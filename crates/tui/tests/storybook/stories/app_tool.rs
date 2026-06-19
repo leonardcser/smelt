@@ -342,7 +342,7 @@ app_story!(present_plan_tool_states, |ctx| {
                 json!("# Goal\nRefactor parser state.\n\n```rust\nfn parse(input: &str) -> Ast {\n    todo!()\n}\n```\n\n# Verification\nRun parser tests."),
             ),
         ],
-        "Wrote plan to /tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md",
+        "wrote plan to /tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md",
         Some(9),
     );
     ctx.assert_snapshot_named("expanded");

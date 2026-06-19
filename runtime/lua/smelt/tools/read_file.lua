@@ -5,8 +5,8 @@ local transcript_defaults = require("smelt.transcript.defaults")
 
 local DEFAULT_LINE_LIMIT = 2000
 
-local FILE_UNCHANGED_STUB = "File unchanged since last read. Use the earlier read_file "
-  .. "tool_result instead of re-reading."
+local FILE_UNCHANGED_STUB = "file unchanged since last read; use the earlier read_file "
+  .. "tool_result instead of re-reading"
 
 local function effective_range(args)
   local offset_raw = tonumber(args.offset) or 0

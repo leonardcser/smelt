@@ -112,7 +112,7 @@ impl ProcessStatusEvent {
                     Some(code) => format!("exited with code {code}"),
                     None => "exited".to_string(),
                 };
-                format!("background process {process_id} {status}.")
+                format!("background process {process_id} {status}")
             }
         }
     }
@@ -1058,12 +1058,12 @@ mod tests {
     #[test]
     fn user_content_helper_classifies_reserved_notes() {
         let process = history_item_from_user_content(Content::text(
-            crate::note::process_status_note("Background process 751225 exited with code 1."),
+            crate::note::process_status_note("background process 751225 exited with code 1"),
         ));
         assert_eq!(
             process,
             HistoryItem::note(HistoryNote::process_status(
-                "Background process 751225 exited with code 1."
+                "background process 751225 exited with code 1"
             ))
         );
 
@@ -1207,10 +1207,7 @@ mod tests {
 
         assert_eq!(json["kind"], "note");
         assert_eq!(json["note_kind"], "process_status");
-        assert_eq!(
-            json["text"],
-            "background process 751225 exited with code 1."
-        );
+        assert_eq!(json["text"], "background process 751225 exited with code 1");
         assert_eq!(json["event"]["event"], "background_process_completed");
         assert_eq!(json["event"]["process_id"], "751225");
         assert_eq!(json["event"]["exit_code"], 1);

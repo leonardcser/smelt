@@ -9,7 +9,7 @@ end
 
 local function output_plan_path(output)
   local content = output and output.content or ""
-  return content:match("Wrote plan to ([^\n]+)")
+  return content:match("wrote plan to ([^\n]+)")
 end
 
 local function plan_file_view(args, path)
@@ -353,32 +353,32 @@ local function register_present_plan()
       })
 
       if action == nil then
-        return { content = "Plan dismissed. Continue discussing or call present_plan again when ready.", is_error = true }
+        return { content = "plan dismissed; continue discussing or call present_plan again when ready", is_error = true }
       end
 
       local status = action == "draft" and "draft" or "approved"
       local artifact_dir, path, err = save_plan(args, status)
       if not path then
-        return { content = "Failed to save plan: " .. (err or "unknown"), is_error = true }
+        return { content = "failed to save plan: " .. (err or "unknown"), is_error = true }
       end
 
       if action == "approve" then
         smelt.mode("normal")
-        return "Wrote plan to " .. path
-            .. "\nPlan artifact directory: " .. artifact_dir
-            .. "\nPlan approved.\n\nProceed with the implementation using normal-mode permissions and this saved plan as the reference."
+        return "wrote plan to " .. path
+            .. "\nplan artifact directory: " .. artifact_dir
+            .. "\nplan approved\n\nproceed with the implementation using normal-mode permissions and this saved plan as the reference"
       end
 
       if action == "apply" then
         smelt.mode("apply")
-        return "Wrote plan to " .. path
-            .. "\nPlan artifact directory: " .. artifact_dir
-            .. "\nPlan approved.\n\nProceed with the implementation in apply mode, using this saved plan as the reference."
+        return "wrote plan to " .. path
+            .. "\nplan artifact directory: " .. artifact_dir
+            .. "\nplan approved\n\nproceed with the implementation in apply mode, using this saved plan as the reference"
       end
 
-      return "Wrote plan to " .. path
-          .. "\nPlan artifact directory: " .. artifact_dir
-          .. "\n\nStay in plan mode and continue refining the plan before implementation. Use read_file and edit_file with the full plan path above when revising this draft."
+      return "wrote plan to " .. path
+          .. "\nplan artifact directory: " .. artifact_dir
+          .. "\n\nstay in plan mode and continue refining the plan before implementation; use read_file and edit_file with the full plan path above when revising this draft"
     end,
   })
 end

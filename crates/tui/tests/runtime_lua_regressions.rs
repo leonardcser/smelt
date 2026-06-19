@@ -281,7 +281,7 @@ fn web_search_reports_duckduckgo_challenge_as_error() {
     assert!(is_error);
     assert_eq!(
         content,
-        "Search failed: DuckDuckGo returned an anti-bot challenge"
+        "search failed: DuckDuckGo returned an anti-bot challenge"
     );
 }
 

@@ -1014,7 +1014,7 @@ mod tests {
     fn block_snapshot_json_exposes_process_status_event_fields() {
         let mut transcript = Transcript::new();
         transcript.push(Block::ProcessStatus {
-            text: "Background process 42 exited with code 7.".into(),
+            text: "background process 42 exited with code 7".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "42",
                 Some(7),

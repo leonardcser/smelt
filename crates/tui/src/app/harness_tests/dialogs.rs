@@ -283,7 +283,7 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
     assert!(!is_error, "{content}");
     let plan_path = content
         .lines()
-        .find_map(|line| line.strip_prefix("Wrote plan to "))
+        .find_map(|line| line.strip_prefix("wrote plan to "))
         .expect("result includes plan path");
     assert!(plan_path.ends_with("/plan.md"));
     assert_eq!(
@@ -373,7 +373,7 @@ fn present_plan_existing_path_approves_without_overwriting_plan_body() {
 
     let (content, is_error) = tool_result(&app, "plan-approve").expect("present_plan result");
     assert!(!is_error, "{content}");
-    assert!(content.contains("Wrote plan to "));
+    assert!(content.contains("wrote plan to "));
     assert_eq!(
         std::fs::read_to_string(&plan_path).unwrap(),
         "# Revised\nUse the existing draft.\n"
@@ -415,7 +415,7 @@ fn present_plan_dismiss_does_not_echo_plan_body() {
 
     let (content, is_error) = tool_result(&app, "plan-dismiss").expect("present_plan result");
     assert!(is_error);
-    assert!(content.contains("Plan dismissed"));
+    assert!(content.contains("plan dismissed"));
     assert!(!content.contains("Secret draft"));
     assert!(!content.contains("Do not keep this transcript copy"));
 }
@@ -546,7 +546,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
     assert_eq!(result.1, "aq-questions");
     assert_eq!(
         result.2,
-        "Q: Pick first?\nA: One\n\nQ: Pick second?\nA: Four"
+        "q: Pick first?\na: One\n\nq: Pick second?\na: Four"
     );
     assert!(!result.3);
 }

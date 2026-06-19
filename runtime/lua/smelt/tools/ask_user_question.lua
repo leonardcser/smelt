@@ -116,7 +116,7 @@ smelt.tools.register({
 
       local answer
       if result and result.custom then
-        answer = "Other: " .. result.custom
+        answer = "other: " .. result.custom
       elseif result and result.index and result.index <= #options then
         local picked = options[result.index]
         answer = (picked and picked.label) or "(unknown)"
@@ -125,7 +125,7 @@ smelt.tools.register({
         return { content = "user cancelled", is_error = true }
       end
 
-      table.insert(parts, string.format("Q: %s\nA: %s", q.question or "", answer))
+      table.insert(parts, string.format("q: %s\na: %s", q.question or "", answer))
     end
 
     return table.concat(parts, "\n\n")

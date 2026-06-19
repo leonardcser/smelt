@@ -90,7 +90,7 @@ smelt.tools.register({
     if path == "" or smelt.fs.file_state.has(path) then
       return nil
     end
-    return "Use read_file on this notebook before editing it."
+    return "read the notebook with read_file before editing"
   end,
   paths_for_workspace = function(args)
     local p = args.notebook_path or ""

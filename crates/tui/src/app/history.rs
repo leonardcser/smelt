@@ -1371,7 +1371,7 @@ mod checkpoint_tests {
     #[test]
     fn restore_screen_rebuilds_process_status_notes_as_process_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = "Background process 123 completed successfully.";
+        let note = "background process 123 completed successfully";
         app.app.core.session.history = vec![user(&protocol::process_status_note(note))];
 
         app.app.restore_screen();

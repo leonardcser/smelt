@@ -603,20 +603,15 @@ impl FileStateCache {
 /// the message for the caller tool.
 pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
     let Some(cached) = cache.get(path) else {
-        return Some(format!("Read the {noun} with read_file before editing."));
+        return Some(format!("read the {noun} with read_file before editing"));
     };
     match file_mtime_ms(path) {
         Ok(current) if current == cached.mtime_ms => None,
         // Let a missing file / stat error fall through to run()'s real I/O error.
         Err(_) => None,
         Ok(_) => {
-            let cap = if noun == "notebook" {
-                "Notebook"
-            } else {
-                "File"
-            };
             Some(format!(
-                "{cap} has been modified since last read. Use read_file to read the current contents before editing."
+                "{noun} has been modified since last read; use read_file to read the current contents before editing"
             ))
         }
     }
@@ -639,7 +634,7 @@ pub fn checked_write_file(
     let exists = Path::new(path).exists();
     let _lock = if exists {
         if !cache.has(path) {
-            return Err("File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.".into());
+            return Err("file already exists; use edit_file to modify existing files, or read_file then write_file to replace".into());
         }
         if let Some(err) = staleness_error(cache, path, "file") {
             return Err(err);
@@ -692,7 +687,7 @@ pub fn checked_edit_file(
     }
     if count > 1 && !replace_all {
         return Err(format!(
-            "old_string matched {count} times. Make it unique or set replace_all to true."
+            "old_string matched {count} times; make it unique or set replace_all to true"
         ));
     }
 
@@ -729,7 +724,7 @@ pub fn try_flock(path: &str) -> Result<FlockGuard, String> {
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         if err.kind() == std::io::ErrorKind::WouldBlock {
-            return Err("File is currently being edited by another agent, try again later.".into());
+            return Err("file is currently being edited by another agent, try again later".into());
         }
         return Err(format!("flock error: {err}"));
     }

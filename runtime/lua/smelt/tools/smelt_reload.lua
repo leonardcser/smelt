@@ -14,8 +14,8 @@ smelt.tools.register({
   summary = function() return "schedule end-of-turn reload" end,
   execute = function()
     if smelt.engine.reload_when_idle() then
-      return "Reload scheduled. Config changes will apply when this turn completes."
+      return "reload scheduled; config changes will apply when this turn completes"
     end
-    return "Reload already scheduled."
+    return "reload already scheduled"
   end,
 })

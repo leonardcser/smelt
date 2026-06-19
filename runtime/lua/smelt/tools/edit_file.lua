@@ -154,7 +154,7 @@ smelt.tools.register({
     if path == "" or smelt.fs.file_state.has(path) then
       return nil
     end
-    return "Read the file with read_file before editing."
+    return "read the file with read_file before editing"
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
@@ -176,7 +176,7 @@ smelt.tools.register({
     end
     if smelt.notebook.is_notebook_path(path) then
       return {
-        content = "Cannot use edit_file on a Jupyter notebook. Use edit_notebook instead.",
+        content = "cannot use edit_file on a Jupyter notebook; use edit_notebook instead",
         is_error = true,
       }
     end

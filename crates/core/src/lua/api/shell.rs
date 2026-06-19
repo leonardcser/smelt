@@ -21,7 +21,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
         };
         let base = bin.rsplit('/').next().unwrap_or(bin);
         if INTERACTIVE_BINS.contains(&base) {
-            return Some("Interactive commands (editors, REPLs, pagers) cannot run here because they require a terminal. If there is no non-interactive alternative, ask the user to run them.");
+            return Some("interactive commands (editors, REPLs, pagers) cannot run here because they require a terminal; if there is no non-interactive alternative, ask the user to run them");
         }
         if base == "git" {
             let has_interactive_flag = parts.iter().any(|p| *p == "-i" || *p == "--interactive");
@@ -29,7 +29,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
                 let has_interactive_subcmd =
                     parts.iter().any(|p| GIT_INTERACTIVE_SUBCMDS.contains(p));
                 if has_interactive_subcmd {
-                    return Some("Interactive git commands (rebase -i, add -i, etc.) cannot run here because they require a terminal. If there is no non-interactive alternative, ask the user to run them.");
+                    return Some("interactive git commands (rebase -i, add -i, etc.) cannot run here because they require a terminal; if there is no non-interactive alternative, ask the user to run them");
                 }
             }
         }
@@ -43,7 +43,7 @@ fn check_shell_background_operator(command: &str) -> Option<String> {
         .any(|(_, op)| op.as_deref() == Some("&"));
     if has {
         Some(
-            "Shell backgrounding (`&`) is not supported in `bash` commands here. Remove `&`, set `run_in_background=true` on the tool call, then use `read_process_output` and `stop_process` with the returned process id."
+            "shell backgrounding (`&`) is not supported in `bash` commands here; remove `&`, set `background=true` on the tool call, then use `read_process_output` and `stop_process` with the returned process id"
                 .to_string(),
         )
     } else {

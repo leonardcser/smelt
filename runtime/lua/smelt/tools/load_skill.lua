@@ -27,7 +27,7 @@ smelt.tools.register({
   execute = function(args)
     local name = args.name or ""
     if name == "" then
-      return { content = "Missing required parameter: name", is_error = true }
+      return { content = "missing required parameter: name", is_error = true }
     end
     local content, err = smelt.skills.content(name)
     if content then

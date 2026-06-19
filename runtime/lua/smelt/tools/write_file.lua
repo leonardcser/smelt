@@ -59,7 +59,7 @@ smelt.tools.register({
     end
     if smelt.notebook.is_notebook_path(path) then
       return {
-        content = "Cannot use write_file on a Jupyter notebook. Use edit_notebook instead.",
+        content = "cannot use write_file on a Jupyter notebook; use edit_notebook instead",
         is_error = true,
       }
     end

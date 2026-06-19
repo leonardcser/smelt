@@ -2222,7 +2222,7 @@ mod tests {
     fn empty_enter_does_not_interrupt_for_turn_only_status_item() {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
-        let note = protocol::HistoryNote::process_status("Background process 42 exited.");
+        let note = protocol::HistoryNote::process_status("background process 42 exited");
         app.app
             .queued_inputs
             .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
@@ -2233,7 +2233,7 @@ mod tests {
         assert!(app.agent_running());
         assert_eq!(
             app.state().queued_inputs,
-            vec!["Background process 42 exited.".to_string()]
+            vec!["background process 42 exited".to_string()]
         );
         assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
         assert!(!app.actions().iter().any(|action| matches!(

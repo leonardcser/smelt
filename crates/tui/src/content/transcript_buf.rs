@@ -3914,14 +3914,14 @@ mod tests {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         transcript.push(Block::ProcessStatus {
-            text: "Background process 1 finished successfully.".into(),
+            text: "background process 1 finished successfully".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "1",
                 Some(0),
             )),
         });
         transcript.push(Block::ProcessStatus {
-            text: "Background process 2 exited with code 7.".into(),
+            text: "background process 2 exited with code 7".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "2",
                 Some(7),

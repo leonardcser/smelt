@@ -2,11 +2,11 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-background process 4210 finished successfully.
+background process 4210 finished successfully
 
-background process 4211 exited with code 1.
+background process 4211 exited with code 1
 
-background process 4212 exited.
+background process 4212 exited
 
 
 

@@ -69,12 +69,12 @@ local function fetch_raw(args)
   local timeout = math.min(tonumber(args.timeout) or DEFAULT_TIMEOUT, MAX_TIMEOUT)
 
   if not url:match("^[Hh][Tt][Tt][Pp][Ss]?://") then
-    return { content = "URL must start with http:// or https://", is_error = true }
+    return { content = "invalid URL: must start with http:// or https://", is_error = true }
   end
 
   local req_host = url_host(url)
   if not req_host then
-    return { content = "Invalid URL: " .. url, is_error = true }
+    return { content = "invalid URL: " .. url, is_error = true }
   end
 
   local cache_key = "fetch:" .. url .. ":" .. format
@@ -95,12 +95,12 @@ local function fetch_raw(args)
 
   local resp, err = do_fetch(smelt.http.random_user_agent())
   if err then
-    return { content = "Fetch failed: " .. err, is_error = true }
+    return { content = "fetch failed: " .. err, is_error = true }
   end
   if resp.status == 403 and header(resp.headers, "cf-mitigated"):lower() == "challenge" then
     resp, err = do_fetch("smelt")
     if err then
-      return { content = "Fetch failed: " .. err, is_error = true }
+      return { content = "fetch failed: " .. err, is_error = true }
     end
   end
 
@@ -108,8 +108,8 @@ local function fetch_raw(args)
   if final_host ~= req_host then
     return {
       content = string.format(
-        "Redirect crossed domains: requested %s but landed on %s. "
-          .. "Re-run with the final URL if intended.",
+        "redirect crossed domains: requested %s but landed on %s; "
+          .. "re-run with the final URL if intended",
         req_host or "?",
         final_host or "?"
       ),
@@ -118,7 +118,7 @@ local function fetch_raw(args)
   end
 
   if resp.status < 200 or resp.status >= 300 then
-    return { content = "HTTP " .. resp.status, is_error = true }
+    return { content = "request failed: HTTP " .. resp.status, is_error = true }
   end
 
   local content_type = header(resp.headers, "content-type"):lower()
@@ -175,7 +175,7 @@ local function fetch_raw(args)
 
   local output = truncate_output(table.concat(parts), MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES)
   if was_truncated then
-    output = output .. "\n\n[Response truncated. Original response exceeded 5 MB.]"
+    output = output .. "\n\n[response truncated: original response exceeded 5 MB]"
   end
   smelt.http.cache.write(cache_key, output)
   return output

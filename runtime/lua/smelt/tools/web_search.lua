@@ -37,7 +37,7 @@ smelt.tools.register({
   execute = function(args)
     local query = args.query or ""
     if query == "" then
-      return { content = "Query cannot be empty", is_error = true }
+      return { content = "query cannot be empty", is_error = true }
     end
 
     local cache_key = "search:" .. query
@@ -59,19 +59,19 @@ smelt.tools.register({
       },
     })
     if not resp then
-      return { content = "Search failed: " .. (err or "no response"), is_error = true }
+      return { content = "search failed: " .. (err or "no response"), is_error = true }
     end
     local body = resp.body or ""
     if is_duckduckgo_challenge(resp.status, body) then
-      return { content = "Search failed: DuckDuckGo returned an anti-bot challenge", is_error = true }
+      return { content = "search failed: DuckDuckGo returned an anti-bot challenge", is_error = true }
     end
     if resp.status ~= 200 then
-      return { content = "Search failed: HTTP " .. resp.status, is_error = true }
+      return { content = "search failed: HTTP " .. resp.status, is_error = true }
     end
 
     local results = smelt.html.parse_ddg_results(body)
     if #results == 0 then
-      return "No results found"
+      return "no results found"
     end
 
     local lines = {}

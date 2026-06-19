@@ -180,7 +180,7 @@ end
 
 local function notify_status(goal)
   if not goal or not goal.objective or goal.objective == "" then
-    smelt.notify("No goal set. Use /goal <objective> to start one.", "goal")
+    smelt.notify("no goal set; use /goal <objective> to start one", "goal")
     return
   end
   smelt.notify(M.describe(goal), "goal")
@@ -481,19 +481,19 @@ end
 
 function M.describe(goal)
   goal = goal or session_goal()
-  if not goal or not goal.objective or goal.objective == "" then return "No goal is set." end
+  if not goal or not goal.objective or goal.objective == "" then return "no goal is set" end
   local lines = {
-    "Goal: " .. goal.objective,
-    "State: " .. (goal.state or STATE.ACTIVE),
-    "Auto-continue: " .. (goal.auto_continue ~= false and "on" or "off"),
+    "goal: " .. goal.objective,
+    "state: " .. (goal.state or STATE.ACTIVE),
+    "auto-continue: " .. (goal.auto_continue ~= false and "on" or "off"),
   }
-  if goal.summary then table.insert(lines, "Summary: " .. tostring(goal.summary)) end
+  if goal.summary then table.insert(lines, "summary: " .. tostring(goal.summary)) end
   local progress = progress_label(goal.progress)
-  if progress then table.insert(lines, "Progress: " .. progress) end
-  if goal.id then table.insert(lines, "ID: " .. tostring(goal.id)) end
-  if goal.created_at_ms then table.insert(lines, "Created: " .. tostring(goal.created_at_ms)) end
-  if goal.updated_at_ms then table.insert(lines, "Updated: " .. tostring(goal.updated_at_ms)) end
-  if goal.reason then table.insert(lines, "Reason: " .. tostring(goal.reason)) end
+  if progress then table.insert(lines, "progress: " .. progress) end
+  if goal.id then table.insert(lines, "id: " .. tostring(goal.id)) end
+  if goal.created_at_ms then table.insert(lines, "created: " .. tostring(goal.created_at_ms)) end
+  if goal.updated_at_ms then table.insert(lines, "updated: " .. tostring(goal.updated_at_ms)) end
+  if goal.reason then table.insert(lines, "reason: " .. tostring(goal.reason)) end
   return table.concat(lines, "\n")
 end
 
@@ -510,44 +510,44 @@ function M.command(arg)
 
   if sub == "clear" or sub == "stop" then
     M.clear()
-    smelt.notify("Goal cleared.", "goal")
+    smelt.notify("goal cleared", "goal")
     return
   end
   if sub == "done" then
     local goal, err = M.complete()
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal marked done.", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal marked done", "goal") end
     return
   end
   if sub == "pause" then
     local goal, err = M.pause()
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal paused.", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal paused", "goal") end
     return
   end
   if sub == "block" or sub == "blocked" then
     local goal, err = M.block(rest)
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal marked blocked.", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal marked blocked", "goal") end
     return
   end
   if sub == "resume" then
     local goal, err = M.resume()
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal resumed.", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal resumed", "goal") end
     M.schedule_auto_continue()
     return
   end
   if sub == "progress" then
     local goal, err = M.update_status({ progress = rest })
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal progress updated.", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal progress updated", "goal") end
     return
   end
   if sub == "summary" then
     local goal, err = M.update_status({ summary = rest })
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal summary updated.", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal summary updated", "goal") end
     return
   end
   if sub == "auto" then
     local on = rest ~= "off" and rest ~= "false" and rest ~= "0"
     local goal, err = M.set_auto(on)
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal auto-continue " .. (on and "on" or "off") .. ".", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal auto-continue " .. (on and "on" or "off"), "goal") end
     if on then M.schedule_auto_continue() end
     return
   end
@@ -593,7 +593,7 @@ local function register_tools()
       end
       local goal, err = M.create(args.objective or "", { summary = args.summary, auto_continue = args.auto_continue ~= false })
       if not goal then return { content = err, is_error = true } end
-      return { content = "Created goal.\n" .. M.describe(goal) }
+      return { content = "created goal\n" .. M.describe(goal) }
     end,
   })
 
@@ -626,7 +626,7 @@ local function register_tools()
       if args.progress == nil then return { content = "progress is required", is_error = true } end
       local goal, err = M.update_status({ progress = args.progress })
       if not goal then return { content = err, is_error = true } end
-      return { content = "Updated goal status.\n" .. M.describe(goal) }
+      return { content = "updated goal status\n" .. M.describe(goal) }
     end,
   })
 
@@ -657,7 +657,7 @@ local function register_tools()
         goal, err = M.block(args.reason)
       end
       if not goal then return { content = err, is_error = true } end
-      return { content = "Updated goal.\n" .. M.describe(goal) }
+      return { content = "updated goal\n" .. M.describe(goal) }
     end,
   })
 end

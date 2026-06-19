@@ -2608,7 +2608,7 @@ mod tests {
 
         turn.push_turn_content(
             Content::text(protocol::process_status_note(
-                "Background process 751225 exited with code 1.",
+                "background process 751225 exited with code 1",
             )),
             None,
         );
@@ -2620,7 +2620,7 @@ mod tests {
         assert!(matches!(
             &turn.history[1],
             HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, .. })
-                if text == "Background process 751225 exited with code 1."
+                if text == "background process 751225 exited with code 1"
         ));
         assert!(matches!(
             &turn.history[2],

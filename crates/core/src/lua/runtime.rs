@@ -3177,7 +3177,7 @@ mod tests {
     fn process_status_block_table_exposes_typed_event_fields() {
         let lua = Lua::new();
         let block = Block::ProcessStatus {
-            text: "Background process 42 exited with code 7.".into(),
+            text: "background process 42 exited with code 7".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "42",
                 Some(7),
