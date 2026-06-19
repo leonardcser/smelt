@@ -1495,7 +1495,11 @@ pub fn load(id_or_prefix: &str) -> Option<Session> {
 pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
     let _perf = smelt_perf::perf::begin("session:load_meta");
     let id = resolve_prefix(id_or_prefix)?;
-    load_meta_for_dir(dir_for_id(&id))
+    let dir = dir_for_id(&id);
+    if let Err(err) = crate::session_migration::ensure_session_db(&dir) {
+        log_session_migration_error(&dir, &err);
+    }
+    load_meta_for_dir(dir)
 }
 
 fn load_exact(id: &str) -> Option<Session> {

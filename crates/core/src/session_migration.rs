@@ -136,6 +136,7 @@ fn migrate_session_dir_to_db_inner(
     crate::session::cleanup_stale_import_temp_files(dir_path);
 
     if dir_path.join("session.db").is_file() {
+        let _ = smelt_store::SessionDb::open(dir_path.join("session.db"));
         crate::session::cleanup_migrated_legacy_artifacts(dir_path);
         return Ok(SessionMigrationOutcome::Skipped);
     }
@@ -172,6 +173,11 @@ fn migrate_session_dir_to_db_inner(
 
 pub fn ensure_session_db(dir_path: &Path) -> SessionMigrationResult<()> {
     if dir_path.join("session.db").is_file() {
+        smelt_store::SessionDb::open(dir_path.join("session.db"))
+            .map(|_| ())
+            .map_err(|err| SessionMigrationError::OpenDatabase {
+                message: err.to_string(),
+            })?;
         return Ok(());
     }
     let _ = migrate_session_dir_to_db(dir_path)?;

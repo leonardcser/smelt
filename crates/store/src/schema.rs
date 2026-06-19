@@ -43,10 +43,8 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
             expected: SCHEMA_VERSION,
         });
     }
-    if current < SCHEMA_VERSION {
-        conn.execute_batch(SCHEMA)?;
-        set_user_version(conn, SCHEMA_VERSION)?;
-    }
+    ensure_schema_shape(conn)?;
+    set_user_version(conn, SCHEMA_VERSION)?;
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
          VALUES ('schema_version', ?1, unixepoch()), ('app_version', ?2, unixepoch())
@@ -54,6 +52,130 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
         (SCHEMA_VERSION.to_string(), app_version),
     )?;
     Ok(())
+}
+
+fn ensure_schema_shape(conn: &Connection) -> Result<()> {
+    // Version 1 is the plan baseline; keep same-version databases aligned with
+    // the current in-tree table shape before creating indexes that reference
+    // newly introduced columns.
+    ensure_schema_columns(conn)?;
+    conn.execute_batch(SCHEMA)?;
+    Ok(())
+}
+
+fn ensure_schema_columns(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "session_state", "first_user_message TEXT")?;
+    add_column_if_missing(conn, "session_state", "reasoning_effort TEXT")?;
+    add_column_if_missing(conn, "session_state", "parent_id TEXT")?;
+    add_column_if_missing(conn, "session_state", "context_tokens INTEGER")?;
+    add_column_if_missing(conn, "session_state", "context_tokens_history_len INTEGER")?;
+    add_column_if_missing(conn, "session_state", "display_context_tokens INTEGER")?;
+    add_column_if_missing(
+        conn,
+        "session_state",
+        "session_cost_usd REAL NOT NULL DEFAULT 0",
+    )?;
+
+    add_column_if_missing(conn, "history_items", "model_visible_hash TEXT")?;
+    add_column_if_missing(conn, "history_items", "search_text TEXT")?;
+    add_column_if_missing(
+        conn,
+        "history_items",
+        "created_at INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    add_column_if_missing(conn, "transcript_blocks", "content_hash TEXT")?;
+    add_column_if_missing(conn, "transcript_blocks", "sidecar_hash TEXT")?;
+    add_column_if_missing(
+        conn,
+        "transcript_blocks",
+        "estimated_text_bytes INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "transcript_blocks", "estimated_rows INTEGER")?;
+    add_column_if_missing(conn, "transcript_blocks", "preview_text TEXT")?;
+    add_column_if_missing(conn, "transcript_blocks", "search_text TEXT")?;
+    add_column_if_missing(conn, "transcript_blocks", "descriptor_json TEXT")?;
+    add_column_if_missing(conn, "transcript_blocks", "origin_json TEXT")?;
+    add_column_if_missing(conn, "transcript_blocks", "tool_state_json TEXT")?;
+
+    add_column_if_missing(conn, "objects", "kind TEXT NOT NULL DEFAULT 'unknown'")?;
+    add_column_if_missing(conn, "objects", "codec TEXT NOT NULL DEFAULT 'none'")?;
+    add_column_if_missing(conn, "objects", "raw_size INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "objects", "stored_size INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "objects", "created_at INTEGER NOT NULL DEFAULT 0")?;
+
+    add_column_if_missing(
+        conn,
+        "request_attempts",
+        "background INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "request_attempts",
+        "raw_body_size INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "request_attempts", "kind TEXT")?;
+    add_column_if_missing(conn, "request_attempts", "api_base TEXT")?;
+    add_column_if_missing(conn, "request_attempts", "url TEXT")?;
+    add_column_if_missing(conn, "request_attempts", "http_status INTEGER")?;
+    add_column_if_missing(conn, "request_attempts", "prompt_cache_key TEXT")?;
+    add_column_if_missing(
+        conn,
+        "request_attempts",
+        "stream INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "request_attempts",
+        "attempt INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column_if_missing(conn, "request_attempts", "response_summary TEXT")?;
+
+    add_column_if_missing(conn, "request_stats", "context_tokens INTEGER")?;
+    add_column_if_missing(conn, "request_stats", "cache_write_tokens INTEGER")?;
+    add_column_if_missing(conn, "request_stats", "tokens_per_sec REAL")?;
+
+    add_column_if_missing(
+        conn,
+        "metadata_snapshots",
+        "created_at INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "accounting_snapshots",
+        "created_at INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "transcript_search", "history_idx INTEGER")?;
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, column_def: &str) -> Result<()> {
+    let Some(column) = column_def.split_whitespace().next() else {
+        return Ok(());
+    };
+    if !table_exists(conn, table)? || column_exists(conn, table, column)? {
+        return Ok(());
+    }
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column_def}"), [])?;
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1")?;
+    Ok(stmt.exists([table])?)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn set_user_version(conn: &Connection, version: i32) -> Result<()> {
@@ -236,3 +358,74 @@ CREATE TABLE IF NOT EXISTS transcript_search_terms (
 );
 CREATE INDEX IF NOT EXISTS transcript_search_terms_block_idx ON transcript_search_terms(block_idx);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_repairs_in_place_version_one_session_state_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE session_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                id TEXT NOT NULL UNIQUE,
+                title TEXT,
+                slug TEXT,
+                cwd TEXT,
+                mode TEXT,
+                model TEXT,
+                accounting_json TEXT,
+                checkpoint_json TEXT,
+                revision INTEGER NOT NULL DEFAULT 0,
+                history_len INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_state (
+                singleton, id, title, slug, cwd, mode, model,
+                accounting_json, checkpoint_json, revision, history_len,
+                created_at, updated_at
+            ) VALUES (
+                1, 'old-session', 'Old Session', 'old-session', '/tmp',
+                'normal', 'model', '{}', NULL, 7, 2, 1000, 2000
+            );
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .unwrap();
+
+        migrate(&mut conn, "test-version").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        for column in [
+            "first_user_message",
+            "reasoning_effort",
+            "parent_id",
+            "context_tokens",
+            "context_tokens_history_len",
+            "display_context_tokens",
+            "session_cost_usd",
+        ] {
+            assert!(
+                column_exists(&conn, "session_state", column).unwrap(),
+                "{column}"
+            );
+        }
+        let (id, cost): (String, f64) = conn
+            .query_row(
+                "SELECT id, session_cost_usd FROM session_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(id, "old-session");
+        assert_eq!(cost, 0.0);
+    }
+}
