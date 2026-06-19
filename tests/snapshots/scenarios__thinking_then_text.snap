@@ -1,11 +1,13 @@
 ---
 source: tests/scenarios.rs
+assertion_line: 323
 expression: out.events
 ---
 [
   "Ready",
   {
     "HistoryUpdated": {
+      "first_changed_index": 1,
       "history": [
         {
           "kind": "note",
@@ -43,17 +45,9 @@ expression: out.events
     }
   },
   {
-    "HistoryUpdated": {
-      "history": [
-        {
-          "kind": "note",
-          "note_kind": "context",
-          "text": "Current working directory: /."
-        },
-        {
-          "content": "solve it",
-          "kind": "user"
-        },
+    "HistoryAppended": {
+      "first_index": 2,
+      "items": [
         {
           "content": "answer",
           "kind": "assistant",
@@ -74,31 +68,7 @@ expression: out.events
   },
   {
     "TurnComplete": {
-      "history": [
-        {
-          "kind": "note",
-          "note_kind": "context",
-          "text": "Current working directory: /."
-        },
-        {
-          "content": "solve it",
-          "kind": "user"
-        },
-        {
-          "content": "answer",
-          "kind": "assistant",
-          "reasoning": "let me think",
-          "reasoning_blocks": [
-            {
-              "data": {
-                "thinking": "let me think",
-                "type": "thinking"
-              },
-              "provider": "anthropic"
-            }
-          ]
-        }
-      ],
+      "first_changed_index": 3,
       "meta": {
         "avg_tps": "[avg_tps]",
         "elapsed_ms": "[elapsed_ms]",

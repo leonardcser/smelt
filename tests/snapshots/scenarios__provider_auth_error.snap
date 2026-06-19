@@ -1,11 +1,13 @@
 ---
 source: tests/scenarios.rs
+assertion_line: 211
 expression: out.events
 ---
 [
   "Ready",
   {
     "HistoryUpdated": {
+      "first_changed_index": 1,
       "history": [
         {
           "kind": "note",
