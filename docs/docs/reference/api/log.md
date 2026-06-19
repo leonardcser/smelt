@@ -4,7 +4,9 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Structured JSONL log entries written to the engine log file. Use for machine-readable telemetry events; pair with `smelt.notify` for user-visible toasts.
+Structured JSONL log entries written to the engine log file. Use for
+machine-readable telemetry events; pair with `smelt.notify` for user-visible
+toasts.
 
 ## `smelt.log.error`
 
@@ -20,7 +22,8 @@ Write a JSONL log entry at Error level.
 fun(event: string, data: any?): nil
 ```
 
-Write a JSONL log entry at Info level. `event` is a short stable name; `data` is an optional table serialized into the entry body.
+Write a JSONL log entry at Info level. `event` is a short stable name; `data` is
+an optional table serialized into the entry body.
 
 ## `smelt.log.warn`
 
@@ -29,4 +32,3 @@ fun(event: string, data: any?): nil
 ```
 
 Write a JSONL log entry at Warn level.
-

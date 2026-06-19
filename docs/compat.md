@@ -20,7 +20,8 @@ with `COMPAT(<id>)`.
 ## session-json-monolith
 
 - Remove after: two alpha releases after SQLite session storage ships
-- Why: import old monolithic `session.json` files to canonical SQLite storage on open or background migration, then remove the monolith
+- Why: import old monolithic `session.json` files to canonical SQLite storage on
+  open or background migration, then remove the monolith
 - Code:
   - `crates/core/src/session.rs`: `read_legacy_json_session`,
     `migrate_legacy_json_session`
@@ -40,8 +41,8 @@ with `COMPAT(<id>)`.
 
 - Remove after: old session dirs without `meta.json` / `content.txt` no longer
   matter
-- Why: rebuild list metadata and search text from canonical SQLite, surfacing pending
-  migration status for legacy inputs without loading them directly
+- Why: rebuild list metadata and search text from canonical SQLite, surfacing
+  pending migration status for legacy inputs without loading them directly
 - Code:
   - `crates/core/src/session.rs`: session listing/search blob fallbacks
 

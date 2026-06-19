@@ -4,7 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Cached file-state tracker used by tools to detect external modifications between reads and writes.
+Cached file-state tracker used by tools to detect external modifications between
+reads and writes.
 
 ## `smelt.fs.file_state.get`
 
@@ -12,7 +13,8 @@ Cached file-state tracker used by tools to detect external modifications between
 fun(p: string): any
 ```
 
-Look up the cached file-state entry for `p`. Returns `{ content, mtime_ms, read_range }` or `nil` when no entry exists.
+Look up the cached file-state entry for `p`. Returns
+`{ content, mtime_ms, read_range }` or `nil` when no entry exists.
 
 ## `smelt.fs.file_state.has`
 
@@ -28,7 +30,8 @@ Return `true` if the file-state cache has a recorded entry for `p`.
 fun(p: string): integer?, string?
 ```
 
-Return the modification time of `p` in milliseconds since the UNIX epoch. Returns `(ms, nil)` or `(nil, err_string)` on failure.
+Return the modification time of `p` in milliseconds since the UNIX epoch.
+Returns `(ms, nil)` or `(nil, err_string)` on failure.
 
 ## `smelt.fs.file_state.record_read`
 
@@ -36,7 +39,8 @@ Return the modification time of `p` in milliseconds since the UNIX epoch. Return
 fun(p: string, content: string, offset: integer, limit: integer): nil
 ```
 
-Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.
+Record that `p` was read at byte range `[offset, offset+limit)` with `content`
+so subsequent staleness checks know what the agent has seen.
 
 ## `smelt.fs.file_state.record_read_with_mtime`
 
@@ -44,7 +48,8 @@ Record that `p` was read at byte range `[offset, offset+limit)` with `content` s
 fun(p: string, content: string, offset: integer, limit: integer, mtime_ms: integer): nil
 ```
 
-Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.
+Record that `p` was read with a caller-provided mtime in milliseconds, avoiding
+an extra stat call.
 
 ## `smelt.fs.file_state.record_write`
 
@@ -52,7 +57,8 @@ Record that `p` was read with a caller-provided mtime in milliseconds, avoiding 
 fun(p: string, content: string): nil
 ```
 
-Record that `p` was written with `content` so subsequent staleness checks see the latest state.
+Record that `p` was written with `content` so subsequent staleness checks see
+the latest state.
 
 ## `smelt.fs.file_state.staleness_error`
 
@@ -60,5 +66,6 @@ Record that `p` was written with `content` so subsequent staleness checks see th
 fun(p: string, noun: string?): string?
 ```
 
-Return an error message describing why the cached state of `p` is stale relative to disk, or `nil` if it is up to date. `noun` (default `"file"`) labels the entity in the message.
-
+Return an error message describing why the cached state of `p` is stale relative
+to disk, or `nil` if it is up to date. `noun` (default `"file"`) labels the
+entity in the message.

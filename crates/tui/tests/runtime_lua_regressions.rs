@@ -234,10 +234,16 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     assert_eq!(rows, 7);
 }
 
+fn web_search_lua_fixture(smelt_api: &str) -> mlua::Lua {
+    let lua = mlua::Lua::new();
+    lua.load(smelt_api).exec().expect("install fake smelt api");
+    lua.load(WEB_SEARCH_LUA).exec().expect("load web_search");
+    lua
+}
+
 #[test]
 fn web_search_reports_duckduckgo_challenge_as_error() {
-    let lua = mlua::Lua::new();
-    lua.load(
+    let lua = web_search_lua_fixture(
         r#"
         smelt = {
           tools = {
@@ -263,10 +269,7 @@ fn web_search_reports_duckduckgo_challenge_as_error() {
           },
         }
         "#,
-    )
-    .exec()
-    .expect("install fake smelt api");
-    lua.load(WEB_SEARCH_LUA).exec().expect("load web_search");
+    );
 
     let (content, is_error): (String, bool) = lua
         .load(
@@ -283,6 +286,166 @@ fn web_search_reports_duckduckgo_challenge_as_error() {
         content,
         "search failed: DuckDuckGo returned an anti-bot challenge"
     );
+}
+
+#[test]
+fn web_search_brave_uses_configured_provider_and_api_key() {
+    let lua = web_search_lua_fixture(
+        r#"
+        smelt = {
+          settings = {
+            web_search_provider = "brave",
+            brave_search_api_key_env = "TEST_BRAVE_KEY",
+          },
+          tools = {
+            register = function(tool) smelt.__registered_tool = tool end,
+          },
+          os = {
+            getenv = function(name)
+              smelt.__env_name = name
+              return "secret-key"
+            end,
+          },
+          http = {
+            cache = {
+              read = function(key) smelt.__cache_read_key = key; return nil end,
+              write = function(key, value) smelt.__cache_write_key = key; smelt.__cached = value end,
+            },
+            get = function(url, opts)
+              smelt.__url = url
+              smelt.__token = opts.headers["X-Subscription-Token"]
+              return { status = 200, body = "{}" }
+            end,
+          },
+          json = {
+            decode = function()
+              return {
+                web = {
+                  results = {
+                    { title = "Brave Result", url = "https://example.com", description = "From Brave" },
+                  },
+                },
+              }, nil
+            end,
+          },
+          html = {
+            parse_ddg_results = function()
+              error("Brave searches must not use the DuckDuckGo parser")
+            end,
+          },
+        }
+        "#,
+    );
+
+    let (content, env_name, token, cache_read_key, cache_write_key): (
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = lua
+        .load(
+            r#"
+            local result = smelt.__registered_tool.execute({ query = "rust tui" })
+            return result, smelt.__env_name, smelt.__token, smelt.__cache_read_key, smelt.__cache_write_key
+            "#,
+        )
+        .eval()
+        .expect("execute web_search");
+
+    assert_eq!(env_name, "TEST_BRAVE_KEY");
+    assert_eq!(token, "secret-key");
+    assert_eq!(cache_read_key, "search:brave:rust tui");
+    assert_eq!(cache_write_key, "search:brave:rust tui");
+    assert_eq!(
+        content,
+        "1. Brave Result\n   https://example.com\n   From Brave"
+    );
+}
+
+#[test]
+fn web_search_brave_requires_api_key_env_var() {
+    let lua = web_search_lua_fixture(
+        r#"
+        smelt = {
+          settings = { web_search_provider = "brave" },
+          tools = {
+            register = function(tool) smelt.__registered_tool = tool end,
+          },
+          os = {
+            getenv = function() return nil end,
+          },
+          http = {
+            cache = {
+              read = function() return nil end,
+              write = function() error("failed searches must not be cached") end,
+            },
+            get = function()
+              error("Brave search must not call HTTP without an API key")
+            end,
+          },
+          json = { decode = function() error("no response to decode") end },
+        }
+        "#,
+    );
+
+    let (content, is_error): (String, bool) = lua
+        .load(
+            r#"
+            local result = smelt.__registered_tool.execute({ query = "rust tui" })
+            return result.content, result.is_error
+            "#,
+        )
+        .eval()
+        .expect("execute web_search");
+
+    assert!(is_error);
+    assert_eq!(
+        content,
+        "search failed: Brave Search API key env var 'BRAVE_SEARCH_API_KEY' is not set"
+    );
+}
+
+#[test]
+fn web_search_brave_handles_unexpected_response_shape() {
+    let lua = web_search_lua_fixture(
+        r#"
+        smelt = {
+          settings = { web_search_provider = "brave" },
+          tools = {
+            register = function(tool) smelt.__registered_tool = tool end,
+          },
+          os = {
+            getenv = function() return "secret-key" end,
+          },
+          http = {
+            cache = {
+              read = function() return nil end,
+              write = function(key, value) smelt.__cached = value end,
+            },
+            get = function()
+              return { status = 200, body = "{}" }
+            end,
+          },
+          json = {
+            decode = function()
+              return { web = true }, nil
+            end,
+          },
+        }
+        "#,
+    );
+
+    let content: String = lua
+        .load(
+            r#"
+            return smelt.__registered_tool.execute({ query = "rust tui" })
+            "#,
+        )
+        .eval()
+        .expect("execute web_search");
+
+    assert_eq!(content, "no results found");
 }
 
 #[test]

@@ -12,7 +12,10 @@ Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 fun(items: table, query: string): integer[]
 ```
 
-Rank `items` by fuzzy match against `query`. Returns 1-based indices, best first. Empty query → identity order. Items may be strings or tables with `label`/`description`/`search_terms`; set `_hay` to a precomputed concatenated haystack to skip per-call concatenation.
+Rank `items` by fuzzy match against `query`. Returns 1-based indices, best
+first. Empty query → identity order. Items may be strings or tables with
+`label`/`description`/`search_terms`; set `_hay` to a precomputed concatenated
+haystack to skip per-call concatenation.
 
 ## `smelt.fuzzy.score`
 
@@ -21,4 +24,3 @@ fun(text: string, query: string): integer?
 ```
 
 Fuzzy-match score for `text` against `query`. Lower = better; `nil` = no match.
-

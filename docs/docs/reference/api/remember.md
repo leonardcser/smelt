@@ -4,5 +4,6 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Per-key opt-in to last-used recall on launch. `smelt.remember({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.
-
+Per-key opt-in to last-used recall on launch.
+`smelt.remember({ model = false })` makes that key always start from
+`smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.

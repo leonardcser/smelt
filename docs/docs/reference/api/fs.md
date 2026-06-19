@@ -4,7 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall.
+Sync filesystem primitives. Errors use the `(value, err_string)` convention so
+callers can distinguish failures without pcall.
 
 ## `smelt.fs.copy`
 
@@ -12,7 +13,8 @@ Sync filesystem primitives. Errors use the `(value, err_string)` convention so c
 fun(from: string, to: string): integer?, string?
 ```
 
-Copy file `from` to `to`. Returns `(bytes_copied, nil)` on success or `(nil, err_string)` on failure.
+Copy file `from` to `to`. Returns `(bytes_copied, nil)` on success or
+`(nil, err_string)` on failure.
 
 ## `smelt.fs.exists`
 
@@ -28,7 +30,9 @@ Return `true` if a filesystem entry exists at `p`.
 fun(pattern: string, path: string?, opts: table?): string[]?, string?
 ```
 
-Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.
+Find paths matching `pattern` under `path` (defaults to cwd). Returns the
+matches sorted newest-first, capped at `opts.max` (default 200). On error
+returns `(nil, err_string)`.
 
 ## `smelt.fs.glob_async`
 
@@ -36,8 +40,8 @@ Find paths matching `pattern` under `path` (defaults to cwd). Returns the matche
 fun(pattern: string, path: string?, opts: table?): table?, string?
 ```
 
-Find paths matching `pattern` under `path` off the main thread. `opts`
-accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
+Find paths matching `pattern` under `path` off the main thread. `opts` accepts
+`max`, `max_scanned`, and `timeout_ms`. Returns a table with
 `{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
 
 ## `smelt.fs.is_dir`
@@ -62,7 +66,8 @@ Return `true` if `p` exists and refers to a regular file.
 fun(p: string): boolean, string?
 ```
 
-Create directory `p` (parents must exist). Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Create directory `p` (parents must exist). Returns `(true, nil)` on success or
+`(false, err_string)` on failure.
 
 ## `smelt.fs.mkdir_all`
 
@@ -70,7 +75,8 @@ Create directory `p` (parents must exist). Returns `(true, nil)` on success or `
 fun(p: string): boolean, string?
 ```
 
-Create directory `p` along with any missing parent directories. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Create directory `p` along with any missing parent directories. Returns
+`(true, nil)` on success or `(false, err_string)` on failure.
 
 ## `smelt.fs.mkdir_all_async`
 
@@ -87,7 +93,8 @@ Create `path` and parents off the main thread. Same return shape as
 fun(p: string): string?, string?
 ```
 
-Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string)` on failure.
+Read `p` into a string. Returns `(content, nil)` on success or
+`(nil, err_string)` on failure.
 
 ## `smelt.fs.read_async`
 
@@ -95,11 +102,11 @@ Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string
 fun(path: string): string?, string?, integer?
 ```
 
-Read `path` off the main thread. Must be called from inside
-`smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
-task runtime). Returns `(content, nil)` on success or `(nil, err)` on
-failure - same convention as `smelt.fs.read`. Third return value is the
-file mtime in milliseconds when available.
+Read `path` off the main thread. Must be called from inside `smelt.spawn(fn)` or
+a `tool.execute` (anything that runs on the Lua task runtime). Returns
+`(content, nil)` on success or `(nil, err)` on failure - same convention as
+`smelt.fs.read`. Third return value is the file mtime in milliseconds when
+available.
 
 ## `smelt.fs.read_dir`
 
@@ -107,7 +114,8 @@ file mtime in milliseconds when available.
 fun(p: string): string[]?, string?
 ```
 
-List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.
+List the immediate entries of directory `p`. Returns `(entries, nil)` on success
+or `(nil, err_string)` on failure.
 
 ## `smelt.fs.read_limited`
 
@@ -115,7 +123,8 @@ List the immediate entries of directory `p`. Returns `(entries, nil)` on success
 fun(p: string, max_bytes: integer): table?, string?
 ```
 
-Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)` on success or `(nil, err_string)` on failure.
+Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)`
+on success or `(nil, err_string)` on failure.
 
 ## `smelt.fs.remove_dir`
 
@@ -123,7 +132,8 @@ Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)`
 fun(p: string): boolean, string?
 ```
 
-Delete the empty directory at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Delete the empty directory at `p`. Returns `(true, nil)` on success or
+`(false, err_string)` on failure.
 
 ## `smelt.fs.remove_dir_all`
 
@@ -131,7 +141,8 @@ Delete the empty directory at `p`. Returns `(true, nil)` on success or `(false, 
 fun(p: string): boolean, string?
 ```
 
-Recursively delete the directory tree rooted at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Recursively delete the directory tree rooted at `p`. Returns `(true, nil)` on
+success or `(false, err_string)` on failure.
 
 ## `smelt.fs.remove_file`
 
@@ -139,7 +150,8 @@ Recursively delete the directory tree rooted at `p`. Returns `(true, nil)` on su
 fun(p: string): boolean, string?
 ```
 
-Delete the file at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Delete the file at `p`. Returns `(true, nil)` on success or
+`(false, err_string)` on failure.
 
 ## `smelt.fs.rename`
 
@@ -147,7 +159,8 @@ Delete the file at `p`. Returns `(true, nil)` on success or `(false, err_string)
 fun(from: string, to: string): boolean, string?
 ```
 
-Rename or move `from` to `to`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Rename or move `from` to `to`. Returns `(true, nil)` on success or
+`(false, err_string)` on failure.
 
 ## `smelt.fs.size`
 
@@ -155,7 +168,8 @@ Rename or move `from` to `to`. Returns `(true, nil)` on success or `(false, err_
 fun(p: string): integer?, string?
 ```
 
-Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.
+Return the size of file `p` in bytes. Returns `(size, nil)` or
+`(nil, err_string)` on failure.
 
 ## `smelt.fs.watch`
 
@@ -166,11 +180,12 @@ fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: st
 Types: [`smelt.Reg`](types.md#smeltreg)
 
 Filesystem watcher. Calls `handler(event)` for each event, where
-`event = { kind, detail?, paths }`. `kind` is one of `"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
-`detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).
-`opts.recursive` defaults to true; set false to watch only the immediate
-entries of a directory. Returns a `Reg` whose `:remove()` stops the
-watcher and cancels the polling coroutine.
+`event = { kind, detail?, paths }`. `kind` is one of
+`"create" | "modify" | "remove" | "rename" | "access" | "other" | "any"`;
+`detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"`
+→ `detail = "file" | "folder"`). `opts.recursive` defaults to true; set false to
+watch only the immediate entries of a directory. Returns a `Reg` whose
+`:remove()` stops the watcher and cancels the polling coroutine.
 
 ## `smelt.fs.write`
 
@@ -178,7 +193,8 @@ watcher and cancels the polling coroutine.
 fun(p: string, contents: string): boolean, string?
 ```
 
-Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.
+Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on
+success or `(false, err_string)` on failure.
 
 ## `smelt.fs.write_async`
 
@@ -189,4 +205,3 @@ fun(path: string, contents: string): boolean, string?, integer?
 Write `contents` to `path` off the main thread. Same yielding rules as
 `smelt.fs.read_async`. Returns `(true, nil, mtime_ms)` on success or
 `(false, err, nil)` on failure - mirrors `smelt.fs.write`.
-

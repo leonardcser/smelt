@@ -4,7 +4,10 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.
+Reload-safe periodic work. Subscribes to the host's one-second `now` cell and
+throttles your callback to a fixed interval - safe to call from plugin module
+bodies. Use this for recurring polling; reserve `smelt.timer.every` for
+transient timers armed by user actions.
 
 ## `smelt.tick.every`
 
@@ -14,16 +17,13 @@ fun(secs: integer, fn: fun()): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Reload-safe periodic work. Subscribes to the `now` cell (a one-second
-wall-clock tick the host publishes while the app is alive) and fires
-`fn` at most once every `secs` seconds. `fn` runs inside a fresh
-`smelt.spawn`, so it may yield (HTTP, processes, sleeps) without
-blocking the cell pump.
+Reload-safe periodic work. Subscribes to the `now` cell (a one-second wall-clock
+tick the host publishes while the app is alive) and fires `fn` at most once
+every `secs` seconds. `fn` runs inside a fresh `smelt.spawn`, so it may yield
+(HTTP, processes, sleeps) without blocking the cell pump.
 
-Unlike `smelt.timer.every`, this idiom is safe to call from a
-plugin's module body: cell subscriptions are wiped on `/reload` and
-re-armed when the body re-runs, so no Reg juggling is required for
-hot-reload survival.
+Unlike `smelt.timer.every`, this idiom is safe to call from a plugin's module
+body: cell subscriptions are wiped on `/reload` and re-armed when the body
+re-runs, so no Reg juggling is required for hot-reload survival.
 
 Returns a `Reg` whose `:remove()` unsubscribes.
-

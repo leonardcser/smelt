@@ -4,9 +4,11 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+This namespace mixes Host and UiHost functions; each function below lists its
+exact tier.
 
-Transcript display policy and rendered transcript inspection. Host-tier renderer hooks are layered with UiHost read APIs when a TUI is active.
+Transcript display policy and rendered transcript inspection. Host-tier renderer
+hooks are layered with UiHost read APIs when a TUI is active.
 
 ## `smelt.transcript.block_at_row`
 
@@ -14,9 +16,11 @@ Transcript display policy and rendered transcript inspection. Host-tier renderer
 fun(row: integer): table?
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
+Return the exact transcript block containing absolute display row `row`, or nil
+when the row is outside a block. This may materialize full block layout.
 
 ## `smelt.transcript.block_before_or_at_row`
 
@@ -24,9 +28,12 @@ Return the exact transcript block containing absolute display row `row`, or nil 
 fun(row: integer, opts: table?): table?
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. Uses the row index and does not materialize the full block layout.
+Return the nearest transcript block at or before absolute display row `row`,
+optionally filtered by `opts.role`. Uses the row index and does not materialize
+the full block layout.
 
 ## `smelt.transcript.blocks`
 
@@ -34,9 +41,18 @@ Return the nearest transcript block at or before absolute display row `row`, opt
 fun(): table
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
+Return the laid-out transcript blocks for the current frame as a list of
+`{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into
+`session.messages` order (the same value `session.rewind_to(idx)` accepts).
+`role` is
+`"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"`.
+`first_row` is the absolute display row of the block's first visible line
+(compare against `win:scroll().top`). `rows` is the block's row count.
+`first_line` is the first non-empty line of the block's raw source text. Returns
+an empty list before the first frame projects.
 
 ## `smelt.transcript.extend_renderer`
 
@@ -44,15 +60,17 @@ Return the laid-out transcript blocks for the current frame as a list of `{ idx,
 fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.Reg`](types.md#smeltreg)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Add or replace named middleware around the root renderer. Later extensions
-run first. The callback receives `(next, block, ctx)` and may return its own
-layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
-this registration instance. Omit `opts.cache_key` to opt out of persisted
-DisplayIR while the middleware is active.
+Add or replace named middleware around the root renderer. Later extensions run
+first. The callback receives `(next, block, ctx)` and may return its own layout
+or delegate with `next(block, ctx)`. The returned `Reg` removes only this
+registration instance. Omit `opts.cache_key` to opt out of persisted DisplayIR
+while the middleware is active.
 
 ## `smelt.transcript.fold_all`
 
@@ -60,7 +78,8 @@ DisplayIR while the middleware is active.
 fun(action: string): boolean
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 Apply a fold action (`open` or `close`) to every current transcript render node.
 
@@ -70,9 +89,12 @@ Apply a fold action (`open` or `close`) to every current transcript render node.
 fun(row: integer, action: string, opts: table?): boolean
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.
+Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at
+absolute display row `row`. Pass `{ explicit = true }` to require a collapsed
+summary/elision affordance row.
 
 ## `smelt.transcript.fold_kind`
 
@@ -80,9 +102,12 @@ Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at ab
 fun(kind: string, action: string): boolean
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`. `toggle` is aggregate: open all if any matching node is folded, otherwise close all.
+Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current
+block node with the given kind, e.g. `thinking`. `toggle` is aggregate: open all
+if any matching node is folded, otherwise close all.
 
 ## `smelt.transcript.fold_node`
 
@@ -90,9 +115,11 @@ Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current bloc
 fun(node_id: table, action: string): boolean
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.
+Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node
+id returned by `node_at_row(...).node_id`.
 
 ## `smelt.transcript.get_renderer`
 
@@ -100,12 +127,13 @@ Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node i
 fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return the current composed root transcript renderer, or nil before the
-default renderer has been installed.
+Return the current composed root transcript renderer, or nil before the default
+renderer has been installed.
 
 ## `smelt.transcript.invalidate_renderer`
 
@@ -117,8 +145,8 @@ fun(): integer
 
 Bump the renderer generation after changing closed-over state that affects
 renderer output without calling `set_renderer`, `extend_renderer`, or a
-registration's `:remove()`. This also opts out of persisted DisplayIR until
-the renderer is installed again with a cache key.
+registration's `:remove()`. This also opts out of persisted DisplayIR until the
+renderer is installed again with a cache key.
 
 ## `smelt.transcript.is_empty`
 
@@ -126,9 +154,13 @@ the renderer is installed again with a cache key.
 fun(): boolean
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+Return `true` when the transcript history holds no blocks (user, assistant,
+thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so
+unlike `blocks()` it works before the first frame projects and is the right
+signal for empty-state plugins (logo splash, onboarding hints).
 
 ## `smelt.transcript.node_at_row`
 
@@ -136,9 +168,13 @@ Return `true` when the transcript history holds no blocks (user, assistant, thin
 fun(row: integer): table?
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
+Return render-node metadata for absolute display row `row`, including
+`{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`,
+or nil when outside the transcript. `id`/`node_id` is a stable typed table
+`{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 
 ## `smelt.transcript.rows`
 
@@ -146,9 +182,12 @@ Return render-node metadata for absolute display row `row`, including `{ kind, i
 fun(start: integer, count: integer): table
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
+Return rendered transcript display rows in `[start, start + count)`. This is
+exact for the requested absolute display-row range and materializes only the
+bounded range needed for the query.
 
 ## `smelt.transcript.set_renderer`
 
@@ -156,15 +195,16 @@ Return rendered transcript display rows in `[start, start + count)`. This is exa
 fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
 Replace the base transcript renderer used when the host asks Lua for a
 transcript block layout. Existing middleware registered with `extend_renderer`
 remains wrapped around the new base. The renderer must return a `smelt.layout`
-value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key`
-to opt out of persisted DisplayIR, or bump it whenever renderer output changes
+value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key` to
+opt out of persisted DisplayIR, or bump it whenever renderer output changes
 across process restarts.
 
 ## `smelt.transcript.stream`
@@ -173,11 +213,16 @@ across process restarts.
 fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream
 ```
 
-Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.transcript.StreamOpts`](types.md#smelttranscriptstreamopts), [`smelt.transcript.Stream`](types.md#smelttranscriptstream)
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf),
+[`smelt.transcript.StreamOpts`](types.md#smelttranscriptstreamopts),
+[`smelt.transcript.Stream`](types.md#smelttranscriptstream)
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
+Create a transcript-shaped streaming renderer for `buf`. The returned object
+feeds deltas through the same incremental markdown parser and renderer used by
+the main transcript.
 
 ## `smelt.transcript.text`
 
@@ -185,9 +230,11 @@ Create a transcript-shaped streaming renderer for `buf`. The returned object fee
 fun(): string
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).
+Return the full transcript as a single newline-joined string (post-render
+display text, using current transcript presentation state).
 
 ## `smelt.transcript.visible_blocks`
 
@@ -195,7 +242,9 @@ Return the full transcript as a single newline-joined string (post-render displa
 fun(): table
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
-Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.
-
+Return the transcript blocks materialized in the current visible projection as
+`{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this
+does not force full transcript materialization.

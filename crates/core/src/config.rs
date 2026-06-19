@@ -228,6 +228,10 @@ settings! {
     /// TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.
     cache_ttl_long:        Bool   = false;
+    /// Search provider used by the built-in `web_search` tool.
+    web_search_provider:   String = "duckduckgo", choices: ["duckduckgo", "brave"];
+    /// Environment variable containing the Brave Search API key.
+    brave_search_api_key_env: String = "BRAVE_SEARCH_API_KEY";
     /// Root directory for managed git worktrees. Relative paths are resolved
     /// inside the git root and contain worktrees directly; absolute paths are
     /// external roots and get a per-repository bucket. Supports leading `~`,

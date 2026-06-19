@@ -4,7 +4,9 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Helpers for constructing `Reg` handles. Plugins that own several reactive subscriptions can wrap their teardown logic in a single `Reg` returned to callers.
+Helpers for constructing `Reg` handles. Plugins that own several reactive
+subscriptions can wrap their teardown logic in a single `Reg` returned to
+callers.
 
 ## `smelt.reg.compose`
 
@@ -14,11 +16,11 @@ fun(...: smelt.Reg?): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Combine variadic `Reg`s into one. `:remove()` on the result fires every
-inner `:remove()` in order, idempotent across repeat calls. Inputs may
-include `nil` (skipped) so call sites don't need to filter. Returns a
-`Reg`. Typical use: a plugin that owns several reactive subscriptions
-returns one composed Reg to its caller.
+Combine variadic `Reg`s into one. `:remove()` on the result fires every inner
+`:remove()` in order, idempotent across repeat calls. Inputs may include `nil`
+(skipped) so call sites don't need to filter. Returns a `Reg`. Typical use: a
+plugin that owns several reactive subscriptions returns one composed Reg to its
+caller.
 
 ```lua
 return smelt.reg.compose(
@@ -36,5 +38,6 @@ fun(undo: fun()): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Wrap `undo` as a `Reg`. The first call to `:remove()` invokes `undo()` and returns `true`; subsequent calls are no-ops returning `false`. Errors raised inside `undo` are swallowed.
-
+Wrap `undo` as a `Reg`. The first call to `:remove()` invokes `undo()` and
+returns `true`; subsequent calls are no-ops returning `false`. Errors raised
+inside `undo` are swallowed.

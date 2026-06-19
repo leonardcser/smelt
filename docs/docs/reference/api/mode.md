@@ -4,9 +4,12 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+This namespace mixes Host and UiHost functions; each function below lists its
+exact tier.
 
-Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists the configured cycle.
+Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets
+it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists
+the configured cycle.
 
 ## `smelt.mode.cycle`
 
@@ -14,7 +17,8 @@ Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets 
 fun(): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
 wrapping at the end. No-op when the cycle is empty.
@@ -27,7 +31,8 @@ fun(): string[]
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
+Return the configured agent-mode cycle; falls back to the built-in default when
+the user has not customized one.
 
 ## `smelt.mode.get`
 
@@ -35,9 +40,8 @@ Return the configured agent-mode cycle; falls back to the built-in default when 
 fun(name: string): table|nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.icon`
 
@@ -45,9 +49,8 @@ fun(name: string): table|nil
 fun(name: string): string
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.list`
 
@@ -55,9 +58,8 @@ fun(name: string): string
 fun(): table[]
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.note`
 
@@ -65,9 +67,8 @@ fun(): table[]
 fun(name: string): string
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.permission_behaviors`
 
@@ -75,9 +76,8 @@ fun(name: string): string
 fun(): table<string, table>
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.register`
 
@@ -85,9 +85,8 @@ fun(): table<string, table>
 fun(spec: table): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.set_icon`
 
@@ -95,9 +94,8 @@ fun(spec: table): nil
 fun(name: string, icon: string): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.
 
 ## `smelt.mode.style`
 
@@ -105,7 +103,5 @@ fun(name: string, icon: string): nil
 fun(name: string): table
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-
-
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
+raises.

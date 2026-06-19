@@ -4,7 +4,10 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.
+Occurrence-oriented subscriptions over event-shaped signals such as
+`turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the
+current value matters; use `smelt.events.on` when only future occurrences
+matter.
 
 ## `smelt.events.emit`
 
@@ -14,7 +17,8 @@ fun(event: smelt.events.Name, payload: any): nil
 
 Types: [`smelt.events.Name`](types.md#smelteventsname)
 
-Publish `payload` for the event named `event`. Custom events are declared automatically on first emit.
+Publish `payload` for the event named `event`. Custom events are declared
+automatically on first emit.
 
 ## `smelt.events.new`
 
@@ -24,7 +28,10 @@ fun(event: smelt.events.Name): nil
 
 Types: [`smelt.events.Name`](types.md#smelteventsname)
 
-Declare an event named `event`. Existing signals are left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.
+Declare an event named `event`. Existing signals are left unchanged.
+`smelt.events.on` and `smelt.events.emit` also declare custom events
+automatically, so this is only needed when a plugin wants to document its event
+surface explicitly.
 
 ## `smelt.events.on`
 
@@ -32,7 +39,9 @@ Declare an event named `event`. Existing signals are left unchanged. `smelt.even
 fun(event: smelt.events.Name, handler: fun(value: any)): smelt.Reg
 ```
 
-Types: [`smelt.events.Name`](types.md#smelteventsname), [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.events.Name`](types.md#smelteventsname),
+[`smelt.Reg`](types.md#smeltreg)
 
-Register `handler(payload)` for the event named `event`. Custom events are declared automatically before subscribing. Returns a `Reg` whose `:remove()` unsubscribes.
-
+Register `handler(payload)` for the event named `event`. Custom events are
+declared automatically before subscribing. Returns a `Reg` whose `:remove()`
+unsubscribes.

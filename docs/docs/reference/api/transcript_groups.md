@@ -4,7 +4,9 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Declarative transcript display grouping. Register adjacent-run group rules and group-node renderers while the host owns deterministic planning and cache invalidation.
+Declarative transcript display grouping. Register adjacent-run group rules and
+group-node renderers while the host owns deterministic planning and cache
+invalidation.
 
 ## `smelt.transcript.groups.cache_key`
 
@@ -32,7 +34,8 @@ fun(): smelt.transcript.GroupSpec[]
 
 Types: [`smelt.transcript.GroupSpec`](types.md#smelttranscriptgroupspec)
 
-Return group specs in planner order: higher priority first, then registration order.
+Return group specs in planner order: higher priority first, then registration
+order.
 
 ## `smelt.transcript.groups.register`
 
@@ -40,9 +43,9 @@ Return group specs in planner order: higher priority first, then registration or
 fun(spec: smelt.transcript.GroupSpec): smelt.Reg
 ```
 
-Types: [`smelt.transcript.GroupSpec`](types.md#smelttranscriptgroupspec), [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.transcript.GroupSpec`](types.md#smelttranscriptgroupspec),
+[`smelt.Reg`](types.md#smeltreg)
 
 Register or replace a declarative transcript group type. This only declares
 planning metadata and a renderer for future virtual group nodes; Rust owns
 deterministic adjacent-run planning.
-

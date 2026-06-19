@@ -4,7 +4,11 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Opt out of bundled `smelt.<dotted>` modules. Call from `early.lua` to prevent the module from auto-loading; calls made later mark the module as disabled but its body has already run. For runtime removal of an already-loaded tool, call `smelt.tools.unregister` directly; for commands, hold the `Reg` returned by `smelt.cmd.register` and call `:remove()`.
+Opt out of bundled `smelt.<dotted>` modules. Call from `early.lua` to prevent
+the module from auto-loading; calls made later mark the module as disabled but
+its body has already run. For runtime removal of an already-loaded tool, call
+`smelt.tools.unregister` directly; for commands, hold the `Reg` returned by
+`smelt.cmd.register` and call `:remove()`.
 
 ## `smelt.builtins.disable`
 
@@ -14,7 +18,9 @@ fun(selector: smelt.builtins.Selector): integer
 
 Types: [`smelt.builtins.Selector`](types.md#smeltbuiltinsselector)
 
-Mark the bundled modules in `selector` as disabled. The auto-loader skips matching `require()` calls. Returns the count of names marked. Call from `early.lua` for full effect.
+Mark the bundled modules in `selector` as disabled. The auto-loader skips
+matching `require()` calls. Returns the count of names marked. Call from
+`early.lua` for full effect.
 
 ## `smelt.builtins.enable`
 
@@ -24,7 +30,8 @@ fun(selector: smelt.builtins.Selector): integer
 
 Types: [`smelt.builtins.Selector`](types.md#smeltbuiltinsselector)
 
-Undo a prior `disable` for the bundled modules in `selector`. Returns the count of names un-marked. Has no effect if the modules were never disabled.
+Undo a prior `disable` for the bundled modules in `selector`. Returns the count
+of names un-marked. Has no effect if the modules were never disabled.
 
 ## `smelt.builtins.is_disabled`
 
@@ -32,7 +39,8 @@ Undo a prior `disable` for the bundled modules in `selector`. Returns the count 
 fun(module: string): boolean
 ```
 
-Return `true` if the dotted module name (e.g. `"smelt.tools.web_search"`) is currently in the disabled set.
+Return `true` if the dotted module name (e.g. `"smelt.tools.web_search"`) is
+currently in the disabled set.
 
 ## `smelt.builtins.list`
 
@@ -41,4 +49,3 @@ fun(): table
 ```
 
 Return the sorted dotted module names that are currently disabled.
-

@@ -38,7 +38,9 @@
   var DRIP_CHAR = "|";
   var BASE_LEVEL = 0.86;
   var FRAME_INTERVAL = 1000 / 30;
-  var coarsePointerQuery = window.matchMedia ? window.matchMedia("(pointer: coarse)") : null;
+  var coarsePointerQuery = window.matchMedia
+    ? window.matchMedia("(pointer: coarse)")
+    : null;
 
   function currentScheme() {
     return document.body.getAttribute("data-md-color-scheme") || "default";
@@ -85,7 +87,8 @@
     var scale = 1;
     if (width < 720 || height < 540) scale = 1.2;
     if (width < 560 || height < 420) scale = 1.35;
-    if (coarsePointerQuery && coarsePointerQuery.matches) scale = Math.max(scale, 1.45);
+    if (coarsePointerQuery && coarsePointerQuery.matches)
+      scale = Math.max(scale, 1.45);
     return scale;
   }
 
@@ -241,8 +244,16 @@
   }
 
   function injectHeat(cx, cy, amount, radius) {
-    for (var y = Math.max(0, cy - radius); y <= Math.min(ROWS - 1, cy + radius); y++) {
-      for (var x = Math.max(0, cx - radius); x <= Math.min(COLS - 1, cx + radius); x++) {
+    for (
+      var y = Math.max(0, cy - radius);
+      y <= Math.min(ROWS - 1, cy + radius);
+      y++
+    ) {
+      for (
+        var x = Math.max(0, cx - radius);
+        x <= Math.min(COLS - 1, cx + radius);
+        x++
+      ) {
         var dx = x - cx;
         var dy = y - cy;
         var dist = Math.sqrt(dx * dx + dy * dy);
@@ -272,7 +283,8 @@
         var left = x > 0 ? heat[idx(x - 1, y)] : heat[pos];
         var right = x < COLS - 1 ? heat[idx(x + 1, y)] : heat[pos];
         var swirl = Math.sin(flow[pos] + time * 1.2 + y * 0.13) * 0.03;
-        var mixed = heat[pos] * 0.58 + below * 0.28 + (left + right) * 0.07 + swirl;
+        var mixed =
+          heat[pos] * 0.58 + below * 0.28 + (left + right) * 0.07 + swirl;
 
         if (rowFrac >= surface) {
           var depth = rowFrac - surface;
@@ -307,7 +319,12 @@
       blast.life -= dt;
       var progress = 1 - blast.life / blast.maxLife;
       blast.radius = blast.maxRadius * progress;
-      injectHeat(Math.round(blast.x), Math.round(blast.y), blast.heat * (1 - progress * 0.6), Math.max(2, Math.round(blast.radius)));
+      injectHeat(
+        Math.round(blast.x),
+        Math.round(blast.y),
+        blast.heat * (1 - progress * 0.6),
+        Math.max(2, Math.round(blast.radius)),
+      );
       if (blast.life <= 0) {
         blasts.splice(i, 1);
       }
@@ -356,7 +373,9 @@
   function lavaColor(level, depth, isCrust, x, y, time) {
     var flicker = Math.sin(x * 0.81 + y * 0.37 + time * 3.4) * 0.08;
     var shimmer = Math.sin(x * 0.23 - y * 0.61 + time * 1.9) * 0.05;
-    var veins = Math.sin(x * 0.14 + time * 0.9) * 0.12 + Math.cos(y * 0.48 - time * 1.2) * 0.08;
+    var veins =
+      Math.sin(x * 0.14 + time * 0.9) * 0.12 +
+      Math.cos(y * 0.48 - time * 1.2) * 0.08;
     var tone = level + flicker + shimmer;
     var depthFade = clamp(depth * 3.2, 0, 0.32);
     var lightTheme = isLightTheme();
@@ -405,11 +424,14 @@
   }
 
   function lavaChar(level, isCrust, x, y, time) {
-    var noise = Math.sin(x * 1.17 + time * 2.1) + Math.cos(y * 0.73 - time * 1.3);
+    var noise =
+      Math.sin(x * 1.17 + time * 2.1) + Math.cos(y * 0.73 - time * 1.3);
     var veins = Math.sin(x * 0.31 + y * 0.22 + time * 1.7);
     var variant = clamp(level + noise * 0.06 + veins * 0.04, 0, 0.999);
     if (isCrust) {
-      var crustIndex = Math.abs(Math.floor((x * 3 + y * 5 + time * 8) % LAVA_CRUST_CHARS.length));
+      var crustIndex = Math.abs(
+        Math.floor((x * 3 + y * 5 + time * 8) % LAVA_CRUST_CHARS.length),
+      );
       return LAVA_CRUST_CHARS[crustIndex];
     }
     if (veins > 0.55 && variant > 0.42) return "%";
@@ -522,7 +544,8 @@
       var pos = idx(x, y);
       var glow = spark.life / spark.maxLife;
       buf[pos].ch = spark.char;
-      buf[pos].color = glow > 0.65 ? "#fff2c9" : glow > 0.35 ? "#ffbe63" : "#ff7f32";
+      buf[pos].color =
+        glow > 0.65 ? "#fff2c9" : glow > 0.35 ? "#ffbe63" : "#ff7f32";
     }
   }
 
@@ -539,7 +562,8 @@
         if (cell.color === "transparent") {
           out += " ";
         } else {
-          out += '<span style="color:' + cell.color + '">' + cell.ch + "</span>";
+          out +=
+            '<span style="color:' + cell.color + '">' + cell.ch + "</span>";
         }
       }
       if (y < ROWS - 1) out += "\n";
@@ -579,12 +603,21 @@
     mouse.y = ny;
     mouse.px = nx;
     mouse.py = ny;
-    mouse.power = clamp(mouse.power + Math.abs(mouse.vx) * 8 + Math.abs(mouse.vy) * 6, 0, 1.4);
+    mouse.power = clamp(
+      mouse.power + Math.abs(mouse.vx) * 8 + Math.abs(mouse.vy) * 6,
+      0,
+      1.4,
+    );
     mouse.lastMove = performance.now() / 1000;
 
     var mx = Math.round(nx * (COLS - 1));
     var my = Math.round(ny * (ROWS - 1));
-    injectHeat(mx, my, 0.12 + mouse.power * 0.08, 4 + Math.round(mouse.power * 3));
+    injectHeat(
+      mx,
+      my,
+      0.12 + mouse.power * 0.08,
+      4 + Math.round(mouse.power * 3),
+    );
     if (ny > BASE_LEVEL - 0.08 && Math.random() > 0.55) {
       spawnPop(mx, Math.max(0, my - 1), 0.3 + mouse.power * 0.4);
     }

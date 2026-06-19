@@ -4,7 +4,10 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Declare and read CLI flags from Lua. `register_flag` is intended to be called from `early.lua` so the flag is folded into the main binary's argument parser. `get(name)` returns the parsed value (or the declared default) after the binary has parsed argv.
+Declare and read CLI flags from Lua. `register_flag` is intended to be called
+from `early.lua` so the flag is folded into the main binary's argument parser.
+`get(name)` returns the parsed value (or the declared default) after the binary
+has parsed argv.
 
 ## `smelt.cli.get`
 
@@ -12,7 +15,8 @@ Declare and read CLI flags from Lua. `register_flag` is intended to be called fr
 fun(name: string): any
 ```
 
-Return the parsed value of the Lua-declared CLI flag `name`. Returns the declared default if the binary has not parsed argv yet (e.g. headless tests).
+Return the parsed value of the Lua-declared CLI flag `name`. Returns the
+declared default if the binary has not parsed argv yet (e.g. headless tests).
 
 ## `smelt.cli.list`
 
@@ -30,5 +34,9 @@ fun(opts: smelt.cli.RegisterFlagOpts): nil
 
 Types: [`smelt.cli.RegisterFlagOpts`](types.md#smeltcliregisterflagopts)
 
-Register a CLI flag. MUST be called from `early.lua`. The runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `"boolean"`, `"string"`, or `"integer"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.
-
+Register a CLI flag. MUST be called from `early.lua`. The runtime errors loudly
+if invoked in any later phase, because clap has already parsed argv by then.
+`opts.kind` is `"boolean"`, `"string"`, or `"integer"`; `opts.default`
+(optional) sets the value when the flag is absent. Booleans always default to
+`false` when not provided. Errors if a flag with the same name was already
+registered.

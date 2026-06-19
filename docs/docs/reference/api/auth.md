@@ -4,7 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Authenticated provider helpers. Requests use smelt-managed credentials without exposing bearer tokens to Lua.
+Authenticated provider helpers. Requests use smelt-managed credentials without
+exposing bearer tokens to Lua.
 
 ## `smelt.auth.managed_usage`
 
@@ -13,8 +14,9 @@ fun(provider: string): { summary: table?, limits: table[] }?, string?
 ```
 
 Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
-provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
-resetHint? }`. Only providers with managed quota endpoints support this.
+provider-neutral `{ summary, limits }` rows with
+`{ label, used, limit, resetHint? }`. Only providers with managed quota
+endpoints support this.
 
 ## `smelt.auth.request`
 
@@ -23,7 +25,6 @@ fun(provider: string, opts: { path: string, method: string?, body: string? }): {
 ```
 
 Run an authenticated request against a provider-owned endpoint using
-smelt-managed credentials. Credentials stay in Rust; Lua receives only
-the HTTP status and body. `opts.path` must be an absolute path without a
-URL scheme; `opts.method` defaults to `GET`.
-
+smelt-managed credentials. Credentials stay in Rust; Lua receives only the HTTP
+status and body. `opts.path` must be an absolute path without a URL scheme;
+`opts.method` defaults to `GET`.

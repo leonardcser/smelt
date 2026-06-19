@@ -12,7 +12,8 @@ Pure parsers: frontmatter extraction from markdown documents.
 fun(content: string): any, string
 ```
 
-Split `---`-delimited YAML frontmatter from a markdown document. Returns `(frontmatter_table, body)` or `(nil, content)` when no frontmatter is present.
+Split `---`-delimited YAML frontmatter from a markdown document. Returns
+`(frontmatter_table, body)` or `(nil, content)` when no frontmatter is present.
 
 ## `smelt.parse.json`
 
@@ -20,5 +21,6 @@ Split `---`-delimited YAML frontmatter from a markdown document. Returns `(front
 fun(content: string): any
 ```
 
-Parse a JSON document into a Lua value. Returns the decoded value on success, `nil` on parse error. Objects become tables, arrays become 1-indexed tables, numbers become integers when they fit losslessly.
-
+Parse a JSON document into a Lua value. Returns the decoded value on success,
+`nil` on parse error. Objects become tables, arrays become 1-indexed tables,
+numbers become integers when they fit losslessly.

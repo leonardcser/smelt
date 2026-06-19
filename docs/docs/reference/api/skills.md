@@ -4,7 +4,11 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-List and load skill content from the SkillLoader populated at startup. Markdown custom commands can opt into skill discovery with `agent_skill: true` (or `agent-skill: true`) in their frontmatter; the skill name is the command file stem. Loaded command skills are static context: slash-command arguments are not included, and shell output markers are not evaluated.
+List and load skill content from the SkillLoader populated at startup. Markdown
+custom commands can opt into skill discovery with `agent_skill: true` (or
+`agent-skill: true`) in their frontmatter; the skill name is the command file
+stem. Loaded command skills are static context: slash-command arguments are not
+included, and shell output markers are not evaluated.
 
 ## `smelt.skills.content`
 
@@ -12,7 +16,8 @@ List and load skill content from the SkillLoader populated at startup. Markdown 
 fun(name: string): string?, string?
 ```
 
-Load the skill named `name` and return `(content, nil)` on success or `(nil, err_string)` if the skill is missing or failed to load.
+Load the skill named `name` and return `(content, nil)` on success or
+`(nil, err_string)` if the skill is missing or failed to load.
 
 ## `smelt.skills.info`
 
@@ -20,7 +25,8 @@ Load the skill named `name` and return `(content, nil)` on success or `(nil, err
 fun(): table
 ```
 
-Return every discovered skill as `{ name, description, source, location, shadowed }` rows sorted by name.
+Return every discovered skill as
+`{ name, description, source, location, shadowed }` rows sorted by name.
 
 ## `smelt.skills.list`
 
@@ -28,5 +34,5 @@ Return every discovered skill as `{ name, description, source, location, shadowe
 fun(): table
 ```
 
-Return the names of every skill discovered by the loader as a Lua array. Empty when no skills are loaded.
-
+Return the names of every skill discovered by the loader as a Lua array. Empty
+when no skills are loaded.

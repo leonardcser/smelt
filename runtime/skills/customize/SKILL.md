@@ -488,6 +488,8 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after  compaction. A group is a user message, a plain assistant message,  or an assistant tool-use step together with its tool outputs. |
 | `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
+| `web_search_provider` | `"duckduckgo"` \| `"brave"` | `"duckduckgo"` | Search provider used by the built-in `web_search` tool. |
+| `brave_search_api_key_env` | string | `"BRAVE_SEARCH_API_KEY"` | Environment variable containing the Brave Search API key. |
 | `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved  inside the git root and contain worktrees directly; absolute paths are  external roots and get a per-repository bucket. Supports leading `~`,  `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
 | `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a  pill when an update is available; `"auto"` installs in  background on detection. |
 | `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases,  including prereleases) or `"unstable"` (`main` HEAD). |
