@@ -49,12 +49,27 @@ use smelt_core::transcript_model::BlockId;
 pub(crate) enum TranscriptScrollIntent {
     Tail,
     PreserveViewport,
-    UserDelta { rows: isize },
-    PageDelta { pages: isize },
+    UserDelta {
+        rows: isize,
+    },
+    PageDelta {
+        pages: isize,
+    },
     ExactContentAnchor(TranscriptTraceAnchor),
     SearchJump(TranscriptTraceAnchor),
-    ResizeReflow { previous_width: u16 },
-    ScrollbarFraction { numerator: u64, denominator: u64 },
+    RevealBlock {
+        descriptor_index: usize,
+        block_id: BlockId,
+        row_offset: RowIndex,
+        screen_padding_top: RowIndex,
+    },
+    ResizeReflow {
+        previous_width: u16,
+    },
+    ScrollbarFraction {
+        numerator: u64,
+        denominator: u64,
+    },
     ApproximateRowSeek(RowIndex),
 }
 

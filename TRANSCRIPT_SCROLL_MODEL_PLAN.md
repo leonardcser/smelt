@@ -906,6 +906,13 @@ Acceptance:
 - The result is unchanged by sparse prefix estimate refinement.
 - No exact global prefix height is required.
 
+Phase 2 result:
+
+- Added a first-class `RevealBlock` transcript scroll intent carrying descriptor index, block id, row offset, and requested top screen padding.
+- Block reveal now loads a bounded descriptor window around the target, computes the exact rendered target row inside that window, and derives the paint scroll row as `target_row - screen_padding_top`.
+- Lua `reveal_block` records a semantic reveal intent instead of reusing search-jump row intent.
+- Regression coverage verifies the target block remains at the requested screen row even when the sparse prefix estimate changes.
+
 ### Reset Phase 3: Replace Lua pill and reveal APIs
 
 Goal: remove row-based semantic navigation from plugins and public Lua paths.

@@ -1036,6 +1036,7 @@ impl TranscriptDocument {
             | TranscriptScrollIntent::PageDelta { .. }
             | TranscriptScrollIntent::ExactContentAnchor(_)
             | TranscriptScrollIntent::SearchJump(_)
+            | TranscriptScrollIntent::RevealBlock { .. }
             | TranscriptScrollIntent::ResizeReflow { .. } => TranscriptViewportMode::Anchored,
         }
     }
@@ -1584,13 +1585,14 @@ impl TranscriptDocument {
         self.navigation_block(role, TranscriptNavigationDirection::Next)
     }
 
-    pub(crate) fn descriptor_block_position(
+    fn descriptor_block_target_row(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
         descriptor_index: usize,
+        row_offset: RowIndex,
         viewport_rows: u16,
-    ) -> Option<crate::smelt_edit::DocPosition> {
+    ) -> Option<(BlockId, RowIndex)> {
         let block_id = if self.sparse_descriptors.total_count().is_some() {
             let range = self.descriptor_window_range_around_center(
                 width,
@@ -1608,13 +1610,34 @@ impl TranscriptDocument {
             self.history().order.get(descriptor_index).copied()?
         };
 
-        let (.., first_row, _) = self
+        let (_, first_row, rows) = self
             .materialize_exact_loaded_block_layout(lua, width)
             .into_iter()
             .find(|(id, _, _)| *id == block_id)?;
-        Some(crate::smelt_edit::DocPosition {
-            row: first_row,
-            byte_col: 0,
+        let row_offset = row_offset.min(rows.saturating_sub(1));
+        Some((block_id, first_row.saturating_add(row_offset)))
+    }
+
+    pub(crate) fn descriptor_block_reveal_position(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        descriptor_index: usize,
+        row_offset: RowIndex,
+        screen_padding_top: RowIndex,
+        viewport_rows: u16,
+    ) -> Option<TranscriptBlockRevealPosition> {
+        let (block_id, target_row) = self.descriptor_block_target_row(
+            lua,
+            width,
+            descriptor_index,
+            row_offset,
+            viewport_rows,
+        )?;
+        Some(TranscriptBlockRevealPosition {
+            block_id,
+            target_row,
+            scroll_top: target_row.saturating_sub(screen_padding_top),
         })
     }
 
@@ -2093,6 +2116,29 @@ impl TranscriptDocument {
                     viewport_rows,
                 );
                 crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
+            }
+            TranscriptScrollIntent::RevealBlock {
+                descriptor_index,
+                block_id,
+                row_offset,
+                screen_padding_top,
+            } => {
+                let Some(reveal) = self.descriptor_block_reveal_position(
+                    lua,
+                    width,
+                    *descriptor_index,
+                    *row_offset,
+                    *screen_padding_top,
+                    viewport_rows,
+                ) else {
+                    return crate::content::transcript_buf::ScrollTarget::visible_tail();
+                };
+                if reveal.block_id != *block_id {
+                    return crate::content::transcript_buf::ScrollTarget::visible_tail();
+                }
+                crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                    reveal.scroll_top,
+                )
             }
             TranscriptScrollIntent::ScrollbarFraction {
                 numerator,
@@ -4493,6 +4539,126 @@ mod document_tests {
     }
 
     #[test]
+    fn reveal_block_intent_places_target_at_requested_screen_row() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 6;
+        let descriptor_index = 50;
+        let top_padding = 2;
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Transcript::new();
+        for idx in 0..100 {
+            if idx == descriptor_index {
+                source.push(Block::User {
+                    text: format!("user {idx}"),
+                    image_labels: Vec::new(),
+                });
+            } else {
+                source.push(Block::Text {
+                    content: format!("assistant {idx}"),
+                });
+            }
+        }
+        let records = source.history.descriptor_records();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            80..100,
+            Some(dir.path().to_path_buf()),
+        ));
+        let block_id = BlockId::new(descriptor_index as u64);
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
+            descriptor_index,
+            block_id,
+            row_offset: 0,
+            screen_padding_top: top_padding,
+        });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: 0,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(911), Default::default());
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let first_scroll = rows.clamped_scroll;
+        let reveal = document
+            .descriptor_block_reveal_position(
+                &lua,
+                width,
+                descriptor_index,
+                0,
+                top_padding,
+                viewport_rows,
+            )
+            .expect("revealed block position");
+        assert_eq!(reveal.block_id, block_id);
+        assert_eq!(
+            reveal.target_row.saturating_sub(rows.clamped_scroll),
+            top_padding
+        );
+        assert!(active_history_contains(&document, "user 50"));
+
+        let active_start = document
+            .active_descriptor_range
+            .as_ref()
+            .expect("active reveal window")
+            .start
+            .get();
+        assert!(active_start > 0);
+        document.extent_index.descriptor_rows_estimate_cache.insert(
+            DescriptorRowsEstimateKey {
+                width,
+                start: 0,
+                end: active_start,
+            },
+            first_scroll.saturating_add(123),
+        );
+        document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
+            descriptor_index,
+            block_id,
+            row_offset: 0,
+            screen_padding_top: top_padding,
+        });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: rows.clamped_scroll,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        assert_ne!(rows.clamped_scroll, first_scroll);
+        let reveal = document
+            .descriptor_block_reveal_position(
+                &lua,
+                width,
+                descriptor_index,
+                0,
+                top_padding,
+                viewport_rows,
+            )
+            .expect("revealed block position after prefix refinement");
+        assert_eq!(
+            reveal.target_row.saturating_sub(rows.clamped_scroll),
+            top_padding
+        );
+    }
+
+    #[test]
     fn sparse_block_lookup_searches_previous_windows_for_role_match() {
         let lua = LuaRuntime::new();
         let dir = tempfile::tempdir().unwrap();
@@ -4827,6 +4993,13 @@ pub(crate) struct TranscriptNavigationBlock {
     pub(crate) role: &'static str,
     pub(crate) first_line: String,
     pub(crate) already_at_anchor: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptBlockRevealPosition {
+    pub(crate) block_id: BlockId,
+    pub(crate) target_row: RowIndex,
+    pub(crate) scroll_top: RowIndex,
 }
 
 fn transcript_block_role(block: &Block) -> &'static str {
@@ -5341,23 +5514,38 @@ impl TuiApp {
             .map(|viewport| viewport.rect.height)
             .unwrap_or(1)
             .max(1);
-        let Some(position) = self.transcript.descriptor_block_position(
+        let Some(reveal) = self.transcript.descriptor_block_reveal_position(
             &self.lua,
             width,
             descriptor_index,
+            0,
+            top_padding,
             viewport_rows,
         ) else {
             return false;
         };
+        let window_scroll_before = self.transcript_scroll_top();
         self.reveal_position(
             crate::app::TRANSCRIPT_WIN,
-            position,
+            crate::smelt_edit::DocPosition {
+                row: reveal.target_row,
+                byte_col: 0,
+            },
             crate::app::reveal::RevealOptions {
                 top_padding,
                 cursor,
-                transcript_scroll_intent: Some(crate::app::reveal::RevealScrollIntent::SearchJump),
                 ..Default::default()
             },
+        );
+        self.record_transcript_scroll_intent(
+            "reveal_block",
+            TranscriptScrollIntent::RevealBlock {
+                descriptor_index,
+                block_id: reveal.block_id,
+                row_offset: 0,
+                screen_padding_top: top_padding,
+            },
+            window_scroll_before,
         );
         true
     }
