@@ -999,6 +999,13 @@ Acceptance:
 - Estimates can move scrollbar geometry but cannot move visible content, cursor, selection, copied text, or semantic navigation targets.
 - Placeholder rows are inert and appear only for explicit far seek states.
 
+Phase 6 result:
+
+- Renamed transcript document estimate seams to mark prefix/suffix row offsets and approximate display-row descriptor activation as approximate paint or far-seek metadata.
+- Extended trace content anchors with descriptor index and block id so semantic `ExactContentAnchor` and `SearchJump` intents can resolve by descriptor/block identity instead of approximate display-row activation.
+- Kept approximate row activation on explicit row/debug and far-seek paths, while local scroll, semantic navigation, and reveal use content anchors or adjacent descriptor loading.
+- Added regression coverage that an explicit `ApproximateRowSeek` loads a sparse window and then re-anchors viewport state to the real descriptor/block content.
+
 ### Reset Phase 7: Validation and deletion pass
 
 Goal: finish with fewer models than we started with.

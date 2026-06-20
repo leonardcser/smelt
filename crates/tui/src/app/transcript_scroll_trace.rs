@@ -108,6 +108,8 @@ pub(crate) enum TranscriptTraceAnchor {
     Tail,
     Content {
         virtual_row: RowIndex,
+        descriptor_index: usize,
+        block_id: BlockId,
         node_id: RenderNodeId,
         row_offset: RowIndex,
     },
