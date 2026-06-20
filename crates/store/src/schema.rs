@@ -434,6 +434,9 @@ CREATE TABLE IF NOT EXISTS transcript_blocks (
 CREATE INDEX IF NOT EXISTS transcript_blocks_history_idx ON transcript_blocks(history_idx, block_idx);
 CREATE INDEX IF NOT EXISTS transcript_blocks_kind_idx ON transcript_blocks(kind, block_idx);
 CREATE INDEX IF NOT EXISTS transcript_blocks_tool_call_id_idx ON transcript_blocks(tool_call_id);
+CREATE INDEX IF NOT EXISTS transcript_blocks_extent_idx
+    ON transcript_blocks(block_idx, kind, estimated_rows, estimated_text_bytes, preview_text)
+    WHERE descriptor_json IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS objects (
     hash TEXT PRIMARY KEY,

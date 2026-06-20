@@ -665,6 +665,55 @@ mod tests {
     }
 
     #[test]
+    fn transcript_descriptor_estimated_rows_uses_compact_tool_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut tool = transcript_record(0, "tool", &"x".repeat(10_000));
+        tool.kind = "tool".into();
+        tool.tool_name = Some("edit_file".into());
+        tool.preview_text = "edited file".into();
+        let assistant = transcript_record(1, "assistant", "abcdefghij");
+        db.replace_transcript_descriptor_records(&[tool, assistant])
+            .unwrap();
+
+        assert_eq!(
+            db.transcript_descriptor_estimated_rows((0..1).into(), 10)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.transcript_descriptor_estimated_rows((0..2).into(), 10)
+                .unwrap(),
+            5
+        );
+    }
+
+    #[test]
+    fn descriptor_slices_omit_search_text_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let huge_search_text = format!("needle {}", "x".repeat(10_000));
+        let record = transcript_record(0, "huge", &huge_search_text);
+        db.replace_transcript_descriptor_records(std::slice::from_ref(&record))
+            .unwrap();
+
+        let slice = db.read_transcript_descriptor_slice((0..1).into()).unwrap();
+        assert_eq!(slice.records.len(), 1);
+        assert_eq!(slice.records[0].search_text, "");
+
+        let tail = db.read_transcript_descriptor_tail_slice(1).unwrap();
+        assert_eq!(tail.records.len(), 1);
+        assert_eq!(tail.records[0].search_text, "");
+
+        let full = db.read_all_transcript_descriptor_records().unwrap();
+        assert_eq!(full[0].search_text, huge_search_text);
+        assert!(!db
+            .search_transcript_candidates("needle")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn history_suffix_write_appends_history_and_descriptors_transactionally() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
@@ -884,7 +933,12 @@ mod tests {
         assert_eq!(slice.start.get(), 2);
         assert_eq!(slice.end().get(), 5);
         assert_eq!(slice.total_count, 6);
-        assert_eq!(slice.records, records[2..5].to_vec());
+        let expected_slice = records[2..5]
+            .iter()
+            .cloned()
+            .map(without_search_text)
+            .collect::<Vec<_>>();
+        assert_eq!(slice.records, expected_slice);
         assert_eq!(
             slice.hydration,
             crate::TranscriptDescriptorHydration::ObjectBacked
@@ -898,16 +952,26 @@ mod tests {
         let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
         assert_eq!(tail.start.get(), 4);
         assert_eq!(tail.end().get(), 6);
-        assert_eq!(tail.records, records[4..6].to_vec());
+        let expected_tail = records[4..6]
+            .iter()
+            .cloned()
+            .map(without_search_text)
+            .collect::<Vec<_>>();
+        assert_eq!(tail.records, expected_tail);
         assert!(db
             .read_transcript_descriptor_tail_slice(0)
             .unwrap()
             .is_empty());
+        let expected_all = records
+            .iter()
+            .cloned()
+            .map(without_search_text)
+            .collect::<Vec<_>>();
         assert_eq!(
             db.read_transcript_descriptor_tail_slice(99)
                 .unwrap()
                 .records,
-            records
+            expected_all
         );
     }
 
@@ -2006,6 +2070,11 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    fn without_search_text(mut record: TranscriptDescriptorRecord) -> TranscriptDescriptorRecord {
+        record.search_text.clear();
+        record
     }
 
     fn transcript_record(

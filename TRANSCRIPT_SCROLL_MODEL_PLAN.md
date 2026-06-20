@@ -1022,6 +1022,44 @@ Phase 8 validation:
 - `cargo nextest run --workspace --features smelt-tui/harness`
 - `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib --search --search-bytes 524288000 --resume --resume-bytes 524288000 --no-warmup`
 
+### Phase 9: Slim descriptor-store hot paths
+
+Goal: keep descriptor-backed resume and sparse extent queries proportional to display metadata, not hidden search payloads or full tool output.
+
+Tasks:
+
+- Keep descriptor slice and tail-slice reads from hydrating large `search_text` payloads when projection only needs descriptors, previews, origins, and tool state.
+- Keep full descriptor reads and SQLite search candidates able to access stored search text.
+- Estimate compact tool, process-status, and mode rows from display preview text when exact persisted rows are unavailable, rather than from large searchable payloads.
+- Add a covering descriptor extent index for the fields used by sparse row-estimate scans.
+- Validate the store behavior with targeted tests, then rerun transcript validation and benchmark gates if this phase changes measured hot paths.
+
+Acceptance:
+
+- Descriptor slices used by sparse resume omit search payloads without breaking full descriptor hydration or search.
+- Store row estimates for compact tool-like descriptors use display-sized previews instead of large searchable snapshots.
+- Existing transcript scroll ownership behavior remains unchanged.
+
+Phase 9 implementation record:
+
+- Updated descriptor slice and tail-slice SQL to project an empty `search_text` payload for object-backed sparse descriptor loads while leaving full descriptor reads hydrated.
+- Updated descriptor row estimates to prefer `estimated_rows`, then compact display-preview wrapping for `tool`, `process_status`, and `mode` descriptors, then the stored text-byte estimate for normal descriptors.
+- Added `transcript_blocks_extent_idx` over descriptor extent fields to support sparse estimate scans without reading unrelated payload columns.
+- Added store tests for compact preview estimates and slice reads that omit search text while preserving full hydration and search candidates.
+- Reran the large benchmark with output captured at `/home/dev/tmp/smelt-transcript-scroll-model-bench-phase9.txt`:
+  - 10 MiB mixed layout: `first_ms=15.011`, `scroll12_ms=20.583`, `visible_ms=3.282`, `copy_ms=13.955`, `append_ms=7.221`, with `full_row_builds=0` for first, resize, theme, scroll12, visible, copy, append, and no-cache passes.
+  - 500 MiB search/view: `width_resize_ms=3.646`, `height_resize_ms=3.404`, `copy_mid_ms=0.306`, `nav_ctrl_d20_ms=38.449`, `nav_ctrl_u20_ms=29.342`, `next100_ms=95.363`, `after_append_ms=12.955`.
+  - 500 MiB descriptor-backed resume stayed bounded with `descriptor_slice_requested=80`, `descriptors_loaded=80`, `descriptor_json_bytes_loaded=331120`, `tail_load_ms=29.722`, and `tail_render_ms=1.280`.
+
+Phase 9 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-store transcript_descriptor_estimated_rows`
+- `cargo test -p smelt-store descriptor_slices_omit_search_text_payloads`
+- `cargo clippy -p smelt-store --all-targets -- -D warnings`
+- `cargo test -p smelt-tui --features harness transcript_scroll`
+- `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib --search --search-bytes 524288000 --resume --resume-bytes 524288000 --no-warmup`
+
 ## Historical Phase 6 results
 
 The original six phases were implemented and validated. They are now considered a scalability baseline, not the final scroll model. This section records that baseline and the tradeoffs left by the incomplete model.

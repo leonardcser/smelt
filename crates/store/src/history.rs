@@ -496,9 +496,19 @@ pub(crate) fn transcript_descriptor_estimated_rows(
     let limit = checked_i64((end - start) as u64, "descriptor_estimated_rows_len")?;
     let offset = checked_i64(start as u64, "descriptor_estimated_rows_start")?;
     let rows: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(((MAX(estimated_text_bytes, 1) + ?1 - 1) / ?1) + 1), 0)
+        "SELECT COALESCE(SUM(
+             COALESCE(
+                 estimated_rows,
+                 CASE
+                     WHEN kind IN ('tool', 'process_status', 'mode') THEN
+                         ((MAX(LENGTH(COALESCE(preview_text, '')), 1) + ?1 - 1) / ?1) + 1
+                     ELSE
+                         ((MAX(estimated_text_bytes, 1) + ?1 - 1) / ?1) + 1
+                 END
+             )
+         ), 0)
          FROM (
-             SELECT estimated_text_bytes
+             SELECT kind, estimated_rows, estimated_text_bytes, preview_text
              FROM transcript_blocks
              WHERE descriptor_json IS NOT NULL
              ORDER BY block_idx
@@ -578,7 +588,7 @@ pub(crate) fn read_transcript_descriptor_slice_with_total(
     let offset = checked_i64(start as u64, "descriptor_range_start")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, search_text, descriptor_json,
+                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
                 origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
@@ -634,7 +644,7 @@ pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
     let limit = checked_i64(count as u64, "descriptor_tail_len")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, search_text, descriptor_json,
+                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
                 origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
