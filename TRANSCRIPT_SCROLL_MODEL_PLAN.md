@@ -1001,6 +1001,27 @@ Acceptance:
 - Placeholder-only viewports are limited to intentional far sparse seeks.
 - Code ownership is simpler: transcript scroll semantics live in `TranscriptDocument`, not split across app, UI, window, projection, and extent helpers.
 
+Phase 8 implementation record:
+
+- Reran the targeted transcript scroll replay tests and full transcript test filter after Phase 7 cleanup to verify the intent-owned viewport model still protects stable content movement, local placeholder rejection, semantic search jumps, scrollbar fraction intents, and transcript document commands.
+- Reran workspace formatting, clippy, and nextest to validate the completed scroll model across the full workspace.
+- Reran the large transcript benchmark with `TMPDIR=/home/dev/tmp` and captured output at `/home/dev/tmp/smelt-transcript-scroll-model-bench-phase8.txt`.
+- Final benchmark results stayed within the established bounded-work gates:
+  - 10 MiB mixed layout: `first_ms=15.819`, `resize_ms=3.251`, `theme_ms=3.100`, `scroll12_ms=20.461`, `visible_ms=3.304`, `copy_ms=14.097`, `append_ms=7.231`, with `full_row_builds=0` for first, resize, theme, scroll12, visible, copy, append, and no-cache passes.
+  - 500 MiB search/view: `width_resize_ms=4.087`, `height_resize_ms=3.485`, `theme_color_ms=2.852`, `copy_mid_ms=0.307`, `nav_ctrl_d20_ms=38.992`, `nav_ctrl_u20_ms=29.636`, `nav_gg_ms=0.567`, `nav_G_ms=5.083`, `rare_ms=26.979`, `common_submit_ms=11.730`, `next100_ms=99.369`, `after_append_ms=14.776`.
+  - After-append search stayed bounded with `dirty_candidate_blocks=1`, `dirty_candidates_scanned=1`, `transcript:collect_nodes_range:rows total=40`, and `transcript:render_plan:reused last=1`.
+  - 500 MiB descriptor-backed resume stayed bounded with `descriptors=128000`, `descriptor_slice_requested=80`, `descriptors_loaded=80`, `descriptor_json_bytes_loaded=331120`, `tail_load_ms=36.031`, and `tail_render_ms=1.266`.
+  - No `store:transcript:descriptor_estimated_rows` metric was emitted, so first tail render did not synchronously scan the unloaded descriptor prefix for row estimates.
+
+Phase 8 validation:
+
+- `cargo test -p smelt-tui --features harness transcript_scroll -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_ -- --nocapture`
+- `cargo fmt`
+- `cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness`
+- `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib --search --search-bytes 524288000 --resume --resume-bytes 524288000 --no-warmup`
+
 ## Historical Phase 6 results
 
 The original six phases were implemented and validated. They are now considered a scalability baseline, not the final scroll model. This section records that baseline and the tradeoffs left by the incomplete model.
