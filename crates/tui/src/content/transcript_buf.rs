@@ -1606,13 +1606,15 @@ impl TranscriptProjection {
         env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
         rows: std::ops::Range<RowIndex>,
-    ) -> std::ops::Range<usize> {
+    ) -> (std::ops::Range<usize>, bool) {
         if rows.start >= rows.end {
-            return 0..0;
+            return (0..0, false);
         }
+        let mut changed_any = false;
         let mut node_range = self.measurements.active.node_range_for_rows(rows.clone());
         for _ in 0..8 {
             let changed = self.exactify_node_range(env.clone(), history, node_range.clone());
+            changed_any |= changed;
             let total_rows = self.measurements.active.total_rows();
             let end = rows.end.min(total_rows);
             let refined = if rows.start < end {
@@ -1623,21 +1625,39 @@ impl TranscriptProjection {
                 0..0
             };
             if !changed && refined == node_range {
-                return refined;
+                return (refined, changed_any);
             }
             node_range = refined;
         }
-        let _ = self.exactify_node_range(env, history, node_range.clone());
+        changed_any |= self.exactify_node_range(env, history, node_range.clone());
         self.measurements.active.refresh_prefix_rows();
         let total_rows = self.measurements.active.total_rows();
         let end = rows.end.min(total_rows);
-        if rows.start < end {
+        let refined = if rows.start < end {
             self.measurements
                 .active
                 .node_range_for_rows(rows.start..end)
         } else {
             0..0
+        };
+        (refined, changed_any)
+    }
+
+    pub(crate) fn exactify_rows_for_range(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        rows: std::ops::Range<RowIndex>,
+    ) -> bool {
+        if rows.start >= rows.end {
+            return false;
         }
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        let (_, changed) = self.exactify_row_range(env, history, rows);
+        self.measurements.remember_active();
+        changed
     }
 
     fn rebuild_row_index_with_env(

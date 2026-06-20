@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::search::SearchDirection;
 use crate::app::transcript_scroll_trace::{
-    TranscriptProjectionTargetTrace, TranscriptScrollIntent, TranscriptScrollTraceFrame,
-    TranscriptTraceAnchor,
+    TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
+    TranscriptScrollTraceFrame, TranscriptTraceAnchor,
 };
 use crate::content::render_plan::RenderNodeId;
 
@@ -1564,6 +1564,25 @@ fn assert_user_delta_targets_exact_rows(frames: &[TranscriptScrollTraceFrame]) {
     }
 }
 
+fn assert_user_delta_descriptor_coverage_moves_contiguously(frames: &[TranscriptScrollTraceFrame]) {
+    let mut previous: Option<TranscriptDescriptorTraceRange> = None;
+    for frame in frames {
+        let TranscriptScrollIntent::UserDelta { .. } = frame.scroll_intent else {
+            continue;
+        };
+        let Some(current) = frame.active_descriptor_range_after else {
+            continue;
+        };
+        if let Some(previous) = previous {
+            assert!(
+                current.start <= previous.end && previous.start <= current.end,
+                "local user delta jumped to disjoint descriptor coverage: previous={previous:?}, current={current:?}, frame={frame:?}"
+            );
+        }
+        previous = Some(current);
+    }
+}
+
 fn assert_preserve_frames_keep_semantic_anchor(frames: &[TranscriptScrollTraceFrame]) {
     let preserve_frames: Vec<_> = frames
         .iter()
@@ -1728,13 +1747,18 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         assert_local_scroll_frames_are_exact_and_fast(&wheel_probe_frames);
     }
     assert_local_scroll_frames_are_exact_and_fast(&drag_top_frames);
+    assert_user_delta_descriptor_coverage_moves_contiguously(&drag_top_frames);
     assert_local_scroll_frames_are_exact_and_fast(&wheel_down_frames);
     assert_local_scroll_frames_are_exact_and_fast(&drag_bottom_frames);
+    assert_user_delta_descriptor_coverage_moves_contiguously(&drag_bottom_frames);
     assert_user_delta_targets_exact_rows(&wheel_up_frames);
+    assert_user_delta_descriptor_coverage_moves_contiguously(&wheel_up_frames);
     if !wheel_probe_frames.is_empty() {
         assert_user_delta_targets_exact_rows(&wheel_probe_frames);
+        assert_user_delta_descriptor_coverage_moves_contiguously(&wheel_probe_frames);
     }
     assert_user_delta_targets_exact_rows(&wheel_down_frames);
+    assert_user_delta_descriptor_coverage_moves_contiguously(&wheel_down_frames);
     assert_preserve_frames_keep_semantic_anchor(&report.frames);
     assert_monotonic_visible_anchors(&wheel_up_frames, true);
     if !wheel_probe_frames.is_empty() {
@@ -1859,6 +1883,8 @@ fn transcript_cursor_down_scroll_crosses_sparse_windows_without_locking() {
         )),
         "cursor-down document scrolling fell back to estimated exact-row anchors: {frames:?}"
     );
+    assert_monotonic_visible_anchors(&frames, false);
+    assert_user_delta_descriptor_coverage_moves_contiguously(&frames);
 }
 
 #[test]
