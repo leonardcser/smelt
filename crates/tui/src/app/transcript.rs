@@ -935,6 +935,15 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn set_pending_scroll_intent(&mut self, intent: TranscriptScrollIntent) {
+        let intent = match (self.viewport_state.pending_intent.take(), intent) {
+            (
+                Some(TranscriptScrollIntent::UserDelta { rows: pending }),
+                TranscriptScrollIntent::UserDelta { rows },
+            ) => TranscriptScrollIntent::UserDelta {
+                rows: pending.saturating_add(rows),
+            },
+            (Some(_), intent) | (None, intent) => intent,
+        };
         self.viewport_state.mode = Self::viewport_mode_for_intent(&intent);
         self.viewport_state.pending_intent = Some(intent);
     }
@@ -1738,10 +1747,13 @@ impl TranscriptDocument {
         fallback_scroll_top: RowIndex,
     ) -> Option<RowIndex> {
         match self.viewport_state.top_anchor {
-            // Tail-follow is an input intent, not durable row authority. A preserve
-            // frame after tail-follow keeps the resolved paint row unless `follow_tail`
-            // asks projection to seek tail again.
-            Some(TranscriptScrollAnchor::Tail) => Some(fallback_scroll_top),
+            // Tail-follow is an input intent, not durable row authority. Local
+            // movement after tail-follow starts from the last resolved paint row
+            // so generic Window pre-scroll cannot apply the same delta twice.
+            Some(TranscriptScrollAnchor::Tail) => self
+                .viewport_state
+                .resolved_scroll_top
+                .or(Some(fallback_scroll_top)),
             Some(TranscriptScrollAnchor::Content {
                 virtual_row,
                 anchor,
@@ -1759,6 +1771,22 @@ impl TranscriptDocument {
             self.projection
                 .estimated_total_rows(lua, &mut self.transcript.history, width);
         self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
+    }
+
+    fn local_delta_scroll_target(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        fallback_scroll_top: RowIndex,
+        rows: isize,
+    ) -> crate::content::transcript_buf::ScrollTarget {
+        let base = self
+            .row_for_viewport_anchor(lua, width, fallback_scroll_top)
+            .unwrap_or(fallback_scroll_top);
+        let row = Self::add_rows(base, rows);
+        self.activate_descriptor_window_covering_virtual_row(lua, width, row, viewport_rows);
+        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
     }
 
     fn scroll_target_for_intent(
@@ -1786,22 +1814,16 @@ impl TranscriptDocument {
                     fallback_scroll_top,
                 )
             }
-            TranscriptScrollIntent::UserDelta { rows } => {
-                let base = self
-                    .row_for_viewport_anchor(lua, width, fallback_scroll_top)
-                    .unwrap_or(fallback_scroll_top);
-                crate::content::transcript_buf::ScrollTarget::visible_row(Self::add_rows(
-                    base, *rows,
-                ))
-            }
+            TranscriptScrollIntent::UserDelta { rows } => self.local_delta_scroll_target(
+                lua,
+                width,
+                viewport_rows,
+                fallback_scroll_top,
+                *rows,
+            ),
             TranscriptScrollIntent::PageDelta { pages } => {
-                let base = self
-                    .row_for_viewport_anchor(lua, width, fallback_scroll_top)
-                    .unwrap_or(fallback_scroll_top);
                 let rows = pages.saturating_mul(viewport_rows.max(1) as isize);
-                crate::content::transcript_buf::ScrollTarget::visible_row(Self::add_rows(
-                    base, rows,
-                ))
+                self.local_delta_scroll_target(lua, width, viewport_rows, fallback_scroll_top, rows)
             }
             TranscriptScrollIntent::ExactContentAnchor(anchor)
             | TranscriptScrollIntent::SearchJump(anchor) => self
@@ -2872,6 +2894,56 @@ mod document_tests {
         assert_eq!(
             frames[0].projection_target,
             TranscriptProjectionTargetTrace::ReflowStableRow(first.clamped_scroll)
+        );
+    }
+
+    #[test]
+    fn transcript_viewport_state_coalesces_pending_user_deltas() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 5;
+        let mut document = TranscriptDocument::from_transcript(fixed_transcript(40));
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(412), Default::default());
+
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(20),
+            viewport_rows,
+        );
+        let first = document.project_planned(&lua, &mut buf, &theme, plan);
+        assert_eq!(first.clamped_scroll, 20);
+
+        document.set_scroll_trace_enabled(true);
+        document.take_scroll_trace_frames();
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -1 });
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -2 });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: first.clamped_scroll.saturating_sub(3),
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(applied.materialized_rows.clamped_scroll, 17);
+        let frames = document.take_scroll_trace_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].scroll_intent,
+            TranscriptScrollIntent::UserDelta { rows: -3 }
+        );
+        assert_eq!(
+            frames[0].projection_target,
+            TranscriptProjectionTargetTrace::ReflowStableRow(17)
         );
     }
 

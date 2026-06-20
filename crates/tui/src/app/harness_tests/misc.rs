@@ -1,6 +1,8 @@
 use super::*;
 use crate::app::search::SearchDirection;
-use crate::app::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptScrollTraceFrame};
+use crate::app::transcript_scroll_trace::{
+    TranscriptProjectionTargetTrace, TranscriptScrollIntent, TranscriptScrollTraceFrame,
+};
 use crate::content::render_plan::RenderNodeId;
 
 #[test]
@@ -986,7 +988,12 @@ impl TranscriptScrollReplay {
                     let before = app.app.transcript_win().scroll_top();
                     let (row, col) = transcript_content_point(app, 1);
                     assert!(
-                        app.app.ui.scroll_at(row, col, rows),
+                        app.app.scroll_at_with_transcript_intent(
+                            row,
+                            col,
+                            rows,
+                            format!("coalesced_wheel:{rows}"),
+                        ),
                         "coalesced wheel replay should pan the transcript"
                     );
                     set_replay_trace_input(
@@ -1001,7 +1008,7 @@ impl TranscriptScrollReplay {
                     start_transcript_edge_drag(app, TranscriptDragEdge::Top);
                     for tick in 0..ticks {
                         let before = app.app.transcript_win().scroll_top();
-                        if app.app.ui.tick_drag_autoscroll() {
+                        if app.app.tick_drag_autoscroll_with_transcript_intent() {
                             set_replay_trace_input(
                                 app,
                                 format!("drag_autoscroll_top:{tick}"),
@@ -1017,7 +1024,7 @@ impl TranscriptScrollReplay {
                     start_transcript_edge_drag(app, TranscriptDragEdge::Bottom);
                     for tick in 0..ticks {
                         let before = app.app.transcript_win().scroll_top();
-                        if app.app.ui.tick_drag_autoscroll() {
+                        if app.app.tick_drag_autoscroll_with_transcript_intent() {
                             set_replay_trace_input(
                                 app,
                                 format!("drag_autoscroll_bottom:{tick}"),
@@ -1290,6 +1297,27 @@ fn assert_local_scroll_frames_are_exact_and_fast(frames: &[TranscriptScrollTrace
     }
 }
 
+fn assert_user_delta_targets_requested_rows(frames: &[TranscriptScrollTraceFrame]) {
+    assert!(!frames.is_empty(), "expected user delta frames");
+    for frame in frames {
+        let TranscriptScrollIntent::UserDelta { rows } = frame.scroll_intent else {
+            continue;
+        };
+        let expected = if rows >= 0 {
+            frame.window_scroll_before.saturating_add(rows as u64)
+        } else {
+            frame
+                .window_scroll_before
+                .saturating_sub(rows.unsigned_abs() as u64)
+        };
+        assert_eq!(
+            frame.projection_target,
+            TranscriptProjectionTargetTrace::ReflowStableRow(expected),
+            "user delta was not projected as the requested content-row movement: {frame:?}"
+        );
+    }
+}
+
 #[test]
 fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(320, 78, 18);
@@ -1348,10 +1376,17 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         .iter()
         .filter(|frame| {
             frame.input_event_or_tick.starts_with("wheel_up:")
-                || frame
-                    .input_event_or_tick
-                    .starts_with("wheel_up_window_probe")
                 || frame.input_event_or_tick.starts_with("coalesced_wheel")
+        })
+        .cloned()
+        .collect();
+    let wheel_probe_frames: Vec<_> = report
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame
+                .input_event_or_tick
+                .starts_with("wheel_up_window_probe")
         })
         .cloned()
         .collect();
@@ -1378,10 +1413,15 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         .cloned()
         .collect();
     assert_local_scroll_frames_are_exact_and_fast(&wheel_up_frames);
+    assert_local_scroll_frames_are_exact_and_fast(&wheel_probe_frames);
     assert_local_scroll_frames_are_exact_and_fast(&drag_top_frames);
     assert_local_scroll_frames_are_exact_and_fast(&wheel_down_frames);
     assert_local_scroll_frames_are_exact_and_fast(&drag_bottom_frames);
+    assert_user_delta_targets_requested_rows(&wheel_up_frames);
+    assert_user_delta_targets_requested_rows(&wheel_probe_frames);
+    assert_user_delta_targets_requested_rows(&wheel_down_frames);
     assert_monotonic_visible_anchors(&wheel_up_frames, true);
+    assert_monotonic_visible_anchors(&wheel_probe_frames, true);
     assert_monotonic_visible_anchors(&drag_top_frames, true);
     assert_monotonic_visible_anchors(&wheel_down_frames, false);
     assert_monotonic_visible_anchors(&drag_bottom_frames, false);

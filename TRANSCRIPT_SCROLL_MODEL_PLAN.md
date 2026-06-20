@@ -882,6 +882,25 @@ Acceptance:
 - Nearby scroll does not produce placeholder-only viewports.
 - Selection autoscroll keeps growing selection exactly while maintaining bounded materialization.
 
+Phase 5 implementation record:
+
+- Changed `UserDelta` and `PageDelta` resolution to target reflow-stable rows from the document-owned viewport anchor instead of plain exact numeric rows, so exact height refinement preserves the requested content identity during local movement.
+- Local movement after tail-follow now starts from the last document-resolved paint row, not the generic `Window` row after pre-scroll, preventing wheel and autoscroll deltas from being applied twice.
+- Local delta projection activates descriptor windows around the requested row before planning, so nearby wheel/page movement loads adjacent descriptor content instead of landing in sparse placeholders.
+- Pending `UserDelta` intents coalesce inside `TranscriptDocument`, preserving one accumulated content-row movement when multiple local scroll inputs arrive before projection.
+- Updated the replay harness so coalesced wheel and drag-autoscroll scenarios use the production transcript-intent adapters, then tightened replay assertions to require reflow-stable local targets, exact visible anchors, no local placeholders, and separated monotonic checks for contiguous upward sequences.
+- Added `transcript_viewport_state_coalesces_pending_user_deltas` to cover accumulated document-owned deltas and their reflow-stable projection target.
+
+Phase 5 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-tui --features harness transcript_viewport_state_coalesces_pending_user_deltas -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_scroll -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_ -- --nocapture`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness`
+
 ### Phase 6: Restrict estimates to scrollbar and far seek
 
 Goal: prevent estimates from influencing visible content identity or local scroll velocity.
