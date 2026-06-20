@@ -504,20 +504,27 @@ impl TuiApp {
             )
         })?;
 
-        let transcript_scroll_intent = if win == crate::app::TRANSCRIPT_WIN
-            && scroll_top != window_scroll_before
-        {
-            let anchor =
-                self.transcript
-                    .trace_anchor_at_row(&self.lua, viewport_cols.max(1), scroll_top);
-            Some((
-                "document_command",
-                TranscriptScrollIntent::ExactContentAnchor(anchor),
-                window_scroll_before,
-            ))
-        } else {
-            None
-        };
+        let transcript_scroll_intent =
+            if win == crate::app::TRANSCRIPT_WIN && scroll_top != window_scroll_before {
+                let rows = signed_row_delta(window_scroll_before, scroll_top);
+                let intent = match command {
+                    DocumentCommand::MoveRows(_)
+                    | DocumentCommand::PageRows(_)
+                    | DocumentCommand::HalfPageRows(_)
+                    | DocumentCommand::ScrollRows(_) => TranscriptScrollIntent::UserDelta { rows },
+                    _ => {
+                        let anchor = self.transcript.trace_anchor_at_row(
+                            &self.lua,
+                            viewport_cols.max(1),
+                            scroll_top,
+                        );
+                        TranscriptScrollIntent::ExactContentAnchor(anchor)
+                    }
+                };
+                Some(("document_command", intent, window_scroll_before))
+            } else {
+                None
+            };
 
         {
             let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
@@ -543,7 +550,7 @@ impl TuiApp {
             win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
         }
         if let Some((label, intent, before)) = transcript_scroll_intent {
-            self.record_transcript_scroll_intent(label, intent, before);
+            self.record_transcript_scroll_intent_from_document_command(label, intent, before);
         }
         if trace_transcript_command {
             let cursor_anchor = self.transcript.trace_anchor_at_row(
@@ -566,6 +573,14 @@ impl TuiApp {
             );
         }
         copy
+    }
+}
+
+fn signed_row_delta(before: RowIndex, after: RowIndex) -> isize {
+    if after >= before {
+        after.saturating_sub(before).min(isize::MAX as RowIndex) as isize
+    } else {
+        -(before.saturating_sub(after).min(isize::MAX as RowIndex) as isize)
     }
 }
 

@@ -395,19 +395,24 @@ impl SparseTranscriptDescriptors {
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, TranscriptBlockRecordWithId)> {
         match direction {
-            TranscriptNavigationDirection::Previous => self
-                .records
-                .range(..=anchor)
-                .rev()
-                .find_map(|(index, record)| {
-                    (descriptor_role(&record.record.descriptor) == role)
-                        .then(|| (index.get(), record.clone()))
-                }),
+            TranscriptNavigationDirection::Previous => {
+                self.records
+                    .range(..anchor)
+                    .rev()
+                    .find_map(|(index, record)| {
+                        (descriptor_role(&record.record.descriptor) == role)
+                            .then(|| (index.get(), record.clone()))
+                    })
+            }
             TranscriptNavigationDirection::Next => {
-                self.records.range(anchor..).find_map(|(index, record)| {
-                    (descriptor_role(&record.record.descriptor) == role)
-                        .then(|| (index.get(), record.clone()))
-                })
+                let after_anchor =
+                    smelt_store::TranscriptDescriptorIndex::new(anchor.get().saturating_add(1));
+                self.records
+                    .range(after_anchor..)
+                    .find_map(|(index, record)| {
+                        (descriptor_role(&record.record.descriptor) == role)
+                            .then(|| (index.get(), record.clone()))
+                    })
             }
         }
     }
@@ -1498,7 +1503,61 @@ impl TranscriptDocument {
             let _ = self.activate_descriptor_window_range(range);
         }
         self.row_for_anchor(lua, width, anchor.row_anchor)
-            .or(Some(anchor.fallback_row))
+    }
+
+    fn content_anchor_at_or_after_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        top_row: RowIndex,
+        viewport_rows: u16,
+    ) -> Option<(TranscriptContentAnchor, isize)> {
+        let viewport_rows = RowIndex::from(viewport_rows.max(1));
+        for offset in 0..viewport_rows {
+            let row = top_row.saturating_add(offset);
+            if let Some(anchor) =
+                self.content_anchor_at_row(lua, width, row, TranscriptAnchorBias::Top)
+            {
+                return Some((anchor, -(offset as isize)));
+            }
+        }
+
+        let visible_end = top_row.saturating_add(viewport_rows);
+        let (block_id, first_row, rows) = self
+            .materialize_exact_loaded_block_layout(lua, width)
+            .into_iter()
+            .find(|(_, first_row, rows)| {
+                let end = first_row.saturating_add(*rows);
+                *first_row < visible_end && end > top_row
+            })?;
+        let descriptor_index = self.descriptor_index_for_block_id(block_id)?;
+        let intra_block_row = top_row
+            .saturating_sub(first_row)
+            .min(rows.saturating_sub(1));
+        let anchor_row = first_row.saturating_add(intra_block_row);
+        let offset = if anchor_row >= top_row {
+            -(anchor_row
+                .saturating_sub(top_row)
+                .min(isize::MAX as RowIndex) as isize)
+        } else {
+            top_row
+                .saturating_sub(anchor_row)
+                .min(isize::MAX as RowIndex) as isize
+        };
+        Some((
+            TranscriptContentAnchor {
+                descriptor_index,
+                block_id,
+                intra_block_row,
+                bias: TranscriptAnchorBias::Top,
+                row_anchor: crate::content::transcript_buf::TranscriptRowAnchor {
+                    id: crate::content::render_plan::RenderNodeId::Block(block_id),
+                    row_offset: intra_block_row,
+                },
+                fallback_row: anchor_row,
+            },
+            offset,
+        ))
     }
 
     fn current_viewport_descriptor_anchor(&self) -> Option<(usize, BlockId, RowIndex)> {
@@ -1536,12 +1595,14 @@ impl TranscriptDocument {
         let session_dir = self.session_dir.clone()?;
         let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
         let record = match direction {
-            TranscriptNavigationDirection::Previous => db
-                .read_transcript_descriptor_before_kind(role, anchor_index as u64)
-                .ok()
-                .flatten()?,
+            TranscriptNavigationDirection::Previous => {
+                let before = anchor_index.checked_sub(1)?;
+                db.read_transcript_descriptor_before_kind(role, before as u64)
+                    .ok()
+                    .flatten()?
+            }
             TranscriptNavigationDirection::Next => db
-                .read_transcript_descriptor_after_kind(role, anchor_index as u64)
+                .read_transcript_descriptor_after_kind(role, anchor_index.saturating_add(1) as u64)
                 .ok()
                 .flatten()?,
         };
@@ -1601,12 +1662,17 @@ impl TranscriptDocument {
                     .iter()
                     .copied()
                     .enumerate()
-                    .take(anchor_index.saturating_add(1))
+                    .take(anchor_index)
                     .rev(),
             ),
-            TranscriptNavigationDirection::Next => {
-                Box::new(history.order.iter().copied().enumerate().skip(anchor_index))
-            }
+            TranscriptNavigationDirection::Next => Box::new(
+                history
+                    .order
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .skip(anchor_index.saturating_add(1)),
+            ),
         };
         for (index, block_id) in iter {
             if transcript_history_role(history, block_id) != role {
@@ -1786,34 +1852,8 @@ impl TranscriptDocument {
         )
     }
 
-    fn next_descriptor_window_range(
-        &self,
-        width: u16,
-        viewport_rows: u16,
-    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let active = self.active_descriptor_range.clone()?;
-        let total = self.sparse_descriptors.total_count()?;
-        let start = active.end.get();
-        if start >= total {
-            return None;
-        }
-        let count = self.descriptor_window_count(width, viewport_rows, total);
-        let end = start.saturating_add(count).min(total);
-        Some(
-            smelt_store::TranscriptDescriptorIndex::new(start)
-                ..smelt_store::TranscriptDescriptorIndex::new(end),
-        )
-    }
-
     fn activate_previous_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
         let Some(range) = self.previous_descriptor_window_range(width, viewport_rows) else {
-            return false;
-        };
-        self.activate_descriptor_window_range(range)
-    }
-
-    fn activate_next_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
-        let Some(range) = self.next_descriptor_window_range(width, viewport_rows) else {
             return false;
         };
         self.activate_descriptor_window_range(range)
@@ -2025,14 +2065,15 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
         top_row: RowIndex,
+        viewport_rows: u16,
         fallback: TranscriptScrollAnchor,
     ) {
-        let top_anchor = match fallback {
-            TranscriptScrollAnchor::Tail => Some(TranscriptScrollAnchor::Tail),
+        let (top_anchor, top_offset_rows) = match fallback {
+            TranscriptScrollAnchor::Tail => (Some(TranscriptScrollAnchor::Tail), 0),
             TranscriptScrollAnchor::Content(_) | TranscriptScrollAnchor::EstimatedRow(_) => self
-                .content_anchor_at_row(lua, width, top_row, TranscriptAnchorBias::Top)
-                .map(TranscriptScrollAnchor::Content)
-                .or(Some(fallback)),
+                .content_anchor_at_or_after_row(lua, width, top_row, viewport_rows)
+                .map(|(anchor, offset)| (Some(TranscriptScrollAnchor::Content(anchor)), offset))
+                .unwrap_or((Some(fallback), 0)),
         };
         self.viewport_state.mode = match top_anchor {
             Some(TranscriptScrollAnchor::Tail) => TranscriptViewportMode::Tail,
@@ -2040,7 +2081,7 @@ impl TranscriptDocument {
             Some(TranscriptScrollAnchor::EstimatedRow(_)) | None => TranscriptViewportMode::FarSeek,
         };
         self.viewport_state.top_anchor = top_anchor;
-        self.viewport_state.top_offset_rows = 0;
+        self.viewport_state.top_offset_rows = top_offset_rows;
     }
 
     fn take_viewport_intent(
@@ -2084,7 +2125,6 @@ impl TranscriptDocument {
             TranscriptTraceAnchor::Tail => None,
             TranscriptTraceAnchor::EstimatedRow(row) => Some(row),
             TranscriptTraceAnchor::Content {
-                virtual_row,
                 descriptor_index,
                 block_id,
                 row_offset,
@@ -2107,7 +2147,6 @@ impl TranscriptDocument {
                         row_offset,
                     },
                 )
-                .or(Some(virtual_row))
             }
         }
     }
@@ -2147,37 +2186,40 @@ impl TranscriptDocument {
         self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
     }
 
-    fn activate_adjacent_descriptor_window_for_local_delta(
+    fn activate_descriptor_window_covering_local_delta(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
         viewport_rows: u16,
         target_row: RowIndex,
-        rows: isize,
-    ) {
-        const MAX_ADJACENT_LOADS_PER_DELTA: usize = 4;
-        if rows == 0 {
-            return;
-        }
+    ) -> bool {
+        const MAX_EXPANSIONS_PER_DELTA: usize = 4;
+        let mut changed = false;
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
-        for _ in 0..MAX_ADJACENT_LOADS_PER_DELTA {
+        for _ in 0..MAX_EXPANSIONS_PER_DELTA {
             let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) else {
-                return;
+                return changed;
             };
             let target_end = target_row.saturating_add(viewport_row_count);
-            let needs_previous = rows < 0 && target_row < loaded_start;
-            let needs_next = rows > 0 && target_end > loaded_end;
-            let changed = if needs_previous {
-                self.activate_previous_descriptor_window(width, viewport_rows)
-            } else if needs_next {
-                self.activate_next_descriptor_window(width, viewport_rows)
-            } else {
-                return;
-            };
-            if !changed {
-                return;
+            if target_row >= loaded_start && target_end <= loaded_end {
+                return changed;
             }
+            let edge = if target_row < loaded_start {
+                target_row
+            } else {
+                target_end
+            };
+            let Some(range) =
+                self.descriptor_window_expanded_toward_row(width, edge, loaded_start, loaded_end)
+            else {
+                return changed;
+            };
+            if !self.activate_descriptor_window_range(range) {
+                return changed;
+            }
+            changed = true;
         }
+        changed
     }
 
     fn local_delta_scroll_target(
@@ -2188,18 +2230,23 @@ impl TranscriptDocument {
         fallback_scroll_top: RowIndex,
         rows: isize,
     ) -> crate::content::transcript_buf::ScrollTarget {
+        const MAX_LOCAL_DELTA_REBASES: usize = 4;
         let base = self
             .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
             .unwrap_or(fallback_scroll_top);
-        let row = Self::add_rows(base, rows);
-        self.activate_adjacent_descriptor_window_for_local_delta(
-            lua,
-            width,
-            viewport_rows,
-            row,
-            rows,
-        );
-        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
+        let mut row = Self::add_rows(base, rows);
+        for _ in 0..MAX_LOCAL_DELTA_REBASES {
+            if !self.activate_descriptor_window_covering_local_delta(lua, width, viewport_rows, row)
+            {
+                break;
+            }
+            let base = self
+                .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
+                .unwrap_or(fallback_scroll_top);
+            row = Self::add_rows(base, rows);
+        }
+
+        crate::content::transcript_buf::ScrollTarget::visible_row(row)
     }
 
     fn scroll_target_for_intent(
@@ -2577,7 +2624,13 @@ impl TranscriptDocument {
                 rows.clamped_scroll = requested;
             }
         }
-        self.capture_viewport_anchor(lua, width, rows.clamped_scroll, scroll_anchor);
+        self.capture_viewport_anchor(
+            lua,
+            width,
+            rows.clamped_scroll,
+            viewport_rows,
+            scroll_anchor,
+        );
         self.viewport_state.resolved_scroll_top = Some(rows.clamped_scroll);
         self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
         self.applied_viewport(rows, viewport_rows, false)
@@ -3425,7 +3478,7 @@ mod document_tests {
         );
         assert_eq!(
             frames[0].projection_target,
-            TranscriptProjectionTargetTrace::ReflowStableRow(17)
+            TranscriptProjectionTargetTrace::ExactRow(17)
         );
     }
 
@@ -3551,9 +3604,10 @@ mod document_tests {
             .active_descriptor_range
             .as_ref()
             .expect("active adjacent descriptor window");
-        assert_eq!(active.end.get(), 60);
+        assert_eq!(active.end.get(), 80);
         assert!(active.start.get() < 60);
         assert!(active_history_contains(&document, "block 59"));
+        assert!(active_history_contains(&document, "block 60"));
         assert!(matches!(
             document.viewport_state.top_anchor,
             Some(TranscriptScrollAnchor::Content(_))
@@ -3614,8 +3668,9 @@ mod document_tests {
             .active_descriptor_range
             .as_ref()
             .expect("active adjacent descriptor window");
-        assert_eq!(active.start.get(), 40);
+        assert_eq!(active.start.get(), 20);
         assert!(active.end.get() > 40);
+        assert!(active_history_contains(&document, "block 39"));
         assert!(active_history_contains(&document, "block 40"));
         assert!(matches!(
             document.viewport_state.top_anchor,

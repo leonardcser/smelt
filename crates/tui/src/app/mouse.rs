@@ -343,9 +343,40 @@ impl TuiApp {
         intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
     ) {
+        self.record_transcript_scroll_intent_with_selection_update(
+            label,
+            intent,
+            window_scroll_before,
+            true,
+        );
+    }
+
+    pub(crate) fn record_transcript_scroll_intent_from_document_command(
+        &mut self,
+        label: impl Into<String>,
+        intent: TranscriptScrollIntent,
+        window_scroll_before: RowIndex,
+    ) {
+        self.record_transcript_scroll_intent_with_selection_update(
+            label,
+            intent,
+            window_scroll_before,
+            false,
+        );
+    }
+
+    fn record_transcript_scroll_intent_with_selection_update(
+        &mut self,
+        label: impl Into<String>,
+        intent: TranscriptScrollIntent,
+        window_scroll_before: RowIndex,
+        update_selection_cursor: bool,
+    ) {
         let label = label.into();
-        if let TranscriptScrollIntent::UserDelta { rows } = intent {
-            self.advance_transcript_selection_cursor_for_user_delta(rows);
+        if update_selection_cursor {
+            if let TranscriptScrollIntent::UserDelta { rows } = intent {
+                self.advance_transcript_selection_cursor_for_user_delta(rows);
+            }
         }
         if !matches!(intent, TranscriptScrollIntent::Tail) {
             if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {

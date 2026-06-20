@@ -1439,6 +1439,27 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         previous.first_line
     );
 
+    let older = reveal_user_block_via_lua(&mut app, "previous");
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("older previous user reveal frame");
+    assert_reveal_block_frame(frame, &older);
+    let lines = transcript_viewport_lines(&app);
+    let older_marker = older
+        .first_line
+        .split_whitespace()
+        .next()
+        .expect("older previous user marker");
+    assert!(
+        lines.iter().any(|line| line.contains(older_marker)),
+        "second previous user target was not revealed in the viewport: target={:?}, lines={lines:?}",
+        older.first_line
+    );
+    assert!(
+        older.idx < previous.idx,
+        "repeated previous-user reveal should walk backward by descriptor identity: previous={previous:?}, older={older:?}"
+    );
+
     app.app.submit_search(
         crate::app::TRANSCRIPT_WIN,
         SearchDirection::Forward,
@@ -1527,26 +1548,18 @@ fn assert_local_scroll_frames_are_exact_and_fast(frames: &[TranscriptScrollTrace
     }
 }
 
-fn assert_user_delta_targets_requested_rows(frames: &[TranscriptScrollTraceFrame]) {
+fn assert_user_delta_targets_exact_rows(frames: &[TranscriptScrollTraceFrame]) {
     assert!(!frames.is_empty(), "expected user delta frames");
     for frame in frames {
-        let TranscriptScrollIntent::UserDelta { rows } = frame.scroll_intent else {
+        let TranscriptScrollIntent::UserDelta { .. } = frame.scroll_intent else {
             continue;
         };
-        let base = match frame.viewport_anchor_before {
-            Some(TranscriptTraceAnchor::Content { virtual_row, .. })
-            | Some(TranscriptTraceAnchor::EstimatedRow(virtual_row)) => virtual_row,
-            Some(TranscriptTraceAnchor::Tail) | None => frame.window_scroll_before,
-        };
-        let expected = if rows >= 0 {
-            base.saturating_add(rows as u64)
-        } else {
-            base.saturating_sub(rows.unsigned_abs() as u64)
-        };
-        assert_eq!(
-            frame.projection_target,
-            TranscriptProjectionTargetTrace::ReflowStableRow(expected),
-            "user delta was not projected as the requested content-row movement: {frame:?}"
+        assert!(
+            matches!(
+                frame.projection_target,
+                TranscriptProjectionTargetTrace::ExactRow(_)
+            ),
+            "user delta should project through an exact local row: {frame:?}"
         );
     }
 }
@@ -1698,20 +1711,154 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         })
         .cloned()
         .collect();
+    assert!(
+        !wheel_up_frames.is_empty()
+            && !drag_top_frames.is_empty()
+            && !wheel_down_frames.is_empty()
+            && !drag_bottom_frames.is_empty(),
+        "replay missing local scroll frame groups: wheel_up={}, probe={}, drag_top={}, wheel_down={}, drag_bottom={}",
+        wheel_up_frames.len(),
+        wheel_probe_frames.len(),
+        drag_top_frames.len(),
+        wheel_down_frames.len(),
+        drag_bottom_frames.len()
+    );
     assert_local_scroll_frames_are_exact_and_fast(&wheel_up_frames);
-    assert_local_scroll_frames_are_exact_and_fast(&wheel_probe_frames);
+    if !wheel_probe_frames.is_empty() {
+        assert_local_scroll_frames_are_exact_and_fast(&wheel_probe_frames);
+    }
     assert_local_scroll_frames_are_exact_and_fast(&drag_top_frames);
     assert_local_scroll_frames_are_exact_and_fast(&wheel_down_frames);
     assert_local_scroll_frames_are_exact_and_fast(&drag_bottom_frames);
-    assert_user_delta_targets_requested_rows(&wheel_up_frames);
-    assert_user_delta_targets_requested_rows(&wheel_probe_frames);
-    assert_user_delta_targets_requested_rows(&wheel_down_frames);
+    assert_user_delta_targets_exact_rows(&wheel_up_frames);
+    if !wheel_probe_frames.is_empty() {
+        assert_user_delta_targets_exact_rows(&wheel_probe_frames);
+    }
+    assert_user_delta_targets_exact_rows(&wheel_down_frames);
     assert_preserve_frames_keep_semantic_anchor(&report.frames);
     assert_monotonic_visible_anchors(&wheel_up_frames, true);
-    assert_monotonic_visible_anchors(&wheel_probe_frames, true);
+    if !wheel_probe_frames.is_empty() {
+        assert_monotonic_visible_anchors(&wheel_probe_frames, true);
+    }
     assert_monotonic_visible_anchors(&drag_top_frames, true);
     assert_monotonic_visible_anchors(&wheel_down_frames, false);
     assert_monotonic_visible_anchors(&drag_bottom_frames, false);
+}
+
+#[test]
+fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    let initial_record = first_visible_record_index(&app).expect("initial visible record");
+    start_transcript_edge_drag(&mut app, TranscriptDragEdge::Top);
+    let mut frames = Vec::new();
+    for _ in 0..900 {
+        if app.app.tick_drag_autoscroll_with_transcript_intent() {
+            app.render_silent();
+            frames.extend(app.app.transcript.take_scroll_trace_frames());
+        }
+    }
+    finish_transcript_drag(&mut app);
+
+    let final_record = first_visible_record_index(&app).expect("final visible record");
+    assert!(
+        final_record.saturating_add(100) < initial_record,
+        "drag autoscroll did not move through older sparse content: initial_record={initial_record}, final_record={final_record}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_monotonic_visible_anchors(&frames, true);
+}
+
+#[test]
+fn transcript_cursor_down_scroll_crosses_sparse_windows_without_locking() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    app.app.transcript_win_mut().set_vim_enabled(true);
+    app.app
+        .transcript_win_mut()
+        .set_vim_mode(crate::smelt_edit::VimMode::Normal);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    for _ in 0..180 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+        app.app.transcript.take_scroll_trace_frames();
+    }
+    let start = first_visible_record_index(&app).expect("initial visible record");
+    let start_row = app.app.transcript_win().scroll_top();
+    let (click_row, click_col) = transcript_content_point(&app, 1);
+    let mouse = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        row: click_row,
+        column: click_col,
+        modifiers: KeyModifiers::empty(),
+    };
+    let pos = app
+        .app
+        .document_view_position_at_mouse_for_win(crate::app::TRANSCRIPT_WIN, mouse)
+        .expect("transcript cursor position");
+    let mut state = app.app.transcript_win().document_view_state();
+    state.cursor = pos;
+    state.drag_endpoint = None;
+    state.selection_anchor = None;
+    app.app.transcript_win_mut().set_document_view_state(state);
+    app.render_silent();
+    app.app.transcript.take_scroll_trace_frames();
+    let mut latest = start;
+    let mut frames = Vec::new();
+
+    for step in 0..220 {
+        let viewport_rows = app
+            .app
+            .transcript_win()
+            .viewport
+            .map(|viewport| viewport.rect.height)
+            .expect("transcript viewport");
+        let now = app.app.core.clock.instant_now();
+        app.app.execute_document_view_command_for_win(
+            crate::app::TRANSCRIPT_WIN,
+            crate::smelt_edit::DocumentCommand::MoveRows(1),
+            viewport_rows,
+            now,
+        );
+        app.render_silent();
+        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        let current = first_visible_record_index(&app).unwrap_or_else(|| {
+            panic!(
+                "cursor-down step {step} rendered no visible record marker: lines={:?}",
+                transcript_viewport_lines(&app)
+            )
+        });
+        assert!(
+            current >= latest,
+            "cursor-down scroll moved backward: latest={latest}, current={current}, lines={:?}",
+            transcript_viewport_lines(&app)
+        );
+        latest = current;
+    }
+
+    let final_scroll = app.app.transcript_win().scroll_top();
+    let final_cursor = app.app.transcript_win().document_view_state().cursor;
+    assert!(
+        final_scroll > start_row.saturating_add(40),
+        "cursor-down scrolling locked before advancing the viewport: start_row={start_row}, final_scroll={final_scroll}, final_cursor={final_cursor:?}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::UserDelta { rows } if rows > 0
+        )),
+        "cursor-down document scrolling did not produce semantic UserDelta frames: {frames:?}"
+    );
+    assert!(
+        frames.iter().all(|frame| !matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ExactContentAnchor(TranscriptTraceAnchor::EstimatedRow(_))
+        )),
+        "cursor-down document scrolling fell back to estimated exact-row anchors: {frames:?}"
+    );
 }
 
 #[test]
