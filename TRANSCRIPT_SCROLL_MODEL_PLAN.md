@@ -709,6 +709,23 @@ Acceptance:
 - The plan and code review identify which current fixes are architectural and which are symptom patches.
 - No new behavior change is made without a trace or replay that explains the problem.
 
+Phase 0 audit record:
+
+- The uncommitted patch that tried to rebase `ExactRow(scroll_top)` through `viewport_anchor` after projection planning was removed before Phase 0 implementation. It was a symptom patch because it added another local repair to the numeric-row path instead of representing the original user action as a transcript scroll intent.
+- The completed Phase 1 to Phase 6 commits are retained as the current scalability baseline:
+  - keep `TranscriptExtentIndex` naming and approximate/exact API naming because they align with the final extent-owner direction;
+  - keep bounded estimate fallback and exact loaded descriptor observations because they preserve boundedness;
+  - treat current `viewport_anchor` repair logic as transitional because it still receives numeric row requests after `Window` and `Ui` have already interpreted the gesture;
+  - treat current full-frame monotonic tests as useful but insufficient because they do not assert stable content-space velocity or frame latency.
+- Current code seams that still collapse intent too early:
+  - app wheel coalescing batches terminal events into a numeric delta and calls `Ui::scroll_at`;
+  - `Ui::scroll_at` calls `Window::pan_by_lines`, mutating `Window::scroll_top` before transcript projection sees the gesture;
+  - drag autoscroll calls `Window::drag_autoscroll_step`, also mutating `Window::scroll_top` directly;
+  - render prep turns `request.scroll_top` into `ScrollTarget::visible_row(request.scroll_top)` for transcript projection;
+  - `TranscriptDocument::resolve_exact_scroll_target_from_viewport_anchor` can only repair a subset of numeric-row drift after the fact.
+- Current real bad-session evidence comes from user testing after the Phase 6 baseline: wheel scrolling and selection autoscroll still have inconsistent speed, lag, and perceived snap-back. The present tests pass while that experience remains bad, so the missing artifact is a deterministic trace/replay that can classify frames into semantic drift, variable velocity, placeholder landing, event coalescing, or projection latency.
+- Phase 0 conclusion: no more local row-rebasing behavior changes should land before Phase 1 trace instrumentation and Phase 2 replay/velocity tests exist. Any future behavior fix must include a failing trace or replay that explains the observed frame sequence.
+
 ### Phase 1: Define the transcript scroll contract and trace schema
 
 Goal: make the target behavior testable before changing the model.
