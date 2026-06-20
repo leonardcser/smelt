@@ -395,6 +395,7 @@ impl TranscriptHeightIndex {
         self.prefix_rows.last().copied().unwrap_or(0)
     }
 
+    #[allow(dead_code)]
     fn scroll_anchor_at_row(&self, row: RowIndex) -> Option<ProjectionAnchor> {
         let index = self.node_index_before_or_at_row(row)?;
         let node = self.nodes.get(index)?;
@@ -593,6 +594,7 @@ impl MeasurementIndexStore {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum ProjectionAnchor {
     Node {
         id: RenderNodeId,
@@ -764,22 +766,16 @@ impl ProjectionPlan {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScrollAnchor {
-    Row(RowIndex),
+    ExactRow(RowIndex),
+    ReflowStableRow(RowIndex),
     Tail,
 }
 
 impl ScrollAnchor {
     fn as_scroll_top(self) -> RowIndex {
         match self {
-            Self::Row(row) => row,
+            Self::ExactRow(row) | Self::ReflowStableRow(row) => row,
             Self::Tail => RowIndex::MAX,
-        }
-    }
-
-    fn row(self) -> Option<RowIndex> {
-        match self {
-            Self::Row(row) => Some(row),
-            Self::Tail => None,
         }
     }
 }
@@ -792,7 +788,11 @@ pub(crate) enum ScrollTarget {
 
 impl ScrollTarget {
     pub(crate) fn visible_row(row: RowIndex) -> Self {
-        Self::Visible(ScrollAnchor::Row(row))
+        Self::Visible(ScrollAnchor::ExactRow(row))
+    }
+
+    pub(crate) fn visible_reflow_stable_row(row: RowIndex) -> Self {
+        Self::Visible(ScrollAnchor::ReflowStableRow(row))
     }
 
     pub(crate) fn visible_tail() -> Self {
@@ -812,12 +812,6 @@ impl ScrollTarget {
     fn mode(self, viewport_rows: u16) -> ProjectionMode {
         match self {
             Self::Visible(_) => ProjectionMode::Visible { viewport_rows },
-        }
-    }
-
-    fn visible_row_anchor(self) -> Option<RowIndex> {
-        match self {
-            Self::Visible(anchor) => anchor.row(),
         }
     }
 }
@@ -982,20 +976,6 @@ fn selectable_row_string(buf: &Buffer, row: usize) -> String {
         .collect()
 }
 
-fn rendered_row_anchors(buf: &Buffer, id: BlockId, rows: usize) -> Vec<ProjectionAnchor> {
-    let mut anchors = Vec::with_capacity(rows);
-    let mut display_offset = 0usize;
-    for row in 0..rows {
-        anchors.push(ProjectionAnchor::rendered_block(
-            id,
-            row as RowIndex,
-            display_offset,
-        ));
-        display_offset = display_offset.saturating_add(selectable_row_string(buf, row).len());
-    }
-    anchors
-}
-
 fn row_offset_for_display_offset(
     buf: &Buffer,
     rows: usize,
@@ -1077,7 +1057,7 @@ fn render_cached_layout_range_to_buffer(
     inline_options: &InlineOptions,
     row_start: RowIndex,
     row_count: RowIndex,
-) -> Option<(Buffer, usize)> {
+) -> Option<(Buffer, usize, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = {
@@ -1116,11 +1096,32 @@ fn render_cached_layout_range_to_buffer(
         let end = start
             .saturating_add(row_to_usize(row_count))
             .min(outcome.line_count);
+        let display_offset = (0..start)
+            .map(|row| selectable_row_string(&buf, row).len())
+            .sum();
         buf.set_lines(end, outcome.line_count, vec![]);
         buf.set_lines(0, start, vec![]);
-        return Some((buf, end.saturating_sub(start)));
+        return Some((buf, end.saturating_sub(start), display_offset));
     }
-    Some((buf, outcome.line_count))
+    let display_offset = if row_start == 0 {
+        0
+    } else {
+        let (full_buf, full_rows) = render_cached_layout_to_buffer(
+            display_model,
+            id,
+            key,
+            renderer_generation,
+            renderer_cache_key,
+            theme,
+            history,
+            inline_options,
+        )?;
+        let start = row_to_usize(row_start).min(full_rows);
+        (0..start)
+            .map(|row| selectable_row_string(&full_buf, row).len())
+            .sum()
+    };
+    Some((buf, outcome.line_count, display_offset))
 }
 
 impl TranscriptProjection {
@@ -2038,32 +2039,11 @@ impl TranscriptProjection {
             .row_for_node_anchor(anchor.id, anchor.row_offset)
     }
 
-    fn width_change_anchor_for(
-        &self,
-        width: u16,
-        scroll_target: ScrollTarget,
-    ) -> Option<ProjectionAnchor> {
-        let row = scroll_target.visible_row_anchor()?;
-        let width_changed = self
-            .last_project_key()
-            .map(|prev| prev.width != width)
-            .unwrap_or(false);
-        if !width_changed {
-            return None;
-        }
-        let rendered = row
-            .checked_sub(self.visible.row_base)
+    fn stable_row_anchor_for(&self, row: RowIndex) -> Option<ProjectionAnchor> {
+        row.checked_sub(self.visible.row_base)
             .and_then(|local| self.visible.row_anchors.get(local as usize))
-            .and_then(|anchor| *anchor);
-        if rendered.is_some() {
-            return rendered;
-        }
-        let (id, row_offset) = self.block_anchor_at(row)?;
-        Some(ProjectionAnchor::RenderedBlock {
-            id,
-            row_offset,
-            display_offset: None,
-        })
+            .and_then(|anchor| *anchor)
+            .or_else(|| self.measurements.active.scroll_anchor_at_row(row))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2077,15 +2057,14 @@ impl TranscriptProjection {
         viewport_rows: u16,
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
-        let width_change_anchor = self.width_change_anchor_for(width, scroll_target);
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
-        self.prepare_row_index_with_env(env.clone(), history, width);
-        let anchor = width_change_anchor.or_else(|| match scroll_target {
-            ScrollTarget::Visible(ScrollAnchor::Row(row)) => {
-                self.measurements.active.scroll_anchor_at_row(row)
+        let anchor = match scroll_target {
+            ScrollTarget::Visible(ScrollAnchor::ReflowStableRow(row)) => {
+                self.stable_row_anchor_for(row)
             }
-            ScrollTarget::Visible(ScrollAnchor::Tail) => None,
-        });
+            ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::Tail) => None,
+        };
+        self.prepare_row_index_with_env(env.clone(), history, width);
         let key = self.project_key(
             width,
             env.renderer_generation,
@@ -2244,7 +2223,7 @@ impl TranscriptProjection {
         // preloaded so nearby scrolls can reuse the materialized buffer.
         let preload_rows = visible_rows / 2;
         let row_window = match request.target.requested {
-            ScrollTarget::Visible(ScrollAnchor::Row(_)) => {
+            ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::ReflowStableRow(_)) => {
                 let start = scroll_top.saturating_sub(preload_rows);
                 let end = viewport_end.saturating_add(preload_rows).min(total_rows);
                 start..end
@@ -2587,22 +2566,35 @@ impl TranscriptProjection {
         if visible_start < visible_end {
             let local_row_start = visible_start.saturating_sub(block_start);
             let local_row_count = visible_end.saturating_sub(visible_start);
-            let Some((node_buf, rendered_rows)) = render_cached_layout_range_to_buffer(
-                &self.display_layouts,
-                id,
-                key,
-                renderer_generation,
-                renderer_cache_key,
-                theme,
-                history,
-                &self.inline_options,
-                local_row_start,
-                local_row_count,
-            ) else {
+            let Some((node_buf, rendered_rows, display_offset)) =
+                render_cached_layout_range_to_buffer(
+                    &self.display_layouts,
+                    id,
+                    key,
+                    renderer_generation,
+                    renderer_cache_key,
+                    theme,
+                    history,
+                    &self.inline_options,
+                    local_row_start,
+                    local_row_count,
+                )
+            else {
                 return;
             };
-            let block_anchors = block_id.and_then(|id| {
-                (local_row_start == 0).then(|| rendered_row_anchors(&node_buf, id, rendered_rows))
+            let block_anchors = block_id.map(|id| {
+                let mut anchors = Vec::with_capacity(rendered_rows);
+                let mut row_display_offset = display_offset;
+                for row in 0..rendered_rows {
+                    anchors.push(ProjectionAnchor::rendered_block(
+                        id,
+                        local_row_start.saturating_add(row as RowIndex),
+                        row_display_offset,
+                    ));
+                    row_display_offset = row_display_offset
+                        .saturating_add(selectable_row_string(&node_buf, row).len());
+                }
+                anchors
             });
             {
                 let _perf =
@@ -2641,34 +2633,6 @@ impl TranscriptProjection {
                 rows: block_rows,
             });
         }
-    }
-
-    /// Map an absolute row to its `(BlockId, row_offset_within_block)`. Gap
-    /// rows resolve to the previous block's last row so a scroll position
-    /// stranded in a gap still anchors to a stable block boundary. Tail targets
-    /// beyond the end of all blocks return `None` so the caller falls back to
-    /// scroll_top and the natural clamp pins the viewport to the new bottom.
-    fn block_anchor_at(&self, row: RowIndex) -> Option<(BlockId, RowIndex)> {
-        let last = self.visible.block_layout.last()?;
-        let last_end = last.start.saturating_add(last.rows);
-        if row >= last_end {
-            return None;
-        }
-        let idx = self
-            .visible
-            .block_layout
-            .partition_point(|e| e.start <= row);
-        if idx == 0 {
-            return None;
-        }
-        let entry = self.visible.block_layout[idx - 1];
-        let end = entry.start.saturating_add(entry.rows);
-        let offset = if row < end {
-            row - entry.start
-        } else {
-            entry.rows.saturating_sub(1)
-        };
-        Some((entry.id, offset))
     }
 
     /// Exact full block layout for snapshot/navigation APIs. This may measure every
@@ -4626,7 +4590,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_projection_keeps_semantic_top_when_prefix_measurements_shrink() {
+    fn visible_projection_honors_requested_row_when_prefix_measurements_shrink() {
         let lua = test_lua();
         lua.lua
             .load(
@@ -4723,10 +4687,10 @@ mod tests {
         let top_line = buf
             .get_line((rows.clamped_scroll - rows.row_base) as usize)
             .expect("visible top row");
-        assert_eq!(top_line, "target row 4");
+        assert_eq!(top_line, "target row 20");
         assert!(
             rows.total_rows < 125,
-            "the requested numeric row should be stale after exact heights are known"
+            "the requested numeric row should be clamped against exact heights"
         );
     }
 
@@ -5947,7 +5911,7 @@ mod tests {
             &mut transcript.history,
             24,
             &theme,
-            ScrollTarget::visible_row(anchor_row),
+            ScrollTarget::visible_reflow_stable_row(anchor_row),
             5,
         );
         assert!(buf.lines().iter().any(|line| line.contains("block 10")));

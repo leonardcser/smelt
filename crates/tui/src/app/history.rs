@@ -474,6 +474,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn display_only_sqlite_load_counts_non_dense_descriptor_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = vec![
+            test_descriptor_record(70, "visible old tail"),
+            test_descriptor_record(235, "visible newest tail"),
+        ];
+        db.replace_transcript_descriptor_records(&records).unwrap();
+        drop(db);
+
+        let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 80, 12)
+            .expect("tail transcript");
+        let descriptor_window = loaded.descriptor_window.expect("descriptor window");
+        assert_eq!(descriptor_window.start.get(), 0);
+        assert_eq!(descriptor_window.end().get(), 2);
+        assert_eq!(descriptor_window.total_count, 2);
+        assert_eq!(descriptor_window.records[0].block_id.get(), 70);
+        assert_eq!(descriptor_window.records[1].block_id.get(), 235);
+    }
+
     fn test_descriptor_record(
         block_idx: u64,
         content: &str,
@@ -1287,12 +1308,15 @@ impl TuiApp {
             self.notify("nothing old enough to compact".to_string());
             return false;
         }
+        let follow_tail = self.transcript_win().is_following_tail();
         self.clear_compaction_preview();
         self.reset_visible_context_tokens();
         self.refresh_compaction_marker();
         self.publish_history_delta("checkpoint");
         self.schedule_session_save();
-        self.transcript_win_mut().follow_tail();
+        if follow_tail {
+            self.transcript_win_mut().follow_tail();
+        }
         true
     }
 
@@ -1989,6 +2013,58 @@ mod checkpoint_tests {
         smelt_perf::perf::set_enabled(false);
 
         assert_no_full_store_reads();
+    }
+
+    #[test]
+    fn history_only_session_preview_and_open_fall_back_to_full_rebuild() {
+        let id = "history-only-preview-open-fallback";
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        session::delete(id);
+
+        let mut saved = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        saved.id = id.into();
+        saved.first_user_message = Some("history only user 0".into());
+        saved.history = vec![
+            user("history only user 0"),
+            assistant("history only assistant 1"),
+            user("history only user 2"),
+        ];
+        session::save_with_blobs_result(&saved, &std::collections::HashMap::new())
+            .expect("save history-only session fixture");
+
+        {
+            let _guard = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .lua
+                .lua
+                .load(
+                    r#"
+                    local buf = smelt.buf.new({})
+                    local out = smelt.session.render_preview_into(
+                        "history-only-preview-open-fallback",
+                        { buf = buf, width = 80, height = 12 }
+                    )
+                    assert(out ~= nil, "preview returned nil")
+                    assert(out.total_rows > 0, "preview was empty")
+                    "#,
+                )
+                .exec()
+                .expect("render history-only preview");
+        }
+
+        app.app.load_session_by_id(id);
+        let total_rows = app.app.transcript_total_rows();
+        assert!(total_rows > 0, "opened transcript was empty");
+        let rows = app
+            .app
+            .transcript_visible_rows(0, total_rows.min(80))
+            .join("\n");
+        assert!(
+            rows.contains("history only user 0") || rows.contains("history only assistant 1"),
+            "opened transcript did not render saved history: {rows:?}"
+        );
+
+        session::delete(id);
     }
 
     #[test]

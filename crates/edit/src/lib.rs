@@ -201,8 +201,14 @@ pub struct Ui {
     cursor_shape: CursorShape,
     /// Timestamp when edge-drag autoscroll last engaged; drives host tick-rate ramp.
     drag_autoscroll_since: Option<std::time::Instant>,
+    /// In-flight content drag position used for edge autoscroll. The pointer,
+    /// not the selection endpoint, is the source of truth for whether a drag
+    /// wants to keep scrolling.
+    drag_autoscroll: Option<DragAutoscroll>,
     /// In-flight chrome drag/resize gesture; `None` when idle.
     chrome_drag: Option<ChromeDrag>,
+    /// Frozen scrollbar geometry for the active pointer gesture.
+    scrollbar_drag: Option<ScrollbarDrag>,
     /// Groups of windows whose `scroll_top` is mirrored. Each group tracks the
     /// last value observed per member; the side that moved this frame becomes
     /// the leader and its value is copied to all others. Synced once per
@@ -221,12 +227,34 @@ struct ScrollGroup {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct DragAutoscroll {
+    owner: WinId,
+    row: u16,
+    column: u16,
+    edge: Option<DragAutoscrollEdge>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragAutoscrollEdge {
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct ChromeDrag {
     overlay: OverlayId,
     action: overlay::ChromeAction,
     start_rect: Rect,
     origin_row: u16,
     origin_col: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollbarDrag {
+    owner: WinId,
+    rect_top: u16,
+    bar: window::ScrollbarState,
+    thumb_grab_row: u16,
 }
 
 impl Ui {
@@ -251,7 +279,9 @@ impl Ui {
             last_click: None,
             cursor_shape: CursorShape::Hidden,
             drag_autoscroll_since: None,
+            drag_autoscroll: None,
             chrome_drag: None,
+            scrollbar_drag: None,
             scroll_groups: Vec::new(),
         }
     }
@@ -382,6 +412,47 @@ impl Ui {
         count
     }
 
+    fn update_drag_autoscroll_pointer(&mut self, target: HitTarget, row: u16, column: u16) {
+        let HitTarget::Window(owner) = target else {
+            self.drag_autoscroll = None;
+            self.drag_autoscroll_since = None;
+            return;
+        };
+        let edge = self.drag_autoscroll_edge_for(owner, row);
+        if self
+            .drag_autoscroll
+            .is_some_and(|drag| drag.owner == owner && drag.edge != edge)
+        {
+            self.drag_autoscroll_since = None;
+        }
+        self.drag_autoscroll = Some(DragAutoscroll {
+            owner,
+            row,
+            column,
+            edge,
+        });
+    }
+
+    fn drag_autoscroll_edge_for(&self, owner: WinId, row: u16) -> Option<DragAutoscrollEdge> {
+        let win = self.wins.get(&owner)?;
+        let viewport = win.viewport?;
+        if viewport.rect.height == 0 {
+            return None;
+        }
+        let top = viewport.rect.top;
+        let bottom = viewport
+            .rect
+            .top
+            .saturating_add(viewport.rect.height.saturating_sub(1));
+        if row <= top {
+            Some(DragAutoscrollEdge::Top)
+        } else if row >= bottom {
+            Some(DragAutoscrollEdge::Bottom)
+        } else {
+            None
+        }
+    }
+
     /// Hit-test a primary-button Down/Drag/Up against any content leaf (splits or overlay).
     /// Latches capture on Down; returns `(target, click_count)` where `click_count`
     /// is 0 for Drag/Up. Up clears capture. Call only when `dispatch_event`
@@ -402,11 +473,15 @@ impl Ui {
                     _ => return None,
                 };
                 self.set_capture(target);
+                self.update_drag_autoscroll_pointer(target, me.row, me.column);
                 let count = self.record_click(me.row, me.column, now);
                 Some((target, count))
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.capture {
-                Some(target @ (HitTarget::Window(_) | HitTarget::Paint(_))) => Some((target, 0)),
+                Some(target @ (HitTarget::Window(_) | HitTarget::Paint(_))) => {
+                    self.update_drag_autoscroll_pointer(target, me.row, me.column);
+                    Some((target, 0))
+                }
                 _ => None,
             },
             MouseEventKind::Up(MouseButton::Left) => match self.capture {
@@ -436,6 +511,8 @@ impl Ui {
             if !self.capture_target_alive(cap) {
                 self.capture = None;
                 self.drag_autoscroll_since = None;
+                self.drag_autoscroll = None;
+                self.scrollbar_drag = None;
             }
         }
     }
@@ -649,6 +726,8 @@ impl Ui {
             if owned {
                 self.capture = None;
                 self.drag_autoscroll_since = None;
+                self.drag_autoscroll = None;
+                self.scrollbar_drag = None;
                 self.chrome_drag = None;
             }
         }
@@ -720,6 +799,8 @@ impl Ui {
             if owned {
                 self.capture = None;
                 self.drag_autoscroll_since = None;
+                self.drag_autoscroll = None;
+                self.scrollbar_drag = None;
                 self.chrome_drag = None;
             }
         }
@@ -1469,12 +1550,21 @@ impl Ui {
     }
 
     fn set_capture(&mut self, target: HitTarget) {
+        if !matches!(target, HitTarget::Scrollbar { .. }) {
+            self.scrollbar_drag = None;
+        }
+        if !matches!(target, HitTarget::Window(_)) {
+            self.drag_autoscroll = None;
+            self.drag_autoscroll_since = None;
+        }
         self.capture = Some(target);
     }
 
     fn clear_capture(&mut self) {
         self.capture = None;
         self.drag_autoscroll_since = None;
+        self.drag_autoscroll = None;
+        self.scrollbar_drag = None;
     }
 
     /// Cancel any in-flight pointer gesture across the UI. This does not move
@@ -1516,8 +1606,8 @@ impl Ui {
 
     /// Sleep duration until the next edge-drag autoscroll tick, ramping from
     /// `AUTOSCROLL_START_MS` down to `AUTOSCROLL_MIN_MS` over
-    /// `AUTOSCROLL_RAMP_DIVISOR_MS` of edge dwell. `None` when the drag is not
-    /// parked at a viewport edge (host should fall back to its normal frame
+    /// `AUTOSCROLL_RAMP_DIVISOR_MS` of edge dwell. `None` when the drag pointer
+    /// is not parked at a viewport edge (host should fall back to its normal frame
     /// interval). Does not mutate; safe to call while computing the next
     /// `tokio::select` sleep.
     pub fn drag_autoscroll_interval(&self) -> Option<std::time::Duration> {
@@ -1533,13 +1623,12 @@ impl Ui {
         })
     }
 
-    /// Per-frame autoscroll step: when a left-button drag's endpoint is parked
+    /// Per-frame autoscroll step: when a left-button drag's pointer is parked
     /// at the top or bottom of the captured window's viewport, pan one row in
-    /// that direction and re-park the endpoint at the new leading edge so the
-    /// selection grows by one row per tick. The endpoint, not `cpos`, is the
-    /// trigger - `cpos` is the pre-drag cursor and is unchanged mid-gesture,
-    /// so a cursor-based check would fire on whatever line happened to be
-    /// selected before the drag. Returns `true` if anything panned.
+    /// that direction and move the selection endpoint to the new leading edge.
+    /// The pointer edge intent, not the current endpoint projection, is the
+    /// trigger so sparse row-document materialization cannot stall the gesture.
+    /// Returns `true` if anything panned.
     pub fn tick_drag_autoscroll(&mut self) -> bool {
         let Some((win_id, delta)) = self.edge_drag_delta() else {
             self.drag_autoscroll_since = None;
@@ -1555,32 +1644,29 @@ impl Ui {
         w.drag_autoscroll_step(buf.expect("captured buffer"), viewport_h, delta)
     }
 
-    /// `(win, delta)` when an in-flight drag's endpoint sits exactly at the
-    /// top or bottom of the captured window's viewport. Shared trigger check
-    /// for [`drag_autoscroll_interval`] and [`tick_drag_autoscroll`].
+    /// `(win, delta)` when an in-flight drag's stored pointer sits at the top
+    /// or bottom of the captured window's viewport. Shared trigger check for
+    /// [`drag_autoscroll_interval`] and [`tick_drag_autoscroll`].
     fn edge_drag_delta(&self) -> Option<(WinId, isize)> {
         let win_id = match self.capture? {
             HitTarget::Window(w) => w,
             _ => return None,
         };
-        let win = self.wins.get(&win_id)?;
-        let viewport_h = win.viewport?.rect.height;
-        if viewport_h == 0 {
+        let drag = self.drag_autoscroll?;
+        if drag.owner != win_id {
             return None;
         }
-        // Mouse must still be held (drag in flight). `Window::mouse_up` clears
-        // `drag_endpoint`, so this also blocks autoscroll after release.
-        let buf = self.bufs.get(&win.buf)?;
-        let abs_row = win.drag_endpoint_absolute_row(buf);
-        let screen_row = abs_row
-            .checked_sub(win.scroll_top())
-            .filter(|r| *r < viewport_h as RowIndex)?;
-        let delta = if screen_row == 0 {
-            -1
-        } else if screen_row >= viewport_h.saturating_sub(1) as RowIndex {
-            1
-        } else {
+        let win = self.wins.get(&win_id)?;
+        if win.viewport?.rect.height == 0 || !win.drag_active() {
             return None;
+        }
+        let _column = drag.column;
+        let edge = self
+            .drag_autoscroll_edge_for(drag.owner, drag.row)
+            .or(drag.edge)?;
+        let delta = match edge {
+            DragAutoscrollEdge::Top => -1,
+            DragAutoscrollEdge::Bottom => 1,
         };
         Some((win_id, delta))
     }
@@ -2034,6 +2120,7 @@ impl Ui {
                             self.hit_test(me.row, me.column, None)
                         {
                             self.set_capture(HitTarget::Scrollbar { owner });
+                            self.start_scrollbar_drag(owner, me.row);
                             self.apply_scrollbar_drag(owner, me.row);
                             return Status::Consumed;
                         }
@@ -2227,21 +2314,66 @@ impl Ui {
         }
     }
 
-    fn apply_scrollbar_drag(&mut self, owner: WinId, row: u16) {
+    fn start_scrollbar_drag(&mut self, owner: WinId, row: u16) {
         let Some(win) = self.wins.get(&owner) else {
+            self.scrollbar_drag = None;
             return;
         };
         let Some(vp) = win.viewport else {
+            self.scrollbar_drag = None;
             return;
         };
         let Some(bar) = vp.scrollbar else {
+            self.scrollbar_drag = None;
             return;
         };
         let rel_row = row.saturating_sub(vp.rect.top);
-        let thumb_top = bar.thumb_top_for_click(rel_row);
-        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
+        let current_thumb_top = bar.thumb_top_for_scroll(win.scroll_top());
+        let thumb_grab_row = if bar.is_thumb_at(win.scroll_top(), rel_row) {
+            rel_row.saturating_sub(current_thumb_top)
+        } else {
+            bar.thumb_size() / 2
+        };
+        self.scrollbar_drag = Some(ScrollbarDrag {
+            owner,
+            rect_top: vp.rect.top,
+            bar,
+            thumb_grab_row,
+        });
+    }
+
+    fn apply_scrollbar_drag(&mut self, owner: WinId, row: u16) {
+        let drag = self.scrollbar_drag.filter(|drag| drag.owner == owner);
+        let from_top = if let Some(drag) = drag {
+            let rel_row = row.saturating_sub(drag.rect_top);
+            let thumb_top = rel_row
+                .saturating_sub(drag.thumb_grab_row)
+                .min(drag.bar.max_thumb_top());
+            drag.bar.scroll_from_top_for_thumb(thumb_top)
+        } else {
+            let Some(win) = self.wins.get(&owner) else {
+                return;
+            };
+            let Some(vp) = win.viewport else {
+                return;
+            };
+            let Some(bar) = vp.scrollbar else {
+                return;
+            };
+            let rel_row = row.saturating_sub(vp.rect.top);
+            let thumb_top = bar.thumb_top_for_click(rel_row);
+            bar.scroll_from_top_for_thumb(thumb_top)
+        };
+        let Some(win) = self.wins.get(&owner) else {
+            return;
+        };
         let buf_id = win.buf;
-        let viewport_rows = vp.rect.height;
+        let viewport_rows = self
+            .scrollbar_drag
+            .filter(|drag| drag.owner == owner)
+            .map(|drag| drag.bar.viewport_rows)
+            .or_else(|| win.viewport.map(|vp| vp.rect.height))
+            .unwrap_or(0);
         let (win, buf) = self.win_and_buf_mut(owner, buf_id);
         if let (Some(win), Some(buf)) = (win, buf) {
             win.scroll_to_preserving_cursor_screen_row(from_top, buf, viewport_rows);
@@ -5572,6 +5704,37 @@ mod tests {
     }
 
     #[test]
+    fn scrollbar_drag_uses_frozen_geometry_until_release() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            5,
+            19,
+        );
+        assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
+        let initial_scroll = ui.win(win).unwrap().scroll_top();
+
+        let rect = layout::Rect::new(0, 0, 20, 10);
+        let changed_bar = window::ScrollbarState::new(19, 1000, 10).unwrap();
+        ui.win_mut(win).unwrap().viewport = Some(window::WindowViewport::new(
+            rect,
+            19,
+            1000,
+            initial_scroll,
+            Some(changed_bar),
+        ));
+
+        let drag = mouse_event(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            5,
+            19,
+        );
+        assert_eq!(ui.dispatch_event(drag, &mut |_, _, _| {}), Status::Consumed);
+        assert_eq!(ui.win(win).unwrap().scroll_top(), initial_scroll);
+    }
+
+    #[test]
     fn dispatch_mouse_left_up_with_scrollbar_capture_clears_it() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
@@ -5709,12 +5872,16 @@ mod tests {
     }
 
     /// Place the captured window's drag endpoint at the start of visual row
-    /// `vrow` so `edge_drag_delta` sees it parked at that row.
+    /// `vrow` so the window has an active drag selection.
     fn park_drag_endpoint_at(ui: &mut Ui, win: WinId, vrow: usize) {
         let buf_id = ui.win(win).unwrap().buf;
         let buf = ui.buf(buf_id).unwrap();
         let byte = buf.byte_at_display_pos(vrow, 0);
         ui.win_mut(win).unwrap().text_state_mut().drag_endpoint = Some(byte);
+    }
+
+    fn park_drag_pointer_at(ui: &mut Ui, win: WinId, row: u16) {
+        ui.update_drag_autoscroll_pointer(HitTarget::Window(win), row, 0);
     }
 
     #[test]
@@ -5729,14 +5896,17 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
         park_drag_endpoint_at(&mut ui, win, 0);
+        park_drag_pointer_at(&mut ui, win, 0);
         assert!(ui.drag_autoscroll_interval().is_some());
         // Already at top of buffer - can't scroll further up, but the
         // trigger still fires; the tick just no-ops the pan.
         assert!(!ui.tick_drag_autoscroll());
 
-        // Scroll into the buffer and re-park at viewport top: now it pans.
+        // Scroll into the buffer. The endpoint no longer has to be exactly on
+        // the edge; the stored pointer intent drives the gesture.
         ui.win_mut(win).unwrap().pin_scroll(5);
-        park_drag_endpoint_at(&mut ui, win, 5);
+        park_drag_endpoint_at(&mut ui, win, 6);
+        park_drag_pointer_at(&mut ui, win, 0);
         assert!(ui.tick_drag_autoscroll());
         assert_eq!(ui.win(win).unwrap().scroll_top(), 4);
     }
@@ -5747,18 +5917,20 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
         // Viewport height is 10; row 9 is the last visible row.
-        park_drag_endpoint_at(&mut ui, win, 9);
+        park_drag_endpoint_at(&mut ui, win, 5);
+        park_drag_pointer_at(&mut ui, win, 9);
         assert!(ui.drag_autoscroll_interval().is_some());
         assert!(ui.tick_drag_autoscroll());
         assert_eq!(ui.win(win).unwrap().scroll_top(), 1);
     }
 
     #[test]
-    fn drag_autoscroll_idle_when_endpoint_leaves_edge() {
+    fn drag_autoscroll_idle_when_pointer_leaves_edge() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        park_drag_endpoint_at(&mut ui, win, 5);
+        park_drag_endpoint_at(&mut ui, win, 9);
+        park_drag_pointer_at(&mut ui, win, 5);
         assert!(ui.drag_autoscroll_interval().is_none());
         assert!(!ui.tick_drag_autoscroll());
     }
@@ -5769,6 +5941,7 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
         park_drag_endpoint_at(&mut ui, win, 9);
+        park_drag_pointer_at(&mut ui, win, 9);
         assert!(ui.tick_drag_autoscroll());
         ui.clear_capture();
         assert!(ui.drag_autoscroll_interval().is_none());
@@ -5781,6 +5954,7 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Scrollbar { owner: win });
         park_drag_endpoint_at(&mut ui, win, 0);
+        park_drag_pointer_at(&mut ui, win, 0);
         assert!(ui.drag_autoscroll_interval().is_none());
         assert!(!ui.tick_drag_autoscroll());
     }
@@ -5832,6 +6006,7 @@ mod tests {
                 byte_col: 0,
             });
         }
+        park_drag_pointer_at(&mut ui, win, 9);
         // Sync local cursor to match the row state (row 9 is local 9 when row_base=0).
         ui.wins.get_mut(&win).unwrap().text_state_mut().cursor_row = 9;
 
@@ -5847,6 +6022,69 @@ mod tests {
                 byte_col: 0
             })
         );
+    }
+
+    #[test]
+    fn drag_autoscroll_row_document_uses_pointer_when_endpoint_unmaterialized() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines((0..20).map(|i| format!("line {i}")).collect());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
+        ui.wins.get_mut(&win).unwrap().viewport = Some(WindowViewport {
+            rect: Rect::new(0, 0, 20, 10),
+            content_width: 20,
+            total_rows: 100,
+            scroll_top: 55,
+            scrollbar: None,
+            gutter_width: 0,
+        });
+        ui.wins
+            .get_mut(&win)
+            .unwrap()
+            .set_materialized_rows(50, 20, 100);
+        ui.win_mut(win).unwrap().pin_scroll(55);
+        {
+            let state = ui.wins.get_mut(&win).unwrap().document_view_state_mut();
+            state.cursor = DocPosition {
+                row: 56,
+                byte_col: 0,
+            };
+            state.drag_endpoint = Some(DocPosition {
+                row: 56,
+                byte_col: 0,
+            });
+            state.preferred_cell_col = Some(0);
+        }
+        ui.set_capture(HitTarget::Window(win));
+        park_drag_pointer_at(&mut ui, win, 0);
+
+        assert!(ui.tick_drag_autoscroll());
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 54);
+        assert_eq!(ui.win(win).unwrap().document_view_state().cursor.row, 54);
+
+        ui.wins
+            .get_mut(&win)
+            .unwrap()
+            .set_materialized_rows(70, 20, 100);
+        assert!(ui.tick_drag_autoscroll());
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 53);
+        let state = ui.win(win).unwrap().document_view_state();
+        assert_eq!(state.cursor.row, 53);
+        assert_eq!(state.drag_endpoint.unwrap().row, 53);
     }
 
     #[test]

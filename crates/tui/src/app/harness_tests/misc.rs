@@ -752,6 +752,300 @@ fn transcript_width_resize_keeps_top_when_cursor_is_lower_in_viewport() {
 }
 
 #[test]
+fn transcript_pinned_bottom_resize_click_selects_clicked_row_without_tail_snap() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = row_document_transcript_app(180, false);
+    app.app.transcript_win_mut().follow_tail();
+    app.render_silent();
+    assert!(app.app.transcript_win().is_following_tail());
+
+    app.set_terminal_size(80, 12);
+    app.render_silent();
+    assert!(app.app.transcript_win().is_following_tail());
+
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport after resize");
+    let click_row = vp.rect.top.saturating_add(2);
+    let click_col = vp
+        .rect
+        .left
+        .saturating_add(vp.gutter_width)
+        .saturating_add(3);
+    let mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: click_row,
+        column: click_col,
+        modifiers: KeyModifiers::empty(),
+    };
+    let expected = app
+        .app
+        .document_view_position_at_mouse_for_win(crate::app::TRANSCRIPT_WIN, mouse)
+        .expect("clicked transcript row");
+    let scroll_before = app.app.transcript_win().scroll_top();
+
+    app.feed_one(SourceEvent::Term(Event::Mouse(mouse)));
+
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "click selection must break tail-follow before the next projection"
+    );
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        scroll_before,
+        "mouse down should not move the transcript before projection"
+    );
+    assert_eq!(transcript_row_cursor_row(&app), expected.row);
+
+    app.render_silent();
+
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "selection must stay pinned after projection"
+    );
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        scroll_before,
+        "selection projection snapped away from the clicked viewport"
+    );
+    assert_eq!(transcript_row_cursor_row(&app), expected.row);
+}
+
+#[test]
+fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic() {
+    let count = 260;
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
+    let loaded = app.app.transcript.history().descriptor_records().len();
+    assert!(
+        loaded < count / 2,
+        "resume test must stay sparse, loaded={loaded}, count={count}"
+    );
+
+    let mut previous = first_visible_record_index(&app).expect("initial visible record marker");
+    let mut saw_earlier_record = false;
+    for step in 0..140 {
+        let before_scroll = app.app.transcript_win().scroll_top();
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+        let after_scroll = app.app.transcript_win().scroll_top();
+        let current = first_visible_record_index(&app).unwrap_or_else(|| {
+            panic!(
+                "step {step} rendered no visible record marker: scroll={after_scroll}, lines={:?}",
+                transcript_viewport_lines(&app)
+            )
+        });
+
+        assert!(
+            after_scroll <= before_scroll,
+            "step {step} scrolled back down: before={before_scroll}, after={after_scroll}, lines={:?}",
+            transcript_viewport_lines(&app)
+        );
+        assert!(
+            current <= previous,
+            "step {step} remapped visible content downward: previous record={previous}, current record={current}, scroll={after_scroll}, lines={:?}",
+            transcript_viewport_lines(&app)
+        );
+        saw_earlier_record |= current < previous;
+        previous = current;
+        if after_scroll == 0 {
+            break;
+        }
+    }
+
+    assert!(
+        saw_earlier_record,
+        "wheel scroll never reached an earlier record"
+    );
+}
+
+#[test]
+fn streaming_tool_and_compaction_updates_do_not_snap_scrolled_transcript_to_tail() {
+    let mut app = row_document_transcript_app(180, false);
+    app.app.transcript_win_mut().follow_tail();
+    app.render_silent();
+    assert!(app.app.transcript_win().is_following_tail());
+
+    for _ in 0..12 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+    let pinned_scroll = app.app.transcript_win().scroll_top();
+    assert!(pinned_scroll > 0, "test must be scrolled away from top");
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "wheel scroll must pin transcript before streaming updates"
+    );
+
+    app.app.start_tool(
+        "stream-write-file".into(),
+        "write_file".into(),
+        protocol::StyledLines::from_plain("STREAMING_WRITE_FILE should stay hidden"),
+        std::collections::HashMap::new(),
+    );
+    app.render_silent();
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        pinned_scroll,
+        "streaming tool start snapped the pinned transcript"
+    );
+    assert!(
+        transcript_viewport_lines(&app)
+            .iter()
+            .all(|line| !line.contains("STREAMING_WRITE_FILE")),
+        "streaming tool tail became visible: {:?}",
+        transcript_viewport_lines(&app)
+    );
+
+    app.push_compaction_preview("STREAMING_COMPACTION should stay hidden");
+    app.render_silent();
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        pinned_scroll,
+        "streaming compaction preview snapped the pinned transcript"
+    );
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "streaming updates must not re-enable tail-follow"
+    );
+    assert!(
+        transcript_viewport_lines(&app)
+            .iter()
+            .all(|line| !line.contains("STREAMING_COMPACTION")),
+        "streaming compaction tail became visible: {:?}",
+        transcript_viewport_lines(&app)
+    );
+}
+
+fn resumed_heterogeneous_transcript_app(
+    count: usize,
+    width: u16,
+    height: u16,
+) -> (TestApp, tempfile::TempDir) {
+    let records = heterogeneous_resume_records(count);
+    let dir = tempfile::tempdir().expect("session dir");
+    crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records)
+        .expect("write transcript descriptors");
+    let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
+        dir.path().to_path_buf(),
+        width,
+        height,
+    )
+    .expect("tail transcript");
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(width, height);
+    app.app.transcript = crate::app::transcript::TranscriptDocument::from_loaded_transcript(loaded);
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    app.app.transcript_win_mut().follow_tail();
+    app.render_silent();
+    (app, dir)
+}
+
+fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
+    use smelt_core::transcript_model::Block;
+
+    let mut source = smelt_core::content::transcript::Transcript::new();
+    for idx in 0..count {
+        let marker = format!("record-{idx:04}");
+        match idx % 10 {
+            0 => source.push(Block::User {
+                text: format!(
+                    "{marker} user prompt with image labels and wrapped text {}",
+                    "u ".repeat(12)
+                ),
+                image_labels: vec![format!("image-{idx}")],
+            }),
+            1 => source.push(Block::Text {
+                content: format!(
+                    "{marker} assistant paragraph\n\n```diff\n- old {idx}\n+ new {idx}\n```\n{}",
+                    "markdown wrap ".repeat(20)
+                ),
+            }),
+            2 => source.push(Block::Thinking {
+                content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)),
+            }),
+            3 => source.push(Block::CodeLine {
+                content: format!("{marker} let value_{idx} = compute({idx});"),
+                lang: "rust".into(),
+            }),
+            4 => source.push(Block::Exec {
+                command: format!("echo {marker}"),
+                output: format!("{marker} stdout line\n{}", "exec output ".repeat(18)),
+            }),
+            5 => source.push(Block::Compacted {
+                summary: format!("{marker} compacted summary {}", "summary ".repeat(10)),
+            }),
+            6 => source.push(Block::CompactionPreview {
+                summary: format!("{marker} streaming preview {}", "preview ".repeat(15)),
+            }),
+            7 => source.push(Block::ToolCall {
+                call_id: format!("read-file-{idx}"),
+                name: "read_file".into(),
+                summary: protocol::StyledLines::from_plain(format!(
+                    "{marker} read_file src/{idx}.rs"
+                )),
+                args: std::collections::HashMap::from([(
+                    "file_path".to_string(),
+                    serde_json::json!(format!("src/{idx}.rs")),
+                )]),
+            }),
+            8 => source.push(Block::ToolCall {
+                call_id: format!("grep-{idx}"),
+                name: "grep".into(),
+                summary: protocol::StyledLines::from_plain(format!("{marker} grep needle")),
+                args: std::collections::HashMap::from([(
+                    "pattern".to_string(),
+                    serde_json::json!(marker),
+                )]),
+            }),
+            _ => source.push(Block::ProcessStatus {
+                text: format!("{marker} background process finished"),
+                event: None,
+            }),
+        };
+    }
+    source.history.descriptor_records()
+}
+
+fn wheel_transcript(app: &mut TestApp, kind: crossterm::event::MouseEventKind) {
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    app.feed_one(SourceEvent::Term(Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind,
+            row: vp.rect.top.saturating_add(1),
+            column: vp
+                .rect
+                .left
+                .saturating_add(vp.gutter_width)
+                .saturating_add(1),
+            modifiers: KeyModifiers::empty(),
+        },
+    )));
+}
+
+fn first_visible_record_index(app: &TestApp) -> Option<usize> {
+    transcript_viewport_lines(app)
+        .into_iter()
+        .find_map(|line| parse_record_index(&line))
+}
+
+fn parse_record_index(line: &str) -> Option<usize> {
+    let start = line.find("record-")? + "record-".len();
+    let digits: String = line[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+#[test]
 fn transcript_tail_follow_keeps_cursor_fixed_relative_to_viewport() {
     let mut app = row_document_transcript_app(100, true);
 

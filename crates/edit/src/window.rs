@@ -103,23 +103,23 @@ impl ScrollbarState {
             .saturating_sub(self.viewport_rows as RowIndex)
     }
 
-    fn thumb_size(&self) -> u16 {
+    pub fn thumb_size(&self) -> u16 {
         let rows = self.viewport_rows as u128;
         let total = self.total_rows.max(1) as u128;
         ((rows * rows) / total).clamp(1, self.viewport_rows as u128) as u16
     }
 
-    fn max_thumb_top(&self) -> u16 {
+    pub fn max_thumb_top(&self) -> u16 {
         self.viewport_rows.saturating_sub(self.thumb_size())
     }
 
     /// Click row → thumb top, centered on the click. Clamped to `[0, max_thumb_top()]`.
-    pub(crate) fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
+    pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
         let half = self.thumb_size() / 2;
         rel_row.saturating_sub(half).min(self.max_thumb_top())
     }
 
-    pub(crate) fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> RowIndex {
+    pub fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> RowIndex {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
         if max_thumb == 0 || max_scroll == 0 {
@@ -136,7 +136,7 @@ impl ScrollbarState {
     }
 
     /// Scroll offset → thumb top row (0-based). Inverse of `thumb_top_for_click`.
-    pub(crate) fn thumb_top_for_scroll(&self, scroll_top: RowIndex) -> u16 {
+    pub fn thumb_top_for_scroll(&self, scroll_top: RowIndex) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
         if max_thumb == 0 || max_scroll == 0 {
@@ -146,7 +146,7 @@ impl ScrollbarState {
         ((scroll as u128 * max_thumb as u128 + max_scroll as u128 / 2) / max_scroll as u128) as u16
     }
 
-    pub(crate) fn is_thumb_at(&self, scroll_top: RowIndex, row: u16) -> bool {
+    pub fn is_thumb_at(&self, scroll_top: RowIndex, row: u16) -> bool {
         let thumb_top = self.thumb_top_for_scroll(scroll_top);
         let thumb_end = thumb_top + self.thumb_size();
         row >= thumb_top && row < thumb_end
@@ -789,6 +789,9 @@ impl Window {
     /// Apply a resolved viewport row while preserving tail mode.
     pub fn set_resolved_scroll(&mut self, row: RowIndex) {
         self.scroll_top = row;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.scroll_top = row;
+        }
     }
 
     pub fn resolve_tail_scroll(&mut self, row: RowIndex) {
@@ -898,6 +901,9 @@ impl Window {
     /// `set_scroll` post-layout will pick up the anchor correctly.
     pub fn set_scroll(&mut self, visual_row: RowIndex, buf: &Buffer) {
         self.scroll_top = visual_row;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.scroll_top = visual_row;
+        }
         if !self.layout_matches(buf) {
             return;
         }
@@ -918,12 +924,12 @@ impl Window {
 
     /// Re-derive `scroll_top` from `scroll_anchor` against the freshly-built
     /// layout. Called after a width/wrap rebuild in `ensure_layout`. Skips
-    /// when tail-follow is active (tail wins), when no anchor is set, when the
-    /// buffer's content was replaced since the anchor was stamped (changedtick
-    /// mismatch - the (lrow, byte) is no longer meaningful), or when the anchor
-    /// row no longer exists in the buffer.
+    /// when tail-follow or an active selection owns the viewport, when no
+    /// anchor is set, when the buffer's content was replaced since the anchor
+    /// was stamped (changedtick mismatch - the (lrow, byte) is no longer
+    /// meaningful), or when the anchor row no longer exists in the buffer.
     fn restore_scroll_from_anchor(&mut self, buf: &Buffer) {
-        if self.is_following_tail() {
+        if self.is_following_tail() || self.selection_active() {
             return;
         }
         let Some((tick, lrow, byte)) = self.scroll_anchor else {
@@ -938,6 +944,9 @@ impl Window {
         }
         let (vrow, _) = self.layout.visual_for_logical(lrow, byte);
         self.scroll_top = self.absolute_row(vrow as RowIndex);
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.scroll_top = self.scroll_top;
+        }
     }
 
     /// Reposition the cursor so it sits at `scroll_top + screen_row` in the
@@ -967,6 +976,9 @@ impl Window {
                 target_abs_row,
             );
             state.cursor = cursor;
+            if state.drag_endpoint.is_some() {
+                state.drag_endpoint = Some(cursor);
+            }
             self.project_row_cursor_to_local(state, buf);
             *self.document_view_state_mut() = state;
             return;
@@ -1022,6 +1034,9 @@ impl Window {
 
     pub fn pin_scroll(&mut self, row: RowIndex) {
         self.scroll_top = row;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.scroll_top = row;
+        }
         self.scroll_state = VerticalScroll::Pinned;
     }
 
@@ -1030,7 +1045,11 @@ impl Window {
     }
 
     pub fn selection_active(&self) -> bool {
+        let row_selection = self.document_view_state_ref().active
+            && (self.document_view_state_ref().selection_anchor.is_some()
+                || self.document_view_state_ref().drag_endpoint.is_some());
         self.selection_anchor().is_some()
+            || row_selection
             || (self.vim_enabled()
                 && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine))
     }
@@ -2611,6 +2630,7 @@ impl Window {
                 self.row_position_cell(state, buf, state.drag_endpoint.unwrap_or(state.cursor))
                     .unwrap_or(0)
             });
+            state.preferred_cell_col = Some(col);
             self.set_scroll(new_scroll, buf);
             let edge_vrow = if delta < 0 {
                 new_scroll
@@ -3437,6 +3457,99 @@ mod tests {
     }
 
     #[test]
+    fn restoring_row_cursor_screen_row_ignores_active_row_drag() {
+        let mut win = make_win();
+        let buf = make_buf(vec![
+            "row 10".into(),
+            "row 11".into(),
+            "αβγδε".into(),
+            "row 13".into(),
+            "row 14".into(),
+        ]);
+        win.ensure_layout(&buf, 80);
+        win.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 30,
+            materialized_rows: 5,
+        });
+        win.set_scroll(10, &buf);
+        {
+            let state = win.document_view_state_mut();
+            state.cursor = DocPosition {
+                row: 14,
+                byte_col: 1,
+            };
+            state.drag_endpoint = Some(state.cursor);
+            state.selection_anchor = Some(DocPosition {
+                row: 20,
+                byte_col: 0,
+            });
+            state.preferred_cell_col = Some(4);
+        }
+
+        win.restore_cursor_screen_row(&buf, 0);
+
+        let state = win.document_view_state_ref();
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 14,
+                byte_col: 1
+            }
+        );
+        assert_eq!(state.drag_endpoint, Some(state.cursor));
+    }
+
+    #[test]
+    fn row_selection_scroll_does_not_reanchor_cursor_to_previous_screen_row() {
+        let mut win = make_win();
+        let buf = make_buf((0..40).map(|row| format!("row {row}")).collect());
+        win.ensure_layout(&buf, 80);
+        win.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 0,
+            total_rows: 40,
+            materialized_rows: 40,
+        });
+        win.set_scroll(10, &buf);
+        {
+            let state = win.document_view_state_mut();
+            state.cursor = DocPosition {
+                row: 24,
+                byte_col: 0,
+            };
+            state.drag_endpoint = Some(DocPosition {
+                row: 10,
+                byte_col: 0,
+            });
+            state.selection_anchor = Some(DocPosition {
+                row: 24,
+                byte_col: 0,
+            });
+        }
+
+        win.scroll_to_preserving_cursor_screen_row(5, &buf, 10);
+
+        let state = win.document_view_state_ref();
+        assert_eq!(win.scroll_top(), 5);
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 24,
+                byte_col: 0
+            }
+        );
+        assert_eq!(
+            state.drag_endpoint,
+            Some(DocPosition {
+                row: 10,
+                byte_col: 0
+            })
+        );
+    }
+
+    #[test]
     fn text_hit_at_mouse_distinguishes_selectable_text_from_chrome() {
         let w = make_win();
         let mut buf = make_buf(vec!["abc----xyz".into()]);
@@ -3653,10 +3766,98 @@ mod tests {
     }
 
     #[test]
+    fn resolved_scroll_keeps_viewport_metadata_in_sync() {
+        let mut w = make_win();
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 20, 10),
+            20,
+            100,
+            5,
+            ScrollbarState::new(19, 100, 10),
+        ));
+
+        w.set_resolved_scroll(42);
+
+        assert_eq!(w.scroll_top(), 42);
+        assert_eq!(w.viewport.unwrap().scroll_top, 42);
+    }
+
+    #[test]
+    fn direct_scroll_keeps_viewport_metadata_in_sync() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(100));
+        w.ensure_layout(&buf, 20);
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 20, 10),
+            20,
+            100,
+            5,
+            ScrollbarState::new(19, 100, 10),
+        ));
+
+        w.set_scroll(37, &buf);
+
+        assert_eq!(w.scroll_top(), 37);
+        assert_eq!(w.viewport.unwrap().scroll_top, 37);
+    }
+
+    #[test]
+    fn active_row_selection_blocks_scroll_anchor_restore_on_reflow() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(100));
+        w.ensure_layout(&buf, 20);
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 20, 10),
+            20,
+            100,
+            9,
+            ScrollbarState::new(19, 100, 10),
+        ));
+        w.set_materialized_rows(0, 99, 100);
+        {
+            let state = w.document_view_state_mut();
+            state.cursor = DocPosition {
+                row: 9,
+                byte_col: 0,
+            };
+            state.drag_endpoint = Some(state.cursor);
+            state.selection_anchor = Some(DocPosition {
+                row: 20,
+                byte_col: 0,
+            });
+        }
+        w.scroll_anchor = Some((buf.changedtick(), 2, 0));
+        w.pin_scroll(9);
+
+        w.ensure_layout(&buf, 30);
+
+        assert_eq!(w.scroll_top(), 9);
+        assert_eq!(w.viewport.unwrap().scroll_top, 9);
+    }
+
+    #[test]
     fn window_viewport_keeps_large_total_rows() {
         let vp = WindowViewport::new(Rect::new(0, 0, 20, 10), 20, 100_000, 80_000, None);
         assert_eq!(vp.total_rows, 100_000);
         assert_eq!(vp.scroll_top, 80_000);
+    }
+
+    #[test]
+    fn pan_by_lines_preserves_cursor_screen_row_for_fast_scroll() {
+        let mut w = make_win();
+        let rows = sample_rows(200);
+        let buf = make_buf(rows);
+        let viewport = 10;
+        w.ensure_layout(&buf, 80);
+        w.jump_to_line_col(&buf, 53, 0, viewport);
+        w.set_scroll(50, &buf);
+        assert_eq!(w.cursor_screen_row(viewport), Some(3));
+
+        w.pan_by_lines(&buf, 80, viewport);
+
+        assert_eq!(w.scroll_top(), 130);
+        assert_eq!(w.cursor_screen_row(viewport), Some(3));
+        assert_eq!(w.cursor_row(), 133);
     }
 
     #[test]

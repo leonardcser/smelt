@@ -5,6 +5,9 @@ use crate::error::{Result, StoreError};
 
 pub const SCHEMA_VERSION: i32 = 1;
 
+const COMPAT_PRE_SQUASH_MIN_SCHEMA_VERSION: i32 = 2;
+const COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION: i32 = 6;
+
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = migrate_inner(conn, app_version);
@@ -22,7 +25,7 @@ pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
 
 pub(crate) fn validate_read_only_schema(conn: &Connection) -> Result<()> {
     let version = user_version(conn)?;
-    if version != SCHEMA_VERSION {
+    if !is_supported_schema_version(version) {
         return Err(StoreError::UnsupportedSchema {
             found: version,
             expected: SCHEMA_VERSION,
@@ -38,6 +41,12 @@ pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
 fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
     if current > SCHEMA_VERSION {
+        if is_pre_squash_schema_version(current) {
+            ensure_schema_shape(conn)?;
+            set_user_version(conn, SCHEMA_VERSION)?;
+            write_store_meta(conn, SCHEMA_VERSION, app_version)?;
+            return Ok(());
+        }
         return Err(StoreError::UnsupportedSchema {
             found: current,
             expected: SCHEMA_VERSION,
@@ -45,11 +54,28 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
+    write_store_meta(conn, SCHEMA_VERSION, app_version)?;
+    Ok(())
+}
+
+fn is_supported_schema_version(version: i32) -> bool {
+    version == SCHEMA_VERSION || is_pre_squash_schema_version(version)
+}
+
+// COMPAT(branch-sqlite-schema-shape-repair): versions 2-6 were used by
+// local databases before the transcript-storage revisions were squashed into
+// the version 1 branch baseline. Read-only open accepts them for previews;
+// writable migration normalizes them to the current baseline.
+fn is_pre_squash_schema_version(version: i32) -> bool {
+    (COMPAT_PRE_SQUASH_MIN_SCHEMA_VERSION..=COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION).contains(&version)
+}
+
+fn write_store_meta(conn: &Connection, schema_version: i32, app_version: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
          VALUES ('schema_version', ?1, unixepoch()), ('app_version', ?2, unixepoch())
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        (SCHEMA_VERSION.to_string(), app_version),
+        (schema_version.to_string(), app_version),
     )?;
     Ok(())
 }
@@ -635,6 +661,51 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("sqlite schema missing table accounting_snapshots"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_only_validation_accepts_pre_squash_user_version_when_shape_matches() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        set_user_version(&conn, COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION).unwrap();
+
+        validate_read_only_schema(&conn).unwrap();
+        assert_eq!(
+            user_version(&conn).unwrap(),
+            COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn migrate_normalizes_pre_squash_user_version_to_current_baseline() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        set_user_version(&conn, COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION).unwrap();
+
+        migrate(&mut conn, "test-version").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        let schema_version: String = conn
+            .query_row(
+                "SELECT value FROM store_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn read_only_validation_rejects_unknown_future_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        set_user_version(&conn, COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION + 1).unwrap();
+
+        let err = validate_read_only_schema(&conn).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported schema version 7"),
             "{err}"
         );
     }

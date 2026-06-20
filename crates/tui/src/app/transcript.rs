@@ -140,7 +140,7 @@ impl SqliteTranscriptStore {
     ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
         let total = {
             let _perf = smelt_perf::perf::begin("transcript:resume_tail:descriptor_count");
-            self.db.transcript_descriptor_dense_extent()?
+            self.db.transcript_descriptor_count()?
         };
         if total == 0 {
             return self
@@ -173,6 +173,15 @@ impl SqliteTranscriptStore {
         let _perf = smelt_perf::perf::begin("transcript:resume_tail:tail_slice_probe");
         self.db
             .read_transcript_descriptor_tail_slice_with_total(total, total)
+    }
+
+    fn estimated_descriptor_rows(
+        &self,
+        width: u16,
+        range: Range<usize>,
+    ) -> smelt_store::Result<u64> {
+        self.db
+            .transcript_descriptor_estimated_rows(range.into(), width)
     }
 }
 
@@ -370,6 +379,155 @@ enum DescriptorRangeState {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct DescriptorRowsEstimateKey {
+    width: u16,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Default)]
+struct TranscriptExtentIndex {
+    descriptor_rows_estimate_cache: HashMap<DescriptorRowsEstimateKey, RowIndex>,
+}
+
+impl TranscriptExtentIndex {
+    fn estimated_exact_rows_for_loaded_descriptors(
+        &self,
+        descriptors: &SparseTranscriptDescriptors,
+        width: u16,
+    ) -> RowIndex {
+        let width = usize::from(width.max(1));
+        descriptors
+            .records
+            .values()
+            .map(|record| {
+                record
+                    .record
+                    .descriptor
+                    .raw_text()
+                    .map(|text| estimate_text_rows_for_width(&text, width))
+                    .unwrap_or(1)
+                    .saturating_add(1)
+            })
+            .sum()
+    }
+
+    fn loaded_descriptor_count(&self, descriptors: &SparseTranscriptDescriptors) -> usize {
+        descriptors.loaded_descriptor_count()
+    }
+
+    fn estimated_average_rows_per_loaded_descriptor(
+        &self,
+        descriptors: &SparseTranscriptDescriptors,
+        width: u16,
+    ) -> RowIndex {
+        let loaded = self.loaded_descriptor_count(descriptors) as RowIndex;
+        if loaded == 0 {
+            return 2;
+        }
+        self.estimated_exact_rows_for_loaded_descriptors(descriptors, width)
+            .saturating_add(loaded.saturating_sub(1))
+            .saturating_div(loaded)
+            .max(1)
+    }
+
+    fn estimated_rows_for_unloaded_descriptor_range(
+        &mut self,
+        session_dir: Option<&PathBuf>,
+        width: u16,
+        range: Range<usize>,
+    ) -> Option<RowIndex> {
+        if range.start >= range.end {
+            return Some(0);
+        }
+        let key = DescriptorRowsEstimateKey {
+            width: width.max(1),
+            start: range.start,
+            end: range.end,
+        };
+        if let Some(rows) = self.descriptor_rows_estimate_cache.get(&key).copied() {
+            return Some(rows);
+        }
+        let session_dir = session_dir?;
+        let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+        let rows = store.estimated_descriptor_rows(key.width, range).ok()? as RowIndex;
+        self.descriptor_rows_estimate_cache.insert(key, rows);
+        Some(rows)
+    }
+
+    fn estimated_rows_for_missing_descriptor_range(
+        &mut self,
+        descriptors: &SparseTranscriptDescriptors,
+        session_dir: Option<&PathBuf>,
+        width: u16,
+        range: Range<usize>,
+    ) -> RowIndex {
+        let count = range.end.saturating_sub(range.start) as RowIndex;
+        self.estimated_rows_for_unloaded_descriptor_range(session_dir, width, range)
+            .unwrap_or_else(|| {
+                count.saturating_mul(
+                    self.estimated_average_rows_per_loaded_descriptor(descriptors, width),
+                )
+            })
+    }
+
+    fn estimated_sparse_prefix_rows(
+        &mut self,
+        descriptors: &SparseTranscriptDescriptors,
+        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        session_dir: Option<&PathBuf>,
+        width: u16,
+    ) -> RowIndex {
+        let end = active_descriptor_range
+            .map(|range| range.start.get())
+            .unwrap_or_else(|| descriptors.missing_prefix_count_for_range(active_descriptor_range));
+        self.estimated_rows_for_missing_descriptor_range(descriptors, session_dir, width, 0..end)
+    }
+
+    fn estimated_sparse_suffix_rows(
+        &mut self,
+        descriptors: &SparseTranscriptDescriptors,
+        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        session_dir: Option<&PathBuf>,
+        width: u16,
+    ) -> RowIndex {
+        let Some(total) = descriptors.total_count() else {
+            let count = descriptors.missing_suffix_count_for_range(active_descriptor_range);
+            return (count as RowIndex).saturating_mul(
+                self.estimated_average_rows_per_loaded_descriptor(descriptors, width),
+            );
+        };
+        let start = active_descriptor_range
+            .map(|range| range.end.get())
+            .unwrap_or(total);
+        self.estimated_rows_for_missing_descriptor_range(
+            descriptors,
+            session_dir,
+            width,
+            start..total,
+        )
+    }
+
+    fn mixed_virtual_total_rows(
+        &mut self,
+        descriptors: &SparseTranscriptDescriptors,
+        active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+        session_dir: Option<&PathBuf>,
+        width: u16,
+        exact_loaded_rows: RowIndex,
+    ) -> RowIndex {
+        self.estimated_sparse_prefix_rows(descriptors, active_descriptor_range, session_dir, width)
+            .saturating_add(exact_loaded_rows)
+            .saturating_add(self.estimated_sparse_suffix_rows(
+                descriptors,
+                active_descriptor_range,
+                session_dir,
+                width,
+            ))
+    }
+}
+
 pub(crate) struct TranscriptDocument {
     transcript: Transcript,
     projection: crate::content::transcript_buf::TranscriptProjection,
@@ -378,6 +536,7 @@ pub(crate) struct TranscriptDocument {
     sparse_descriptors: SparseTranscriptDescriptors,
     active_descriptor_range: Option<Range<smelt_store::TranscriptDescriptorIndex>>,
     session_dir: Option<PathBuf>,
+    extent_index: TranscriptExtentIndex,
 }
 
 pub(crate) struct TranscriptRenderContext {
@@ -396,11 +555,23 @@ pub(crate) enum TranscriptDescriptorSaveSuffix {
     NeedsFullRebuild,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SparseProjectionGap {
+    scroll_top: RowIndex,
+    row_base: RowIndex,
+    end: RowIndex,
+}
+
+enum TranscriptMaterializationPlan {
+    Loaded(crate::content::transcript_buf::ProjectionPlan),
+    UnloadedGap(SparseProjectionGap),
+}
+
 pub(crate) struct TranscriptProjectionPlan {
-    inner: crate::content::transcript_buf::ProjectionPlan,
+    materialization: TranscriptMaterializationPlan,
     row_offset: RowIndex,
     total_rows: RowIndex,
-    prefix_gap_scroll: Option<RowIndex>,
+    requested_scroll: Option<RowIndex>,
     viewport_rows: u16,
 }
 
@@ -486,6 +657,7 @@ impl TranscriptDocument {
             sparse_descriptors,
             active_descriptor_range,
             session_dir: loaded.session_dir,
+            extent_index: TranscriptExtentIndex::default(),
         };
         if document.active_descriptor_range.is_some() {
             document.install_active_descriptor_projection();
@@ -553,79 +725,49 @@ impl TranscriptDocument {
         self.render_cache.clear();
     }
 
-    fn estimated_loaded_descriptor_rows(&self, width: u16) -> RowIndex {
-        let width = usize::from(width.max(1));
-        self.sparse_descriptors
-            .records
-            .range(match self.active_descriptor_range.as_ref() {
-                Some(range) => range.clone(),
-                None => {
-                    smelt_store::TranscriptDescriptorIndex::new(0)
-                        ..smelt_store::TranscriptDescriptorIndex::new(usize::MAX)
-                }
-            })
-            .map(|(_, record)| {
-                record
-                    .record
-                    .descriptor
-                    .raw_text()
-                    .map(|text| estimate_text_rows_for_width(&text, width))
-                    .unwrap_or(1)
-                    .saturating_add(1)
-            })
-            .sum()
+    fn estimated_average_descriptor_rows(&self, width: u16) -> RowIndex {
+        self.extent_index
+            .estimated_average_rows_per_loaded_descriptor(&self.sparse_descriptors, width)
     }
 
-    fn active_descriptor_count(&self) -> usize {
-        match self.active_descriptor_range.as_ref() {
-            Some(range) => self.sparse_descriptors.records.range(range.clone()).count(),
-            None => self.sparse_descriptors.loaded_descriptor_count(),
-        }
+    fn estimated_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
+        self.extent_index.estimated_sparse_prefix_rows(
+            &self.sparse_descriptors,
+            self.active_descriptor_range.as_ref(),
+            self.session_dir.as_ref(),
+            width,
+        )
     }
 
-    fn average_descriptor_rows(&self, width: u16) -> RowIndex {
-        let loaded = self.active_descriptor_count() as RowIndex;
-        if loaded == 0 {
-            return 2;
-        }
-        self.estimated_loaded_descriptor_rows(width)
-            .saturating_add(loaded.saturating_sub(1))
-            .saturating_div(loaded)
-            .max(1)
+    fn estimated_sparse_suffix_rows(&mut self, width: u16) -> RowIndex {
+        self.extent_index.estimated_sparse_suffix_rows(
+            &self.sparse_descriptors,
+            self.active_descriptor_range.as_ref(),
+            self.session_dir.as_ref(),
+            width,
+        )
     }
 
-    fn sparse_prefix_row_offset(&self, width: u16) -> RowIndex {
-        (self
-            .sparse_descriptors
-            .missing_prefix_count_for_range(self.active_descriptor_range.as_ref())
-            as RowIndex)
-            .saturating_mul(self.average_descriptor_rows(width))
+    fn mixed_virtual_total_rows(&mut self, width: u16, exact_loaded_rows: RowIndex) -> RowIndex {
+        self.extent_index.mixed_virtual_total_rows(
+            &self.sparse_descriptors,
+            self.active_descriptor_range.as_ref(),
+            self.session_dir.as_ref(),
+            width,
+            exact_loaded_rows,
+        )
     }
 
-    fn sparse_suffix_rows(&self, width: u16) -> RowIndex {
-        (self
-            .sparse_descriptors
-            .missing_suffix_count_for_range(self.active_descriptor_range.as_ref())
-            as RowIndex)
-            .saturating_mul(self.average_descriptor_rows(width))
-    }
-
-    fn virtual_total_rows(&self, width: u16, loaded_rows: RowIndex) -> RowIndex {
-        self.sparse_prefix_row_offset(width)
-            .saturating_add(loaded_rows)
-            .saturating_add(self.sparse_suffix_rows(width))
-    }
-
-    fn virtual_row_to_loaded_row(&self, width: u16, row: RowIndex) -> RowIndex {
-        row.saturating_sub(self.sparse_prefix_row_offset(width))
+    fn virtual_row_to_loaded_row(&mut self, width: u16, row: RowIndex) -> RowIndex {
+        row.saturating_sub(self.estimated_sparse_prefix_row_offset(width))
     }
 
     fn offset_node_row(
-        &self,
+        &mut self,
         width: u16,
         mut node: crate::content::transcript_buf::TranscriptNodeRow,
     ) -> crate::content::transcript_buf::TranscriptNodeRow {
-        let offset = self.sparse_prefix_row_offset(width);
+        let offset = self.estimated_sparse_prefix_row_offset(width);
         node.first_row = node.first_row.saturating_add(offset);
         node
     }
@@ -656,7 +798,7 @@ impl TranscriptDocument {
         let loaded_rows =
             self.projection
                 .estimated_total_rows(lua, &mut self.transcript.history, width);
-        self.virtual_total_rows(width, loaded_rows)
+        self.mixed_virtual_total_rows(width, loaded_rows)
     }
 
     pub(crate) fn materialize_block_layout(
@@ -668,7 +810,7 @@ impl TranscriptDocument {
         crate::smelt_edit::RowIndex,
         crate::smelt_edit::RowIndex,
     )> {
-        let offset = self.sparse_prefix_row_offset(width);
+        let offset = self.estimated_sparse_prefix_row_offset(width);
         self.projection
             .materialize_block_layout(lua, &mut self.transcript.history, width)
             .into_iter()
@@ -726,20 +868,28 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         role: Option<&str>,
     ) -> Option<TranscriptBlockSnapshot> {
-        let node = self.block_node_before_or_at_row(lua, width, row, |history, id| {
-            role.is_none_or(|role| transcript_history_role(history, id) == role)
-                && !transcript_raw_first_line(history, id).is_empty()
-        })?;
-        let block_id = node.id.as_block_id()?;
-        let history = self.history();
-        let idx = history.order.iter().position(|id| *id == block_id)?;
-        Some((
-            idx,
-            transcript_history_role(history, block_id),
-            node.first_row,
-            node.rows,
-            transcript_raw_first_line(history, block_id),
-        ))
+        let _ = self.activate_descriptor_window_for_virtual_row(width, row, 20);
+        loop {
+            if let Some(node) = self.block_node_before_or_at_row(lua, width, row, |history, id| {
+                role.is_none_or(|role| transcript_history_role(history, id) == role)
+                    && !transcript_raw_first_line(history, id).is_empty()
+            }) {
+                let block_id = node.id.as_block_id()?;
+                let history = self.history();
+                let idx = history.order.iter().position(|id| *id == block_id)?;
+                return Some((
+                    idx,
+                    transcript_history_role(history, block_id),
+                    node.first_row,
+                    node.rows,
+                    transcript_raw_first_line(history, block_id),
+                ));
+            }
+
+            if !self.activate_previous_descriptor_window(width, 20) {
+                return None;
+            }
+        }
     }
 
     pub(crate) fn materialize_search_layout(
@@ -747,7 +897,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        let offset = self.sparse_prefix_row_offset(width);
+        let offset = self.estimated_sparse_prefix_row_offset(width);
         let mut layout =
             self.projection
                 .materialize_search_layout(lua, &mut self.transcript.history, width);
@@ -763,7 +913,7 @@ impl TranscriptDocument {
         width: u16,
         block_indices: &[u64],
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        let offset = self.sparse_prefix_row_offset(width);
+        let offset = self.estimated_sparse_prefix_row_offset(width);
         let mut layout = self.projection.materialize_search_layout_for_blocks(
             lua,
             &mut self.transcript.history,
@@ -805,6 +955,39 @@ impl TranscriptDocument {
         self.projection.visible_block_layout()
     }
 
+    fn descriptor_window_count(&self, width: u16, viewport_rows: u16, total: usize) -> usize {
+        let avg_rows = self.estimated_average_descriptor_rows(width).max(1);
+        let visible_descriptors =
+            (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
+        visible_descriptors.saturating_mul(4).max(32).min(total)
+    }
+
+    fn previous_descriptor_window_range(
+        &self,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
+        let active = self.active_descriptor_range.clone()?;
+        let end = active.start.get();
+        if end == 0 {
+            return None;
+        }
+        let total = self.sparse_descriptors.total_count()?;
+        let count = self.descriptor_window_count(width, viewport_rows, total);
+        let start = end.saturating_sub(count);
+        Some(
+            smelt_store::TranscriptDescriptorIndex::new(start)
+                ..smelt_store::TranscriptDescriptorIndex::new(end),
+        )
+    }
+
+    fn activate_previous_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
+        let Some(range) = self.previous_descriptor_window_range(width, viewport_rows) else {
+            return false;
+        };
+        self.activate_descriptor_window_range(range)
+    }
+
     fn descriptor_window_range_around_center(
         &self,
         width: u16,
@@ -824,10 +1007,7 @@ impl TranscriptDocument {
                 }
             }
         }
-        let avg_rows = self.average_descriptor_rows(width).max(1);
-        let visible_descriptors =
-            (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
-        let count = visible_descriptors.saturating_mul(4).max(32).min(total);
+        let count = self.descriptor_window_count(width, viewport_rows, total);
         let start = center
             .saturating_sub(count / 2)
             .min(total.saturating_sub(count));
@@ -844,7 +1024,7 @@ impl TranscriptDocument {
         row: RowIndex,
         viewport_rows: u16,
     ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let avg_rows = self.average_descriptor_rows(width).max(1);
+        let avg_rows = self.estimated_average_descriptor_rows(width).max(1);
         let total = self.sparse_descriptors.total_count()?;
         let center = ((row / avg_rows) as usize).min(total.saturating_sub(1));
         self.descriptor_window_range_around_center(width, center, viewport_rows, true)
@@ -901,6 +1081,81 @@ impl TranscriptDocument {
         self.activate_descriptor_window_range(range)
     }
 
+    fn active_virtual_row_span(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+    ) -> Option<(RowIndex, RowIndex)> {
+        self.active_descriptor_range.as_ref()?;
+        let row_offset = self.estimated_sparse_prefix_row_offset(width);
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        Some((row_offset, row_offset.saturating_add(loaded_rows)))
+    }
+
+    fn descriptor_window_expanded_toward_row(
+        &self,
+        width: u16,
+        row: RowIndex,
+        loaded_start: RowIndex,
+        loaded_end: RowIndex,
+    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
+        let active = self.active_descriptor_range.clone()?;
+        let total = self.sparse_descriptors.total_count()?;
+        let avg_rows = self.estimated_average_descriptor_rows(width).max(1);
+        let missing_rows = if row < loaded_start {
+            loaded_start.saturating_sub(row)
+        } else {
+            row.saturating_sub(loaded_end).saturating_add(1)
+        };
+        let missing_descriptors = missing_rows
+            .saturating_add(avg_rows.saturating_sub(1))
+            .saturating_div(avg_rows)
+            .max(1) as usize;
+        let (start, end) = if row < loaded_start {
+            (
+                active.start.get().saturating_sub(missing_descriptors),
+                active.end.get(),
+            )
+        } else {
+            (
+                active.start.get(),
+                active
+                    .end
+                    .get()
+                    .saturating_add(missing_descriptors)
+                    .min(total),
+            )
+        };
+        let range = smelt_store::TranscriptDescriptorIndex::new(start)
+            ..smelt_store::TranscriptDescriptorIndex::new(end);
+        (self.active_descriptor_range.as_ref() != Some(&range)).then_some(range)
+    }
+
+    fn activate_descriptor_window_covering_virtual_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+        viewport_rows: u16,
+    ) {
+        let _ = self.activate_descriptor_window_for_virtual_row(width, row, viewport_rows);
+        while let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) {
+            if row >= loaded_start && row < loaded_end {
+                return;
+            }
+            let Some(range) =
+                self.descriptor_window_expanded_toward_row(width, row, loaded_start, loaded_end)
+            else {
+                return;
+            };
+            if !self.activate_descriptor_window_range(range) {
+                return;
+            }
+        }
+    }
+
     fn activate_tail_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
         let Some(range) = self.tail_descriptor_window_range(width, viewport_rows) else {
             return false;
@@ -918,27 +1173,43 @@ impl TranscriptDocument {
     ) -> TranscriptProjectionPlan {
         match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Row(row),
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => {
-                let _ = self.activate_descriptor_window_for_virtual_row(width, row, viewport_rows);
+                self.activate_descriptor_window_covering_virtual_row(
+                    lua,
+                    width,
+                    row,
+                    viewport_rows,
+                );
             }
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_),
+            ) => {}
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => {
                 let _ = self.activate_tail_descriptor_window(width, viewport_rows);
             }
         }
-        let row_offset = self.sparse_prefix_row_offset(width);
-        let prefix_gap_scroll = match scroll_target {
+        let row_offset = self.estimated_sparse_prefix_row_offset(width);
+        let requested_scroll = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Row(row),
-            ) if row < row_offset => Some(row),
-            _ => None,
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            ) => Some(row),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
+                | crate::content::transcript_buf::ScrollAnchor::Tail,
+            ) => None,
         };
         let local_target = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::Row(row),
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => crate::content::transcript_buf::ScrollTarget::visible_row(
+                row.saturating_sub(row_offset),
+            ),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+            ) => crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
                 row.saturating_sub(row_offset),
             ),
             crate::content::transcript_buf::ScrollTarget::Visible(
@@ -956,12 +1227,70 @@ impl TranscriptDocument {
         let loaded_rows =
             self.projection
                 .estimated_total_rows(lua, &mut self.transcript.history, width);
+        let total_rows = self.mixed_virtual_total_rows(width, loaded_rows);
+        let viewport_row_count = RowIndex::from(viewport_rows.max(1));
+        let loaded_start = row_offset;
+        let loaded_end = row_offset.saturating_add(loaded_rows).min(total_rows);
+        let sparse_gap = match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
+                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+            ) if row < loaded_start => {
+                let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
+                Some(SparseProjectionGap {
+                    scroll_top,
+                    row_base: scroll_top
+                        .saturating_sub(viewport_row_count / 2)
+                        .min(loaded_start),
+                    end: loaded_start,
+                })
+            }
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
+                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+            ) if row >= loaded_end && loaded_end < total_rows => {
+                let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
+                Some(SparseProjectionGap {
+                    scroll_top,
+                    row_base: scroll_top
+                        .saturating_sub(viewport_row_count / 2)
+                        .max(loaded_end)
+                        .min(total_rows),
+                    end: total_rows,
+                })
+            }
+            _ => None,
+        };
+        let materialization = sparse_gap
+            .map(TranscriptMaterializationPlan::UnloadedGap)
+            .unwrap_or(TranscriptMaterializationPlan::Loaded(inner));
         TranscriptProjectionPlan {
-            inner,
+            materialization,
             row_offset,
-            total_rows: self.virtual_total_rows(width, loaded_rows),
-            prefix_gap_scroll,
+            total_rows,
+            requested_scroll,
             viewport_rows,
+        }
+    }
+
+    fn project_unloaded_sparse_gap(
+        &mut self,
+        buf: &mut Buffer,
+        plan: &TranscriptProjectionPlan,
+        gap: SparseProjectionGap,
+    ) -> crate::smelt_edit::MaterializedRows {
+        let viewport_rows = RowIndex::from(plan.viewport_rows.max(1));
+        let materialized_rows = gap
+            .end
+            .saturating_sub(gap.row_base)
+            .min(viewport_rows.saturating_mul(2))
+            .min(plan.total_rows.saturating_sub(gap.row_base));
+        buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
+        crate::smelt_edit::MaterializedRows {
+            clamped_scroll: gap.scroll_top,
+            row_base: gap.row_base,
+            total_rows: plan.total_rows,
+            materialized_rows,
         }
     }
 
@@ -972,33 +1301,31 @@ impl TranscriptDocument {
         theme: &Theme,
         plan: TranscriptProjectionPlan,
     ) -> crate::smelt_edit::MaterializedRows {
-        if let Some(scroll_top) = plan.prefix_gap_scroll {
-            let viewport_rows = RowIndex::from(plan.viewport_rows.max(1));
-            let row_base = scroll_top
-                .saturating_sub(viewport_rows / 2)
-                .min(plan.row_offset);
-            let materialized_rows = plan
-                .row_offset
-                .saturating_sub(row_base)
-                .min(plan.total_rows.saturating_sub(row_base));
-            buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
-            return crate::smelt_edit::MaterializedRows {
-                clamped_scroll: scroll_top,
-                row_base,
-                total_rows: plan.total_rows,
-                materialized_rows,
-            };
-        }
-        let mut rows = self.projection.project_planned(
-            lua,
-            buf,
-            &mut self.transcript.history,
-            theme,
-            plan.inner,
-        );
+        let mut rows = match plan.materialization {
+            TranscriptMaterializationPlan::UnloadedGap(gap) => {
+                return self.project_unloaded_sparse_gap(buf, &plan, gap);
+            }
+            TranscriptMaterializationPlan::Loaded(inner) => self.projection.project_planned(
+                lua,
+                buf,
+                &mut self.transcript.history,
+                theme,
+                inner,
+            ),
+        };
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(plan.row_offset);
         rows.row_base = rows.row_base.saturating_add(plan.row_offset);
         rows.total_rows = plan.total_rows;
+        if let Some(requested) = plan.requested_scroll {
+            let viewport_rows = RowIndex::from(plan.viewport_rows.max(1));
+            let requested = requested.min(plan.total_rows.saturating_sub(viewport_rows));
+            if requested >= rows.row_base
+                && requested.saturating_add(viewport_rows)
+                    <= rows.row_base.saturating_add(rows.materialized_rows)
+            {
+                rows.clamped_scroll = requested;
+            }
+        }
         rows
     }
 
@@ -1010,7 +1337,7 @@ impl TranscriptDocument {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
-        let row_offset = self.sparse_prefix_row_offset(width);
+        let row_offset = self.estimated_sparse_prefix_row_offset(width);
         let end = start.saturating_add(count);
         if count == 0 || end <= start {
             return DisplayRows::empty();
@@ -1118,7 +1445,7 @@ impl TranscriptDocument {
         width: u16,
         anchor: crate::content::transcript_buf::TranscriptRowAnchor,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        let offset = self.sparse_prefix_row_offset(width);
+        let offset = self.estimated_sparse_prefix_row_offset(width);
         self.projection
             .row_for_anchor(lua, &mut self.transcript.history, width, anchor)
             .map(|row| row.saturating_add(offset))
@@ -1262,7 +1589,7 @@ impl TranscriptDocument {
         theme: &Theme,
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
-        let row_offset = self.sparse_prefix_row_offset(width);
+        let row_offset = self.estimated_sparse_prefix_row_offset(width);
         if range.end.row < row_offset {
             return crate::smelt_edit::CopyOutput::default();
         }
@@ -1527,7 +1854,7 @@ mod document_tests {
         let total_rows = document.estimated_total_rows(&lua, 80);
 
         assert!(total_rows > loaded_rows);
-        assert!(document.sparse_prefix_row_offset(80) > 0);
+        assert!(document.estimated_sparse_prefix_row_offset(80) > 0);
     }
 
     #[test]
@@ -1554,7 +1881,7 @@ mod document_tests {
             session_dir: None,
         };
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
-        let offset = document.sparse_prefix_row_offset(80);
+        let offset = document.estimated_sparse_prefix_row_offset(80);
         let plan = document.plan_projection_measured(
             &lua,
             80,
@@ -1570,6 +1897,40 @@ mod document_tests {
         assert!(rows.row_base >= offset);
         assert!(rows.clamped_scroll >= offset);
         assert!(buf.lines().iter().any(|line| line == "tail two"));
+    }
+
+    #[test]
+    fn sparse_projection_preserves_scroll_in_unloaded_suffix_gap() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let records = transcript_records(100);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            40..48,
+            None,
+        ));
+        let offset = document.estimated_sparse_prefix_row_offset(80);
+        let loaded_rows =
+            document
+                .projection
+                .estimated_total_rows(&lua, &mut document.transcript.history, 80);
+        let target = offset.saturating_add(loaded_rows).saturating_add(10);
+        let plan = document.plan_projection_measured(
+            &lua,
+            80,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(target),
+            10,
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(402), Default::default());
+
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(rows.clamped_scroll, target);
+        assert!(rows.row_base <= target);
+        assert!(rows.row_base >= offset.saturating_add(loaded_rows));
+        assert!(rows.materialized_rows > 0);
+        assert!(buf.lines().iter().all(|line| line.is_empty()));
     }
 
     #[test]
@@ -1633,14 +1994,38 @@ mod document_tests {
         );
     }
 
-    fn transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
+    fn fixed_transcript(count: usize) -> Transcript {
         let mut source = Transcript::new();
         for idx in 0..count {
             source.push(Block::Text {
                 content: format!("block {idx}"),
             });
         }
-        source.history.descriptor_records()
+        source
+    }
+
+    fn transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
+        fixed_transcript(count).history.descriptor_records()
+    }
+
+    fn varied_transcript(count: usize) -> Transcript {
+        let mut source = Transcript::new();
+        for idx in 0..count {
+            let repeats = match idx % 9 {
+                0 => 1,
+                1 | 2 => 4,
+                3..=5 => 12,
+                _ => 28,
+            };
+            source.push(Block::Text {
+                content: format!("block {idx} {}", "wrapped text ".repeat(repeats)),
+            });
+        }
+        source
+    }
+
+    fn varied_transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
+        varied_transcript(count).history.descriptor_records()
     }
 
     fn descriptor_records_with_ids(
@@ -1676,6 +2061,37 @@ mod document_tests {
         }
     }
 
+    fn skewed_transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
+        let mut source = Transcript::new();
+        for idx in 0..count {
+            let repeats = if idx < count / 2 { 80 } else { 1 };
+            source.push(Block::Text {
+                content: format!("block {idx} {}", "skewed text ".repeat(repeats)),
+            });
+        }
+        source.history.descriptor_records()
+    }
+
+    #[test]
+    fn resumed_sparse_prefix_rows_use_persisted_descriptor_estimates() {
+        let width = 24;
+        let records = skewed_transcript_records(300);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let expected = smelt_store::SessionDb::open_read_only(dir.path().join("session.db"))
+            .unwrap()
+            .transcript_descriptor_estimated_rows((0..220).into(), width)
+            .unwrap() as RowIndex;
+
+        let mut sparse = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            220..235,
+            Some(dir.path().to_path_buf()),
+        ));
+
+        assert_eq!(sparse.estimated_sparse_prefix_row_offset(width), expected);
+    }
+
     fn active_history_contains(document: &TranscriptDocument, needle: &str) -> bool {
         document
             .transcript
@@ -1688,6 +2104,606 @@ mod document_tests {
                     .raw_text()
                     .is_some_and(|text| text == needle)
             })
+    }
+
+    #[test]
+    fn resumed_sparse_scroll_up_never_stalls_or_reverses() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 24;
+        let viewport_rows = 12;
+        let records = varied_transcript_records(400);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(403), Default::default());
+        let mut rows = {
+            let plan = document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                viewport_rows,
+            );
+            document.project_planned(&lua, &mut buf, &theme, plan)
+        };
+
+        for step in 0..600 {
+            if rows.clamped_scroll == 0 {
+                break;
+            }
+            let previous = rows.clamped_scroll;
+            let requested = previous.saturating_sub(3);
+            let plan = document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_row(requested),
+                viewport_rows,
+            );
+            rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+            assert!(
+                rows.clamped_scroll < previous,
+                "scroll step {step} stalled or reversed: previous={previous}, requested={requested}, resolved={}, row_base={}, materialized={}, total={}, active={:?}",
+                rows.clamped_scroll,
+                rows.row_base,
+                rows.materialized_rows,
+                rows.total_rows,
+                document.active_descriptor_range,
+            );
+            assert!(
+                rows.row_base <= rows.clamped_scroll,
+                "scroll step {step} resolved before materialized base: {:?}",
+                rows
+            );
+            assert!(
+                rows.clamped_scroll
+                    .saturating_add(RowIndex::from(viewport_rows))
+                    <= rows.row_base.saturating_add(rows.materialized_rows),
+                "scroll step {step} viewport is not materialized: {:?}",
+                rows
+            );
+        }
+    }
+
+    #[test]
+    fn resumed_sparse_skewed_scroll_up_materializes_requested_viewport() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 24;
+        let viewport_rows = 12;
+        let records = skewed_transcript_records(300);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(404), Default::default());
+        let mut rows = {
+            let plan = document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                viewport_rows,
+            );
+            document.project_planned(&lua, &mut buf, &theme, plan)
+        };
+
+        for step in 0..1000 {
+            if rows.clamped_scroll == 0 {
+                break;
+            }
+            let previous = rows.clamped_scroll;
+            let requested = previous.saturating_sub(3);
+            let plan = document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_row(requested),
+                viewport_rows,
+            );
+            rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+            assert_eq!(
+                rows.clamped_scroll, requested,
+                "scroll step {step} did not honor request: previous={previous}, rows={rows:?}, active={:?}",
+                document.active_descriptor_range,
+            );
+            assert!(
+                buf.lines().iter().any(|line| !line.is_empty()),
+                "scroll step {step} materialized only sparse placeholders: requested={requested}, rows={rows:?}, active={:?}",
+                document.active_descriptor_range,
+            );
+        }
+    }
+
+    struct ProjectionHarness<'a> {
+        lua: &'a LuaRuntime,
+        theme: &'a Theme,
+        width: u16,
+        viewport_rows: u16,
+    }
+
+    fn project_frame_into_window(
+        document: &mut TranscriptDocument,
+        win: &mut crate::smelt_edit::Window,
+        buf: &mut Buffer,
+        ctx: ProjectionHarness<'_>,
+        follow_tail: bool,
+    ) -> crate::smelt_edit::MaterializedRows {
+        let cursor_screen_row = win.cursor_screen_row(ctx.viewport_rows);
+        let scroll_target = if follow_tail {
+            crate::content::transcript_buf::ScrollTarget::visible_tail()
+        } else {
+            crate::content::transcript_buf::ScrollTarget::visible_row(win.scroll_top())
+        };
+        let plan = document.plan_projection_measured(
+            ctx.lua,
+            ctx.width,
+            ctx.theme,
+            scroll_target,
+            ctx.viewport_rows,
+        );
+        let rows = document.project_planned(ctx.lua, buf, ctx.theme, plan);
+        win.apply_materialized_rows(rows);
+        win.set_resolved_scroll(rows.clamped_scroll);
+        win.ensure_layout(buf, ctx.width);
+        win.refresh_document_view_position_from_buffer(buf);
+        if let Some(screen_row) = cursor_screen_row {
+            win.restore_cursor_screen_row(buf, screen_row);
+        }
+        win.sync_row_render_state(buf, ctx.viewport_rows, std::time::Instant::now());
+        rows
+    }
+
+    fn transcript_window() -> crate::smelt_edit::Window {
+        crate::smelt_edit::Window::new(
+            crate::smelt_edit::WinId(1),
+            crate::smelt_edit::BufId(1),
+            crate::smelt_edit::SplitConfig {
+                region: "transcript".into(),
+                gutters: smelt_term::layout::Gutters::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn resumed_sparse_window_wheel_scroll_up_keeps_moving() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 24;
+        let viewport_rows = 12;
+        let records = varied_transcript_records(400);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut win = transcript_window();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
+        let ctx = || ProjectionHarness {
+            lua: &lua,
+            theme: &theme,
+            width,
+            viewport_rows,
+        };
+        project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), true);
+
+        for step in 0..200 {
+            if win.scroll_top() == 0 {
+                break;
+            }
+            let previous = win.scroll_top();
+            win.pan_by_lines(&buf, -3, viewport_rows);
+            let requested = win.scroll_top();
+            let rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+            assert!(
+                win.scroll_top() < previous,
+                "wheel step {step} stalled or reversed: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}",
+                win.scroll_top(),
+                document.active_descriptor_range,
+            );
+            assert!(
+                win.scroll_top() <= requested,
+                "wheel step {step} projection reversed past the requested scroll: requested={requested}, resolved={}",
+                win.scroll_top()
+            );
+            assert!(
+                requested.saturating_sub(win.scroll_top()) <= RowIndex::from(viewport_rows),
+                "wheel step {step} projection jumped too far above the requested scroll: requested={requested}, resolved={}",
+                win.scroll_top()
+            );
+        }
+    }
+
+    #[test]
+    fn resumed_sparse_window_wheel_scroll_down_is_monotonic_and_does_not_snap_back() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 24;
+        let viewport_rows = 12;
+        let records = skewed_transcript_records(300);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut win = transcript_window();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
+        let ctx = || ProjectionHarness {
+            lua: &lua,
+            theme: &theme,
+            width,
+            viewport_rows,
+        };
+        project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), true);
+        win.pin_scroll(0);
+        project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+
+        let mut steps = 0;
+        for step in 0..300 {
+            let previous = win.scroll_top();
+            win.pan_by_lines(&buf, 3, viewport_rows);
+            let requested = win.scroll_top();
+            if requested == previous {
+                break;
+            }
+            let rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+            assert!(
+                win.scroll_top() > previous,
+                "wheel step {step} reversed or stalled: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}",
+                win.scroll_top(),
+                document.active_descriptor_range,
+            );
+            assert_eq!(
+                win.scroll_top(),
+                requested,
+                "wheel step {step} projection did not honor the requested scroll"
+            );
+            steps += 1;
+        }
+        assert!(steps > 0, "scroll-down scenario did not move");
+
+        let settled = win.scroll_top();
+        let rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+        assert_eq!(
+            win.scroll_top(),
+            settled,
+            "idle projection snapped after scroll-down settled: rows={rows:?}, active={:?}",
+            document.active_descriptor_range,
+        );
+    }
+
+    #[test]
+    fn resumed_sparse_drag_select_autoscroll_up_keeps_moving() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 24;
+        let viewport_rows = 12;
+        let records = varied_transcript_records(400);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut win = transcript_window();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
+        let ctx = || ProjectionHarness {
+            lua: &lua,
+            theme: &theme,
+            width,
+            viewport_rows,
+        };
+        project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), true);
+        let top = win.scroll_top();
+        let mut state = win.document_view_state();
+        state.cursor = crate::smelt_edit::DocPosition {
+            row: top,
+            byte_col: 0,
+        };
+        state.drag_endpoint = Some(state.cursor);
+        state.selection_anchor = Some(crate::smelt_edit::DocPosition {
+            row: top.saturating_add(RowIndex::from(viewport_rows.saturating_sub(1))),
+            byte_col: 0,
+        });
+        state.preferred_cell_col = Some(0);
+        win.set_document_view_state(state);
+
+        for step in 0..200 {
+            if win.scroll_top() == 0 {
+                break;
+            }
+            let previous = win.scroll_top();
+            assert!(
+                win.drag_autoscroll_step(&buf, viewport_rows, -1),
+                "drag step {step} did not move before projection"
+            );
+            let requested = win.scroll_top();
+            let rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+            let state = win.document_view_state();
+            assert!(
+                win.scroll_top() < previous,
+                "drag step {step} stalled or reversed: previous={previous}, requested={requested}, resolved={}, rows={rows:?}, active={:?}, state={state:?}",
+                win.scroll_top(),
+                document.active_descriptor_range,
+            );
+            assert_eq!(
+                win.scroll_top(),
+                requested,
+                "drag step {step} projection did not honor autoscroll request"
+            );
+            assert_eq!(
+                state.drag_endpoint.map(|pos| pos.row),
+                Some(win.scroll_top()),
+                "drag step {step} endpoint did not stay parked at the top edge"
+            );
+        }
+    }
+
+    #[test]
+    fn resumed_sparse_scrollbar_total_matches_full_transcript_truth_for_fixed_rows() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 32;
+        let viewport_rows = 12;
+        let source = fixed_transcript(240);
+        let records = source.history.descriptor_records();
+        let mut full_document = TranscriptDocument::from_transcript(source);
+        let mut full_buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
+        let full_rows = {
+            let plan = full_document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                viewport_rows,
+            );
+            full_document.project_planned(&lua, &mut full_buf, &theme, plan)
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut sparse_document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut sparse_buf = Buffer::new(crate::smelt_edit::BufId(3), Default::default());
+        let sparse_rows = {
+            let plan = sparse_document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                viewport_rows,
+            );
+            sparse_document.project_planned(&lua, &mut sparse_buf, &theme, plan)
+        };
+
+        assert_eq!(sparse_rows.total_rows, full_rows.total_rows);
+        let bar = crate::smelt_edit::ScrollbarState::new(
+            width.saturating_sub(1),
+            sparse_rows.total_rows,
+            viewport_rows,
+        )
+        .expect("scrollbar");
+        assert_eq!(bar.total_rows, full_rows.total_rows);
+        assert_eq!(bar.viewport_rows, viewport_rows);
+    }
+
+    #[test]
+    fn resumed_sparse_scrollbar_click_and_drag_requests_do_not_snap_back() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 32;
+        let viewport_rows = 12;
+        let source = fixed_transcript(240);
+        let records = source.history.descriptor_records();
+        let mut full_document = TranscriptDocument::from_transcript(source);
+        let mut full_buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
+        let full_rows = {
+            let plan = full_document.plan_projection_measured(
+                &lua,
+                width,
+                &theme,
+                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                viewport_rows,
+            );
+            full_document.project_planned(&lua, &mut full_buf, &theme, plan)
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            LoadedTranscript::tail_from_sqlite_dir(dir.path().to_path_buf(), width, viewport_rows)
+                .expect("tail transcript");
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let mut win = transcript_window();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
+        let ctx = || ProjectionHarness {
+            lua: &lua,
+            theme: &theme,
+            width,
+            viewport_rows,
+        };
+        let sparse_rows = project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), true);
+        assert_eq!(sparse_rows.total_rows, full_rows.total_rows);
+
+        let full_bar = crate::smelt_edit::ScrollbarState::new(
+            width.saturating_sub(1),
+            full_rows.total_rows,
+            viewport_rows,
+        )
+        .expect("full scrollbar");
+        let sparse_bar = crate::smelt_edit::ScrollbarState::new(
+            width.saturating_sub(1),
+            sparse_rows.total_rows,
+            viewport_rows,
+        )
+        .expect("sparse scrollbar");
+
+        let mut previous = None;
+        for rel_row in 0..viewport_rows {
+            let request =
+                sparse_bar.scroll_from_top_for_thumb(sparse_bar.thumb_top_for_click(rel_row));
+            let full_request =
+                full_bar.scroll_from_top_for_thumb(full_bar.thumb_top_for_click(rel_row));
+            assert_eq!(
+                request, full_request,
+                "click row {rel_row} mapped differently"
+            );
+
+            win.scroll_to_preserving_cursor_screen_row(request, &buf, viewport_rows);
+            let requested = win.scroll_top();
+            project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+            assert_eq!(
+                win.scroll_top(),
+                requested,
+                "click row {rel_row} snapped after projection"
+            );
+            if let Some(previous) = previous {
+                assert!(
+                    win.scroll_top() >= previous,
+                    "click row {rel_row} moved backward: previous={previous}, current={}",
+                    win.scroll_top()
+                );
+            }
+            previous = Some(win.scroll_top());
+        }
+
+        for thumb_top in 0..=sparse_bar.max_thumb_top() {
+            let request = sparse_bar.scroll_from_top_for_thumb(thumb_top);
+            assert_eq!(
+                request,
+                full_bar.scroll_from_top_for_thumb(thumb_top),
+                "thumb row {thumb_top} mapped differently"
+            );
+            win.scroll_to_preserving_cursor_screen_row(request, &buf, viewport_rows);
+            let requested = win.scroll_top();
+            project_frame_into_window(&mut document, &mut win, &mut buf, ctx(), false);
+            assert_eq!(
+                win.scroll_top(),
+                requested,
+                "thumb row {thumb_top} snapped after projection"
+            );
+            let resolved_thumb = sparse_bar.thumb_top_for_scroll(win.scroll_top());
+            assert!(
+                resolved_thumb.abs_diff(thumb_top) <= 1,
+                "thumb row {thumb_top} resolved to {resolved_thumb} for scroll {}",
+                win.scroll_top()
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_block_lookup_translates_virtual_rows_for_top_pill() {
+        let lua = LuaRuntime::new();
+        let mut source = Transcript::new();
+        for idx in 0..100 {
+            if idx % 10 == 0 {
+                source.push(Block::User {
+                    text: format!("user {idx}"),
+                    image_labels: Vec::new(),
+                });
+            } else {
+                source.push(Block::Text {
+                    content: format!("assistant {idx}"),
+                });
+            }
+        }
+        let records = source.history.descriptor_records();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            40..48,
+            None,
+        ));
+        let offset = document.estimated_sparse_prefix_row_offset(80);
+
+        let snapshot = document
+            .block_snapshot_before_or_at_row(&lua, 80, offset.saturating_add(1), Some("user"))
+            .expect("loaded user block before virtual row");
+
+        assert_eq!(snapshot.1, "user");
+        assert_eq!(snapshot.4, "user 40");
+        assert_eq!(snapshot.2, offset);
+    }
+
+    #[test]
+    fn sparse_block_lookup_loads_window_for_requested_virtual_row() {
+        let lua = LuaRuntime::new();
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Transcript::new();
+        for idx in 0..100 {
+            if idx % 10 == 0 {
+                source.push(Block::User {
+                    text: format!("user {idx}"),
+                    image_labels: Vec::new(),
+                });
+            } else {
+                source.push(Block::Text {
+                    content: format!("assistant {idx}"),
+                });
+            }
+        }
+        let records = source.history.descriptor_records();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            68..100,
+            Some(dir.path().to_path_buf()),
+        ));
+        assert!(!active_history_contains(&document, "user 40"));
+
+        let snapshot = document
+            .block_snapshot_before_or_at_row(&lua, 80, 81, Some("user"))
+            .expect("user block loaded for requested row");
+
+        assert_eq!(snapshot.1, "user");
+        assert_eq!(snapshot.4, "user 40");
+        assert!(active_history_contains(&document, "user 40"));
+    }
+
+    #[test]
+    fn sparse_block_lookup_searches_previous_windows_for_role_match() {
+        let lua = LuaRuntime::new();
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Transcript::new();
+        for idx in 0..100 {
+            if idx == 0 || idx == 90 {
+                source.push(Block::User {
+                    text: format!("user {idx}"),
+                    image_labels: Vec::new(),
+                });
+            } else {
+                source.push(Block::Text {
+                    content: format!("assistant {idx}"),
+                });
+            }
+        }
+        let records = source.history.descriptor_records();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            68..100,
+            Some(dir.path().to_path_buf()),
+        ));
+        assert!(!active_history_contains(&document, "user 0"));
+
+        let snapshot = document
+            .block_snapshot_before_or_at_row(&lua, 80, 161, Some("user"))
+            .expect("previous user block outside the initial lookup window");
+
+        assert_eq!(snapshot.1, "user");
+        assert_eq!(snapshot.4, "user 0");
+        assert!(active_history_contains(&document, "user 0"));
     }
 
     #[test]
@@ -1773,6 +2789,47 @@ mod document_tests {
         assert_eq!(document.active_descriptor_range, active_before);
         assert_eq!(document.sparse_descriptors.loaded_ranges().len(), 1);
         assert!(active_history_contains(&document, "block 40"));
+    }
+
+    #[test]
+    fn sparse_average_rows_stays_stable_when_switching_loaded_windows() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let mut source = Transcript::new();
+        for idx in 0..100 {
+            let content = if idx >= 68 {
+                format!("block {idx} {}", "long text ".repeat(40))
+            } else {
+                format!("block {idx}")
+            };
+            source.push(Block::Text { content });
+        }
+        let records = source.history.descriptor_records();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            68..100,
+            None,
+        ));
+        assert!(document.merge_descriptor_window(LoadedDescriptorWindow {
+            start: smelt_store::TranscriptDescriptorIndex::new(40),
+            total_count: records.len(),
+            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+            records: descriptor_records_with_ids(&records[40..48], 40),
+        }));
+        let average_before = document.estimated_average_descriptor_rows(20);
+
+        let _plan = document.plan_projection_measured(
+            &lua,
+            20,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            10,
+        );
+
+        assert_eq!(
+            document.estimated_average_descriptor_rows(20),
+            average_before
+        );
     }
 
     #[test]
@@ -2019,6 +3076,7 @@ impl TuiApp {
     }
 
     pub(crate) fn update_compaction_preview(&mut self, summary: String) {
+        let follow_tail = self.transcript_win().is_following_tail();
         let existing = self.transcript.compaction_preview_id();
         let Some(id) = self.transcript.set_compaction_preview(summary) else {
             return;
@@ -2032,7 +3090,9 @@ impl TuiApp {
                 crate::content::transcript_buf::FoldAction::Peek,
             );
         }
-        self.transcript_win_mut().follow_tail();
+        if follow_tail {
+            self.transcript_win_mut().follow_tail();
+        }
         self.request_transient_render();
     }
 

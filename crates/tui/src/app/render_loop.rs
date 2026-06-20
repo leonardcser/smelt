@@ -210,22 +210,27 @@ impl TuiApp {
                     return;
                 }
                 let viewport_rows = request.rect.height;
-                let cursor_screen_row = if request.follow_tail {
-                    ui.win(request.win)
-                        .and_then(|win| win.cursor_screen_row(viewport_rows))
-                } else {
-                    None
-                };
+                let cursor_screen_row = ui
+                    .win(request.win)
+                    .and_then(|win| win.cursor_screen_row(viewport_rows));
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
+                    let width = request.content_width.max(1);
+                    let width_changed = ui
+                        .win(request.win)
+                        .and_then(|win| win.viewport)
+                        .is_some_and(|viewport| viewport.content_width != width);
                     let scroll_target = if request.follow_tail {
                         crate::content::transcript_buf::ScrollTarget::visible_tail()
+                    } else if width_changed {
+                        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                            request.scroll_top,
+                        )
                     } else {
                         crate::content::transcript_buf::ScrollTarget::visible_row(
                             request.scroll_top,
                         )
                     };
-                    let width = request.content_width.max(1);
                     let plan = transcript.plan_projection_measured(
                         lua,
                         width,

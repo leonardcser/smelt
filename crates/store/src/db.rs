@@ -428,6 +428,14 @@ impl SessionDb {
         history::transcript_descriptor_dense_extent(&self.conn)
     }
 
+    pub fn transcript_descriptor_estimated_rows(
+        &self,
+        range: TranscriptDescriptorRange,
+        width: u16,
+    ) -> Result<u64> {
+        history::transcript_descriptor_estimated_rows(&self.conn, range, width)
+    }
+
     pub fn read_all_transcript_descriptor_records(
         &self,
     ) -> Result<Vec<TranscriptDescriptorRecord>> {
@@ -613,6 +621,46 @@ mod tests {
         assert_eq!(
             db.search_transcript_candidates("updated two").unwrap(),
             vec![]
+        );
+    }
+
+    #[test]
+    fn transcript_descriptor_estimated_rows_sums_dense_descriptor_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut records = vec![
+            transcript_record(10, "zero", ""),
+            transcript_record(20, "one", "a"),
+            transcript_record(30, "two", "abcdefghi"),
+            transcript_record(40, "three", "abcdefghij"),
+        ];
+        records[0].estimated_text_bytes = 0;
+        records[1].estimated_text_bytes = 1;
+        records[2].estimated_text_bytes = 9;
+        records[3].estimated_text_bytes = 10;
+        db.replace_transcript_descriptor_records(&records).unwrap();
+
+        assert_eq!(
+            db.transcript_descriptor_estimated_rows((0..0).into(), 5)
+                .unwrap(),
+            0
+        );
+        let inverted_start = 3;
+        let inverted_end = 1;
+        assert_eq!(
+            db.transcript_descriptor_estimated_rows((inverted_start..inverted_end).into(), 5)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.transcript_descriptor_estimated_rows((0..4).into(), 5)
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            db.transcript_descriptor_estimated_rows((1..3).into(), 5)
+                .unwrap(),
+            5
         );
     }
 

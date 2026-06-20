@@ -5,13 +5,17 @@ with `COMPAT(<id>)`.
 
 ## branch-sqlite-schema-shape-repair
 
-- Remove after: transcript virtualization branch-local databases have either been repaired/reimported or the branch lands with a real schema migration boundary
-- Why: recover local `session.db` files created by earlier iterations of the unreleased transcript virtualization branch that used `user_version = 1` with older table shapes
+- Remove after: two alpha releases after SQLite session storage ships and background migration has had a release window to normalize branch-local DBs
+- Why: recover local `session.db` files created by earlier iterations of the unreleased transcript virtualization branch that used `user_version = 1` with older table shapes, or pre-squash `user_version` 2-6 with the canonical table shape
 - Code:
   - `crates/store/src/schema.rs`: same-version schema shape repair before running canonical `SCHEMA`
+  - `crates/store/src/schema.rs`: read-only acceptance plus writable normalization of pre-squash schema versions 2-6 when the table shape is canonical
 - Tests:
   - `migrate_repairs_in_place_version_one_session_state_schema`
   - `read_only_validation_rejects_same_version_wrong_shape`
+  - `read_only_validation_accepts_pre_squash_user_version_when_shape_matches`
+  - `migrate_normalizes_pre_squash_user_version_to_current_baseline`
+  - `existing_sqlite_session_migration_normalizes_pre_squash_schema_version`
 
 ## session-v1-messages
 

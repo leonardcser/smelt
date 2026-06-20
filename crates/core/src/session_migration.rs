@@ -400,6 +400,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn existing_sqlite_session_migration_normalizes_pre_squash_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("session.db");
+        let db = smelt_store::SessionDb::open(&db_path).unwrap();
+        db.connection()
+            .execute_batch(
+                "PRAGMA user_version = 6;
+                 UPDATE store_meta SET value = '6' WHERE key = 'schema_version';",
+            )
+            .unwrap();
+        drop(db);
+
+        let outcome = migrate_session_dir_to_db(dir.path()).unwrap();
+        assert_eq!(outcome, SessionMigrationOutcome::Skipped);
+
+        let db = smelt_store::SessionDb::open_read_only(&db_path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), smelt_store::SCHEMA_VERSION);
+        let schema_version = db.meta("schema_version").unwrap();
+        let expected = smelt_store::SCHEMA_VERSION.to_string();
+        assert_eq!(schema_version.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
     fn existing_invalid_db_with_legacy_sidecars_is_a_failure() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("session.db"), b"not sqlite").unwrap();

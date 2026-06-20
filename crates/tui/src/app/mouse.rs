@@ -222,6 +222,13 @@ impl TuiApp {
                 if is_down && self.ui.active_modal().is_none() {
                     self.ui.set_focus(win);
                 }
+                if (is_down || is_drag)
+                    && self.ui.win(win).is_some_and(|win| win.is_following_tail())
+                {
+                    if let Some(win) = self.ui.win_mut(win) {
+                        win.pin_current_scroll();
+                    }
+                }
                 if is_down && me.modifiers.contains(KeyModifiers::CONTROL) {
                     if let Some(pos) = self.document_view_position_at_mouse_for_win(win, me) {
                         if let Some(action) = self.document_action_at(win, pos) {

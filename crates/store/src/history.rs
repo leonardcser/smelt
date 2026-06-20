@@ -479,6 +479,49 @@ pub(crate) fn transcript_descriptor_dense_extent(conn: &Connection) -> Result<us
     Ok(count as usize)
 }
 
+pub(crate) fn transcript_descriptor_estimated_rows(
+    conn: &Connection,
+    range: TranscriptDescriptorRange,
+    width: u16,
+) -> Result<u64> {
+    let _perf = perf::begin("store:transcript:descriptor_estimated_rows");
+    let start = range.start().get();
+    let end = range.end().get();
+    if start >= end {
+        perf::record_value("store:transcript:descriptor_estimated_rows_requested", 0);
+        perf::record_value("store:transcript:descriptor_estimated_rows_total", 0);
+        return Ok(0);
+    }
+    let width = width.max(1) as u64;
+    let limit = checked_i64((end - start) as u64, "descriptor_estimated_rows_len")?;
+    let offset = checked_i64(start as u64, "descriptor_estimated_rows_start")?;
+    let rows: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(((MAX(estimated_text_bytes, 1) + ?1 - 1) / ?1) + 1), 0)
+         FROM (
+             SELECT estimated_text_bytes
+             FROM transcript_blocks
+             WHERE descriptor_json IS NOT NULL
+             ORDER BY block_idx
+             LIMIT ?2 OFFSET ?3
+         )",
+        params![
+            checked_i64(width, "descriptor_estimated_rows_width")?,
+            limit,
+            offset
+        ],
+        |row| row.get(0),
+    )?;
+    perf::record_value(
+        "store:transcript:descriptor_estimated_rows_requested",
+        end.saturating_sub(start) as u64,
+    );
+    perf::record_value(
+        "store:transcript:descriptor_estimated_rows_total",
+        rows as u64,
+    );
+    Ok(rows as u64)
+}
+
 pub(crate) fn read_transcript_descriptor_records(
     conn: &Connection,
 ) -> Result<Vec<TranscriptDescriptorRecord>> {
