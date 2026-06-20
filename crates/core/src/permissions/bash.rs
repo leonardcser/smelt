@@ -130,13 +130,13 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                     }
                 }
 
-                // Redirections involving & (2>&1, >&2, &>, &>>) - not an operator.
+                // Redirections involving & (2>&1, 0<&3, >&2, <&0, &>, &>>) - not an operator.
                 if rest.starts_with("&>") {
                     i += if rest.starts_with("&>>") { 3 } else { 2 };
                     continue;
                 }
-                if bytes[i] == b'&' && i > 0 && bytes[i - 1] == b'>' {
-                    // >& fd duplication (e.g. 2>&1) - skip the fd digit(s).
+                if bytes[i] == b'&' && i > 0 && matches!(bytes[i - 1], b'>' | b'<') {
+                    // >& / <& fd duplication or close (e.g. 2>&1, 0<&3, <&-).
                     i += 1;
                     while i < len && bytes[i].is_ascii_digit() {
                         i += 1;

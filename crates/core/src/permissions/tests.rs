@@ -425,6 +425,39 @@ fn split_shell_commands_utf8_with_heredoc() {
 }
 
 #[test]
+fn split_shell_commands_input_fd_duplication_is_not_background() {
+    assert_eq!(
+        split_shell_commands("cat <&0 | head"),
+        vec!["cat <&0", "head"]
+    );
+    assert_eq!(
+        split_shell_commands_with_ops("cat <&0 | head"),
+        vec![
+            ("cat <&0".to_string(), Some("|".to_string())),
+            ("head".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        split_shell_commands_with_ops("exec 3<&0 && cat <&3"),
+        vec![
+            ("exec 3<&0".to_string(), Some("&&".to_string())),
+            ("cat <&3".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn split_shell_commands_ampersand_input_redirect_is_background() {
+    assert_eq!(
+        split_shell_commands_with_ops("cd /tmp &< sessions.jsonl head -1"),
+        vec![
+            ("cd /tmp".to_string(), Some("&".to_string())),
+            ("< sessions.jsonl head -1".to_string(), None),
+        ]
+    );
+}
+
+#[test]
 fn has_output_redirection_utf8() {
     // Multi-byte chars near redirection operators.
     assert!(!has_output_redirection("echo ✿"));
