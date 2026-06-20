@@ -60,6 +60,7 @@ impl TuiApp {
     }
 
     fn prepare_user_visible_turn(&mut self) {
+        self.dismiss_notification();
         self.ensure_deferred_session_loaded();
         self.clear_prompt_prediction();
         self.sleep_inhibit.acquire();
@@ -1122,6 +1123,38 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn starting_user_turn_dismisses_visible_notification() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .notify_error_sticky("rate limit exceeded".to_string());
+        assert!(app.app.notification_win().is_some());
+
+        let turn = app
+            .app
+            .begin_agent_turn("try again", Content::text("try again"));
+        app.app.agent = Some(turn);
+
+        assert!(app.app.notification_win().is_none());
+    }
+
+    #[test]
+    fn starting_command_continuation_dismisses_visible_notification() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.notify_error_sticky("quota exceeded".to_string());
+        assert!(app.app.notification_win().is_some());
+
+        let turn = app.app.begin_command_request_turn(
+            "continue".into(),
+            String::new(),
+            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::ContinueFromLast,
+        );
+        app.app.agent = Some(turn);
+
+        assert!(app.app.notification_win().is_none());
     }
 
     #[test]
