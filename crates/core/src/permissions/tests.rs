@@ -1144,6 +1144,57 @@ fn workspace_bash_ls_directory_requires_that_directory() {
 }
 
 #[test]
+fn workspace_bash_mkdir_requires_created_directory_not_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let output_dir = temp.path().join("tmp");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = format!("mkdir -p {}", output_dir.display());
+    let args = args_with("command", &command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: canonicalize_path_or_parent(&output_dir)
+        }]
+    );
+}
+
+#[test]
+fn workspace_bash_benchmark_command_requires_tmp_dir_not_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("smelt");
+    let worktree = project.join(".worktrees/transcript-virtualization");
+    let tmp = temp.path().join("tmp");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let mut p = perms_with_workspace(worktree.to_str().unwrap());
+    p.set_allowed_roots(worktree.clone(), vec![project.clone()]);
+    let command = format!(
+        "cd {} && mkdir -p {} && set -o pipefail; TMPDIR={} cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib --search --search-bytes 524288000 --resume --resume-bytes 524288000 --no-warmup 2>&1 | tee {}/smelt-transcript-scroll-model-bench-phase8.txt | tail -160",
+        worktree.display(),
+        tmp.display(),
+        tmp.display(),
+        tmp.display(),
+    );
+    let args = args_with("command", &command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: canonicalize_path_or_parent(&tmp)
+        }]
+    );
+}
+
+#[test]
 fn workspace_bash_cargo_install_root_requires_root_directory() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
