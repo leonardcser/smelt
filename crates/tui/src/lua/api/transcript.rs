@@ -38,6 +38,21 @@ fn navigation_block_table(
     Ok(t)
 }
 
+fn navigation_block_table(
+    lua: &Lua,
+    idx: usize,
+    role: &'static str,
+    first_line: String,
+    already_at_top: bool,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("idx", idx)?;
+    t.set("role", role)?;
+    t.set("first_line", first_line)?;
+    t.set("already_at_top", already_at_top)?;
+    Ok(t)
+}
+
 #[derive(Debug, Default, LuaOpts)]
 #[lua(name = "smelt.transcript.StreamOpts")]
 pub struct LuaTranscriptStreamOpts {
@@ -401,6 +416,43 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .unwrap_or(true);
             Ok(crate::lua::try_with_app(|app| {
                 app.reveal_transcript_descriptor_block(descriptor_index, top_padding, cursor)
+            })
+            .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
+        "previous_block",
+        "Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
+        &["opts"],
+        |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
+            let role = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
+            let snap = crate::lua::try_with_app(|app| {
+                app.previous_transcript_navigation_block(role.as_deref())
+            })
+            .flatten();
+            snap.map(|(idx, role, first_line, already_at_top)| {
+                navigation_block_table(lua, idx, role, first_line, already_at_top)
+            })
+            .transpose()
+        },
+    )?;
+    m.fn_(
+        "reveal_block",
+        "Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.",
+        &["idx", "opts"],
+        |_, (idx, opts): (usize, Option<mlua::Table>)| -> LuaResult<bool> {
+            let top_padding = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<crate::smelt_edit::RowIndex>>("top_padding").ok().flatten())
+                .unwrap_or(0);
+            let cursor = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("cursor").ok().flatten())
+                .unwrap_or(true);
+            Ok(crate::lua::try_with_app(|app| {
+                app.reveal_transcript_descriptor_block(idx, top_padding, cursor)
             })
             .unwrap_or(false))
         },

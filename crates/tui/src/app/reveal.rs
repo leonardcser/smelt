@@ -164,6 +164,21 @@ impl TuiApp {
                 }),
             );
         }
+
+        if trace_reveal {
+            let anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport_width, position.row);
+            self.transcript.record_scroll_trace_event(
+                "reveal_after",
+                json!({
+                    "position_row": position.row,
+                    "position_byte_col": position.byte_col,
+                    "position_anchor": format!("{:?}", anchor),
+                    "window_scroll_after": self.transcript_scroll_top(),
+                }),
+            );
+        }
     }
 }
 
