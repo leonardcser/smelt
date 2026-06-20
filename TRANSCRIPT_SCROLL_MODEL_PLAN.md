@@ -952,6 +952,13 @@ Acceptance:
 - Click, drag, cursor reveal, and jump-to-bottom cannot change descriptor windows except by submitting a transcript intent.
 - Cursor disappearance is intentional and testable, not a side effect of sparse window replacement.
 
+Phase 4 result:
+
+- Rebuilt the transcript viewport content anchor around descriptor index, block id, intra-block row, and top-row bias, retaining the last resolved row only as a fallback when the semantic anchor cannot be rehydrated.
+- Preserve-viewport now resolves the stored descriptor/block anchor by loading a bounded descriptor window around that descriptor before deriving the paint row.
+- Extended existing cursor, selection, drag endpoint, scroll-top, and search-range preservation helpers to store the same descriptor/block content anchors instead of bare render-row anchors.
+- Added regression coverage that replaces the active sparse descriptor window, then verifies preserve-viewport rehydrates the original block from its descriptor/block anchor.
+
 ### Reset Phase 5: Make local scroll exact and bounded
 
 Goal: smooth wheel and drag autoscroll by moving in exact local content space.

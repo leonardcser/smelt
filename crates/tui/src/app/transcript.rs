@@ -700,12 +700,24 @@ struct SparseProjectionGap {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptAnchorBias {
+    Top,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranscriptContentAnchor {
+    descriptor_index: usize,
+    block_id: BlockId,
+    intra_block_row: RowIndex,
+    bias: TranscriptAnchorBias,
+    row_anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+    fallback_row: RowIndex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TranscriptScrollAnchor {
     Tail,
-    Content {
-        virtual_row: RowIndex,
-        anchor: crate::content::transcript_buf::TranscriptRowAnchor,
-    },
+    Content(TranscriptContentAnchor),
     EstimatedRow(RowIndex),
 }
 
@@ -1058,13 +1070,10 @@ impl TranscriptDocument {
     fn trace_anchor(anchor: TranscriptScrollAnchor) -> TranscriptTraceAnchor {
         match anchor {
             TranscriptScrollAnchor::Tail => TranscriptTraceAnchor::Tail,
-            TranscriptScrollAnchor::Content {
-                virtual_row,
-                anchor,
-            } => TranscriptTraceAnchor::Content {
-                virtual_row,
-                node_id: anchor.id,
-                row_offset: anchor.row_offset,
+            TranscriptScrollAnchor::Content(anchor) => TranscriptTraceAnchor::Content {
+                virtual_row: anchor.fallback_row,
+                node_id: anchor.row_anchor.id,
+                row_offset: anchor.intra_block_row,
             },
             TranscriptScrollAnchor::EstimatedRow(row) => TranscriptTraceAnchor::EstimatedRow(row),
         }
@@ -1077,11 +1086,8 @@ impl TranscriptDocument {
         row: RowIndex,
     ) -> TranscriptTraceAnchor {
         let anchor = self
-            .row_anchor_at_row(lua, width, row)
-            .map(|anchor| TranscriptScrollAnchor::Content {
-                virtual_row: row,
-                anchor,
-            })
+            .content_anchor_at_row(lua, width, row, TranscriptAnchorBias::Top)
+            .map(TranscriptScrollAnchor::Content)
             .unwrap_or(TranscriptScrollAnchor::EstimatedRow(row));
         Self::trace_anchor(anchor)
     }
@@ -1435,23 +1441,66 @@ impl TranscriptDocument {
         })
     }
 
-    fn current_viewport_descriptor_anchor(&self) -> Option<(usize, BlockId, RowIndex)> {
-        if let Some(TranscriptScrollAnchor::Content { anchor, .. }) = self.viewport_state.top_anchor
+    fn descriptor_index_for_block_id(&self, block_id: BlockId) -> Option<usize> {
+        if let Some(index) = self
+            .sparse_descriptors
+            .descriptor_index_for_block_id(block_id)
         {
-            if let Some(block_id) = anchor.id.as_block_id() {
-                if let Some(index) = self
-                    .sparse_descriptors
-                    .descriptor_index_for_block_id(block_id)
-                {
-                    return Some((index.get(), block_id, anchor.row_offset));
-                }
-                if self.sparse_descriptors.total_count().is_none() {
-                    let history = self.history();
-                    if let Some(index) = history.order.iter().position(|id| *id == block_id) {
-                        return Some((index, block_id, anchor.row_offset));
-                    }
-                }
-            }
+            return Some(index.get());
+        }
+        if self.sparse_descriptors.total_count().is_none() {
+            return self.history().order.iter().position(|id| *id == block_id);
+        }
+        None
+    }
+
+    fn content_anchor_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+        bias: TranscriptAnchorBias,
+    ) -> Option<TranscriptContentAnchor> {
+        let row_anchor = self.row_anchor_at_row(lua, width, row)?;
+        let block_id = row_anchor.id.as_block_id()?;
+        let descriptor_index = self.descriptor_index_for_block_id(block_id)?;
+        Some(TranscriptContentAnchor {
+            descriptor_index,
+            block_id,
+            intra_block_row: row_anchor.row_offset,
+            bias,
+            row_anchor,
+            fallback_row: row,
+        })
+    }
+
+    fn row_for_content_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        anchor: TranscriptContentAnchor,
+    ) -> Option<RowIndex> {
+        if self.sparse_descriptors.total_count().is_some() {
+            let range = self.descriptor_window_range_around_center(
+                width,
+                anchor.descriptor_index,
+                viewport_rows,
+                true,
+            )?;
+            let _ = self.activate_descriptor_window_range(range);
+        }
+        self.row_for_anchor(lua, width, anchor.row_anchor)
+            .or(Some(anchor.fallback_row))
+    }
+
+    fn current_viewport_descriptor_anchor(&self) -> Option<(usize, BlockId, RowIndex)> {
+        if let Some(TranscriptScrollAnchor::Content(anchor)) = self.viewport_state.top_anchor {
+            return Some((
+                anchor.descriptor_index,
+                anchor.block_id,
+                anchor.intra_block_row,
+            ));
         }
 
         if let Some(active) = self.active_descriptor_range.as_ref() {
@@ -1945,18 +1994,14 @@ impl TranscriptDocument {
     ) {
         let top_anchor = match fallback {
             TranscriptScrollAnchor::Tail => Some(TranscriptScrollAnchor::Tail),
-            TranscriptScrollAnchor::Content { .. } | TranscriptScrollAnchor::EstimatedRow(_) => {
-                self.row_anchor_at_row(lua, width, top_row)
-                    .map(|anchor| TranscriptScrollAnchor::Content {
-                        virtual_row: top_row,
-                        anchor,
-                    })
-                    .or(Some(fallback))
-            }
+            TranscriptScrollAnchor::Content(_) | TranscriptScrollAnchor::EstimatedRow(_) => self
+                .content_anchor_at_row(lua, width, top_row, TranscriptAnchorBias::Top)
+                .map(TranscriptScrollAnchor::Content)
+                .or(Some(fallback)),
         };
         self.viewport_state.mode = match top_anchor {
             Some(TranscriptScrollAnchor::Tail) => TranscriptViewportMode::Tail,
-            Some(TranscriptScrollAnchor::Content { .. }) => TranscriptViewportMode::Anchored,
+            Some(TranscriptScrollAnchor::Content(_)) => TranscriptViewportMode::Anchored,
             Some(TranscriptScrollAnchor::EstimatedRow(_)) | None => TranscriptViewportMode::FarSeek,
         };
         self.viewport_state.top_anchor = top_anchor;
@@ -2023,6 +2068,7 @@ impl TranscriptDocument {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
+        viewport_rows: u16,
         fallback_scroll_top: RowIndex,
     ) -> Option<RowIndex> {
         match self.viewport_state.top_anchor {
@@ -2033,12 +2079,9 @@ impl TranscriptDocument {
                 .viewport_state
                 .resolved_scroll_top
                 .or(Some(fallback_scroll_top)),
-            Some(TranscriptScrollAnchor::Content {
-                virtual_row,
-                anchor,
-            }) => self
-                .row_for_anchor(lua, width, anchor)
-                .or(Some(virtual_row)),
+            Some(TranscriptScrollAnchor::Content(anchor)) => {
+                self.row_for_content_anchor(lua, width, viewport_rows, anchor)
+            }
             Some(TranscriptScrollAnchor::EstimatedRow(row)) => Some(row),
             None => Some(fallback_scroll_top),
         }
@@ -2061,7 +2104,7 @@ impl TranscriptDocument {
         rows: isize,
     ) -> crate::content::transcript_buf::ScrollTarget {
         let base = self
-            .row_for_viewport_anchor(lua, width, fallback_scroll_top)
+            .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
             .unwrap_or(fallback_scroll_top);
         let row = Self::add_rows(base, rows);
         self.activate_descriptor_window_covering_virtual_row(lua, width, row, viewport_rows);
@@ -2081,7 +2124,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollTarget::visible_tail()
             }
             TranscriptScrollIntent::PreserveViewport => {
-                match self.row_for_viewport_anchor(lua, width, fallback_scroll_top) {
+                match self.row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top) {
                     Some(row) => {
                         crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
                     }
@@ -2595,7 +2638,7 @@ impl TranscriptDocument {
         position: crate::smelt_edit::DocPosition,
     ) -> TranscriptPositionAnchor {
         TranscriptPositionAnchor {
-            anchor: self.row_anchor_at_row(lua, width, position.row),
+            anchor: self.content_anchor_at_row(lua, width, position.row, TranscriptAnchorBias::Top),
             position,
         }
     }
@@ -2620,7 +2663,7 @@ impl TranscriptDocument {
     ) -> crate::smelt_edit::DocPosition {
         let row = anchor
             .anchor
-            .and_then(|anchor| self.row_for_anchor(lua, width, anchor))
+            .and_then(|anchor| self.row_for_content_anchor(lua, width, 20, anchor))
             .unwrap_or(anchor.position.row);
         crate::smelt_edit::DocPosition {
             row,
@@ -4659,6 +4702,108 @@ mod document_tests {
     }
 
     #[test]
+    fn viewport_anchor_preserves_descriptor_block_across_window_replacement() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 6;
+        let descriptor_index = 50;
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Transcript::new();
+        for idx in 0..100 {
+            if idx == descriptor_index {
+                source.push(Block::User {
+                    text: format!("user {idx}"),
+                    image_labels: Vec::new(),
+                });
+            } else {
+                source.push(Block::Text {
+                    content: format!("assistant {idx}"),
+                });
+            }
+        }
+        let records = source.history.descriptor_records();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            80..100,
+            Some(dir.path().to_path_buf()),
+        ));
+        let block_id = BlockId::new(descriptor_index as u64);
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(912), Default::default());
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
+            descriptor_index,
+            block_id,
+            row_offset: 0,
+            screen_padding_top: 0,
+        });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: 0,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        let anchor = match document.viewport_state.top_anchor {
+            Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
+            other => panic!("expected content viewport anchor, got {other:?}"),
+        };
+        assert_eq!(anchor.descriptor_index, descriptor_index);
+        assert_eq!(anchor.block_id, block_id);
+        assert_eq!(anchor.intra_block_row, anchor.row_anchor.row_offset);
+        assert_eq!(anchor.bias, TranscriptAnchorBias::Top);
+        assert_eq!(anchor.fallback_row, rows.clamped_scroll);
+        let position_anchor = document.position_anchor(
+            &lua,
+            width,
+            crate::smelt_edit::DocPosition {
+                row: rows.clamped_scroll,
+                byte_col: 0,
+            },
+        );
+        let position_content_anchor = position_anchor
+            .anchor
+            .expect("position preservation should store a content anchor");
+        assert_eq!(position_content_anchor.descriptor_index, descriptor_index);
+        assert_eq!(position_content_anchor.block_id, block_id);
+
+        assert!(document.activate_descriptor_window_range(
+            smelt_store::TranscriptDescriptorIndex::new(80)
+                ..smelt_store::TranscriptDescriptorIndex::new(100)
+        ));
+        assert!(!active_history_contains(&document, "user 50"));
+
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: rows.clamped_scroll.saturating_add(999),
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let _rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        assert!(active_history_contains(&document, "user 50"));
+        let anchor_after = match document.viewport_state.top_anchor {
+            Some(TranscriptScrollAnchor::Content(anchor)) => anchor,
+            other => panic!("expected preserved content viewport anchor, got {other:?}"),
+        };
+        assert_eq!(anchor_after.descriptor_index, descriptor_index);
+        assert_eq!(anchor_after.block_id, block_id);
+        assert_eq!(anchor_after.intra_block_row, anchor.intra_block_row);
+    }
+
+    #[test]
     fn sparse_block_lookup_searches_previous_windows_for_role_match() {
         let lua = LuaRuntime::new();
         let dir = tempfile::tempdir().unwrap();
@@ -5060,7 +5205,7 @@ fn transcript_history_role(history: &BlockHistory, id: BlockId) -> &'static str 
 
 #[derive(Clone, Copy)]
 struct TranscriptPositionAnchor {
-    anchor: Option<crate::content::transcript_buf::TranscriptRowAnchor>,
+    anchor: Option<TranscriptContentAnchor>,
     position: crate::smelt_edit::DocPosition,
 }
 
