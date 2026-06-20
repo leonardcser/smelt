@@ -520,6 +520,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           },
           session = {
             context_tokens = function() return 1200 end,
+            context_tokens_stale = function() return false end,
             context_window = function() return 10000 end,
             cost = function() return 0.23 end,
           },
