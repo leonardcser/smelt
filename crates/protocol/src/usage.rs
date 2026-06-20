@@ -63,7 +63,9 @@ impl TokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnMeta {
     pub elapsed_ms: u64,
-    /// Average token speed reported by this turn itself.
+    /// Average end-to-end provider request throughput reported by this turn.
+    /// This is completion tokens divided by full provider request elapsed time,
+    /// including provider/network latency and excluding later tool execution.
     pub avg_tps: Option<f64>,
     /// Token speed displayed at this history point. This may carry the last
     /// observed speed forward when a turn completes without its own sample.

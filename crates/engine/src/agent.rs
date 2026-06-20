@@ -1491,6 +1491,12 @@ impl<'a> Turn<'a> {
             );
             crate::result_dedup::apply_in_place(&mut invocations, &self.history);
             crate::trim::budget_tool_invocations(&mut invocations);
+            self.tool_elapsed
+                .extend(invocations.iter().filter_map(|invocation| {
+                    invocation
+                        .elapsed_ms
+                        .map(|ms| (invocation.call_id.clone(), ms))
+                }));
             self.push_assistant_step(AssistantStep::with_invocations(
                 post_hook_content,
                 post_hook_reasoning,
@@ -1747,6 +1753,7 @@ impl<'a> Turn<'a> {
                         {
                             let (idx, _) = plan.pending_perms.swap_remove(pos);
                             if approved {
+                                plan.slots[idx].start = clock.instant_now();
                                 plan.slots[idx].confirm_msg = message;
                                 let fut = dispatcher
                                     .dispatch(
@@ -1757,6 +1764,7 @@ impl<'a> Turn<'a> {
                                     .expect("dispatcher resolved tool at slot-build time");
                                 futs.push(Box::pin(async move { (idx, fut.await) }));
                             } else {
+                                plan.slots[idx].start = clock.instant_now();
                                 let denial = match message {
                                     Some(msg) => format!(
                                         "The user denied this tool call with message: {msg}"
@@ -1777,8 +1785,9 @@ impl<'a> Turn<'a> {
                             .iter()
                             .position(|(rid, _)| *rid == request_id)
                         {
-                            let (_, pending) = plan.pending_tool_perms.swap_remove(pos);
+                            let (_, mut pending) = plan.pending_tool_perms.swap_remove(pos);
                             if approved {
+                                pending.tool_start = clock.instant_now();
                                 if pending.is_sequential {
                                     plan.sequential_tools.push((
                                         pending.tc,
@@ -1809,8 +1818,7 @@ impl<'a> Turn<'a> {
                                              approach or ask the user for guidance."
                                         .to_string(),
                                 };
-                                let tool_start = pending.tool_start;
-                                let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                let elapsed_ms = None;
                                 let outcome = ToolOutcome {
                                     content: denial,
                                     is_error: false,
@@ -1832,10 +1840,11 @@ impl<'a> Turn<'a> {
                             .iter()
                             .position(|(rid, _)| *rid == request_id)
                         {
-                            let (_, pending) = plan.pending_tool_hooks.swap_remove(pos);
+                            let (_, mut pending) = plan.pending_tool_hooks.swap_remove(pos);
                             let protocol::ToolEvaluation { decision, metadata } = evaluation;
                             match decision {
                                 Decision::Allow => {
+                                    pending.tool_start = clock.instant_now();
                                     if pending.is_sequential {
                                         plan.sequential_tools.push((
                                             pending.tc,
@@ -1865,8 +1874,7 @@ impl<'a> Turn<'a> {
                                                   this tool call. Try a different approach \
                                                   or ask the user for guidance."
                                         .to_string();
-                                    let tool_start = pending.tool_start;
-                                    let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                    let elapsed_ms = None;
                                     let outcome = ToolOutcome {
                                         content: denial,
                                         is_error: false,
@@ -1881,8 +1889,7 @@ impl<'a> Turn<'a> {
                                     outstanding -= 1;
                                 }
                                 Decision::Error(ref err) => {
-                                    let tool_start = pending.tool_start;
-                                    let elapsed_ms = Some(elapsed_ms_since(tool_start));
+                                    let elapsed_ms = None;
                                     let outcome = ToolOutcome {
                                         content: err.clone(),
                                         is_error: true,
@@ -1989,6 +1996,9 @@ impl<'a> Turn<'a> {
         };
 
         if cancelled {
+            for (idx, _) in &plan.pending_perms {
+                plan.slots[*idx].start = clock.instant_now();
+            }
             let cancelled_outcome = || ToolOutcome {
                 content: "cancelled".to_string(),
                 is_error: true,
@@ -2005,7 +2015,7 @@ impl<'a> Turn<'a> {
                 tool_results.push((call_id, outcome, elapsed_ms));
             }
             for (_, pending) in plan.pending_tool_hooks.drain(..) {
-                let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
+                let elapsed_ms = None;
                 let outcome = cancelled_outcome();
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: pending.tc.id.clone(),
@@ -2015,7 +2025,7 @@ impl<'a> Turn<'a> {
                 tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
             }
             for (_, pending) in plan.pending_tool_perms.drain(..) {
-                let elapsed_ms = Some(elapsed_ms_since(pending.tool_start));
+                let elapsed_ms = None;
                 let _ = self.event_tx.send(EngineEvent::ToolFinished {
                     call_id: pending.tc.id.clone(),
                     result: cancelled_outcome(),

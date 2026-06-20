@@ -521,7 +521,16 @@ impl TuiApp {
             }
         };
 
-        let mut meta = self.pending_turn_meta.take().unwrap_or(meta);
+        let mut meta = match self.pending_turn_meta.take() {
+            Some(engine_meta) => protocol::TurnMeta {
+                elapsed_ms: meta.elapsed_ms,
+                avg_tps: engine_meta.avg_tps.or(meta.avg_tps),
+                display_tps: engine_meta.display_tps.or(meta.display_tps),
+                interrupted: engine_meta.interrupted,
+                tool_elapsed: engine_meta.tool_elapsed,
+            },
+            None => meta,
+        };
         if meta.display_tps.is_none() {
             meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
         }
