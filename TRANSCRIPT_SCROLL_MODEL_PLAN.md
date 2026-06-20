@@ -976,6 +976,13 @@ Acceptance:
 - Drag autoscroll does not stop because the cursor/edge crossed an unloaded sparse gap.
 - Loading an adjacent window does not move the visible anchor unexpectedly.
 
+Phase 5 result:
+
+- Local `UserDelta` and `PageDelta` scroll now resolve from the stored content anchor, then try bounded previous/next descriptor-window loads when the target crosses the active sparse window edge.
+- Nearby local deltas no longer use the row-to-average descriptor guess reserved for coarse far seeks.
+- Sparse placeholders remain disabled for local deltas; if adjacent content cannot be loaded, projection stays on exact loaded content instead of exposing inert gap rows.
+- Added regression coverage for a local upward delta crossing the active sparse boundary, loading the previous descriptor window, keeping placeholders hidden, and preserving a semantic top anchor.
+
 ### Reset Phase 6: Keep estimates only for scrollbar and far seek
 
 Goal: make approximation explicit and harmless.

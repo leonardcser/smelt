@@ -1779,8 +1779,34 @@ impl TranscriptDocument {
         )
     }
 
+    fn next_descriptor_window_range(
+        &self,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
+        let active = self.active_descriptor_range.clone()?;
+        let total = self.sparse_descriptors.total_count()?;
+        let start = active.end.get();
+        if start >= total {
+            return None;
+        }
+        let count = self.descriptor_window_count(width, viewport_rows, total);
+        let end = start.saturating_add(count).min(total);
+        Some(
+            smelt_store::TranscriptDescriptorIndex::new(start)
+                ..smelt_store::TranscriptDescriptorIndex::new(end),
+        )
+    }
+
     fn activate_previous_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
         let Some(range) = self.previous_descriptor_window_range(width, viewport_rows) else {
+            return false;
+        };
+        self.activate_descriptor_window_range(range)
+    }
+
+    fn activate_next_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
+        let Some(range) = self.next_descriptor_window_range(width, viewport_rows) else {
             return false;
         };
         self.activate_descriptor_window_range(range)
@@ -2095,6 +2121,39 @@ impl TranscriptDocument {
         self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
     }
 
+    fn activate_adjacent_descriptor_window_for_local_delta(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        target_row: RowIndex,
+        rows: isize,
+    ) {
+        const MAX_ADJACENT_LOADS_PER_DELTA: usize = 4;
+        if rows == 0 {
+            return;
+        }
+        let viewport_row_count = RowIndex::from(viewport_rows.max(1));
+        for _ in 0..MAX_ADJACENT_LOADS_PER_DELTA {
+            let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) else {
+                return;
+            };
+            let target_end = target_row.saturating_add(viewport_row_count);
+            let needs_previous = rows < 0 && target_row < loaded_start;
+            let needs_next = rows > 0 && target_end > loaded_end;
+            let changed = if needs_previous {
+                self.activate_previous_descriptor_window(width, viewport_rows)
+            } else if needs_next {
+                self.activate_next_descriptor_window(width, viewport_rows)
+            } else {
+                return;
+            };
+            if !changed {
+                return;
+            }
+        }
+    }
+
     fn local_delta_scroll_target(
         &mut self,
         lua: &LuaRuntime,
@@ -2107,7 +2166,13 @@ impl TranscriptDocument {
             .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
             .unwrap_or(fallback_scroll_top);
         let row = Self::add_rows(base, rows);
-        self.activate_descriptor_window_covering_virtual_row(lua, width, row, viewport_rows);
+        self.activate_adjacent_descriptor_window_for_local_delta(
+            lua,
+            width,
+            viewport_rows,
+            row,
+            rows,
+        );
         crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
     }
 
@@ -3405,6 +3470,129 @@ mod document_tests {
             far.placeholder_rows_visible,
             "far seek intents may expose inert sparse placeholders"
         );
+    }
+
+    #[test]
+    fn local_delta_crossing_sparse_boundary_loads_adjacent_window() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 6;
+        let records = transcript_records(100);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            60..80,
+            Some(dir.path().to_path_buf()),
+        ));
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(414), Default::default());
+        let loaded_start = document.estimated_sparse_prefix_row_offset(width);
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(loaded_start),
+            viewport_rows,
+        );
+        let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        assert!(!first.placeholder_rows_visible);
+        assert!(active_history_contains(&document, "block 60"));
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -4 });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: first.materialized_rows.clamped_scroll.saturating_sub(4),
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let local = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert!(
+            !local.placeholder_rows_visible,
+            "local deltas must load adjacent content instead of exposing sparse placeholders"
+        );
+        let active = document
+            .active_descriptor_range
+            .as_ref()
+            .expect("active adjacent descriptor window");
+        assert_eq!(active.end.get(), 60);
+        assert!(active.start.get() < 60);
+        assert!(active_history_contains(&document, "block 59"));
+        assert!(matches!(
+            document.viewport_state.top_anchor,
+            Some(TranscriptScrollAnchor::Content(_))
+        ));
+        assert!(local.materialized_rows.clamped_scroll < first.materialized_rows.clamped_scroll);
+    }
+
+    #[test]
+    fn local_delta_crossing_sparse_boundary_loads_next_adjacent_window() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 6;
+        let records = transcript_records(100);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            20..40,
+            Some(dir.path().to_path_buf()),
+        ));
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(415), Default::default());
+        let (_, loaded_end) = document
+            .active_virtual_row_span(&lua, width)
+            .expect("active row span");
+        let top = loaded_end.saturating_sub(RowIndex::from(viewport_rows));
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(top),
+            viewport_rows,
+        );
+        let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        assert!(!first.placeholder_rows_visible);
+        assert!(active_history_contains(&document, "block 39"));
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: 4 });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: first.materialized_rows.clamped_scroll.saturating_add(4),
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let local = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert!(
+            !local.placeholder_rows_visible,
+            "local downward deltas must load adjacent content instead of sparse placeholders"
+        );
+        let active = document
+            .active_descriptor_range
+            .as_ref()
+            .expect("active adjacent descriptor window");
+        assert_eq!(active.start.get(), 40);
+        assert!(active.end.get() > 40);
+        assert!(active_history_contains(&document, "block 40"));
+        assert!(matches!(
+            document.viewport_state.top_anchor,
+            Some(TranscriptScrollAnchor::Content(_))
+        ));
+        assert!(local.materialized_rows.clamped_scroll > first.materialized_rows.clamped_scroll);
     }
 
     #[test]
