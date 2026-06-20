@@ -963,6 +963,15 @@ impl TranscriptDocument {
         }
     }
 
+    fn intent_allows_sparse_placeholders(intent: &TranscriptScrollIntent) -> bool {
+        matches!(
+            intent,
+            TranscriptScrollIntent::ScrollbarFraction { .. }
+                | TranscriptScrollIntent::ApproximateRowSeek(_)
+                | TranscriptScrollIntent::CurrentRowTarget(_)
+        )
+    }
+
     fn trace_descriptor_range(
         range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
     ) -> Option<TranscriptDescriptorTraceRange> {
@@ -1186,13 +1195,14 @@ impl TranscriptDocument {
         )
     }
 
-    fn approximate_loaded_row_for_virtual_content_row(
+    fn exact_loaded_row_for_virtual_content_row(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         row: RowIndex,
     ) -> Option<RowIndex> {
-        let offset = self.estimated_sparse_prefix_row_offset(width);
-        (row >= offset).then_some(row.saturating_sub(offset))
+        let (loaded_start, loaded_end) = self.active_virtual_row_span(lua, width)?;
+        (loaded_start <= row && row < loaded_end).then_some(row.saturating_sub(loaded_start))
     }
 
     fn offset_node_row(
@@ -1305,10 +1315,12 @@ impl TranscriptDocument {
     ) -> Option<TranscriptBlockSnapshot> {
         let _ = self.activate_descriptor_window_for_virtual_row(width, row, 20);
         loop {
-            if let Some(node) = self.block_node_before_or_at_row(lua, width, row, |history, id| {
-                role.is_none_or(|role| transcript_history_role(history, id) == role)
-                    && !transcript_raw_first_line(history, id).is_empty()
-            }) {
+            if let Some(node) =
+                self.loaded_block_node_before_or_at_virtual_row(lua, width, row, |history, id| {
+                    role.is_none_or(|role| transcript_history_role(history, id) == role)
+                        && !transcript_raw_first_line(history, id).is_empty()
+                })
+            {
                 let block_id = node.id.as_block_id()?;
                 let history = self.history();
                 let idx = history.order.iter().position(|id| *id == block_id)?;
@@ -1368,7 +1380,7 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         forward: bool,
     ) -> Option<BlockId> {
-        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
+        let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
         self.projection.block_id_at_or_before_row(
             lua,
             &mut self.transcript.history,
@@ -1521,11 +1533,17 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> Option<(RowIndex, RowIndex)> {
-        self.active_descriptor_range.as_ref()?;
-        let row_offset = self.estimated_sparse_prefix_row_offset(width);
         let loaded_rows =
             self.projection
                 .estimated_total_rows(lua, &mut self.transcript.history, width);
+        if self.active_descriptor_range.is_none() {
+            return self
+                .sparse_descriptors
+                .total_count()
+                .is_none()
+                .then_some((0, loaded_rows));
+        }
+        let row_offset = self.estimated_sparse_prefix_row_offset(width);
         Some((row_offset, row_offset.saturating_add(loaded_rows)))
     }
 
@@ -1860,6 +1878,7 @@ impl TranscriptDocument {
         viewport_rows: u16,
     ) -> TranscriptProjectionPlan {
         let intent = self.take_viewport_intent(input);
+        let allow_sparse_placeholders = Self::intent_allows_sparse_placeholders(&intent);
         let scroll_target = self.scroll_target_for_intent(
             lua,
             width,
@@ -1877,7 +1896,14 @@ impl TranscriptDocument {
                 window_scroll_after_input: input.fallback_scroll_top,
             });
         }
-        self.plan_projection_measured(lua, width, theme, scroll_target, viewport_rows)
+        self.plan_projection_measured_with_sparse_placeholders(
+            lua,
+            width,
+            theme,
+            scroll_target,
+            viewport_rows,
+            allow_sparse_placeholders,
+        )
     }
 
     pub(crate) fn plan_projection_measured(
@@ -1887,6 +1913,25 @@ impl TranscriptDocument {
         theme: &Theme,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
+    ) -> TranscriptProjectionPlan {
+        self.plan_projection_measured_with_sparse_placeholders(
+            lua,
+            width,
+            theme,
+            scroll_target,
+            viewport_rows,
+            true,
+        )
+    }
+
+    fn plan_projection_measured_with_sparse_placeholders(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        theme: &Theme,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        viewport_rows: u16,
+        allow_sparse_placeholders: bool,
     ) -> TranscriptProjectionPlan {
         let scroll_target =
             self.resolve_exact_scroll_target_from_viewport_anchor(lua, width, scroll_target);
@@ -1956,35 +2001,39 @@ impl TranscriptDocument {
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let loaded_start = row_offset;
         let loaded_end = row_offset.saturating_add(loaded_rows).min(total_rows);
-        let sparse_gap = match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
-                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
-            ) if row < loaded_start => {
-                let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
-                Some(SparseProjectionGap {
-                    scroll_top,
-                    row_base: scroll_top
-                        .saturating_sub(viewport_row_count / 2)
-                        .min(loaded_start),
-                    end: loaded_start,
-                })
+        let sparse_gap = if allow_sparse_placeholders {
+            match scroll_target {
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
+                    | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+                ) if row < loaded_start => {
+                    let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
+                    Some(SparseProjectionGap {
+                        scroll_top,
+                        row_base: scroll_top
+                            .saturating_sub(viewport_row_count / 2)
+                            .min(loaded_start),
+                        end: loaded_start,
+                    })
+                }
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
+                    | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+                ) if row >= loaded_end && loaded_end < total_rows => {
+                    let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
+                    Some(SparseProjectionGap {
+                        scroll_top,
+                        row_base: scroll_top
+                            .saturating_sub(viewport_row_count / 2)
+                            .max(loaded_end)
+                            .min(total_rows),
+                        end: total_rows,
+                    })
+                }
+                _ => None,
             }
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
-                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
-            ) if row >= loaded_end && loaded_end < total_rows => {
-                let scroll_top = row.min(total_rows.saturating_sub(viewport_row_count));
-                Some(SparseProjectionGap {
-                    scroll_top,
-                    row_base: scroll_top
-                        .saturating_sub(viewport_row_count / 2)
-                        .max(loaded_end)
-                        .min(total_rows),
-                    end: total_rows,
-                })
-            }
-            _ => None,
+        } else {
+            None
         };
         let materialization = sparse_gap
             .map(TranscriptMaterializationPlan::UnloadedGap)
@@ -2221,13 +2270,7 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
-        let loaded_rows =
-            self.projection
-                .estimated_total_rows(lua, &mut self.transcript.history, width);
-        if local_row >= loaded_rows {
-            return None;
-        }
+        let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
         self.projection
             .node_metadata_at_row(lua, &mut self.transcript.history, width, local_row)
             .map(|node| self.offset_node_row(width, node))
@@ -2239,13 +2282,7 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
-        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
-        let loaded_rows =
-            self.projection
-                .estimated_total_rows(lua, &mut self.transcript.history, width);
-        if local_row >= loaded_rows {
-            return None;
-        }
+        let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
         self.projection
             .row_anchor_at_row(lua, &mut self.transcript.history, width, local_row)
     }
@@ -2314,6 +2351,32 @@ impl TranscriptDocument {
         }
     }
 
+    fn loaded_block_node_before_or_at_virtual_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: crate::smelt_edit::RowIndex,
+        matches: impl FnMut(&BlockHistory, BlockId) -> bool,
+    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+        let (loaded_start, loaded_end) = self.active_virtual_row_span(lua, width)?;
+        if row < loaded_start || loaded_start >= loaded_end {
+            return None;
+        }
+        let local_row = row
+            .min(loaded_end.saturating_sub(1))
+            .saturating_sub(loaded_start);
+        self.projection
+            .block_node_before_or_at_row(
+                lua,
+                &mut self.transcript.history,
+                width,
+                local_row,
+                matches,
+            )
+            .map(|node| self.offset_node_row(width, node))
+    }
+
+    #[cfg(test)]
     pub(crate) fn block_node_before_or_at_row(
         &mut self,
         lua: &LuaRuntime,
@@ -2321,7 +2384,7 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         matches: impl FnMut(&BlockHistory, BlockId) -> bool,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
+        let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
         self.projection
             .block_node_before_or_at_row(
                 lua,
@@ -2341,16 +2404,9 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
         activation: crate::content::transcript_buf::FoldActivation,
     ) -> bool {
-        let Some(local_row) = self.approximate_loaded_row_for_virtual_content_row(width, row)
-        else {
+        let Some(local_row) = self.exact_loaded_row_for_virtual_content_row(lua, width, row) else {
             return false;
         };
-        let loaded_rows =
-            self.projection
-                .estimated_total_rows(lua, &mut self.transcript.history, width);
-        if local_row >= loaded_rows {
-            return false;
-        }
         let changed = self.projection.fold_node_at_row(
             lua,
             &mut self.transcript.history,
@@ -2948,6 +3004,78 @@ mod document_tests {
     }
 
     #[test]
+    fn local_delta_without_adjacent_descriptors_stays_on_exact_loaded_content() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 6;
+        let records = transcript_records(80);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            60..80,
+            None,
+        ));
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(413), Default::default());
+
+        let tail_plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: 0,
+                follow_tail: true,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let tail = document.project_applied_viewport(&lua, &mut buf, &theme, tail_plan);
+        assert!(!tail.placeholder_rows_visible);
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -10_000 });
+        let local_plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: tail.materialized_rows.clamped_scroll.saturating_sub(10_000),
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let local = document.project_applied_viewport(&lua, &mut buf, &theme, local_plan);
+        assert!(
+            !local.placeholder_rows_visible,
+            "local deltas must stay on exact loaded content instead of sparse placeholders"
+        );
+        assert!(local.top_anchor.is_some());
+
+        document.set_pending_scroll_intent(TranscriptScrollIntent::ScrollbarFraction {
+            numerator: 0,
+            denominator: 1,
+        });
+        let far_plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: local.materialized_rows.clamped_scroll,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let far = document.project_applied_viewport(&lua, &mut buf, &theme, far_plan);
+        assert!(
+            far.placeholder_rows_visible,
+            "far seek intents may expose inert sparse placeholders"
+        );
+    }
+
+    #[test]
     fn transcript_scroll_trace_records_injected_exact_observation_count() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
@@ -3057,6 +3185,17 @@ mod document_tests {
         assert!(document
             .node_metadata_at_row(&lua, width, gap_row)
             .is_none());
+        assert!(document.row_anchor_at_row(&lua, width, gap_row).is_none());
+        assert!(document
+            .block_node_before_or_at_row(&lua, width, gap_row, |_, _| true)
+            .is_none());
+        assert!(!document.fold_node_at_row(
+            &lua,
+            width,
+            gap_row,
+            crate::content::transcript_buf::FoldAction::Open,
+            crate::content::transcript_buf::FoldActivation::AnyNodeRow,
+        ));
 
         let action = {
             let mut display_document =
@@ -3099,6 +3238,19 @@ mod document_tests {
         assert!(document
             .node_metadata_at_row(&lua, width, suffix_gap_row)
             .is_none());
+        assert!(document
+            .row_anchor_at_row(&lua, width, suffix_gap_row)
+            .is_none());
+        assert!(document
+            .block_node_before_or_at_row(&lua, width, suffix_gap_row, |_, _| true)
+            .is_none());
+        assert!(!document.fold_node_at_row(
+            &lua,
+            width,
+            suffix_gap_row,
+            crate::content::transcript_buf::FoldAction::Open,
+            crate::content::transcript_buf::FoldActivation::AnyNodeRow,
+        ));
         let action = {
             let mut display_document =
                 TranscriptDisplayDocument::new(&mut document, &lua, width, &theme);

@@ -923,6 +923,25 @@ Acceptance:
 - Estimates affect scrollbar geometry and far seek only.
 - Copy, hit testing, selection, actions, folds, cursor placement, and visible local scroll use exact rows.
 
+Phase 6 implementation record:
+
+- Audited sparse estimate consumers and kept approximate totals on scrollbar geometry, far seek targeting, trace metadata, descriptor activation, and compatibility/test projection entry points.
+- Split viewport projection planning so production transcript intents decide whether sparse placeholders may be materialized. `UserDelta`, `PageDelta`, `PreserveViewport`, `ResizeReflow`, semantic content/search, and `Tail` intents now disallow placeholder rows; scrollbar fraction, approximate row seek, and the temporary current-row compatibility target may still use inert sparse placeholders.
+- Replaced exact content-row lookup through sparse prefix estimates with an exact loaded virtual-row span. Node metadata, row anchors, folds, and exact block-node test coverage now reject unloaded prefix and suffix rows instead of translating them through estimates.
+- Preserved full-transcript behavior by treating non-sparse documents as an exact loaded span from row zero, and kept intentional loaded-window backward searches exact within each loaded descriptor window.
+- Strengthened sparse-gap tests so unloaded prefix and suffix rows expose no text, actions, metadata, row anchors, block nodes, or fold targets. Added a viewport test proving local deltas stay on exact loaded content while far seeks can still expose inert placeholders.
+
+Phase 6 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-tui --features harness unloaded_sparse_gaps_do_not_provide_content_or_hit_targets -- --nocapture`
+- `cargo test -p smelt-tui --features harness local_delta_without_adjacent_descriptors_stays_on_exact_loaded_content -- --nocapture`
+- `cargo test -p smelt-tui --features harness sparse_block_lookup_searches_previous_windows_for_role_match -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_scroll -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_ -- --nocapture`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness`
+
 ### Phase 7: Cleanup obsolete row-authority paths
 
 Goal: finish with fewer competing models than before.
