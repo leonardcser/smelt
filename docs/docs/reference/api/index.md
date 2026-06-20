@@ -99,7 +99,7 @@ Contains both Host and UiHost functions; per-function pages list the exact tier.
 - [`smelt.cmd`](cmd.md) - 4 function(s)
 - [`smelt.mode`](mode.md) - 10 function(s)
 - [`smelt.reasoning`](reasoning.md) - 2 function(s)
-- [`smelt.transcript`](transcript.md) - 17 function(s)
+- [`smelt.transcript`](transcript.md) - 19 function(s)
 
 ## Types
 

@@ -19,7 +19,7 @@ local state = {
   top_buf = nil,
   top_win = nil,
   top_width = nil,
-  top_target_row = nil,
+  top_target_idx = nil,
 }
 
 -- ── Common lifecycle ───────────────────────────────────────────────────
@@ -37,7 +37,7 @@ local function close_top()
   state.top_buf = nil
   state.top_win = nil
   state.top_width = nil
-  state.top_target_row = nil
+  state.top_target_idx = nil
 end
 
 local function close_all()
@@ -124,9 +124,8 @@ end
 -- block sits exactly at the viewport top (already visible, click would no-op).
 local function user_block_for_top_pill(scroll)
   if not can_show_top(scroll) then return nil end
-  local b = smelt.transcript.block_before_or_at_row(scroll.top, { role = "user" })
-  if not b or b.first_line == "" then return nil end
-  if b.first_row == scroll.top then return nil end
+  local b = smelt.transcript.previous_block({ role = "user" })
+  if not b or b.first_line == "" or b.already_at_top then return nil end
   return b
 end
 
@@ -139,8 +138,8 @@ local function open_top(width)
     scrollbar = false,
   })
   win:on("press", function()
-    if state.top_target_row and state.transcript_win then
-      state.transcript_win:reveal(state.top_target_row, { top_padding = 1, cursor = true })
+    if state.top_target_idx then
+      smelt.transcript.reveal_block(state.top_target_idx, { top_padding = 1, cursor = true })
     end
   end)
   state.top_buf = buf
@@ -190,7 +189,7 @@ local function refresh_top(scroll)
 
   if state.top_overlay and state.top_width ~= width then close_top() end
   if not state.top_overlay then open_top(width) end
-  state.top_target_row = target.first_row
+  state.top_target_idx = target.idx
   paint_top_row(width, target.first_line)
 end
 

@@ -472,6 +472,14 @@ impl SessionDb {
         history::read_transcript_descriptor_tail_slice_with_total(&self.conn, total_count, count)
     }
 
+    pub fn read_transcript_descriptor_before_kind(
+        &self,
+        kind: &str,
+        before_or_at_block_idx: u64,
+    ) -> Result<Option<TranscriptDescriptorRecord>> {
+        history::read_transcript_descriptor_before_kind(&self.conn, kind, before_or_at_block_idx)
+    }
+
     pub fn search_transcript_candidates(
         &self,
         query: &str,
@@ -972,6 +980,39 @@ mod tests {
                 .unwrap()
                 .records,
             expected_all
+        );
+    }
+
+    #[test]
+    fn transcript_descriptor_before_kind_reads_nearest_matching_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut records = (0..6)
+            .map(|idx| transcript_record(idx, &format!("block-{idx}"), &format!("text {idx}")))
+            .collect::<Vec<_>>();
+        records[1].kind = "user".into();
+        records[4].kind = "user".into();
+        db.replace_transcript_descriptor_records(&records).unwrap();
+
+        assert_eq!(
+            db.read_transcript_descriptor_before_kind("user", 5)
+                .unwrap(),
+            Some(without_search_text(records[4].clone()))
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_before_kind("user", 4)
+                .unwrap(),
+            Some(without_search_text(records[4].clone()))
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_before_kind("user", 3)
+                .unwrap(),
+            Some(without_search_text(records[1].clone()))
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_before_kind("tool", 5)
+                .unwrap(),
+            None
         );
     }
 

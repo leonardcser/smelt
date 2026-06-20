@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
 use crate::smelt_edit::{DocPosition, RowIndex, WinId};
@@ -76,6 +78,29 @@ impl TuiApp {
         else {
             return;
         };
+        let trace_reveal =
+            leaf == crate::app::TRANSCRIPT_WIN && self.transcript.scroll_trace_enabled();
+        if trace_reveal {
+            let anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport_width, position.row);
+            self.transcript.record_scroll_trace_event(
+                "reveal_before",
+                json!({
+                    "position_row": position.row,
+                    "position_byte_col": position.byte_col,
+                    "position_anchor": format!("{:?}", anchor),
+                    "cursor": opts.cursor,
+                    "top_padding": opts.top_padding,
+                    "bottom_padding": opts.bottom_padding,
+                    "has_scroll_intent": opts.transcript_scroll_intent.is_some(),
+                    "window_scroll_before": self.transcript_scroll_top(),
+                    "viewport_rows": viewport_rows,
+                    "viewport_width": viewport_width,
+                    "is_row_backed": is_row_backed,
+                }),
+            );
+        }
         let trace_before = if leaf == crate::app::TRANSCRIPT_WIN {
             opts.transcript_scroll_intent
                 .map(|intent| (intent, self.transcript_scroll_top()))
@@ -136,6 +161,21 @@ impl TuiApp {
                 "search_jump",
                 intent.trace_intent(anchor),
                 window_scroll_before,
+            );
+        }
+
+        if trace_reveal {
+            let anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport_width, position.row);
+            self.transcript.record_scroll_trace_event(
+                "reveal_after",
+                json!({
+                    "position_row": position.row,
+                    "position_byte_col": position.byte_col,
+                    "position_anchor": format!("{:?}", anchor),
+                    "window_scroll_after": self.transcript_scroll_top(),
+                }),
             );
         }
     }

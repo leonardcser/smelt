@@ -34,7 +34,11 @@
 //! Trace records intentionally use descriptor indices, row anchors, block ids,
 //! counts, and optional timings. They must not contain transcript text.
 
+use std::io::Write;
 use std::ops::Range;
+use std::path::PathBuf;
+
+use serde_json::json;
 
 use crate::content::render_plan::RenderNodeId;
 use crate::smelt_edit::RowIndex;
@@ -221,12 +225,22 @@ impl TranscriptScrollTraceFrameStart {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TranscriptInteractionTraceEvent {
+    pub(crate) seq: u64,
+    pub(crate) kind: String,
+    pub(crate) data: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TranscriptScrollTrace {
     frames: Vec<TranscriptScrollTraceFrame>,
+    interaction_events: Vec<TranscriptInteractionTraceEvent>,
     pending_input: Option<TranscriptScrollTraceRenderInput>,
     last_resolved_scroll_top: Option<RowIndex>,
     record_timings: bool,
+    jsonl_path: Option<PathBuf>,
+    next_event_seq: u64,
 }
 
 impl TranscriptScrollTrace {
@@ -236,6 +250,76 @@ impl TranscriptScrollTrace {
             record_timings,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn with_jsonl_path(path: PathBuf, record_timings: bool) -> Self {
+        let trace = Self {
+            record_timings,
+            jsonl_path: Some(path),
+            ..Self::default()
+        };
+        trace.truncate_jsonl();
+        trace
+    }
+
+    fn truncate_jsonl(&self) {
+        let Some(path) = self.jsonl_path.as_ref() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::File::create(path);
+    }
+
+    pub(crate) fn record_interaction(&mut self, kind: impl Into<String>, data: serde_json::Value) {
+        let event = TranscriptInteractionTraceEvent {
+            seq: self.next_event_seq,
+            kind: kind.into(),
+            data,
+        };
+        self.next_event_seq = self.next_event_seq.saturating_add(1);
+        self.append_jsonl(&event);
+        self.interaction_events.push(event);
+    }
+
+    fn append_jsonl(&self, event: &TranscriptInteractionTraceEvent) {
+        let Some(path) = self.jsonl_path.as_ref() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return;
+        };
+        let _ = serde_json::to_writer(
+            &mut file,
+            &json!({
+                "seq": event.seq,
+                "kind": &event.kind,
+                "data": &event.data,
+            }),
+        );
+        let _ = file.write_all(b"\n");
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn interaction_events(&self) -> &[TranscriptInteractionTraceEvent] {
+        &self.interaction_events
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take_interaction_events(&mut self) -> Vec<TranscriptInteractionTraceEvent> {
+        std::mem::take(&mut self.interaction_events)
+    }
+
+    pub(crate) fn record_projection_frame_event(&mut self, frame: &TranscriptScrollTraceFrame) {
+        self.record_interaction("projection_frame", trace_frame_json(frame));
     }
 
     pub(crate) fn record_timings(&self) -> bool {
@@ -279,6 +363,7 @@ impl TranscriptScrollTrace {
 
     pub(crate) fn push(&mut self, frame: TranscriptScrollTraceFrame) {
         self.last_resolved_scroll_top = Some(frame.resolved_scroll_top);
+        self.record_projection_frame_event(&frame);
         self.frames.push(frame);
     }
 
@@ -295,4 +380,52 @@ impl TranscriptScrollTrace {
     pub(crate) fn take_frames(&mut self) -> Vec<TranscriptScrollTraceFrame> {
         std::mem::take(&mut self.frames)
     }
+}
+
+fn trace_frame_json(frame: &TranscriptScrollTraceFrame) -> serde_json::Value {
+    json!({
+        "input_event_or_tick": &frame.input_event_or_tick,
+        "scroll_intent": format!("{:?}", frame.scroll_intent),
+        "window_scroll_before": frame.window_scroll_before,
+        "window_scroll_after_input": frame.window_scroll_after_input,
+        "viewport_anchor_before": trace_option_debug(frame.viewport_anchor_before),
+        "projection_target": format!("{:?}", frame.projection_target),
+        "active_descriptor_range_before": frame.active_descriptor_range_before.map(trace_descriptor_range_json),
+        "prefix_estimate_before": frame.prefix_estimate_before,
+        "suffix_estimate_before": frame.suffix_estimate_before,
+        "exact_observation_count": frame.exact_observation_count,
+        "resolved_scroll_top": frame.resolved_scroll_top,
+        "viewport_anchor_after": trace_option_debug(frame.viewport_anchor_after),
+        "active_descriptor_range_after": frame.active_descriptor_range_after.map(trace_descriptor_range_json),
+        "materialized_range": trace_row_range_json(frame.materialized_range),
+        "placeholder_rows_visible": frame.placeholder_rows_visible,
+        "first_visible_content_anchor": frame.first_visible_content_anchor.map(trace_visible_anchor_json),
+        "last_visible_content_anchor": frame.last_visible_content_anchor.map(trace_visible_anchor_json),
+        "visible_record_or_block_ids": frame
+            .visible_record_or_block_ids
+            .iter()
+            .map(|id| format!("{:?}", id))
+            .collect::<Vec<_>>(),
+        "render_or_projection_ms": frame.render_or_projection_ms,
+    })
+}
+
+fn trace_descriptor_range_json(range: TranscriptDescriptorTraceRange) -> serde_json::Value {
+    json!({ "start": range.start, "end": range.end })
+}
+
+fn trace_row_range_json(range: TranscriptRowTraceRange) -> serde_json::Value {
+    json!({ "start": range.start, "end": range.end })
+}
+
+fn trace_visible_anchor_json(anchor: TranscriptVisibleContentAnchor) -> serde_json::Value {
+    json!({
+        "virtual_row": anchor.virtual_row,
+        "node_id": format!("{:?}", anchor.node_id),
+        "row_offset": anchor.row_offset,
+    })
+}
+
+fn trace_option_debug<T: std::fmt::Debug>(value: Option<T>) -> Option<String> {
+    value.map(|value| format!("{value:?}"))
 }

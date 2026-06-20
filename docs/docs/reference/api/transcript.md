@@ -140,6 +140,26 @@ fun(row: integer): table?
 
 Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 
+## `smelt.transcript.previous_block`
+
+```lua
+fun(opts: table?): table?
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+
+## `smelt.transcript.reveal_block`
+
+```lua
+fun(idx: integer, opts: table?): boolean
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+
 ## `smelt.transcript.rows`
 
 ```lua

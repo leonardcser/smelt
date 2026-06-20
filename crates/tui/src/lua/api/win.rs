@@ -314,6 +314,8 @@ impl mlua::UserData for LuaWin {
                     if this.id == crate::app::PROMPT_WIN {
                         return;
                     }
+                    let transcript_scroll_intent = (this.id == crate::app::TRANSCRIPT_WIN)
+                        .then_some(crate::app::reveal::RevealScrollIntent::SearchJump);
                     app.reveal_position(
                         this.id,
                         crate::smelt_edit::DocPosition { row, byte_col: 0 },
@@ -321,7 +323,7 @@ impl mlua::UserData for LuaWin {
                             top_padding,
                             bottom_padding,
                             cursor,
-                            ..Default::default()
+                            transcript_scroll_intent,
                         },
                     );
                 });

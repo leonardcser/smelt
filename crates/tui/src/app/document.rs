@@ -1,6 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
+use serde_json::json;
+
 use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext};
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
@@ -308,6 +310,39 @@ impl TuiApp {
             )
         };
 
+        let trace_transcript_mouse =
+            win == crate::app::TRANSCRIPT_WIN && self.transcript.scroll_trace_enabled();
+        if trace_transcript_mouse {
+            let scroll_anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport.content_width, scroll_top);
+            let cursor_anchor = self.transcript.trace_anchor_at_row(
+                &self.lua,
+                viewport.content_width,
+                state.cursor.row,
+            );
+            self.transcript.record_scroll_trace_event(
+                "document_mouse_before",
+                json!({
+                    "mouse_kind": format!("{:?}", event.kind),
+                    "mouse_row": event.row,
+                    "mouse_column": event.column,
+                    "click_count": click_count,
+                    "viewport_top": viewport.rect.top,
+                    "viewport_height": viewport.rect.height,
+                    "viewport_content_width": viewport.content_width,
+                    "window_scroll_top": scroll_top,
+                    "scroll_anchor": format!("{:?}", scroll_anchor),
+                    "viewer_cursor_before": trace_doc_position_json(cursor),
+                    "document_state_cursor_before": trace_doc_position_json(state.cursor),
+                    "document_state_cursor_anchor_before": format!("{:?}", cursor_anchor),
+                    "selection_anchor_before": state.selection_anchor.map(trace_doc_position_json),
+                    "drag_endpoint_before": state.drag_endpoint.map(trace_doc_position_json),
+                    "materialized_before": trace_materialized_rows_json(state.materialized),
+                }),
+            );
+        }
+
         let Some((status, copy)) = self.with_display_document_for_win(win, |document| {
             let total_rows = document.snapshot().total_rows;
             if !state.active {
@@ -351,6 +386,30 @@ impl TuiApp {
             win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
         }
 
+        if trace_transcript_mouse {
+            let window_scroll_after = self.transcript_scroll_top();
+            let state_cursor_anchor = self.transcript.trace_anchor_at_row(
+                &self.lua,
+                viewport.content_width,
+                state.cursor.row,
+            );
+            self.transcript.record_scroll_trace_event(
+                "document_mouse_after",
+                json!({
+                    "mouse_kind": format!("{:?}", event.kind),
+                    "status": format!("{:?}", status),
+                    "window_scroll_before": scroll_top,
+                    "window_scroll_after": window_scroll_after,
+                    "document_state_cursor_after": trace_doc_position_json(state.cursor),
+                    "document_state_cursor_anchor_after": format!("{:?}", state_cursor_anchor),
+                    "selection_anchor_after": state.selection_anchor.map(trace_doc_position_json),
+                    "drag_endpoint_after": state.drag_endpoint.map(trace_doc_position_json),
+                    "materialized_after": trace_materialized_rows_json(state.materialized),
+                    "copy_returned": copy.is_some(),
+                }),
+            );
+        }
+
         (status, copy)
     }
 
@@ -391,6 +450,31 @@ impl TuiApp {
             )
         };
         let window_scroll_before = scroll_top;
+        let trace_transcript_command =
+            win == crate::app::TRANSCRIPT_WIN && self.transcript.scroll_trace_enabled();
+        if trace_transcript_command {
+            let scroll_anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport_cols.max(1), scroll_top);
+            let cursor_anchor = self.transcript.trace_anchor_at_row(
+                &self.lua,
+                viewport_cols.max(1),
+                state.cursor.row,
+            );
+            self.transcript.record_scroll_trace_event(
+                "document_command_before",
+                json!({
+                    "command": format!("{:?}", command),
+                    "window_scroll_before": window_scroll_before,
+                    "scroll_anchor_before": format!("{:?}", scroll_anchor),
+                    "viewer_cursor_before": trace_doc_position_json(cursor),
+                    "document_state_cursor_before": trace_doc_position_json(state.cursor),
+                    "document_state_cursor_anchor_before": format!("{:?}", cursor_anchor),
+                    "materialized_before": trace_materialized_rows_json(state.materialized),
+                    "following_tail_before": following_tail,
+                }),
+            );
+        }
         let copy = self.with_display_document_for_win(win, |document| {
             let total_rows = document.snapshot().total_rows;
             if !state.active {
@@ -461,6 +545,42 @@ impl TuiApp {
         if let Some((label, intent, before)) = transcript_scroll_intent {
             self.record_transcript_scroll_intent(label, intent, before);
         }
+        if trace_transcript_command {
+            let cursor_anchor = self.transcript.trace_anchor_at_row(
+                &self.lua,
+                viewport_cols.max(1),
+                state.cursor.row,
+            );
+            self.transcript.record_scroll_trace_event(
+                "document_command_after",
+                json!({
+                    "command": format!("{:?}", command),
+                    "window_scroll_before": window_scroll_before,
+                    "resolved_scroll_after_command": scroll_top,
+                    "window_scroll_after_apply": self.transcript_scroll_top(),
+                    "document_state_cursor_after": trace_doc_position_json(state.cursor),
+                    "document_state_cursor_anchor_after": format!("{:?}", cursor_anchor),
+                    "materialized_after": trace_materialized_rows_json(state.materialized),
+                    "copy_returned": copy.is_some(),
+                }),
+            );
+        }
         copy
     }
+}
+
+fn trace_doc_position_json(position: DocPosition) -> serde_json::Value {
+    json!({
+        "row": position.row,
+        "byte_col": position.byte_col,
+    })
+}
+
+fn trace_materialized_rows_json(rows: MaterializedRows) -> serde_json::Value {
+    json!({
+        "clamped_scroll": rows.clamped_scroll,
+        "row_base": rows.row_base,
+        "total_rows": rows.total_rows,
+        "materialized_rows": rows.materialized_rows,
+    })
 }

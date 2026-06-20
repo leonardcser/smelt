@@ -667,6 +667,33 @@ pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
     ))
 }
 
+pub(crate) fn read_transcript_descriptor_before_kind(
+    conn: &Connection,
+    kind: &str,
+    before_or_at_block_idx: u64,
+) -> Result<Option<TranscriptDescriptorRecord>> {
+    let _perf = perf::begin("store:transcript:read_descriptor_before_kind");
+    let before_or_at = checked_i64(before_or_at_block_idx, "before_or_at_block_idx")?;
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
+                origin_json, tool_state_json
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL
+           AND kind = ?1
+           AND block_idx <= ?2
+         ORDER BY block_idx DESC
+         LIMIT 1",
+    )?;
+    let mut records = read_transcript_descriptor_records_from_stmt(
+        conn,
+        &mut stmt,
+        params![kind, before_or_at],
+        TranscriptDescriptorHydration::ObjectBacked,
+    )?;
+    Ok(records.pop())
+}
+
 fn read_transcript_descriptor_records_from_stmt<P>(
     conn: &Connection,
     stmt: &mut Statement<'_>,

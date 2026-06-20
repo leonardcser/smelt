@@ -820,6 +820,9 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         local focus = "transcript"
         local cursor = 14
         local blocks = {}
+        local previous_block_calls = 0
+        local row_lookup_calls = 0
+        local revealed_block = nil
         local scroll = {
           top = 10,
           viewport = 5,
@@ -836,7 +839,9 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         function transcript_win:rect() return rect end
         function transcript_win:scroll() return scroll end
         function transcript_win:on(event, fn) handlers[event] = fn end
-        function transcript_win:reveal() end
+        function transcript_win:reveal()
+          error("scroll pill should reveal transcript blocks semantically")
+        end
 
         smelt = {
           focus = function() return focus end,
@@ -856,7 +861,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
           },
           win = {
             new = function()
-              return { on = function() end }
+              return { on = function(_, event, fn) handlers[event] = fn end }
             end,
             transcript = function() return transcript_win end,
           },
@@ -874,13 +879,22 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
           ui = { layout = { leaf = function() return {} end } },
           transcript = {
             blocks = function() return blocks end,
-            block_before_or_at_row = function(row, opts)
+            previous_block = function(opts)
+              previous_block_calls = previous_block_calls + 1
               local role = opts and opts.role or nil
               for i = #blocks, 1, -1 do
                 local b = blocks[i]
-                if (role == nil or b.role == role) and b.first_row <= row then return b end
+                if role == nil or b.role == role then return b end
               end
               return nil
+            end,
+            reveal_block = function(idx, opts)
+              revealed_block = { idx = idx, top_padding = opts and opts.top_padding or nil, cursor = opts and opts.cursor or nil }
+              return true
+            end,
+            block_before_or_at_row = function()
+              row_lookup_calls = row_lookup_calls + 1
+              error("scroll pill should not route semantic navigation through row lookup")
             end,
           },
           events = {
@@ -900,6 +914,9 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         function __set_cursor(row) cursor = row end
         function __set_focus(value) focus = value end
         function __set_blocks(value) blocks = value end
+        function __previous_block_calls() return previous_block_calls end
+        function __row_lookup_calls() return row_lookup_calls end
+        function __revealed_block() return revealed_block end
         function __event(name) assert(handlers[name], name)() end
         function __publish(name) assert(cells[name], name)() end
         "#,
@@ -917,22 +934,32 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         .expect("read bottom overlay state");
     assert!(!bottom_under_cursor);
 
-    let (top_under_cursor, top_after_cursor_move): (bool, bool) = lua
+    let (top_under_cursor, top_after_cursor_move, previous_block_calls, row_lookup_calls, revealed_idx): (
+        bool,
+        bool,
+        i64,
+        i64,
+        i64,
+    ) = lua
         .load(
             r#"
-            __set_blocks({ { idx = 1, role = "user", first_line = "previous message", first_row = 5 } })
+            __set_blocks({ { idx = 1, role = "user", first_line = "previous message", already_at_top = false } })
             __set_cursor(10)
             __event("scrolled")
             local under = __active("smelt.scroll_pills.top")
             __set_cursor(11)
             __publish("cursor_pos")
-            return under, __active("smelt.scroll_pills.top")
+            __event("press")
+            return under, __active("smelt.scroll_pills.top"), __previous_block_calls(), __row_lookup_calls(), __revealed_block().idx
             "#,
         )
         .eval()
         .expect("drive top pill refresh");
     assert!(!top_under_cursor);
     assert!(top_after_cursor_move);
+    assert!(previous_block_calls > 0);
+    assert_eq!(row_lookup_calls, 0);
+    assert_eq!(revealed_idx, 1);
 
     let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua
         .load(

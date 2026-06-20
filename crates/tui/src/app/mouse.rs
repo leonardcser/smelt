@@ -7,6 +7,7 @@ use crate::app::{AppFocus, EventOutcome, PromptResizeClick, PromptResizeDrag, Tu
 use crate::content::layout::HitRegion;
 use crate::smelt_edit::{HitTarget, RowIndex, WinId};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use serde_json::json;
 
 const PROMPT_RESIZE_DOUBLE_CLICK_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(500);
@@ -110,6 +111,14 @@ struct TranscriptScrollInputCandidate {
     window_scroll_before: RowIndex,
 }
 
+fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
+    if delta >= 0 {
+        row.saturating_add(delta as RowIndex)
+    } else {
+        row.saturating_sub(delta.unsigned_abs() as RowIndex)
+    }
+}
+
 impl TuiApp {
     pub(crate) fn scroll_at_with_transcript_intent(
         &mut self,
@@ -125,6 +134,10 @@ impl TuiApp {
                 window_scroll_before: self.transcript_scroll_top(),
             })
         });
+        if candidate.is_some() {
+            self.record_transcript_scroll_input(candidate);
+            return true;
+        }
         let panned = self.ui.scroll_at(row, col, delta);
         if panned {
             self.record_transcript_scroll_input(candidate);
@@ -133,18 +146,98 @@ impl TuiApp {
     }
 
     pub(crate) fn tick_drag_autoscroll_with_transcript_intent(&mut self) -> bool {
-        let candidate = self.ui.drag_autoscroll_delta().and_then(|(win, delta)| {
-            (win == crate::app::TRANSCRIPT_WIN).then(|| TranscriptScrollInputCandidate {
-                label: "drag_autoscroll".to_string(),
-                intent: TranscriptScrollIntent::UserDelta { rows: delta },
-                window_scroll_before: self.transcript_scroll_top(),
-            })
-        });
-        let panned = self.ui.tick_drag_autoscroll();
-        if panned {
-            self.record_transcript_scroll_input(candidate);
+        let Some((win, delta)) = self.ui.begin_drag_autoscroll_tick() else {
+            return false;
+        };
+        if win != crate::app::TRANSCRIPT_WIN {
+            return self.ui.tick_drag_autoscroll();
         }
-        panned
+
+        let candidate = TranscriptScrollInputCandidate {
+            label: "drag_autoscroll".to_string(),
+            intent: TranscriptScrollIntent::UserDelta { rows: delta },
+            window_scroll_before: self.transcript_scroll_top(),
+        };
+        if !self.advance_transcript_drag_autoscroll_endpoint(delta) {
+            return false;
+        }
+        self.record_transcript_scroll_input(Some(candidate));
+        true
+    }
+
+    fn advance_transcript_drag_autoscroll_endpoint(&mut self, delta: isize) -> bool {
+        let (viewport_rows, total_rows, scroll_top, mut state) = {
+            let Some(win) = self.ui.win(crate::app::TRANSCRIPT_WIN) else {
+                return false;
+            };
+            let Some(viewport) = win.viewport else {
+                return false;
+            };
+            let state = win.document_view_state();
+            if !state.active {
+                return false;
+            }
+            (
+                viewport.rect.height,
+                state.materialized.total_rows,
+                win.scroll_top(),
+                state,
+            )
+        };
+        if viewport_rows == 0 || total_rows == 0 || delta == 0 {
+            return false;
+        }
+
+        let max_scroll = total_rows.saturating_sub(RowIndex::from(viewport_rows));
+        let current_scroll = scroll_top.min(max_scroll);
+        let new_scroll = add_signed_row(current_scroll, delta).min(max_scroll);
+        if new_scroll == scroll_top {
+            return false;
+        }
+
+        let edge_row = if delta < 0 {
+            new_scroll
+        } else {
+            new_scroll
+                .saturating_add(RowIndex::from(viewport_rows.saturating_sub(1)))
+                .min(total_rows.saturating_sub(1))
+        };
+        let byte_col = state.drag_endpoint.unwrap_or(state.cursor).byte_col;
+        if state.selection_anchor.is_none() {
+            state.selection_anchor = state.drag_endpoint.or(Some(state.cursor));
+            state.selection_includes_cursor_cell = true;
+        }
+        let cursor = crate::smelt_edit::DocPosition {
+            row: edge_row,
+            byte_col,
+        };
+        state.cursor = cursor;
+        state.drag_endpoint = Some(cursor);
+        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            win.set_document_view_state(state);
+        }
+        true
+    }
+
+    fn advance_transcript_selection_cursor_for_user_delta(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        let Some(win) = self.ui.win(crate::app::TRANSCRIPT_WIN) else {
+            return;
+        };
+        if !win.selection_active() {
+            return;
+        }
+        let mut state = win.document_view_state();
+        if !state.active || state.drag_endpoint.is_some() || state.materialized.total_rows == 0 {
+            return;
+        }
+        state.cursor.row = add_signed_row(state.cursor.row, delta)
+            .min(state.materialized.total_rows.saturating_sub(1));
+        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            win.set_document_view_state(state);
+        }
     }
 
     pub(crate) fn transcript_scroll_top(&self) -> RowIndex {
@@ -250,16 +343,35 @@ impl TuiApp {
         intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
     ) {
+        let label = label.into();
+        if let TranscriptScrollIntent::UserDelta { rows } = intent {
+            self.advance_transcript_selection_cursor_for_user_delta(rows);
+        }
+        if !matches!(intent, TranscriptScrollIntent::Tail) {
+            if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+                win.pin_current_scroll();
+            }
+        }
         self.transcript.set_pending_scroll_intent(intent.clone());
         if !self.transcript.scroll_trace_enabled() {
             return;
         }
+        let window_scroll_after_input = self.transcript_scroll_top();
+        self.transcript.record_scroll_trace_event(
+            "scroll_intent_input",
+            json!({
+                "label": &label,
+                "intent": format!("{:?}", intent),
+                "window_scroll_before": window_scroll_before,
+                "window_scroll_after_input": window_scroll_after_input,
+            }),
+        );
         self.transcript
             .set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
-                input_event_or_tick: label.into(),
+                input_event_or_tick: label,
                 scroll_intent: intent,
                 window_scroll_before,
-                window_scroll_after_input: self.transcript_scroll_top(),
+                window_scroll_after_input,
             });
     }
 
@@ -275,6 +387,17 @@ impl TuiApp {
         let scroll_input = self
             .transcript_wheel_input_candidate(me)
             .or_else(|| self.transcript_scrollbar_input_candidate(me, cap_before));
+        if is_scroll_event(me.kind)
+            && matches!(
+                scroll_input.as_ref().map(|input| &input.intent),
+                Some(TranscriptScrollIntent::UserDelta { .. })
+            )
+        {
+            self.record_transcript_scroll_input(scroll_input);
+            self.pin_well_known_horizontal_scroll();
+            crate::picker::sync_scrolled(self);
+            return EventOutcome::Redraw;
+        }
         if matches!(
             self.ui
                 .dispatch_event(crate::smelt_edit::Event::Mouse(me), &mut |_, _, _| {}),

@@ -1630,6 +1630,19 @@ impl Ui {
         self.edge_drag_delta()
     }
 
+    /// Begin an edge-drag autoscroll tick without moving any window rows.
+    /// Hosts with document-owned viewport projection can use this to keep the
+    /// autoscroll ramp timing while applying the movement semantically.
+    pub fn begin_drag_autoscroll_tick(&mut self) -> Option<(WinId, isize)> {
+        let Some(delta) = self.edge_drag_delta() else {
+            self.drag_autoscroll_since = None;
+            return None;
+        };
+        self.drag_autoscroll_since
+            .get_or_insert_with(std::time::Instant::now);
+        Some(delta)
+    }
+
     /// Per-frame autoscroll step: when a left-button drag's pointer is parked
     /// at the top or bottom of the captured window's viewport, pan one row in
     /// that direction and move the selection endpoint to the new leading edge.
@@ -1637,12 +1650,9 @@ impl Ui {
     /// trigger so sparse row-document materialization cannot stall the gesture.
     /// Returns `true` if anything panned.
     pub fn tick_drag_autoscroll(&mut self) -> bool {
-        let Some((win_id, delta)) = self.edge_drag_delta() else {
-            self.drag_autoscroll_since = None;
+        let Some((win_id, delta)) = self.begin_drag_autoscroll_tick() else {
             return false;
         };
-        self.drag_autoscroll_since
-            .get_or_insert_with(std::time::Instant::now);
         let win = self.wins.get(&win_id).expect("edge_drag_delta validated");
         let viewport_h = win.viewport.expect("edge_drag_delta validated").rect.height;
         let buf_id = win.buf;

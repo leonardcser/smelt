@@ -73,6 +73,16 @@ transcript.is_empty = nil
 transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+---@type fun(opts: table?): table?
+transcript.previous_block = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+---@type fun(idx: integer, opts: table?): boolean
+transcript.reveal_block = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
 ---@type fun(start: integer, count: integer): table
 transcript.rows = nil

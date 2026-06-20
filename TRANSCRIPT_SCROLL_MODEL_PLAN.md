@@ -8,6 +8,114 @@ The current branch has better boundedness and fewer obvious sparse-scroll regres
 
 This plan does not implement code. It records the target model, the current code seams, benchmark baseline, and the refactor phases needed to finish the transcript scrolling architecture without leaving debt.
 
+## Architecture reset: exact semantic navigation first
+
+User testing after the later scroll-model phases shows that the current system still almost works but is not reliable enough. The remaining bugs are not isolated failures. They come from one architectural mismatch: the transcript is a sparse virtual timeline, but too many paths still treat it like a fully materialized row document.
+
+The next work must stop adding row-repair patches. The correct model is:
+
+```text
+semantic operation -> descriptor/block target -> load bounded window -> render exact local rows -> derive paint scroll row
+```
+
+Not:
+
+```text
+semantic operation -> estimated absolute row -> activate guessed descriptor window -> repair viewport after projection
+```
+
+### Non-negotiable reset decisions
+
+1. **Transcript semantic operations must be block/descriptor based.**
+   Previous/next user message, search result reveal, fold reveal, action reveal, cursor restore, and top-pill jumps must target a descriptor index or block id. They must not target estimated absolute rows.
+
+2. **Exact landing does not require exact global transcript height.**
+   To reveal a previous user message, query or index the target descriptor, load a bounded descriptor window around it, render that window, find the exact local row of the target block, and place that local row at the requested screen position. Prefix height can remain approximate for the scrollbar.
+
+3. **Global rows are display metadata, not durable authority.**
+   Absolute rows may be used for scrollbar geometry, diagnostics, and coarse far seek. They must not be the durable identity for navigation, click/drag state, cursor state, selection, copy, search reveal, or message jumps.
+
+4. **Only transcript projection chooses the active descriptor window.**
+   Lookup helpers, Lua plugins, hit tests, and pill refresh code must be side-effect free. They may read passive metadata or request a semantic intent, but they must not opportunistically replace the active render window.
+
+5. **The current transitional fixes must be audited and removed if they preserve the wrong model.**
+   Code added to make row-based APIs behave better is not final just because tests pass. If it keeps `block_before_or_at_row(row)`, `reveal(row)`, `ApproximateRowSeek`, or descriptor-window guessing on a semantic path, it is cleanup debt.
+
+### Semantic navigation design
+
+Add first-class transcript navigation APIs and intents:
+
+```rust
+enum TranscriptIntent {
+    Tail,
+    PreserveViewport,
+    ScrollRows { rows: isize },
+    PageRows { rows: isize },
+    RevealBlock {
+        descriptor_index: usize,
+        block_id: BlockId,
+        row_offset: RowIndex,
+        screen_padding_top: RowIndex,
+    },
+    PreviousBlock {
+        role: TranscriptRole,
+        from: TranscriptAnchor,
+        screen_padding_top: RowIndex,
+    },
+    NextBlock {
+        role: TranscriptRole,
+        from: TranscriptAnchor,
+        screen_padding_top: RowIndex,
+    },
+    ScrollbarFraction { numerator: u64, denominator: u64 },
+    ApproximateFarRow(RowIndex),
+}
+```
+
+The exact shape can change, but the separation must not: semantic navigation uses descriptors and blocks; only scrollbar/far seek uses approximate rows.
+
+### Store and index requirements
+
+Add or expose store/index operations that answer semantic questions directly:
+
+- previous descriptor of role/kind before a descriptor index;
+- next descriptor of role/kind after a descriptor index;
+- descriptor slice centered around a descriptor index with before/after padding;
+- optional in-memory role index for loaded or cheaply indexed descriptors;
+- passive metadata lookup that cannot mutate the active render window.
+
+The DB already stores `kind` and `block_idx`, so previous/next user lookup should be an indexed query, not a row estimate.
+
+### Exact reveal algorithm
+
+For `PreviousBlock { role: User, from, screen_padding_top: 1 }`:
+
+1. Resolve `from` to a descriptor index or block id.
+2. Query the previous `kind = 'user'` descriptor before that index.
+3. Load a bounded descriptor window around the target descriptor.
+4. Render that window using the normal transcript renderer.
+5. Compute the exact local row of the target block inside the loaded window.
+6. Set viewport local top to `target_local_row - screen_padding_top`.
+7. Emit derived scrollbar/global row information only after the exact local viewport is resolved.
+
+No step requires exact prefix height.
+
+### Cleanup from the failed transitional model
+
+Remove or rewrite the following as part of the reset:
+
+- `block_before_or_at_row(row, ...)` from top-pill and semantic navigation paths. Keep only as a compatibility/debug row query if still needed.
+- `win:reveal(row, ...)` for transcript semantic navigation. Replace with `transcript:reveal_block(...)`, `transcript:previous_block(...)`, or equivalent.
+- Passive row lookup helpers added only to make previous-user pills safer while still using estimated rows.
+- `opts.passive = true` on row lookup if the final API no longer uses row lookup for semantic navigation.
+- Search/reveal routing that turns a semantic target into an estimated row before projection.
+- Descriptor-window selection from `row / average_rows` except in explicitly named far-seek code.
+- Any path where a lookup helper mutates `active_descriptor_range` or installs a render projection.
+- Patch-level viewport repair code that exists only because `Window::scroll_top` was mutated before transcript projection saw the original intent.
+- Tests that assert numeric-row artifacts for transcript navigation instead of block identity, local row placement, visible anchor stability, and bounded work.
+
+Structured trace infrastructure may stay, but ad hoc debug tracing and symptom-specific tests should be removed once the semantic tests cover the behavior.
+
 ## Post-Phase 6 reassessment
 
 The first six phases improved scalability and removed several obvious sparse-scroll regressions, but they did not finish the migration to the correct scroll model. User testing still reports inconsistent velocity, lag, and occasional perceived snap-back while wheel scrolling or drag-selection autoscrolling. That means this document must no longer treat the Phase 6 result as final.
@@ -258,21 +366,36 @@ enum TranscriptScrollIntent {
     PreserveViewport,
     UserDelta { rows: isize },
     PageDelta { pages: isize },
-    ExactContentAnchor(TranscriptScrollAnchor),
-    SearchJump(TranscriptScrollAnchor),
+    RevealBlock {
+        descriptor_index: usize,
+        block_id: BlockId,
+        row_offset: RowIndex,
+        screen_padding_top: RowIndex,
+    },
+    PreviousBlock {
+        role: TranscriptRole,
+        from: TranscriptScrollAnchor,
+        screen_padding_top: RowIndex,
+    },
+    NextBlock {
+        role: TranscriptRole,
+        from: TranscriptScrollAnchor,
+        screen_padding_top: RowIndex,
+    },
     ResizeReflow { previous_width: u16 },
     ScrollbarFraction { numerator: u64, denominator: u64 },
-    ApproximateRowSeek(RowIndex),
+    ApproximateFarRow(RowIndex),
 }
 ```
 
 Rules:
 
 - Wheel and drag autoscroll use `UserDelta`.
-- Scrollbar drag/click uses `ScrollbarFraction` or `ApproximateRowSeek` and is allowed to use estimates for the initial landing.
-- Search and reveal use semantic anchors.
+- Previous/next message, search result reveal, fold reveal, action reveal, and cursor restore use block/descriptor semantic intents.
+- Scrollbar drag/click uses `ScrollbarFraction` or `ApproximateFarRow` and is allowed to use estimates for the initial landing.
 - Resize uses reflow preservation, not an exact numeric row.
 - Tail-follow is its own state and does not require computing the full exact total before rendering.
+- `ExactContentAnchor(row)` and row-based `SearchJump(row)` are transitional only if they exist in code; they should be deleted or rewritten to block/descriptor targets.
 
 ### Transcript viewport state
 
@@ -281,9 +404,16 @@ Rules:
 ```rust
 struct TranscriptViewportState {
     top_anchor: Option<TranscriptScrollAnchor>,
-    top_offset_rows: isize,
+    top_screen_row: RowIndex,
     mode: TranscriptViewportMode,
     pending_intent: Option<TranscriptScrollIntent>,
+}
+
+struct TranscriptScrollAnchor {
+    descriptor_index: usize,
+    block_id: BlockId,
+    intra_block_row: RowIndex,
+    bias: AnchorBias,
 }
 
 enum TranscriptViewportMode {
@@ -575,6 +705,26 @@ Correct behavior:
 4. Re-anchor to the nearest real descriptor/block row.
 5. If refinement changes local height, preserve the content anchor, not the original numeric row.
 
+### Previous/next user message navigation
+
+Previous/next user message navigation must be exact and must not use absolute-row estimates.
+
+Correct behavior:
+
+1. Treat the currently visible content as a descriptor/block anchor.
+2. Query the previous or next `kind = 'user'` descriptor by descriptor index or block id.
+3. Load a bounded descriptor window around that descriptor.
+4. Render the window and compute the target block's exact local row.
+5. Place the target local row at the requested screen padding.
+6. Preserve the target block identity through any subsequent estimate refinement.
+
+Forbidden behavior:
+
+- computing the target by `block_before_or_at_row(scroll.top, ...)`;
+- computing the target window with `row / average_rows`;
+- calling generic `win:reveal(row)` for a message jump;
+- returning an estimated `first_row` as the semantic result of the lookup.
+
 ### Search, copy, folds, actions
 
 These must never return estimated content.
@@ -686,9 +836,157 @@ Delete or simplify the following once the new model owns the behavior:
 7. **Dead compatibility or fallback paths.**
    If a fallback is only for tests, make it test-only. If it is for legacy data, tag it with `COMPAT(<id>)` and document removal criteria in `docs/compat.md`.
 
-## Refactor phases
+## Robust architecture refactor phases
 
-The original six phases are complete but insufficient. They improved boundedness and removed several regressions, but they did not finish the architectural migration away from numeric-row authority. The following phases supersede the earlier phase list and should be implemented in order. Each phase must validate the new user-facing scroll contract, not only internal counters.
+These phases supersede the implementation records below. The older phase notes are useful history, but the code should now be judged against this reset plan.
+
+### Reset Phase 0: Audit and remove wrong-model patches
+
+Goal: reduce the number of row-authority paths before adding new semantic APIs.
+
+Tasks:
+
+- Classify every transcript scroll/navigation change currently on the branch as final-model, diagnostic, or wrong-model.
+- Revert or delete wrong-model code that only makes estimated row APIs safer instead of replacing them.
+- Keep structured tracing only if it explains semantic anchors, descriptor ranges, exact local rows, and latency without transcript content.
+- Remove semantic use of `block_before_or_at_row(row, ...)`, `win:reveal(row, ...)`, and `ApproximateRowSeek` outside scrollbar/far seek.
+- Make `Window::scroll_top` a derived transcript paint output at the transcript boundary.
+
+Acceptance:
+
+- There is a documented list of deleted transitional paths.
+- Previous/next user navigation and search reveal no longer depend on estimated absolute rows.
+- Tests fail if a semantic transcript operation routes through an estimated row target.
+
+Phase 0 audit result:
+
+- Final-model code to keep: explicit `TranscriptScrollIntent` routing, descriptor ranges in scroll traces, exact local layout materialization after a bounded descriptor window is loaded, and scrollbar/far-seek-only use of `ApproximateRowSeek`.
+- Diagnostic code to keep: structured transcript interaction traces that record intent, descriptor range, row counts, anchors, and timing without transcript content.
+- Deleted wrong-model paths: top scroll pill `block_before_or_at_row(scroll.top, { role = "user", passive = true })`; top scroll pill transcript `win:reveal(first_row, ...)`; `opts.passive` on transcript row lookup; passive sparse row lookup helpers that queried estimated rows without activating the target; and tests that asserted passive row lookup instead of semantic navigation.
+- Guardrails added: runtime Lua regression fails if scroll pills call row lookup or transcript `win:reveal(row)` for the semantic previous-user action; sparse navigation test asserts descriptor lookup does not mutate the active descriptor window.
+
+### Reset Phase 1: Add semantic descriptor navigation
+
+Goal: find target blocks exactly without computing global transcript height.
+
+Tasks:
+
+- Add store APIs for previous/next descriptor by `kind` and descriptor index.
+- Add a bounded read centered around descriptor index.
+- Add a transcript metadata/index layer that can answer previous/next role queries without mutating active render state.
+- Return descriptor/block identity and preview metadata, not estimated `first_row`, from navigation lookup APIs.
+
+Acceptance:
+
+- Previous/next user lookup is O(log n) or bounded indexed SQL, not row-estimate search.
+- Lookup does not change `active_descriptor_range`, projection state, cursor, selection, or viewport.
+
+### Reset Phase 2: Add exact block reveal
+
+Goal: land semantic targets exactly using local rendered rows.
+
+Tasks:
+
+- Add `RevealBlock` or equivalent transcript intent.
+- Load a bounded window around the target descriptor.
+- Render the window and compute exact local target row.
+- Place target at `screen_padding_top` or requested screen position.
+- Derive any global row/scrollbar state after local placement.
+
+Acceptance:
+
+- Previous-user pill lands with the target user block exactly at the requested screen row.
+- The result is unchanged by sparse prefix estimate refinement.
+- No exact global prefix height is required.
+
+### Reset Phase 3: Replace Lua pill and reveal APIs
+
+Goal: remove row-based semantic navigation from plugins and public Lua paths.
+
+Tasks:
+
+- Replace top pill logic with `previous_block({ role = "user", from = current_anchor })` or equivalent.
+- Replace pill click with block reveal, not `win:reveal(row)`.
+- Keep generic `win:reveal(row)` for non-transcript windows and explicit row debugging only.
+- Document transcript-specific semantic navigation APIs.
+
+Acceptance:
+
+- Scroll pills never call `block_before_or_at_row(scroll.top, ...)`.
+- Scroll pills never call transcript `win:reveal(row)` for previous/next message navigation.
+- Runtime Lua regression tests assert semantic API use.
+
+### Reset Phase 4: Rebuild viewport state around block anchors
+
+Goal: make the durable transcript viewport a block/descriptor anchor plus local screen placement.
+
+Tasks:
+
+- Store top visible anchor as descriptor index, block id, intra-block row offset, and screen bias.
+- Store cursor, selection anchor, and drag endpoint as content anchors, not estimated rows.
+- Resolve `Window::scroll_top` only after projection.
+- Ensure lookup, hit-test, and metadata helpers are side-effect free.
+
+Acceptance:
+
+- Click, drag, cursor reveal, and jump-to-bottom cannot change descriptor windows except by submitting a transcript intent.
+- Cursor disappearance is intentional and testable, not a side effect of sparse window replacement.
+
+### Reset Phase 5: Make local scroll exact and bounded
+
+Goal: smooth wheel and drag autoscroll by moving in exact local content space.
+
+Tasks:
+
+- Consume wheel/page deltas through exact materialized rows and overscan.
+- Prefetch or synchronously load bounded adjacent descriptor windows before crossing local boundaries.
+- Do not show sparse placeholders for nearby wheel or drag autoscroll.
+- Keep velocity based on content rows, not changing global estimates.
+
+Acceptance:
+
+- Repeated wheel ticks move visible content by stable content-row deltas.
+- Drag autoscroll does not stop because the cursor/edge crossed an unloaded sparse gap.
+- Loading an adjacent window does not move the visible anchor unexpectedly.
+
+### Reset Phase 6: Keep estimates only for scrollbar and far seek
+
+Goal: make approximation explicit and harmless.
+
+Tasks:
+
+- Rename estimate APIs so exact consumers cannot call them by accident.
+- Keep approximate totals for scrollbar display.
+- Keep approximate row/fraction mapping only for explicit far seek.
+- After far seek loads a window, re-anchor to real descriptor/block identity.
+
+Acceptance:
+
+- Estimates can move scrollbar geometry but cannot move visible content, cursor, selection, copied text, or semantic navigation targets.
+- Placeholder rows are inert and appear only for explicit far seek states.
+
+### Reset Phase 7: Validation and deletion pass
+
+Goal: finish with fewer models than we started with.
+
+Tasks:
+
+- Add full-frame tests for previous user, next user, bottom jump then click, wheel bursts, drag autoscroll, search reveal, resize, and streaming append.
+- Add trace/replay assertions for visible block anchor stability and per-frame latency.
+- Delete obsolete tests that only prove old numeric-row behavior.
+- Run workspace tests, clippy, and large benchmarks with `/home/dev/tmp`.
+
+Acceptance:
+
+- One owner for transcript viewport state.
+- One owner for transcript extent knowledge.
+- No semantic transcript navigation path depends on estimated absolute rows.
+- The cleanup removes wrong-model code and abstractions instead of preserving them behind compatibility shims.
+
+## Superseded implementation phase archive
+
+
+The following phase notes are archived history from the earlier attempt. They are not the next implementation plan. Keep them only to preserve benchmark context and to identify transitional code that should be audited during Reset Phase 0.
 
 ### Phase 0: Freeze symptom patches and capture current behavior
 

@@ -2,6 +2,7 @@ use super::*;
 use crate::app::search::SearchDirection;
 use crate::app::transcript_scroll_trace::{
     TranscriptProjectionTargetTrace, TranscriptScrollIntent, TranscriptScrollTraceFrame,
+    TranscriptTraceAnchor,
 };
 use crate::content::render_plan::RenderNodeId;
 
@@ -820,6 +821,107 @@ fn transcript_pinned_bottom_resize_click_selects_clicked_row_without_tail_snap()
 }
 
 #[test]
+fn transcript_interaction_trace_records_click_and_projection_events() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = row_document_transcript_app(80, false);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_interaction_events();
+    app.render_silent();
+    app.app.transcript.take_scroll_trace_interaction_events();
+
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: vp.rect.top.saturating_add(2),
+        column: vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(3),
+        modifiers: KeyModifiers::empty(),
+    })));
+    app.render_silent();
+
+    let events = app.app.transcript.take_scroll_trace_interaction_events();
+    let kinds = events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        kinds.contains(&"document_mouse_before"),
+        "missing click pre-state trace in {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"document_mouse_after"),
+        "missing click post-state trace in {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"projection_frame"),
+        "missing projection frame trace in {kinds:?}"
+    );
+}
+
+#[test]
+fn transcript_fast_scroll_jump_bottom_then_click_preserves_bottom_viewport() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(320, 78, 18);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_interaction_events();
+
+    for _ in 0..180 {
+        wheel_transcript(&mut app, MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+
+    app.type_char('G');
+    app.render_silent();
+    let bottom_scroll = app.app.transcript_win().scroll_top();
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    let mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: vp.rect.bottom().saturating_sub(2),
+        column: vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(3),
+        modifiers: KeyModifiers::empty(),
+    };
+    let expected = app
+        .app
+        .document_view_position_at_mouse_for_win(crate::app::TRANSCRIPT_WIN, mouse)
+        .expect("clicked bottom transcript row");
+
+    app.feed_one(SourceEvent::Term(Event::Mouse(mouse)));
+    app.render_silent();
+
+    let after_scroll = app.app.transcript_win().scroll_top();
+    let after_cursor = transcript_row_cursor_row(&app);
+    assert_eq!(
+        after_cursor,
+        expected.row,
+        "bottom click cursor resolved to wrong row after fast sparse scroll; trace={:#?}",
+        app.app.transcript.scroll_trace_interaction_events()
+    );
+    assert_eq!(
+        after_scroll,
+        bottom_scroll,
+        "bottom click teleported transcript after fast sparse scroll; trace={:#?}",
+        app.app.transcript.scroll_trace_interaction_events()
+    );
+}
+
+#[test]
 fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic() {
     let count = 260;
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
@@ -1303,12 +1405,15 @@ fn assert_user_delta_targets_requested_rows(frames: &[TranscriptScrollTraceFrame
         let TranscriptScrollIntent::UserDelta { rows } = frame.scroll_intent else {
             continue;
         };
+        let base = match frame.viewport_anchor_before {
+            Some(TranscriptTraceAnchor::Content { virtual_row, .. })
+            | Some(TranscriptTraceAnchor::EstimatedRow(virtual_row)) => virtual_row,
+            Some(TranscriptTraceAnchor::Tail) | None => frame.window_scroll_before,
+        };
         let expected = if rows >= 0 {
-            frame.window_scroll_before.saturating_add(rows as u64)
+            base.saturating_add(rows as u64)
         } else {
-            frame
-                .window_scroll_before
-                .saturating_sub(rows.unsigned_abs() as u64)
+            base.saturating_sub(rows.unsigned_abs() as u64)
         };
         assert_eq!(
             frame.projection_target,
@@ -1499,6 +1604,43 @@ fn transcript_wheel_preserves_user_delta_intent() {
         TranscriptScrollIntent::UserDelta { rows: -3 },
         "wheel replay must preserve the semantic user delta instead of collapsing to {:?}",
         frame.scroll_intent
+    );
+    assert_eq!(
+        frame.window_scroll_after_input, frame.window_scroll_before,
+        "transcript wheel input must not mutate Window::scroll_top before projection: {frame:?}"
+    );
+}
+
+#[test]
+fn transcript_drag_autoscroll_preserves_user_delta_intent() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    start_transcript_edge_drag(&mut app, TranscriptDragEdge::Top);
+    assert!(
+        app.app.tick_drag_autoscroll_with_transcript_intent(),
+        "transcript edge drag should request a semantic scroll tick"
+    );
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("drag autoscroll render frame");
+    let state = app.app.transcript_win().document_view_state();
+
+    assert_eq!(
+        frame.scroll_intent,
+        TranscriptScrollIntent::UserDelta { rows: -1 },
+        "drag autoscroll must preserve the semantic user delta instead of collapsing to {:?}",
+        frame.scroll_intent
+    );
+    assert_eq!(
+        frame.window_scroll_after_input, frame.window_scroll_before,
+        "transcript drag autoscroll must not mutate Window::scroll_top before projection: {frame:?}"
+    );
+    assert_eq!(
+        state.drag_endpoint.map(|pos| pos.row),
+        Some(frame.resolved_scroll_top),
+        "top-edge drag endpoint should advance to the projected leading row"
     );
 }
 
