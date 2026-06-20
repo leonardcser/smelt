@@ -962,6 +962,24 @@ Acceptance:
 - The code no longer needs local row-rebasing patches to make sparse scrolling feel correct.
 - The cleanup diff removes more old row-authority code than it adds in replacement glue.
 
+Phase 7 implementation record:
+
+- Removed `TranscriptScrollIntent::CurrentRowTarget`, the `COMPAT(transcript-window-scroll-top-adapter)` adapter, and the corresponding `docs/compat.md` entry so transcript projection no longer infers semantic intent from a changed `Window::scroll_top`.
+- Removed `TranscriptDocument::resolve_exact_scroll_target_from_viewport_anchor`, the patch-level row repair helper made obsolete by document-owned viewport state and explicit intents.
+- Routed remaining transcript document-command scroll changes through `ExactContentAnchor` intents before render, and made transcript test seeks record `ApproximateRowSeek` explicitly before mutating the resolved paint row.
+- Replaced the stale numeric-row replay assertion with intent-contract coverage that verifies wheel deltas preserve `UserDelta` semantics and do not expose local sparse placeholders.
+- Kept generic `Window` row APIs for non-transcript documents and resolved paint geometry, while removing transcript-specific row-authority interpretation from the transcript document boundary.
+
+Phase 7 validation:
+
+- `cargo test -p smelt-tui --features harness transcript_scroll -- --nocapture`
+- `cargo test -p smelt-tui --features harness viewport_content_anchor_survives_sparse_prefix_estimate_refinement -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_vim_visual_char_starts_at_cursor -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_ -- --nocapture`
+- `cargo fmt`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness`
+
 ### Phase 8: Benchmark, validate, and update this plan
 
 Goal: prove the correct model is both smoother and still bounded.

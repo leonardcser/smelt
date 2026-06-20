@@ -316,14 +316,23 @@ fn execute_transcript_viewer_command(
     win.execute_document_view_command(buf, command, viewport_rows, now);
 }
 
+fn seek_transcript_viewport_to_row(app: &mut TestApp, row: crate::smelt_edit::RowIndex) {
+    let before = app.app.transcript_win().scroll_top();
+    app.app.record_transcript_scroll_intent(
+        "test_seek",
+        crate::app::transcript_scroll_trace::TranscriptScrollIntent::ApproximateRowSeek(row),
+        before,
+    );
+    app.app.transcript_win_mut().pin_scroll(row);
+    app.render_silent();
+}
+
 fn pin_transcript_top_to_line_containing(
     app: &mut TestApp,
     needle: &str,
 ) -> crate::smelt_edit::RowIndex {
     for row in 0..transcript_total_rows(app) {
-        execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::GotoRow(row));
-        app.app.transcript_win_mut().pin_scroll(row);
-        app.render_silent();
+        seek_transcript_viewport_to_row(app, row);
         if transcript_viewport_top_line(app).contains(needle) {
             return app.app.transcript_win().scroll_top();
         }
@@ -336,9 +345,7 @@ fn pin_transcript_top_to_line_containing(
 
 fn pin_transcript_viewport_to_line_containing(app: &mut TestApp, needle: &str) {
     for row in 0..transcript_total_rows(app) {
-        execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::GotoRow(row));
-        app.app.transcript_win_mut().pin_scroll(row);
-        app.render_silent();
+        seek_transcript_viewport_to_row(app, row);
         if transcript_viewport_lines(app)
             .iter()
             .any(|line| line.contains(needle))

@@ -52,7 +52,6 @@ pub(crate) enum TranscriptScrollIntent {
     ResizeReflow { previous_width: u16 },
     ScrollbarFraction { numerator: u64, denominator: u64 },
     ApproximateRowSeek(RowIndex),
-    CurrentRowTarget(RowIndex),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,7 +265,7 @@ impl TranscriptScrollTrace {
                 scroll_intent: match projection_target {
                     TranscriptProjectionTargetTrace::Tail => TranscriptScrollIntent::Tail,
                     TranscriptProjectionTargetTrace::ExactRow(row) => {
-                        TranscriptScrollIntent::CurrentRowTarget(row)
+                        TranscriptScrollIntent::ApproximateRowSeek(row)
                     }
                     TranscriptProjectionTargetTrace::ReflowStableRow(_) => {
                         TranscriptScrollIntent::PreserveViewport

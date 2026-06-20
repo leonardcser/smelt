@@ -1484,7 +1484,7 @@ fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
 }
 
 #[test]
-fn transcript_scroll_replay_requires_wheel_intent_before_numeric_row_target() {
+fn transcript_wheel_preserves_user_delta_intent() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
     app.app.transcript.set_scroll_trace_enabled(true);
     app.app.transcript.take_scroll_trace_frames();

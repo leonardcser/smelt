@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext};
+use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
 use crate::smelt_edit::{
     BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DocPosition, DocRange,
@@ -389,6 +390,7 @@ impl TuiApp {
                 cursor,
             )
         };
+        let window_scroll_before = scroll_top;
         let copy = self.with_display_document_for_win(win, |document| {
             let total_rows = document.snapshot().total_rows;
             if !state.active {
@@ -418,27 +420,47 @@ impl TuiApp {
             )
         })?;
 
-        let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
-        let win_ref = win_ref?;
-        let buf_ref = buf_ref?;
-        win_ref.set_document_view_state(state);
-        if win_ref.vim_mode() != vim_mode {
-            win_ref.set_vim_mode(vim_mode);
-        }
-        win_ref.scroll_left = scroll_left;
-        match command {
-            DocumentCommand::ScrollRows(_) => {
-                win_ref.set_scroll(scroll_top, buf_ref);
-                win_ref.update_tail_state(buf_ref, viewport_rows);
+        let transcript_scroll_intent = if win == crate::app::TRANSCRIPT_WIN
+            && scroll_top != window_scroll_before
+        {
+            let anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport_cols.max(1), scroll_top);
+            Some((
+                "document_command",
+                TranscriptScrollIntent::ExactContentAnchor(anchor),
+                window_scroll_before,
+            ))
+        } else {
+            None
+        };
+
+        {
+            let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
+            let win_ref = win_ref?;
+            let buf_ref = buf_ref?;
+            win_ref.set_document_view_state(state);
+            if win_ref.vim_mode() != vim_mode {
+                win_ref.set_vim_mode(vim_mode);
             }
-            DocumentCommand::CenterScroll => win_ref.pin_scroll(scroll_top),
-            DocumentCommand::PanColumns(_) => {}
-            _ => {
-                win_ref.set_resolved_scroll(scroll_top);
-                win_ref.pin_current_scroll();
+            win_ref.scroll_left = scroll_left;
+            match command {
+                DocumentCommand::ScrollRows(_) => {
+                    win_ref.set_scroll(scroll_top, buf_ref);
+                    win_ref.update_tail_state(buf_ref, viewport_rows);
+                }
+                DocumentCommand::CenterScroll => win_ref.pin_scroll(scroll_top),
+                DocumentCommand::PanColumns(_) => {}
+                _ => {
+                    win_ref.set_resolved_scroll(scroll_top);
+                    win_ref.pin_current_scroll();
+                }
             }
+            win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
         }
-        win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
+        if let Some((label, intent, before)) = transcript_scroll_intent {
+            self.record_transcript_scroll_intent(label, intent, before);
+        }
         copy
     }
 }
