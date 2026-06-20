@@ -4,9 +4,23 @@
 
 This plan refines the transcript virtualization work around one specific question: how scrolling should map between user-visible content, virtual document rows, sparse descriptor windows, and scrollbar position without loading the full transcript.
 
-The current branch is close to smooth in practice after stabilizing sparse prefix/suffix row estimates, but the architecture should not keep estimation as a hidden dependency in places where exact information is available. The final model should make estimation explicit, bounded, and replaceable by exact knowledge whenever exact knowledge is cheap.
+The current branch has better boundedness and fewer obvious sparse-scroll regressions than the starting point, but user testing still reports inconsistent velocity, lag, and perceived snap-back. The architecture should not keep estimation or numeric row identity as hidden dependencies in places where semantic content identity is required. The final model should make user intent, exact content anchors, bounded estimates, and resolved paint rows separate concepts.
 
 This plan does not implement code. It records the target model, the current code seams, benchmark baseline, and the refactor phases needed to finish the transcript scrolling architecture without leaving debt.
+
+## Post-Phase 6 reassessment
+
+The first six phases improved scalability and removed several obvious sparse-scroll regressions, but they did not finish the migration to the correct scroll model. User testing still reports inconsistent velocity, lag, and occasional perceived snap-back while wheel scrolling or drag-selection autoscrolling. That means this document must no longer treat the Phase 6 result as final.
+
+The core mistake was leaving numeric `scroll_top` as an authoritative transcript scroll state in too many paths. Sparse virtualization makes numeric rows unstable because unloaded prefix estimates, exact height observations, descriptor-window hydration, and render-plan refinement can all change the mapping between row number and visible content. The model must be corrected so user interactions are represented as semantic scroll intents over content, and `Window::scroll_top` becomes a resolved paint output for transcript windows.
+
+The next work must prioritize architecture and observability over local bug patches:
+
+1. Define the transcript scroll contract explicitly.
+2. Add trace instrumentation that can explain real bad sessions.
+3. Add replay and velocity tests that fail on the observed user experience, not only on internal monotonicity.
+4. Move transcript scrolling to document-owned viewport state and explicit intents.
+5. Delete or isolate row-number authority from transcript interaction paths.
 
 ## Principles carried forward
 
@@ -110,7 +124,7 @@ old: missing rows = missing descriptor count * average rows in current loaded wi
 new: missing rows = SQLite aggregate over persisted descriptor metadata
 ```
 
-The result is smooth in practice because loading a new descriptor window no longer changes the estimate for unrelated unloaded ranges based on local content mix.
+The result removed one major instability source because loading a new descriptor window no longer changes the estimate for unrelated unloaded ranges based on local content mix. It did not make scrolling correct by construction because user gestures can still be reduced to numeric rows before transcript projection resolves them against semantic content.
 
 ### What is still architecturally wrong
 
@@ -121,6 +135,18 @@ The current fix is still a transitional model:
 3. The store aggregate scans descriptor rows for large ranges. In the latest 500 MiB resume benchmark, one estimate over 127,920 unloaded descriptors took about 23 ms and contributed to a 45 ms tail load.
 4. Numeric `scroll_top` still carries too much semantic meaning. It should be derived from a content anchor and current extent index, not treated as the durable scroll identity through sparse refinement.
 5. There are two related but separate models: loaded render-plan row indexing in `transcript_buf.rs` and sparse unloaded-gap estimation in `app/transcript.rs`. They should be coordinated by one owner.
+
+### Post-Phase 6 observed failure mode
+
+The remaining lag and inconsistent scroll speed are consistent with a deeper state-model problem, not a single missing anchor case:
+
+1. Wheel, scrollbar, and drag-autoscroll input are converted too early into absolute numeric row requests.
+2. Projection later resolves those rows through a sparse extent model whose estimates may have changed.
+3. Exact height observations and descriptor-window changes can update the row mapping during the same user gesture.
+4. The render loop also preserves cursor screen rows, resolves tail-follow, coalesces wheel input, and applies materialized rows, so several subsystems can reinterpret the same gesture.
+5. Current tests mostly assert monotonic row numbers or bounded work. They do not assert constant user-visible velocity, per-frame latency, or that the top visible content anchor advances by the intended amount on every input tick.
+
+The corrected model must make this impossible by design: a user scroll gesture is an intent relative to current visible content. Numeric rows are only the resolved output after transcript projection has consumed that intent.
 
 ## Latest benchmark baseline
 
@@ -201,6 +227,97 @@ Interpretation: descriptor loading remains bounded to 80 descriptors, but comput
 ## Correct model
 
 The transcript should have four row-knowledge levels. Code should choose the most exact level that is available and required for the operation.
+
+Before the level model matters, the scroll contract must be explicit:
+
+1. **User scroll is intent, not a row assignment.**
+   Wheel, keyboard page movement, drag autoscroll, scrollbar click/drag, search jump, resize reflow, and tail-follow are distinct intents. They must not all collapse into `ExactRow(scroll_top)` before `TranscriptDocument` sees them.
+
+2. **Transcript viewport state is semantic.**
+   The durable viewport state is content identity plus an offset, such as descriptor/block anchor and intra-anchor row offset. `Window::scroll_top` is a resolved paint coordinate for the current projection.
+
+3. **Estimate refinement cannot move visible content.**
+   Exact height observations and unloaded estimate improvements may move the scrollbar thumb or total extent. They must not reinterpret an in-flight wheel or drag gesture as a different content position.
+
+4. **Velocity must be stable in content space.**
+   A repeated wheel tick or autoscroll tick should advance by the same content-row amount unless it reaches a real boundary or the next content is not yet loaded. It must not become faster or slower because an estimate changed.
+
+5. **Sparse placeholders are not a normal local-scroll result.**
+   Placeholder rows may appear only for intentional far seeks into unloaded sparse gaps. Nearby wheel scrolling and drag autoscroll must load adjacent descriptors or stay anchored to the last exact content boundary.
+
+6. **Only transcript projection resolves transcript scroll.**
+   App, UI, and `Window` code may collect geometry and user events, but they should not apply transcript-specific sparse row math. They pass scroll intents to `TranscriptDocument`, which returns a resolved viewport.
+
+### Transcript scroll intents
+
+Introduce an explicit transcript intent type. The exact shape can evolve, but the model should distinguish at least:
+
+```rust
+enum TranscriptScrollIntent {
+    Tail,
+    PreserveViewport,
+    UserDelta { rows: isize },
+    PageDelta { pages: isize },
+    ExactContentAnchor(TranscriptScrollAnchor),
+    SearchJump(TranscriptScrollAnchor),
+    ResizeReflow { previous_width: u16 },
+    ScrollbarFraction { numerator: u64, denominator: u64 },
+    ApproximateRowSeek(RowIndex),
+}
+```
+
+Rules:
+
+- Wheel and drag autoscroll use `UserDelta`.
+- Scrollbar drag/click uses `ScrollbarFraction` or `ApproximateRowSeek` and is allowed to use estimates for the initial landing.
+- Search and reveal use semantic anchors.
+- Resize uses reflow preservation, not an exact numeric row.
+- Tail-follow is its own state and does not require computing the full exact total before rendering.
+
+### Transcript viewport state
+
+`TranscriptDocument` should own the durable transcript viewport state:
+
+```rust
+struct TranscriptViewportState {
+    top_anchor: Option<TranscriptScrollAnchor>,
+    top_offset_rows: isize,
+    mode: TranscriptViewportMode,
+    pending_intent: Option<TranscriptScrollIntent>,
+}
+
+enum TranscriptViewportMode {
+    Tail,
+    Anchored,
+    FarSeek,
+}
+```
+
+Rules:
+
+- `Window::scroll_top` for the transcript is updated from the projection result.
+- `Window` should not be the transcript source of truth for follow-tail, sparse scroll identity, or semantic viewport anchoring.
+- Cursor and selection remain document coordinates and are projected through the same materialized range.
+
+### Applied viewport output
+
+Projection should return one resolved output:
+
+```rust
+struct AppliedTranscriptViewport {
+    materialized_rows: crate::smelt_edit::MaterializedRows,
+    top_anchor: Option<TranscriptScrollAnchor>,
+    scrollbar_total_rows: RowIndex,
+    exact_visible_range: Range<RowIndex>,
+    placeholder_rows_visible: bool,
+}
+```
+
+Rules:
+
+- The render loop applies this output to `Window`.
+- Tests should inspect this output or equivalent trace data.
+- Placeholder visibility is allowed only for far sparse gaps, never as a side effect of nearby scroll.
 
 ### Level 1: Exact materialized rows
 
@@ -469,118 +586,286 @@ Correct behavior:
 - Folds and actions hydrate the target descriptor/window exactly before acting.
 - Estimated gaps are not selectable text and have no actions.
 
+## Testing and observability model
+
+The existing tests are necessary but not sufficient. They prove many internal invariants, but they do not reproduce the subjective bug report: inconsistent velocity, lag, and occasional perceived snap-back during real gestures.
+
+### Scroll trace instrumentation
+
+Add a transcript scroll trace that can be enabled in tests and optionally during local debugging. Each frame should record:
+
+```text
+input_event_or_tick
+scroll_intent
+window_scroll_before
+window_scroll_after_input
+viewport_anchor_before
+projection_target
+active_descriptor_range_before
+prefix_estimate_before
+suffix_estimate_before
+exact_observation_count
+resolved_scroll_top
+viewport_anchor_after
+active_descriptor_range_after
+materialized_range
+placeholder_rows_visible
+first_visible_content_anchor
+last_visible_content_anchor
+visible_record_or_block_ids
+render_or_projection_ms
+```
+
+Requirements:
+
+- The trace must be deterministic in tests.
+- It must not log user transcript content by default. Use descriptor indices, block ids, row anchors, counts, and timings.
+- It must be cheap when disabled.
+- It should explain whether a bad frame is caused by semantic drift, variable velocity, descriptor loading, placeholder landing, event coalescing, or render latency.
+
+### Replay tests
+
+Add a scroll-trace replay harness that can run a recorded sequence of intents against a deterministic sparse transcript.
+
+Required scenarios:
+
+1. Repeated wheel up from tail through heterogeneous descriptor heights.
+2. Repeated wheel down from top into loaded and unloaded regions.
+3. Drag selection to top edge with autoscroll ticks.
+4. Drag selection to bottom edge with autoscroll ticks.
+5. Wheel bursts with production coalescing semantics.
+6. Exact height observations injected mid-gesture.
+7. Descriptor-window replacement while preserving visible content.
+8. Resize while a wheel or drag gesture is in progress.
+9. Streaming append while scrolled away from tail.
+10. Scrollbar drag to far sparse positions.
+
+Assertions:
+
+- Visible content anchor never reverses for a monotonic gesture.
+- Per-tick content movement stays within a narrow expected range except at real content boundaries.
+- Nearby scroll never produces a placeholder-only viewport.
+- Projection/render latency stays under a defined budget for local scroll frames.
+- Descriptor JSON loads and materialized row counts stay bounded.
+- Scrollbar extent may refine, but the visible anchor does not move unexpectedly.
+
+### End-to-end test gap to close
+
+The harness must exercise the real path, not just direct document calls:
+
+```text
+terminal event -> wheel coalescing or drag tick -> Ui -> Window geometry -> TranscriptDocument intent -> projection -> Window applied viewport -> rendered frame snapshot
+```
+
+Any direct `TranscriptDocument` unit test must be paired with at least one full-frame harness test if it protects user-visible scrolling behavior.
+
+## Cleanup requirements
+
+Cleanup is part of the architecture work, not a final polish step.
+
+Delete or simplify the following once the new model owns the behavior:
+
+1. **Transcript-specific row reinterpretation in `Window`.**
+   Keep generic row-document painting and geometry, but remove transcript sparse semantics from `Window` paths.
+
+2. **Patch-level semantic-anchor fallbacks.**
+   Remove local conditions that try to repair `ExactRow(scroll_top)` after the fact. The correct model should pass explicit intents and semantic viewport state before numeric rows are produced.
+
+3. **Duplicate extent calculations.**
+   Consolidate loaded exact heights, unloaded estimates, mixed totals, prefix/suffix math, and scrollbar totals under `TranscriptExtentIndex` or its replacement.
+
+4. **Approximate APIs used by exact consumers.**
+   Delete or rename any method that can silently provide estimated rows to copy, hit testing, selection, actions, cursor placement, or visible content projection.
+
+5. **Obsolete tests that assert implementation artifacts.**
+   Keep tests that assert user-visible contracts and bounded work. Remove or rewrite tests that only assert the old numeric-row workflow.
+
+6. **Temporary tracing or debug output.**
+   Trace infrastructure may stay behind a test/debug gate. Ad hoc logging and one-off metrics added for diagnosis must be removed before final validation.
+
+7. **Dead compatibility or fallback paths.**
+   If a fallback is only for tests, make it test-only. If it is for legacy data, tag it with `COMPAT(<id>)` and document removal criteria in `docs/compat.md`.
+
 ## Refactor phases
 
-### Phase 1: Name the row-extent boundary
+The original six phases are complete but insufficient. They improved boundedness and removed several regressions, but they did not finish the architectural migration away from numeric-row authority. The following phases supersede the earlier phase list and should be implemented in order. Each phase must validate the new user-facing scroll contract, not only internal counters.
 
-Goal: introduce the final abstraction without changing behavior.
+### Phase 0: Freeze symptom patches and capture current behavior
+
+Goal: stop adding local repairs before the correct model is observable.
 
 Tasks:
 
-- Add a `TranscriptExtentIndex` or equivalent private module under `TranscriptDocument`.
-- Move `DescriptorRowsEstimateKey`, `descriptor_rows_estimate_cache`, `estimated_descriptor_rows_for_range`, `missing_descriptor_rows`, `sparse_prefix_row_offset`, `sparse_suffix_rows`, and `virtual_total_rows` behind it.
-- Make every method state whether it returns exact, estimated, or mixed row counts.
-- Keep current tests passing.
+- Do not add more special cases that reinterpret `ExactRow(scroll_top)` after projection has already started.
+- Review uncommitted or recent scroll patches and classify each as:
+  - keep because it matches the final model;
+  - temporary diagnostic aid;
+  - remove once intent-based scrolling lands.
+- Add a short note near any temporary code that names the final deletion condition. Do not add compatibility shims for unreleased intermediate behavior.
+- Record one or more real bad scroll sessions with enough information to identify semantic drift, variable velocity, placeholder landing, event coalescing, or render latency.
 
 Acceptance:
 
-- No caller outside `TranscriptDocument` does ad hoc sparse prefix/suffix estimate math.
-- Exact-required code paths cannot accidentally call an estimated-row method without the type or method name making that obvious.
+- The plan and code review identify which current fixes are architectural and which are symptom patches.
+- No new behavior change is made without a trace or replay that explains the problem.
 
-### Phase 2: Add semantic scroll anchors
+### Phase 1: Define the transcript scroll contract and trace schema
 
-Goal: stop treating numeric `scroll_top` as the durable identity of sparse transcript position.
+Goal: make the target behavior testable before changing the model.
 
 Tasks:
 
-- Add a transcript-specific viewport anchor held by `TranscriptDocument` or document-view state.
-- Capture viewport top anchor after each successful projection.
-- Resolve anchor to numeric `scroll_top` for `Window` only after descriptor window materialization.
-- Preserve anchor across descriptor window switches, estimate refinement, resize, group/fold changes, and streaming append.
-- Keep tail-follow as an anchor state, not as a requirement to compute full total rows before rendering.
+- Write the scroll contract in code-facing docs or test helper docs:
+  - wheel delta semantics;
+  - drag autoscroll semantics;
+  - scrollbar drag/click semantics;
+  - tail-follow semantics;
+  - resize/reflow semantics;
+  - estimate-refinement semantics.
+- Add a disabled-by-default transcript scroll trace with the fields listed in the testing section.
+- Ensure trace records use ids, descriptor indices, anchors, counts, and timings, not transcript text.
+- Add helpers to compare visible content movement in content-anchor space.
 
 Acceptance:
 
-- Existing sparse wheel, drag autoscroll, resize anchor, and streaming snap-back tests pass.
-- Add a focused test where an estimate changes or is refined while a content anchor remains visible.
+- A local reproduction can produce a trace explaining every frame's input, intent, projection target, resolved viewport, descriptor range, placeholder state, and projection time.
+- Trace is cheap when disabled and deterministic in tests.
 
-### Phase 3: Remove synchronous large-range estimate scans from render paths
+### Phase 2: Build replay and velocity tests that fail for the real bug class
 
-Goal: keep stability without paying O(total descriptors) during first tail render or ordinary scroll frames.
+Goal: test the experience the user reports, not only numeric monotonicity.
 
 Tasks:
 
-- Add `PersistentExtentStore` methods for cheap descriptor count and chunked estimates.
-- Avoid opening a fresh read-only SQLite connection per estimate miss. Use a document-owned or app-provided read-only store handle where safe.
-- Introduce chunked per-width estimate summaries or an equivalent bounded query mechanism.
-- For missing summaries, use stable coarse fallback and schedule or lazily compute chunk summaries, preserving anchors on refinement.
+- Add a scroll replay harness that drives the full event path where possible.
+- Add deterministic sparse transcript fixtures with heterogeneous descriptor heights.
+- Cover wheel bursts, normal wheel ticks, top and bottom drag-autoscroll, exact height refinement mid-gesture, descriptor-window replacement, resize during scroll, streaming append while pinned, and scrollbar far seek.
+- Add velocity assertions over visible content anchors.
+- Add latency assertions for local scroll projection frames.
 
 Acceptance:
 
-- 500 MiB descriptor-backed resume loads only the tail descriptor window and does not scan the full unloaded prefix on the synchronous tail-render path.
-- Benchmark counters show descriptor JSON loaded remains bounded to the active window.
-- `store:transcript:descriptor_estimated_rows_requested` is either absent from first tail render or bounded to chunk-size work.
+- At least one replay or full-frame test fails on the current architecture for the observed lag/jitter class before the model rewrite.
+- Passing tests must prove stable content movement and bounded latency, not merely nondecreasing `scroll_top`.
 
-### Phase 4: Consolidate loaded exact height index with sparse extent model
+### Phase 3: Introduce explicit `TranscriptScrollIntent`
 
-Goal: stop maintaining two mental models for row heights.
+Goal: stop collapsing distinct user actions into numeric row requests before transcript projection sees them.
 
 Tasks:
 
-- Treat `TranscriptHeightIndex` exact measurements as Level 1/2 entries in the document extent index.
-- Keep render-plan reuse and exactification behavior from `transcript_buf.rs`, but expose it through the document-owned extent API.
-- Make exact cached descriptor heights override estimates for loaded descriptors.
-- Ensure cache invalidation includes width, renderer generation, renderer cache key, presentation generation, content hash, and view/fold state.
+- Add `TranscriptScrollIntent` with variants for tail, preserve viewport, user delta, page delta, semantic anchor jump, resize reflow, scrollbar fraction, and approximate row seek.
+- Route wheel and drag-autoscroll paths to produce `UserDelta` for transcript windows.
+- Route scrollbar paths to produce `ScrollbarFraction` or `ApproximateRowSeek`.
+- Route search/reveal to semantic anchors.
+- Keep existing behavior behind an adapter only long enough to compare traces.
 
 Acceptance:
 
-- Local scroll, copy, search, resize, and theme operations keep bounded counters.
-- The 10 MiB layout workload keeps `full_row_builds=0` for first, resize, theme, scroll, visible, copy, and append.
+- Trace shows transcript projection receiving the original user intent.
+- App/UI/Window code no longer needs transcript-specific sparse row interpretation to express user actions.
 
-### Phase 5: Restrict estimates to legitimate consumers
+### Phase 4: Make `TranscriptDocument` own durable viewport state
 
-Goal: make it hard to use estimates when exact data is available.
+Goal: make `Window::scroll_top` derived for transcript windows.
 
 Tasks:
 
-- Audit every caller of total rows, materialized rows, block layout, search layout, and copy layout.
-- Split APIs by intent:
-  - exact materialization;
-  - approximate scrollbar extent;
+- Add `TranscriptViewportState` to `TranscriptDocument` or the document-owned view state.
+- Store semantic top anchor, row offset, mode, and pending intent.
+- Resolve pending intents during transcript projection against exact materialized rows and stable sparse extents.
+- Return `AppliedTranscriptViewport` with materialized rows, resolved scroll, visible anchors, scrollbar extent, and placeholder status.
+- Update the render loop so `Window` applies the resolved output but does not own transcript scroll semantics.
+
+Acceptance:
+
+- Estimate refinement, exact height observation, and descriptor-window replacement cannot move visible content unless the pending intent asks to move.
+- `Window::scroll_top` remains correct for painting and scrollbars but is not the durable transcript position.
+
+### Phase 5: Rework local scrolling and autoscroll around exact content movement
+
+Goal: make nearby scrolling consistent and exact.
+
+Tasks:
+
+- Resolve `UserDelta` inside the current exact materialized/overscan range when possible.
+- When the delta approaches a window boundary, load adjacent descriptors before landing in placeholders.
+- Keep drag selection anchor and active edge in document coordinates.
+- Define what happens at real content boundaries and when adjacent descriptors cannot be loaded.
+- Ensure wheel coalescing produces a single intent with a known row delta, not several partially-applied row assignments.
+
+Acceptance:
+
+- Repeated wheel and autoscroll ticks move visible content at a stable rate in replay tests.
+- Nearby scroll does not produce placeholder-only viewports.
+- Selection autoscroll keeps growing selection exactly while maintaining bounded materialization.
+
+### Phase 6: Restrict estimates to scrollbar and far seek
+
+Goal: prevent estimates from influencing visible content identity or local scroll velocity.
+
+Tasks:
+
+- Audit every use of approximate total rows, sparse prefix/suffix rows, mixed totals, and unloaded gap rows.
+- Split APIs by precision and intent:
+  - exact visible materialization;
+  - exact loaded descriptor extent;
+  - approximate scrollbar total;
   - approximate far seek;
-  - compatibility fallback.
-- Rename retained expensive or approximate APIs so call sites reveal cost and precision.
-- Add assertions or tests that estimated gaps cannot provide copy text, actions, or hit targets.
+  - compatibility/test fallback.
+- Ensure unloaded sparse gaps are inert and reachable only through intentional far seeks or insufficiently loaded far scrollbar targets.
+- Keep or improve the bounded estimate-store behavior from the first six phases.
 
 Acceptance:
 
-- Estimation is used only for unloaded gaps, global scrollbar extent, and coarse far seeking.
-- Visible viewport and overscan are exact.
-- No app/window code computes transcript-specific sparse estimates directly.
+- Exact consumers cannot call approximate APIs by accident.
+- Estimates affect scrollbar geometry and far seek only.
+- Copy, hit testing, selection, actions, folds, cursor placement, and visible local scroll use exact rows.
 
-### Phase 6: Benchmark and simplify
+### Phase 7: Cleanup obsolete row-authority paths
 
-Goal: finish with a simpler architecture, not an extra abstraction layer over the old one.
+Goal: finish with fewer competing models than before.
 
 Tasks:
 
-- Rerun the benchmark command from this plan with `TMPDIR=/home/dev/tmp`.
-- Rerun targeted sparse/harness tests, clippy, and workspace tests.
-- Compare against the latest baseline in this document.
-- Delete any old estimate helpers, caches, or fallbacks made obsolete by the new extent owner.
-- Update this plan with final measured numbers and any deliberate tradeoffs.
+- Remove temporary adapters that convert transcript intents back into `ExactRow(scroll_top)` too early.
+- Remove patch-level anchor fallbacks made obsolete by durable viewport state.
+- Remove transcript-specific sparse behavior from `Window` except resolved paint geometry.
+- Consolidate exact loaded heights and sparse estimates under one extent owner.
+- Delete stale tests that assert the old numeric-row workflow. Replace them with contract, trace, and replay tests.
+- Remove ad hoc tracing/debug metrics. Keep only structured trace infrastructure behind test/debug gates.
+- Tag any real legacy compatibility fallback with `COMPAT(<id>)` and document it in `docs/compat.md`.
+
+Acceptance:
+
+- There is one owner for transcript viewport state and one owner for transcript extent knowledge.
+- The code no longer needs local row-rebasing patches to make sparse scrolling feel correct.
+- The cleanup diff removes more old row-authority code than it adds in replacement glue.
+
+### Phase 8: Benchmark, validate, and update this plan
+
+Goal: prove the correct model is both smoother and still bounded.
+
+Tasks:
+
+- Run targeted replay tests and full transcript tests.
+- Run workspace tests and clippy.
+- Run the large transcript benchmark with `TMPDIR=/home/dev/tmp`.
+- Compare scroll latency, descriptor loads, materialized rows, full row builds, and search/copy boundedness to the Phase 6 baseline.
+- Update this document with final results and any deliberate tradeoffs.
 
 Acceptance:
 
 - No full transcript load on normal hot paths.
-- First tail render is not blocked by a full-prefix descriptor estimate scan.
-- Smooth heterogeneous wheel scroll and active selection autoscroll remain covered by full-frame tests.
-- Streaming tool and compaction updates do not re-enable tail-follow when the user is scrolled away.
-- Code ownership is simpler: `TranscriptDocument` owns transcript row extent and sparse loading policy.
+- First tail render remains bounded and does not scan full unloaded prefixes.
+- Wheel and drag-autoscroll replay tests prove stable velocity in content space.
+- Local scroll projection latency stays within the chosen budget.
+- Placeholder-only viewports are limited to intentional far sparse seeks.
+- Code ownership is simpler: transcript scroll semantics live in `TranscriptDocument`, not split across app, UI, window, projection, and extent helpers.
 
-## Final Phase 6 results
+## Historical Phase 6 results
 
-All six phases are implemented. This section records the final validation run and the tradeoffs intentionally left in the completed scroll model.
+The original six phases were implemented and validated. They are now considered a scalability baseline, not the final scroll model. This section records that baseline and the tradeoffs left by the incomplete model.
 
 The full benchmark command was rerun with home temp storage:
 
