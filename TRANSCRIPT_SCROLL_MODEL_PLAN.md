@@ -1024,6 +1024,31 @@ Acceptance:
 - No semantic transcript navigation path depends on estimated absolute rows.
 - The cleanup removes wrong-model code and abstractions instead of preserving them behind compatibility shims.
 
+Reset Phase 7 result:
+
+- Added full-frame semantic navigation coverage for previous-user and next-user reveals through the Lua `smelt.transcript.previous_block`, `next_block`, and `reveal_block` APIs. The regression asserts `RevealBlock` trace intent, descriptor/block identity, exact visible content anchors, no sparse placeholders, and visible target content after projection.
+- Strengthened replay validation so preserve and resize frames must keep the same semantic descriptor/block viewport anchor and stay within the existing per-frame latency budget.
+- Strengthened search reveal coverage to assert semantic `SearchJump(Content { ... })`, exact visible content, no sparse placeholders, and visible matched content after projection.
+- Rechecked existing full-frame coverage for bottom jump then click, wheel bursts, drag autoscroll, resize, and streaming append. The remaining row-oriented tests are generic window/document behavior or resolved paint-coordinate checks, not obsolete semantic-navigation authority.
+- Large transcript benchmark output was captured at `/home/dev/tmp/smelt-transcript-scroll-model-bench-reset-phase7.txt`.
+
+Reset Phase 7 validation:
+
+- `cargo test -p smelt-tui --features harness transcript_previous_and_next_user_reveals_are_full_frame_semantic`
+- `cargo test -p smelt-tui --features harness transcript_scroll`
+- `cargo test -p smelt-tui --features harness transcript_`
+- `cargo fmt && cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness` with `3864 passed, 7 skipped`
+- `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib --search --search-bytes 524288000 --resume --resume-bytes 524288000 --no-warmup`
+
+Reset Phase 7 benchmark summary:
+
+- 10 MiB mixed layout: `first_ms=15.161`, `resize_ms=3.201`, `theme_ms=2.947`, `scroll12_ms=19.899`, `visible_ms=3.238`, `copy_ms=13.513`, `append_ms=7.001`, with `full_row_builds=0` for first, resize, theme, scroll12, visible, copy, append, and no-cache passes.
+- 500 MiB search/view: `width_resize_ms=3.990`, `height_resize_ms=3.540`, `theme_color_ms=2.673`, `copy_mid_ms=0.304`, `nav_ctrl_d20_ms=37.879`, `nav_ctrl_u20_ms=31.214`, `nav_gg_ms=0.561`, `nav_G_ms=5.104`, `rare_ms=25.616`, `common_submit_ms=7.485`, `next100_ms=103.199`, `after_append_ms=12.748`.
+- After-append search stayed bounded with `dirty_candidate_blocks=1`, `dirty_candidates_scanned=1`, `transcript:collect_nodes_range:rows total=40`, and `transcript:render_plan:reused last=1`.
+- 500 MiB descriptor-backed resume stayed bounded with `descriptor_slice_requested=80`, `descriptors_loaded=80`, `descriptor_json_bytes_loaded=331120`, `tail_load_ms=21.520`, and `tail_render_ms=1.307`.
+- No `store:transcript:descriptor_estimated_rows` metric was emitted, so first tail render did not synchronously scan the unloaded descriptor prefix for row estimates.
+
 ## Superseded implementation phase archive
 
 

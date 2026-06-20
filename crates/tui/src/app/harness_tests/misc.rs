@@ -1341,6 +1341,134 @@ fn finish_transcript_drag(app: &mut TestApp) {
     )));
 }
 
+#[derive(Clone, Debug)]
+struct RevealedUserBlock {
+    idx: usize,
+    block_id: u64,
+    first_line: String,
+}
+
+fn reveal_user_block_via_lua(app: &mut TestApp, direction: &str) -> RevealedUserBlock {
+    let snippet = match direction {
+        "previous" => {
+            r#"
+            local block = assert(smelt.transcript.previous_block({ role = "user" }))
+            assert(block.role == "user")
+            assert(smelt.transcript.reveal_block(block.idx, { top_padding = 1, cursor = true }))
+            _G.transcript_revealed_idx = block.idx
+            _G.transcript_revealed_block_id = block.block_id
+            _G.transcript_revealed_first_line = block.first_line
+            "#
+        }
+        "next" => {
+            r#"
+            local block = assert(smelt.transcript.next_block({ role = "user" }))
+            assert(block.role == "user")
+            assert(smelt.transcript.reveal_block(block.idx, { top_padding = 1, cursor = true }))
+            _G.transcript_revealed_idx = block.idx
+            _G.transcript_revealed_block_id = block.block_id
+            _G.transcript_revealed_first_line = block.first_line
+            "#
+        }
+        other => panic!("unsupported transcript reveal direction {other}"),
+    };
+    assert!(app.run_lua(snippet));
+    let globals = app.app.lua.lua.globals();
+    RevealedUserBlock {
+        idx: globals
+            .get::<usize>("transcript_revealed_idx")
+            .expect("revealed descriptor index"),
+        block_id: globals
+            .get::<u64>("transcript_revealed_block_id")
+            .expect("revealed block id"),
+        first_line: globals
+            .get::<String>("transcript_revealed_first_line")
+            .expect("revealed first line"),
+    }
+}
+
+fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &RevealedUserBlock) {
+    assert_eq!(frame.input_event_or_tick, "reveal_block");
+    assert!(
+        !frame.placeholder_rows_visible,
+        "semantic block reveal must not expose sparse placeholders: {frame:?}"
+    );
+    assert!(
+        frame.first_visible_content_anchor.is_some(),
+        "semantic block reveal must resolve an exact content anchor: {frame:?}"
+    );
+    match frame.scroll_intent {
+        TranscriptScrollIntent::RevealBlock {
+            descriptor_index,
+            block_id,
+            row_offset,
+            screen_padding_top,
+        } => {
+            assert_eq!(descriptor_index, block.idx);
+            assert_eq!(
+                block_id,
+                smelt_core::transcript_model::BlockId::new(block.block_id)
+            );
+            assert_eq!(row_offset, 0);
+            assert_eq!(screen_padding_top, 1);
+        }
+        ref intent => panic!("semantic user navigation collapsed to wrong intent: {intent:?}"),
+    }
+}
+
+#[test]
+fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(340, 78, 18);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    let previous = reveal_user_block_via_lua(&mut app, "previous");
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("previous user reveal frame");
+    assert_reveal_block_frame(frame, &previous);
+    let lines = transcript_viewport_lines(&app);
+    let previous_marker = previous
+        .first_line
+        .split_whitespace()
+        .next()
+        .expect("previous user marker");
+    assert!(
+        lines.iter().any(|line| line.contains(previous_marker)),
+        "previous user target was not revealed in the viewport: target={:?}, lines={lines:?}",
+        previous.first_line
+    );
+
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        SearchDirection::Forward,
+        "record-0291".to_string(),
+    );
+    app.render_silent();
+    app.app.transcript.take_scroll_trace_frames();
+
+    let next = reveal_user_block_via_lua(&mut app, "next");
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("next user reveal frame");
+    assert_reveal_block_frame(frame, &next);
+    let lines = transcript_viewport_lines(&app);
+    let next_marker = next
+        .first_line
+        .split_whitespace()
+        .next()
+        .expect("next user marker");
+    assert!(
+        lines.iter().any(|line| line.contains(next_marker)),
+        "next user target was not revealed in the viewport: target={:?}, lines={lines:?}",
+        next.first_line
+    );
+    assert!(
+        next.idx > previous.idx,
+        "next user reveal should move forward by descriptor identity: previous={previous:?}, next={next:?}"
+    );
+}
+
 fn visible_anchor_order(frame: &TranscriptScrollTraceFrame) -> Option<(u8, u64, u64)> {
     let anchor = frame.first_visible_content_anchor?;
     match anchor.node_id {
@@ -1421,6 +1549,59 @@ fn assert_user_delta_targets_requested_rows(frames: &[TranscriptScrollTraceFrame
             "user delta was not projected as the requested content-row movement: {frame:?}"
         );
     }
+}
+
+fn assert_preserve_frames_keep_semantic_anchor(frames: &[TranscriptScrollTraceFrame]) {
+    let preserve_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::PreserveViewport
+                    | TranscriptScrollIntent::ResizeReflow { .. }
+            )
+        })
+        .collect();
+    assert!(
+        !preserve_frames.is_empty(),
+        "replay did not include preserve or resize frames"
+    );
+    let mut compared = 0;
+    for frame in preserve_frames {
+        let Some(TranscriptTraceAnchor::Content {
+            descriptor_index: before_descriptor,
+            block_id: before_block,
+            ..
+        }) = frame.viewport_anchor_before
+        else {
+            continue;
+        };
+        let Some(TranscriptTraceAnchor::Content {
+            descriptor_index: after_descriptor,
+            block_id: after_block,
+            ..
+        }) = frame.viewport_anchor_after
+        else {
+            panic!("preserve frame lost its semantic viewport anchor: {frame:?}");
+        };
+        assert_eq!(
+            (after_descriptor, after_block),
+            (before_descriptor, before_block),
+            "preserve/resize frame moved to different visible block identity: {frame:?}"
+        );
+        compared += 1;
+        let ms = frame
+            .render_or_projection_ms
+            .expect("replay should enable projection timings");
+        assert!(
+            ms <= 250,
+            "preserve/resize projection exceeded latency budget: {ms}ms in {frame:?}"
+        );
+    }
+    assert!(
+        compared > 0,
+        "replay preserve/resize frames did not expose comparable semantic anchors"
+    );
 }
 
 #[test]
@@ -1525,6 +1706,7 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
     assert_user_delta_targets_requested_rows(&wheel_up_frames);
     assert_user_delta_targets_requested_rows(&wheel_probe_frames);
     assert_user_delta_targets_requested_rows(&wheel_down_frames);
+    assert_preserve_frames_keep_semantic_anchor(&report.frames);
     assert_monotonic_visible_anchors(&wheel_up_frames, true);
     assert_monotonic_visible_anchors(&wheel_probe_frames, true);
     assert_monotonic_visible_anchors(&drag_top_frames, true);
@@ -1585,6 +1767,21 @@ fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
         ),
         "search jumps must preserve a semantic content anchor instead of collapsing to {:?}",
         frame.scroll_intent
+    );
+    assert!(
+        !frame.placeholder_rows_visible,
+        "search reveal must not expose sparse placeholders: {frame:?}"
+    );
+    assert!(
+        frame.first_visible_content_anchor.is_some(),
+        "search reveal must resolve exact visible content: {frame:?}"
+    );
+    assert!(
+        transcript_viewport_lines(&app)
+            .iter()
+            .any(|line| line.contains("record-0150")),
+        "search reveal did not place the matched record in the viewport: {:?}",
+        transcript_viewport_lines(&app)
     );
 }
 
