@@ -748,6 +748,22 @@ Acceptance:
 - A local reproduction can produce a trace explaining every frame's input, intent, projection target, resolved viewport, descriptor range, placeholder state, and projection time.
 - Trace is cheap when disabled and deterministic in tests.
 
+Phase 1 implementation record:
+
+- Added `crates/tui/src/app/transcript_scroll_trace.rs` as the code-facing scroll contract and trace schema. The contract names wheel delta, drag autoscroll, scrollbar far seek, tail-follow, resize/reflow, and estimate-refinement semantics without changing runtime scroll behavior.
+- Added a disabled-by-default in-memory transcript scroll trace on `TranscriptDocument`. When enabled, projection frames record input/tick labels, semantic intent labels, window scroll before/after input, viewport anchors, projection targets, descriptor ranges, prefix/suffix estimates, exact observation counts, resolved scroll, materialized ranges, placeholder state, first/last visible content anchors, visible block ids, and optional projection timings.
+- Trace records use descriptor indices, row anchors, render node ids, block ids, row counts, and optional timings. They do not record transcript text.
+- Added `compare_visible_content_movement` and `TranscriptVisibleContentAnchor` as Phase 2 helpers for content-anchor velocity assertions.
+- Wired the render-prep path to seed trace frames from the current row-based architecture only when tracing is enabled, keeping disabled tracing on a cheap `Option::is_some` branch.
+- Added a deterministic unit test for trace frame fields with timings disabled.
+
+Phase 1 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-tui --features harness transcript_scroll_trace`
+- `cargo test -p smelt-tui --features harness app::transcript::document_tests`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+
 ### Phase 2: Build replay and velocity tests that fail for the real bug class
 
 Goal: test the experience the user reports, not only numeric monotonicity.

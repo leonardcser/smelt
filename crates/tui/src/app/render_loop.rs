@@ -216,10 +216,34 @@ impl TuiApp {
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
                     let width = request.content_width.max(1);
-                    let width_changed = ui
+                    let previous_content_width = ui
                         .win(request.win)
-                        .and_then(|win| win.viewport)
-                        .is_some_and(|viewport| viewport.content_width != width);
+                        .and_then(|win| win.viewport.map(|viewport| viewport.content_width));
+                    let width_changed =
+                        previous_content_width.is_some_and(|previous| previous != width);
+                    if transcript.scroll_trace_enabled() {
+                        let scroll_intent = if request.follow_tail {
+                            crate::app::transcript_scroll_trace::TranscriptScrollIntent::Tail
+                        } else if width_changed {
+                            crate::app::transcript_scroll_trace::TranscriptScrollIntent::ResizeReflow {
+                                previous_width: previous_content_width.unwrap_or(width),
+                            }
+                        } else {
+                            crate::app::transcript_scroll_trace::TranscriptScrollIntent::CurrentRowTarget(
+                                request.scroll_top,
+                            )
+                        };
+                        transcript.set_next_scroll_trace_input(
+                            crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput {
+                                input_event_or_tick: "render_frame".to_string(),
+                                scroll_intent,
+                                window_scroll_before: transcript
+                                    .last_traced_resolved_scroll_top()
+                                    .unwrap_or(request.scroll_top),
+                                window_scroll_after_input: request.scroll_top,
+                            },
+                        );
+                    }
                     let scroll_target = if request.follow_tail {
                         crate::content::transcript_buf::ScrollTarget::visible_tail()
                     } else if width_changed {

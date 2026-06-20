@@ -1,5 +1,10 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
+use crate::app::transcript_scroll_trace::{
+    TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollTrace,
+    TranscriptScrollTraceFrame, TranscriptScrollTraceFrameStart, TranscriptScrollTraceRenderInput,
+    TranscriptTraceAnchor, TranscriptVisibleContentAnchor,
+};
 use crate::app::TuiApp;
 use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
@@ -21,7 +26,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
 const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
@@ -412,6 +417,10 @@ impl TranscriptExtentIndex {
         self.latest_exact_descriptor_rows.clear();
     }
 
+    fn exact_observation_count(&self) -> usize {
+        self.exact_descriptor_rows.len()
+    }
+
     fn exact_rows_for_descriptor(&self, descriptor_index: usize, width: u16) -> Option<RowIndex> {
         let width = width.max(1);
         let key = self
@@ -622,6 +631,7 @@ pub(crate) struct TranscriptDocument {
     session_dir: Option<PathBuf>,
     extent_index: TranscriptExtentIndex,
     viewport_anchor: Option<TranscriptScrollAnchor>,
+    scroll_trace: Option<TranscriptScrollTrace>,
 }
 
 pub(crate) struct TranscriptRenderContext {
@@ -679,6 +689,16 @@ pub(crate) struct TranscriptProjectionPlan {
     scroll_anchor: TranscriptScrollAnchor,
     width: u16,
     viewport_rows: u16,
+    trace_frame: Option<TranscriptScrollTraceFrameStart>,
+    trace_started_at: Option<Instant>,
+}
+
+struct TranscriptScrollTraceFinishContext {
+    width: u16,
+    row_offset: RowIndex,
+    viewport_rows: u16,
+    trace_frame: Option<TranscriptScrollTraceFrameStart>,
+    trace_started_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -765,6 +785,7 @@ impl TranscriptDocument {
             session_dir: loaded.session_dir,
             extent_index: TranscriptExtentIndex::default(),
             viewport_anchor: None,
+            scroll_trace: None,
         };
         if document.active_descriptor_range.is_some() {
             document.install_active_descriptor_projection();
@@ -778,7 +799,9 @@ impl TranscriptDocument {
 
     pub(crate) fn replace_loaded_transcript(&mut self, loaded: LoadedTranscript) {
         let inline_options = self.projection.inline_options().clone();
+        let scroll_trace = self.scroll_trace.take();
         *self = Self::from_loaded_transcript(loaded);
+        self.scroll_trace = scroll_trace;
         self.set_inline_options(inline_options);
     }
 
@@ -814,6 +837,197 @@ impl TranscriptDocument {
         true
     }
 
+    pub(crate) fn scroll_trace_enabled(&self) -> bool {
+        self.scroll_trace.is_some()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_scroll_trace_enabled(&mut self, enabled: bool) {
+        match (enabled, self.scroll_trace.is_some()) {
+            (true, false) => self.scroll_trace = Some(TranscriptScrollTrace::default()),
+            (false, true) => self.scroll_trace = None,
+            _ => {}
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_scroll_trace_timings_enabled(&mut self, enabled: bool) {
+        self.scroll_trace = Some(TranscriptScrollTrace::with_timings(enabled));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scroll_trace_frames(&self) -> &[TranscriptScrollTraceFrame] {
+        self.scroll_trace
+            .as_ref()
+            .map(TranscriptScrollTrace::frames)
+            .unwrap_or(&[])
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take_scroll_trace_frames(&mut self) -> Vec<TranscriptScrollTraceFrame> {
+        self.scroll_trace
+            .as_mut()
+            .map(TranscriptScrollTrace::take_frames)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn last_traced_resolved_scroll_top(&self) -> Option<RowIndex> {
+        self.scroll_trace
+            .as_ref()
+            .and_then(TranscriptScrollTrace::last_resolved_scroll_top)
+    }
+
+    pub(crate) fn set_next_scroll_trace_input(&mut self, input: TranscriptScrollTraceRenderInput) {
+        if let Some(trace) = self.scroll_trace.as_mut() {
+            trace.set_pending_input(input);
+        }
+    }
+
+    fn trace_descriptor_range(
+        range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
+    ) -> Option<TranscriptDescriptorTraceRange> {
+        range.map(TranscriptDescriptorTraceRange::from_store_range)
+    }
+
+    fn trace_anchor(anchor: TranscriptScrollAnchor) -> TranscriptTraceAnchor {
+        match anchor {
+            TranscriptScrollAnchor::Tail => TranscriptTraceAnchor::Tail,
+            TranscriptScrollAnchor::Content {
+                virtual_row,
+                anchor,
+            } => TranscriptTraceAnchor::Content {
+                virtual_row,
+                node_id: anchor.id,
+                row_offset: anchor.row_offset,
+            },
+            TranscriptScrollAnchor::EstimatedRow(row) => TranscriptTraceAnchor::EstimatedRow(row),
+        }
+    }
+
+    fn trace_projection_target(
+        target: crate::content::transcript_buf::ScrollTarget,
+    ) -> TranscriptProjectionTargetTrace {
+        match target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::Tail,
+            ) => TranscriptProjectionTargetTrace::Tail,
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            ) => TranscriptProjectionTargetTrace::ExactRow(row),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+            ) => TranscriptProjectionTargetTrace::ReflowStableRow(row),
+        }
+    }
+
+    fn start_scroll_trace_frame(
+        &mut self,
+        width: u16,
+        projection_target: crate::content::transcript_buf::ScrollTarget,
+    ) -> Option<(TranscriptScrollTraceFrameStart, Option<Instant>)> {
+        let projection_target = Self::trace_projection_target(projection_target);
+        let (input, record_timings) = {
+            let trace = self.scroll_trace.as_mut()?;
+            (
+                trace.take_pending_input_or_default(projection_target),
+                trace.record_timings(),
+            )
+        };
+        let viewport_anchor_before = self.viewport_anchor.map(Self::trace_anchor);
+        let active_descriptor_range_before =
+            Self::trace_descriptor_range(self.active_descriptor_range.as_ref());
+        let prefix_estimate_before = self.estimated_sparse_prefix_row_offset(width);
+        let suffix_estimate_before = self.estimated_sparse_suffix_rows(width);
+        let exact_observation_count = self.extent_index.exact_observation_count();
+        let started_at = record_timings.then(Instant::now);
+        Some((
+            TranscriptScrollTraceFrameStart {
+                input,
+                viewport_anchor_before,
+                projection_target,
+                active_descriptor_range_before,
+                prefix_estimate_before,
+                suffix_estimate_before,
+                exact_observation_count,
+            },
+            started_at,
+        ))
+    }
+
+    fn finish_scroll_trace_frame(
+        &mut self,
+        lua: &LuaRuntime,
+        rows: crate::smelt_edit::MaterializedRows,
+        ctx: &mut TranscriptScrollTraceFinishContext,
+        placeholder_rows_visible: bool,
+    ) {
+        let Some(trace_frame) = ctx.trace_frame.take() else {
+            return;
+        };
+        let viewport_rows = RowIndex::from(ctx.viewport_rows.max(1));
+        let first_visible_content_anchor =
+            self.trace_visible_content_anchor_at_row(lua, ctx.width, rows.clamped_scroll);
+        let last_visible_row = rows
+            .clamped_scroll
+            .saturating_add(viewport_rows.saturating_sub(1))
+            .min(rows.total_rows.saturating_sub(1));
+        let last_visible_content_anchor =
+            self.trace_visible_content_anchor_at_row(lua, ctx.width, last_visible_row);
+        let active_descriptor_range_after =
+            Self::trace_descriptor_range(self.active_descriptor_range.as_ref());
+        let viewport_anchor_after = self.viewport_anchor.map(Self::trace_anchor);
+        let visible_record_or_block_ids = self.visible_block_ids_for_virtual_range(
+            rows.clamped_scroll..rows.clamped_scroll.saturating_add(viewport_rows),
+            ctx.row_offset,
+        );
+        let render_or_projection_ms = ctx.trace_started_at.take().map(|started| {
+            let millis = started.elapsed().as_millis();
+            millis.min(u128::from(u64::MAX)) as u64
+        });
+        let frame = trace_frame.finish(
+            rows.clamped_scroll,
+            viewport_anchor_after,
+            active_descriptor_range_after,
+            rows.materialized_range(),
+            placeholder_rows_visible,
+            first_visible_content_anchor,
+            last_visible_content_anchor,
+            visible_record_or_block_ids,
+            render_or_projection_ms,
+        );
+        if let Some(trace) = self.scroll_trace.as_mut() {
+            trace.push(frame);
+        }
+    }
+
+    fn trace_visible_content_anchor_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+    ) -> Option<TranscriptVisibleContentAnchor> {
+        self.row_anchor_at_row(lua, width, row)
+            .map(|anchor| TranscriptVisibleContentAnchor {
+                virtual_row: row,
+                node_id: anchor.id,
+                row_offset: anchor.row_offset,
+            })
+    }
+
+    fn visible_block_ids_for_virtual_range(
+        &self,
+        range: Range<RowIndex>,
+        row_offset: RowIndex,
+    ) -> Vec<BlockId> {
+        self.visible_block_layout()
+            .filter_map(|(id, first_row, rows)| {
+                let first_row = first_row.saturating_add(row_offset);
+                let end = first_row.saturating_add(rows);
+                (first_row < range.end && end > range.start).then_some(id)
+            })
+            .collect()
+    }
+
     fn install_active_descriptor_projection(&mut self) {
         let records = self
             .sparse_descriptors
@@ -840,6 +1054,15 @@ impl TranscriptDocument {
 
     fn estimated_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
         self.extent_index.estimated_sparse_prefix_rows(
+            &self.sparse_descriptors,
+            self.active_descriptor_range.as_ref(),
+            self.session_dir.as_ref(),
+            width,
+        )
+    }
+
+    fn estimated_sparse_suffix_rows(&mut self, width: u16) -> RowIndex {
+        self.extent_index.estimated_sparse_suffix_rows(
             &self.sparse_descriptors,
             self.active_descriptor_range.as_ref(),
             self.session_dir.as_ref(),
@@ -1358,6 +1581,11 @@ impl TranscriptDocument {
     ) -> TranscriptProjectionPlan {
         let scroll_target =
             self.resolve_exact_scroll_target_from_viewport_anchor(lua, width, scroll_target);
+        let (trace_frame, trace_started_at) = self
+            .start_scroll_trace_frame(width, scroll_target)
+            .map_or((None, None), |(frame, started_at)| {
+                (Some(frame), started_at)
+            });
         let scroll_anchor = self.scroll_anchor_for_projection_target(scroll_target);
         match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
@@ -1460,27 +1688,30 @@ impl TranscriptDocument {
             scroll_anchor,
             width,
             viewport_rows,
+            trace_frame,
+            trace_started_at,
         }
     }
 
     fn project_unloaded_sparse_gap(
         &mut self,
         buf: &mut Buffer,
-        plan: &TranscriptProjectionPlan,
+        total_rows: RowIndex,
+        viewport_rows: u16,
         gap: SparseProjectionGap,
     ) -> crate::smelt_edit::MaterializedRows {
-        let viewport_rows = RowIndex::from(plan.viewport_rows.max(1));
+        let viewport_rows = RowIndex::from(viewport_rows.max(1));
         let materialized_rows = gap
             .end
             .saturating_sub(gap.row_base)
             .min(viewport_rows.saturating_mul(2))
-            .min(plan.total_rows.saturating_sub(gap.row_base));
+            .min(total_rows.saturating_sub(gap.row_base));
         buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
         self.viewport_anchor = Some(TranscriptScrollAnchor::EstimatedRow(gap.scroll_top));
         crate::smelt_edit::MaterializedRows {
             clamped_scroll: gap.scroll_top,
             row_base: gap.row_base,
-            total_rows: plan.total_rows,
+            total_rows,
             materialized_rows,
         }
     }
@@ -1492,9 +1723,29 @@ impl TranscriptDocument {
         theme: &Theme,
         plan: TranscriptProjectionPlan,
     ) -> crate::smelt_edit::MaterializedRows {
-        let mut rows = match plan.materialization {
+        let TranscriptProjectionPlan {
+            materialization,
+            row_offset,
+            total_rows,
+            requested_scroll,
+            scroll_anchor,
+            width,
+            viewport_rows,
+            trace_frame,
+            trace_started_at,
+        } = plan;
+        let mut trace_ctx = TranscriptScrollTraceFinishContext {
+            width,
+            row_offset,
+            viewport_rows,
+            trace_frame,
+            trace_started_at,
+        };
+        let mut rows = match materialization {
             TranscriptMaterializationPlan::UnloadedGap(gap) => {
-                return self.project_unloaded_sparse_gap(buf, &plan, gap);
+                let rows = self.project_unloaded_sparse_gap(buf, total_rows, viewport_rows, gap);
+                self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, true);
+                return rows;
             }
             TranscriptMaterializationPlan::Loaded(inner) => self.projection.project_planned(
                 lua,
@@ -1505,12 +1756,12 @@ impl TranscriptDocument {
             ),
         };
         self.observe_exact_loaded_descriptor_rows();
-        rows.clamped_scroll = rows.clamped_scroll.saturating_add(plan.row_offset);
-        rows.row_base = rows.row_base.saturating_add(plan.row_offset);
-        rows.total_rows = plan.total_rows;
-        if let Some(requested) = plan.requested_scroll {
-            let viewport_rows = RowIndex::from(plan.viewport_rows.max(1));
-            let requested = requested.min(plan.total_rows.saturating_sub(viewport_rows));
+        rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
+        rows.row_base = rows.row_base.saturating_add(row_offset);
+        rows.total_rows = total_rows;
+        if let Some(requested) = requested_scroll {
+            let viewport_rows = RowIndex::from(viewport_rows.max(1));
+            let requested = requested.min(total_rows.saturating_sub(viewport_rows));
             if requested >= rows.row_base
                 && requested.saturating_add(viewport_rows)
                     <= rows.row_base.saturating_add(rows.materialized_rows)
@@ -1518,7 +1769,8 @@ impl TranscriptDocument {
                 rows.clamped_scroll = requested;
             }
         }
-        self.capture_viewport_anchor(lua, plan.width, rows.clamped_scroll, plan.scroll_anchor);
+        self.capture_viewport_anchor(lua, width, rows.clamped_scroll, scroll_anchor);
+        self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
         rows
     }
 
@@ -2095,6 +2347,10 @@ impl Default for TranscriptDocument {
 #[cfg(test)]
 mod document_tests {
     use super::*;
+    use crate::app::transcript_scroll_trace::{
+        TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
+        TranscriptScrollTraceRenderInput, TranscriptTraceAnchor,
+    };
     use smelt_core::transcript_model::TranscriptBlockRecord;
 
     #[test]
@@ -2171,6 +2427,77 @@ mod document_tests {
         assert!(rows.row_base >= offset);
         assert!(rows.clamped_scroll >= offset);
         assert!(buf.lines().iter().any(|line| line == "tail two"));
+    }
+
+    #[test]
+    fn transcript_scroll_trace_records_projection_contract_fields() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let mut source = Transcript::new();
+        source.push(Block::Text {
+            content: "trace head".into(),
+        });
+        source.push(Block::Text {
+            content: "trace tail".into(),
+        });
+        let records = source.history.descriptor_records();
+        let window_records = descriptor_records_with_ids(&records, 0);
+        let loaded = LoadedTranscript {
+            transcript: Transcript::new(),
+            descriptor_window: Some(LoadedDescriptorWindow {
+                start: smelt_store::TranscriptDescriptorIndex::new(0),
+                total_count: 2,
+                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+                records: window_records,
+            }),
+            session_dir: None,
+        };
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        document.set_scroll_trace_enabled(true);
+        document.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
+            input_event_or_tick: "unit_wheel_tick".to_string(),
+            scroll_intent: TranscriptScrollIntent::UserDelta { rows: -3 },
+            window_scroll_before: 12,
+            window_scroll_after_input: 9,
+        });
+        let plan = document.plan_projection_measured(
+            &lua,
+            80,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            10,
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(409), Default::default());
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+        let frames = document.take_scroll_trace_frames();
+        assert_eq!(frames.len(), 1);
+        let frame = &frames[0];
+        assert_eq!(frame.input_event_or_tick, "unit_wheel_tick");
+        assert_eq!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::UserDelta { rows: -3 }
+        );
+        assert_eq!(frame.window_scroll_before, 12);
+        assert_eq!(frame.window_scroll_after_input, 9);
+        assert_eq!(
+            frame.projection_target,
+            TranscriptProjectionTargetTrace::Tail
+        );
+        assert_eq!(frame.resolved_scroll_top, rows.clamped_scroll);
+        assert_eq!(frame.materialized_range, rows.materialized_range().into());
+        assert_eq!(
+            frame.active_descriptor_range_after,
+            Some(TranscriptDescriptorTraceRange { start: 0, end: 2 })
+        );
+        assert!(!frame.placeholder_rows_visible);
+        assert!(matches!(
+            frame.viewport_anchor_after,
+            Some(TranscriptTraceAnchor::Tail)
+        ));
+        assert!(frame.first_visible_content_anchor.is_some());
+        assert!(!frame.visible_record_or_block_ids.is_empty());
+        assert_eq!(frame.render_or_projection_ms, None);
     }
 
     #[test]
