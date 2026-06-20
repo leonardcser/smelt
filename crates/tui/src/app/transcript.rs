@@ -15,7 +15,7 @@ use smelt_core::content::highlight::InlineOptions;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::transcript_model::{
-    Block, BlockHistory, BlockId, ToolOutputRef, ToolStatus, TranscriptBlockRecordWithId,
+    Block, BlockHistory, BlockId, LayoutKey, ToolOutputRef, ToolStatus, TranscriptBlockRecordWithId,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
@@ -388,30 +388,91 @@ struct DescriptorRowsEstimateKey {
     end: usize,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ExactDescriptorRowsKey {
+    descriptor_index: usize,
+    width: u16,
+    renderer_generation: u64,
+    renderer_cache_key: Option<u64>,
+    presentation_generation: u64,
+    node_key: LayoutKey,
+}
+
 #[derive(Default)]
 struct TranscriptExtentIndex {
     descriptor_rows_estimate_cache: HashMap<DescriptorRowsEstimateKey, RowIndex>,
     estimate_store: Option<(PathBuf, SqliteTranscriptStore)>,
+    exact_descriptor_rows: HashMap<ExactDescriptorRowsKey, RowIndex>,
+    latest_exact_descriptor_rows: HashMap<(usize, u16), ExactDescriptorRowsKey>,
 }
 
 impl TranscriptExtentIndex {
+    fn clear_exact_descriptor_rows(&mut self) {
+        self.exact_descriptor_rows.clear();
+        self.latest_exact_descriptor_rows.clear();
+    }
+
+    fn exact_rows_for_descriptor(&self, descriptor_index: usize, width: u16) -> Option<RowIndex> {
+        let width = width.max(1);
+        let key = self
+            .latest_exact_descriptor_rows
+            .get(&(descriptor_index, width))?;
+        self.exact_descriptor_rows.get(key).copied()
+    }
+
+    fn observe_exact_loaded_descriptor_rows(
+        &mut self,
+        descriptors: &SparseTranscriptDescriptors,
+        snapshot: crate::content::transcript_buf::TranscriptExactHeightSnapshot,
+    ) {
+        if snapshot.observations.is_empty() {
+            return;
+        }
+        let descriptor_by_block: HashMap<BlockId, usize> = descriptors
+            .records
+            .iter()
+            .map(|(index, record)| (record.block_id, index.get()))
+            .collect();
+        for observation in snapshot.observations {
+            let Some(descriptor_index) = descriptor_by_block.get(&observation.block_id).copied()
+            else {
+                continue;
+            };
+            let key = ExactDescriptorRowsKey {
+                descriptor_index,
+                width: snapshot.width.max(1),
+                renderer_generation: snapshot.renderer_generation,
+                renderer_cache_key: snapshot.renderer_cache_key,
+                presentation_generation: snapshot.presentation_generation,
+                node_key: observation.key,
+            };
+            self.exact_descriptor_rows
+                .insert(key.clone(), observation.rows);
+            self.latest_exact_descriptor_rows
+                .insert((descriptor_index, key.width), key);
+        }
+    }
+
     fn estimated_exact_rows_for_loaded_descriptors(
         &self,
         descriptors: &SparseTranscriptDescriptors,
         width: u16,
     ) -> RowIndex {
-        let width = usize::from(width.max(1));
+        let text_width = usize::from(width.max(1));
         descriptors
             .records
-            .values()
-            .map(|record| {
-                record
-                    .record
-                    .descriptor
-                    .raw_text()
-                    .map(|text| estimate_text_rows_for_width(&text, width))
-                    .unwrap_or(1)
-                    .saturating_add(1)
+            .iter()
+            .map(|(index, record)| {
+                self.exact_rows_for_descriptor(index.get(), width)
+                    .unwrap_or_else(|| {
+                        record
+                            .record
+                            .descriptor
+                            .raw_text()
+                            .map(|text| estimate_text_rows_for_width(&text, text_width))
+                            .unwrap_or(1)
+                            .saturating_add(1)
+                    })
             })
             .sum()
     }
@@ -760,6 +821,7 @@ impl TranscriptDocument {
         self.projection = crate::content::transcript_buf::TranscriptProjection::new();
         self.projection.set_inline_options(inline_options);
         self.render_cache.clear();
+        self.extent_index.clear_exact_descriptor_rows();
     }
 
     fn estimated_average_descriptor_rows(&self, width: u16) -> RowIndex {
@@ -774,6 +836,12 @@ impl TranscriptDocument {
             self.session_dir.as_ref(),
             width,
         )
+    }
+
+    fn observe_exact_loaded_descriptor_rows(&mut self) {
+        let snapshot = self.projection.exact_height_snapshot();
+        self.extent_index
+            .observe_exact_loaded_descriptor_rows(&self.sparse_descriptors, snapshot);
     }
 
     fn mixed_virtual_total_rows(&mut self, width: u16, exact_loaded_rows: RowIndex) -> RowIndex {
@@ -802,10 +870,12 @@ impl TranscriptDocument {
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
         self.projection.set_inline_options(options);
+        self.extent_index.clear_exact_descriptor_rows();
     }
 
     pub(crate) fn invalidate_theme(&mut self) {
         self.projection.invalidate_theme();
+        self.extent_index.clear_exact_descriptor_rows();
     }
 
     pub(crate) fn build_rows(
@@ -1168,13 +1238,16 @@ impl TranscriptDocument {
         row: RowIndex,
         viewport_rows: u16,
     ) {
+        let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let _ = self.activate_descriptor_window_for_virtual_row(width, row, viewport_rows);
         while let Some((loaded_start, loaded_end)) = self.active_virtual_row_span(lua, width) {
-            if row >= loaded_start && row < loaded_end {
+            let target_end = row.saturating_add(viewport_row_count);
+            if row >= loaded_start && target_end <= loaded_end {
                 return;
             }
+            let edge = if row < loaded_start { row } else { target_end };
             let Some(range) =
-                self.descriptor_window_expanded_toward_row(width, row, loaded_start, loaded_end)
+                self.descriptor_window_expanded_toward_row(width, edge, loaded_start, loaded_end)
             else {
                 return;
             };
@@ -1413,6 +1486,7 @@ impl TranscriptDocument {
                 inner,
             ),
         };
+        self.observe_exact_loaded_descriptor_rows();
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(plan.row_offset);
         rows.row_base = rows.row_base.saturating_add(plan.row_offset);
         rows.total_rows = plan.total_rows;
@@ -1632,7 +1706,7 @@ impl TranscriptDocument {
         activation: crate::content::transcript_buf::FoldActivation,
     ) -> bool {
         let local_row = self.virtual_row_to_loaded_row(width, row);
-        self.projection.fold_node_at_row(
+        let changed = self.projection.fold_node_at_row(
             lua,
             &mut self.transcript.history,
             width,
@@ -1641,7 +1715,11 @@ impl TranscriptDocument {
                 action,
                 activation,
             },
-        )
+        );
+        if changed {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        changed
     }
 
     pub(crate) fn prepare_layout(&mut self, lua: &LuaRuntime, width: u16) {
@@ -1657,8 +1735,13 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.prepare_layout(lua, width);
-        self.projection
-            .fold_node(&self.transcript.history, id, action)
+        let changed = self
+            .projection
+            .fold_node(&self.transcript.history, id, action);
+        if changed {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        changed
     }
 
     pub(crate) fn fold_all(
@@ -1668,7 +1751,11 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.prepare_layout(lua, width);
-        self.projection.fold_all(&self.transcript.history, action)
+        let changed = self.projection.fold_all(&self.transcript.history, action);
+        if changed {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        changed
     }
 
     pub(crate) fn fold_block_kind(
@@ -1679,8 +1766,13 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.prepare_layout(lua, width);
-        self.projection
-            .fold_block_kind(&self.transcript.history, kind, action)
+        let changed = self
+            .projection
+            .fold_block_kind(&self.transcript.history, kind, action);
+        if changed {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        changed
     }
 
     pub(crate) fn copy_range(
@@ -1771,6 +1863,7 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn history_mut(&mut self) -> &mut BlockHistory {
+        self.extent_index.clear_exact_descriptor_rows();
         &mut self.transcript.history
     }
 
@@ -1783,8 +1876,13 @@ impl TranscriptDocument {
         generation: u64,
         cache_key: Option<u64>,
     ) -> bool {
-        self.projection
-            .invalidate_renderer_if_changed(generation, cache_key)
+        let changed = self
+            .projection
+            .invalidate_renderer_if_changed(generation, cache_key);
+        if changed {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        changed
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -1852,6 +1950,7 @@ impl TranscriptDocument {
 
     pub(crate) fn push(&mut self, block: Block) {
         self.transcript.push(block);
+        self.extent_index.clear_exact_descriptor_rows();
     }
 
     pub(crate) fn push_with_origin(
@@ -1860,6 +1959,7 @@ impl TranscriptDocument {
         origin: smelt_core::transcript_model::BlockOrigin,
     ) {
         self.transcript.push_with_origin(block, origin);
+        self.extent_index.clear_exact_descriptor_rows();
     }
 
     pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
@@ -1871,6 +1971,7 @@ impl TranscriptDocument {
         if let Some(id) = self.compaction_preview_id {
             if self.transcript.block(id).is_some() {
                 self.transcript.rewrite_compaction_preview(id, summary);
+                self.extent_index.clear_exact_descriptor_rows();
                 return Some(id);
             }
             self.compaction_preview_id = None;
@@ -1878,12 +1979,14 @@ impl TranscriptDocument {
 
         let id = self.transcript.push_compaction_preview(summary)?;
         self.compaction_preview_id = Some(id);
+        self.extent_index.clear_exact_descriptor_rows();
         Some(id)
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) -> Option<BlockId> {
         let id = self.compaction_preview_id.take()?;
         self.transcript.remove_compaction_preview(id);
+        self.extent_index.clear_exact_descriptor_rows();
         Some(id)
     }
 
@@ -1894,14 +1997,23 @@ impl TranscriptDocument {
     pub(crate) fn insert_checkpoint_marker_at(&mut self, block_index: usize, block: Block) {
         self.transcript
             .insert_checkpoint_marker_at(block_index, block);
+        self.extent_index.clear_exact_descriptor_rows();
     }
 
     pub(crate) fn remove_unoriginated_at(&mut self, block_index: usize) -> Option<Block> {
-        self.transcript.remove_unoriginated_at(block_index)
+        let removed = self.transcript.remove_unoriginated_at(block_index);
+        if removed.is_some() {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        removed
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
-        self.transcript.drain_finished_blocks()
+        let drained = self.transcript.drain_finished_blocks();
+        if !drained.is_empty() {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        drained
     }
 
     pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
@@ -2233,6 +2345,117 @@ mod document_tests {
             }),
             session_dir,
         }
+    }
+
+    fn exact_height_snapshot(
+        block_id: BlockId,
+        width: u16,
+        content_hash: u64,
+        rows: RowIndex,
+    ) -> crate::content::transcript_buf::TranscriptExactHeightSnapshot {
+        crate::content::transcript_buf::TranscriptExactHeightSnapshot {
+            width,
+            renderer_generation: 7,
+            renderer_cache_key: Some(11),
+            presentation_generation: 13,
+            observations: vec![
+                crate::content::transcript_buf::TranscriptExactHeightObservation {
+                    block_id,
+                    key: LayoutKey {
+                        width,
+                        view_state: smelt_core::transcript_model::ViewState::Expanded,
+                        content_hash,
+                        sidecar_hash: 0,
+                    },
+                    rows,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn exact_loaded_descriptor_rows_override_text_estimates() {
+        let records = transcript_records(3);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..3,
+            None,
+        ));
+        let width = 80;
+        let block_id = BlockId::new(1);
+        let raw_estimate = document
+            .extent_index
+            .estimated_exact_rows_for_loaded_descriptors(&document.sparse_descriptors, width);
+
+        document.extent_index.observe_exact_loaded_descriptor_rows(
+            &document.sparse_descriptors,
+            exact_height_snapshot(block_id, width, records[1].content_hash, 17),
+        );
+
+        let refined = document
+            .extent_index
+            .estimated_exact_rows_for_loaded_descriptors(&document.sparse_descriptors, width);
+        assert_eq!(raw_estimate, 6);
+        assert_eq!(refined, 21);
+        assert_eq!(document.estimated_average_descriptor_rows(width), 7);
+    }
+
+    #[test]
+    fn exact_loaded_descriptor_rows_are_width_and_invalidation_scoped() {
+        let records = transcript_records(2);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..2,
+            None,
+        ));
+        let width = 80;
+        assert!(!document.invalidate_renderer_if_changed(7, Some(11)));
+        let block_id = BlockId::new(0);
+        document.extent_index.observe_exact_loaded_descriptor_rows(
+            &document.sparse_descriptors,
+            exact_height_snapshot(block_id, width, records[0].content_hash, 19),
+        );
+
+        assert_eq!(
+            document.extent_index.exact_rows_for_descriptor(0, width),
+            Some(19)
+        );
+        assert_eq!(
+            document
+                .extent_index
+                .exact_rows_for_descriptor(0, width - 1),
+            None
+        );
+        document.extent_index.observe_exact_loaded_descriptor_rows(
+            &document.sparse_descriptors,
+            exact_height_snapshot(block_id, width - 1, records[0].content_hash, 23),
+        );
+        assert_eq!(
+            document
+                .extent_index
+                .exact_rows_for_descriptor(0, width - 1),
+            Some(23)
+        );
+        assert_eq!(
+            document.extent_index.exact_rows_for_descriptor(0, width),
+            Some(19)
+        );
+
+        assert!(document.invalidate_renderer_if_changed(8, Some(11)));
+        assert_eq!(
+            document.extent_index.exact_rows_for_descriptor(0, width),
+            None
+        );
+
+        document.extent_index.observe_exact_loaded_descriptor_rows(
+            &document.sparse_descriptors,
+            exact_height_snapshot(block_id, width, records[0].content_hash, 19),
+        );
+        document.set_inline_options(InlineOptions::default());
+        assert_eq!(
+            document.extent_index.exact_rows_for_descriptor(0, width),
+            None
+        );
     }
 
     fn skewed_transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {

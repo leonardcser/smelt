@@ -37,6 +37,22 @@ pub(crate) struct TranscriptProjection {
     counters: TranscriptProjectionCounters,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptExactHeightObservation {
+    pub(crate) block_id: BlockId,
+    pub(crate) key: LayoutKey,
+    pub(crate) rows: RowIndex,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptExactHeightSnapshot {
+    pub(crate) width: u16,
+    pub(crate) renderer_generation: u64,
+    pub(crate) renderer_cache_key: Option<u64>,
+    pub(crate) presentation_generation: u64,
+    pub(crate) observations: Vec<TranscriptExactHeightObservation>,
+}
+
 #[derive(Default)]
 struct VisibleProjectionState {
     materialized: Option<MaterializedProjection>,
@@ -524,6 +540,26 @@ impl TranscriptHeightIndex {
         self.width = key.width;
         self.rebuild_prefix_rows();
         true
+    }
+
+    fn exact_height_snapshot(&self) -> TranscriptExactHeightSnapshot {
+        TranscriptExactHeightSnapshot {
+            width: self.width,
+            renderer_generation: self.renderer_generation,
+            renderer_cache_key: self.renderer_cache_key,
+            presentation_generation: self.presentation_generation,
+            observations: self
+                .nodes
+                .iter()
+                .filter_map(|node| {
+                    Some(TranscriptExactHeightObservation {
+                        block_id: node.id.as_block_id()?,
+                        key: node.key,
+                        rows: node.exact_height?,
+                    })
+                })
+                .collect(),
+        }
     }
 
     fn cache_entry(&self) -> Option<DisplayRowIndexEntry> {
@@ -1203,6 +1239,10 @@ impl TranscriptProjection {
 
     pub(crate) fn projection_generation(&self) -> u64 {
         self.projection_generation
+    }
+
+    pub(crate) fn exact_height_snapshot(&self) -> TranscriptExactHeightSnapshot {
+        self.measurements.active.exact_height_snapshot()
     }
 
     pub(crate) fn invalidate_renderer_if_changed(
