@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- BLOCKED waiting for parser fixt… · Step 2/5, wiring parser stat
+ BLOCKED waiting for parser fix… · Step 2/5, wiring parser state
 
  Please keep working toward the parser migration.
 

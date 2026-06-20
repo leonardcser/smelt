@@ -14,6 +14,23 @@ app_story!(goal_banner_states, |ctx| {
     );
     ctx.assert_snapshot_named("active_auto");
 
+    ctx.set_viewport(32, 16);
+    ctx.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.update_status({ summary = "Parser migration", progress = "Step 123/456, validating extremely detailed migration output" }))
+        "#,
+    );
+    ctx.assert_snapshot_named("active_auto_narrow");
+
+    ctx.set_viewport(64, 16);
+    ctx.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.update_status({ progress = "Step 2/5, wiring parser state" }))
+        "#,
+    );
+
     ctx.run_lua(r#"assert(require("smelt.goal").pause())"#);
     ctx.assert_snapshot_named("paused");
 

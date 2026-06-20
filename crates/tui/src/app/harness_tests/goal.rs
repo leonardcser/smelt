@@ -185,6 +185,60 @@ fn lua_goal_banner_keeps_progress_visible_with_long_objective() {
 }
 
 #[test]
+fn lua_goal_banner_truncates_long_progress_and_preserves_mode() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(32, 16);
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.create("keep this objective visible when possible", { auto_continue = true, summary = "Goal summary" }))
+            assert(goal.update_status({ progress = "Step 123/456, validating extremely detailed migration output" }))
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    assert_eq!(
+        frame.rows[0].chars().count(),
+        32,
+        "frame:\n{}",
+        frame.text()
+    );
+    assert!(frame.rows[0].contains('…'), "frame:\n{}", frame.text());
+    assert!(
+        frame.rows[0].trim_end().ends_with("auto"),
+        "mode should remain visible when progress is truncated:\n{}",
+        frame.text()
+    );
+}
+
+#[test]
+fn lua_goal_banner_preserves_mode_when_fixed_chrome_overflows() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(10, 16);
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.create("tiny", { auto_continue = false }))
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    assert_eq!(
+        frame.rows[0].chars().count(),
+        10,
+        "frame:\n{}",
+        frame.text()
+    );
+    assert!(
+        frame.rows[0].trim_end().ends_with("manual"),
+        "mode should be preserved even when label and mode fill the row:\n{}",
+        frame.text()
+    );
+}
+
+#[test]
 fn lua_goal_banner_stays_above_transcript_scroll_pill() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 16);

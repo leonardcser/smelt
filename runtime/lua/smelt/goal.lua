@@ -324,17 +324,17 @@ local function banner_text(goal, width)
   end
 
   local progress = progress_label(goal.progress)
-  if not progress then return smelt.text.truncate(goal_text, width, { suffix = "…" }) end
+  if not progress then return smelt.text.truncate_cells(goal_text, width, { suffix = "…" }) end
 
   local separator = " · "
   local progress_width = smelt.text.width(progress)
   local separator_width = smelt.text.width(separator)
   if progress_width + separator_width >= width then
-    return smelt.text.truncate(progress, width, { suffix = "…" })
+    return smelt.text.truncate_cells(progress, width, { suffix = "…" })
   end
 
   local goal_width = width - progress_width - separator_width
-  return smelt.text.truncate(goal_text, goal_width, { suffix = "…" }) .. separator .. progress
+  return smelt.text.truncate_cells(goal_text, goal_width, { suffix = "…" }) .. separator .. progress
 end
 
 local function banner_row(goal, width)
@@ -344,28 +344,31 @@ local function banner_row(goal, width)
   local label, label_group = banner_label(goal)
   local mode_text = banner_mode(goal)
   local mode = mode_text and (" " .. mode_text .. " ") or ""
-  local fixed_width = smelt.text.width(label) + smelt.text.width(mode)
-  if fixed_width >= width then
-    local row = smelt.text.fit(label, width, { suffix = "…" })
-    return {
-      text = row,
-      highlights = {
-        {
-          bytes_start = 0,
-          bytes_end = #row,
-          style = { hl_group = label_group },
-          selectable = true,
-        },
-      },
-    }
-  end
-  local min_text_width = width - fixed_width
-  local text = banner_text(goal, min_text_width)
-  local used = smelt.text.width(label) + smelt.text.width(text) + smelt.text.width(mode)
-  local fill = string.rep(" ", math.max(width - used, 0))
-  local row = label .. text .. fill .. mode
+  local label_width = smelt.text.width(label)
+  local mode_width = smelt.text.width(mode)
+  local fixed_width = label_width + mode_width
+  local label_part = label
+  local text = ""
+  local fill = ""
 
-  local label_end = #label
+  if fixed_width >= width then
+    if mode ~= "" and mode_width < width then
+      label_part = smelt.text.fit(label, width - mode_width, { suffix = "…" })
+    elseif mode ~= "" then
+      label_part = ""
+      mode = smelt.text.fit(mode, width, { suffix = "…" })
+    else
+      label_part = smelt.text.fit(label, width, { suffix = "…" })
+    end
+  else
+    text = banner_text(goal, width - fixed_width)
+    local used = label_width + smelt.text.width(text) + mode_width
+    fill = string.rep(" ", math.max(width - used, 0))
+  end
+
+  local row = label_part .. text .. fill .. mode
+
+  local label_end = #label_part
   local highlights = {
     {
       bytes_start = 0,

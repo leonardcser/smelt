@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+ GOAL Step 123/456, valid… auto
+
+ Please keep working toward
+ the parser migration.
+
+
+
+
+
+
+
+  tip ctrl+enter / ctrl+q, st…
+────────────────────────────────
+
+────────────────────────────────
+ ○ normal               1:1 100%
