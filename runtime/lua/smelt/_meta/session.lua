@@ -17,9 +17,13 @@ session.checkpoint = nil
 ---@type fun(name: string, text: string?, opts: table?): nil
 session.context_note = nil
 
---- Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update.
+--- Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Pair with `context_tokens_stale()`; stale counts are display-only and are not used as authoritative request baselines.
 ---@type fun(): integer?
 session.context_tokens = nil
+
+--- Whether the displayed context token count was reported by a different model/provider than the active model.
+---@type fun(): boolean
+session.context_tokens_stale = nil
 
 --- Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.
 ---@type fun(): integer?

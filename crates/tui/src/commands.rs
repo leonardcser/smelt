@@ -483,6 +483,10 @@ impl TuiApp {
                 .signals
                 .set_dyn("model", std::rc::Rc::new(self.core.config.model.clone()));
         }
+        let identity = self.active_context_token_identity();
+        self.core
+            .session
+            .clear_context_tokens_baseline_if_mismatched(&identity);
         self.refresh_context_window();
     }
 
@@ -717,6 +721,40 @@ mod tests {
         ));
 
         assert_eq!(mode_blocks(&app.app), vec!["now in yolo mode"]);
+    }
+
+    #[test]
+    fn apply_model_clears_context_baseline_when_provider_identity_changes() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.config.model = "same-model".into();
+        app.app.core.config.api_base = "https://old.example".into();
+        app.app.core.config.api_key_env = "OLD_KEY".into();
+        app.app.core.config.provider_type = "openai".into();
+        app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
+            key: "new/same-model".into(),
+            provider_name: "new".into(),
+            model_name: "same-model".into(),
+            api_base: "https://new.example".into(),
+            api_key_env: "NEW_KEY".into(),
+            provider_type: "openai".into(),
+            config: smelt_core::config::ModelConfig::default(),
+        }];
+        let old_identity = app.app.active_context_token_identity();
+        app.app.core.session.history = vec![user("hello")];
+        app.app
+            .core
+            .session
+            .record_context_tokens(100, old_identity);
+
+        app.app.apply_model("new/same-model", false);
+
+        assert!(app.app.core.session.context_tokens.is_none());
+        assert_eq!(app.app.core.session.display_context_tokens(), Some(100));
+        assert!(app
+            .app
+            .core
+            .session
+            .display_context_tokens_stale(&app.app.active_context_token_identity()));
     }
 
     #[test]

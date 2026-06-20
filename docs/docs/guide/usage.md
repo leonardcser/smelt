@@ -12,6 +12,17 @@ The agent streams its response and may call tools along the way.
   exists
 - `F1` opens the help dialog
 
+## Context Counter
+
+When token display is enabled, the prompt bar shows the latest provider-reported
+active-context token count and percentage of the active model's context window.
+A `?` after the number or percentage means the count is stale: it was reported
+by a different model or provider, for example after switching models or
+rewinding to a turn created with another model. Smelt keeps the stale count
+visible for orientation, but does not use it as the authoritative baseline for
+compaction or request estimates; the marker disappears after the active model
+reports fresh usage.
+
 ## Modes
 
 Smelt ships with four modes by default, each with different permission defaults.

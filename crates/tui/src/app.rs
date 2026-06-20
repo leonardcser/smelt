@@ -653,6 +653,16 @@ impl PendingHistoryAppend {
 }
 
 impl TuiApp {
+    pub(crate) fn active_context_token_identity(
+        &self,
+    ) -> smelt_core::session::ContextTokenIdentity {
+        smelt_core::session::ContextTokenIdentity {
+            model: self.core.config.model.clone(),
+            api_base: self.core.config.api_base.clone(),
+            provider_type: self.core.config.provider_type.clone(),
+        }
+    }
+
     pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
         self.agent
             .as_ref()

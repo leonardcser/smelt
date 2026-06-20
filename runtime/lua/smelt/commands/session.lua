@@ -28,15 +28,16 @@ local function pct(num, denom)
   return string.format("%.1f%%", num / denom * 100)
 end
 
-local function fmt_context(ctx, window)
+local function fmt_context(ctx, window, stale)
+  local mark = stale and "?" or ""
   if window and window > 0 then
     local used = tonumber(ctx) or 0
-    local text = string.format("%s / %s", smelt.text.format_tokens(used), smelt.text.format_tokens(window))
+    local text = string.format("%s%s / %s", smelt.text.format_tokens(used), mark, smelt.text.format_tokens(window))
     local context_pct = pct(used, window)
-    if context_pct then text = text .. " (" .. context_pct .. ")" end
+    if context_pct then text = text .. " (" .. context_pct .. mark .. ")" end
     return text
   end
-  return fmt_tokens(ctx)
+  return fmt_tokens(ctx) .. mark
 end
 
 local function fmt_cost(n)
@@ -112,7 +113,7 @@ local function session_lines(info, width)
   add_kv(lines, plain, "reasoning", info.reasoning, width)
 
   add_header(lines, "usage")
-  add_kv(lines, plain, "context", fmt_context(info.context_tokens, info.context_window), width)
+  add_kv(lines, plain, "context", fmt_context(info.context_tokens, info.context_window, info.context_tokens_stale), width)
   add_kv(lines, plain, "tokens", string.format(
     "standard=%s input=%s output=%s cached=%s (read=%s write=%s) reasoning=%s",
     fmt_tokens(tokens.standard_total or 0),

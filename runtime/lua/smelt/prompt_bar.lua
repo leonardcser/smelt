@@ -288,12 +288,14 @@ local function right_spans(opts)
         }
       end
       local window = smelt.session.context_window()
+      local stale = smelt.session.context_tokens_stale()
+      local stale_mark = stale and "?" or ""
       local tok_text
       if window and window > 0 then
         local pct = math.floor(ctx / window * 100)
-        tok_text = string.format(" %s (%d%%)", smelt.text.format_tokens(ctx), pct)
+        tok_text = string.format(" %s%s (%d%%%s)", smelt.text.format_tokens(ctx), stale_mark, pct, stale_mark)
       else
-        tok_text = " " .. smelt.text.format_tokens(ctx)
+        tok_text = " " .. smelt.text.format_tokens(ctx) .. stale_mark
       end
       spans[#spans + 1] = {
         text = tok_text,

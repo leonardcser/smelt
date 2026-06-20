@@ -185,8 +185,9 @@ impl TuiApp {
             let _ = reply.send(HostRequestDecision::Continue);
             return;
         };
+        let identity = self.active_context_token_identity();
         let context_estimate = PrepareContextEstimate::from_request(
-            self.core.session.context_tokens,
+            self.core.session.context_tokens_for(&identity),
             self.core.session.context_tokens_history_len,
             &self.core.session.history,
             &messages,

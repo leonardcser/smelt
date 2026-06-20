@@ -43,7 +43,18 @@ fun(): integer?
 
 Latest non-background provider-reported active-context token count, or `nil`
 before the first usage report. While a request is in flight this may be the
-previous turn's reading until the provider sends a fresh usage update.
+previous turn's reading until the provider sends a fresh usage update. Pair with
+`context_tokens_stale()`; stale counts are display-only and are not used as
+authoritative request baselines.
+
+## `smelt.session.context_tokens_stale`
+
+```lua
+fun(): boolean
+```
+
+Whether the displayed context token count was reported by a different
+model/provider than the active model.
 
 ## `smelt.session.context_window`
 

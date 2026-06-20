@@ -23,7 +23,9 @@ impl TuiApp {
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
             if tokens > 0 {
-                self.core.session.record_context_tokens(tokens);
+                self.core
+                    .session
+                    .record_context_tokens(tokens, self.active_context_token_identity());
                 self.context_tokens_updated_this_turn = true;
             }
         }

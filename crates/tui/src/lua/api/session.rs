@@ -324,11 +324,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "context_tokens",
-        "Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update.",
+        "Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Pair with `context_tokens_stale()`; stale counts are display-only and are not used as authoritative request baselines.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(crate::lua::try_with_app(|app| app.core.session.display_context_tokens())
                 .unwrap_or_default())
+        },
+    )?;
+    m.fn_(
+        "context_tokens_stale",
+        "Whether the displayed context token count was reported by a different model/provider than the active model.",
+        &[],
+        |_, ()| -> LuaResult<bool> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.core
+                    .session
+                    .display_context_tokens_stale(&app.active_context_token_identity())
+            })
+            .unwrap_or_default())
         },
     )?;
     m.fn_(
@@ -371,6 +384,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set("mode", app.core.config.mode.as_str())?;
                 out.set("reasoning", app.core.config.reasoning_effort.label())?;
                 out.set("context_tokens", session.display_context_tokens())?;
+                out.set(
+                    "context_tokens_stale",
+                    session.display_context_tokens_stale(&app.active_context_token_identity()),
+                )?;
                 out.set("context_window", app.core.config.context_window)?;
                 out.set("cost", session.session_cost_usd)?;
                 out.set("history_count", session.history.len())?;

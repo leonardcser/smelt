@@ -658,11 +658,19 @@ impl TuiApp {
             .core
             .session
             .restore_rewindable_snapshots_after_rewind(hist_idx, keep_checkpoint_at_boundary);
+        let identity = self.active_context_token_identity();
+        self.core
+            .session
+            .clear_context_tokens_baseline_if_mismatched(&identity);
         self.apply_rewindable_session_state(turn_meta);
     }
 
     fn prune_rewindable_session_state(&mut self, hist_idx: usize) {
         let turn_meta = self.core.session.prune_rewindable_snapshots(hist_idx);
+        let identity = self.active_context_token_identity();
+        self.core
+            .session
+            .clear_context_tokens_baseline_if_mismatched(&identity);
         self.apply_rewindable_session_state(turn_meta);
     }
 
@@ -2085,6 +2093,40 @@ mod checkpoint_tests {
         assert_eq!(app.app.core.session.context_tokens, Some(50));
         assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));
         assert_eq!(app.app.core.session.context_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn app_rewind_marks_context_tokens_stale_for_different_model() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let old_identity = smelt_core::session::ContextTokenIdentity {
+            model: "old-model".into(),
+            api_base: "https://old.example".into(),
+            provider_type: "old-provider".into(),
+        };
+        app.app.core.session.history = vec![user("a"), assistant("b")];
+        app.app.core.session.context_tokens = Some(50);
+        app.app.core.session.context_tokens_history_len = Some(2);
+        app.app.core.session.context_token_identity = Some(old_identity.clone());
+        app.app.core.session.display_context_tokens = Some(50);
+        app.app.core.session.display_context_token_identity = Some(old_identity);
+        app.app.core.session.snapshot_context();
+        app.app
+            .core
+            .session
+            .history
+            .extend([user("c"), assistant("d")]);
+        app.app.restore_screen();
+
+        let restored = app.app.rewind_to(2).expect("second user turn");
+
+        assert_eq!(restored.0, "c");
+        assert_eq!(app.app.core.session.display_context_tokens(), Some(50));
+        assert!(app
+            .app
+            .core
+            .session
+            .display_context_tokens_stale(&app.app.active_context_token_identity()));
+        assert!(app.app.core.session.context_tokens.is_none());
     }
 
     #[test]

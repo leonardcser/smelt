@@ -21,10 +21,10 @@ with `smelt.remember(...)`.
 | Subcommand             | Description                                                                                         |
 | ---------------------- | --------------------------------------------------------------------------------------------------- |
 | `smelt auth`           | Provider picker for login/logout flows and API-key provider snippets                                |
-| `smelt config default` | Print a default `init.lua` template with built-in setting values and commented examples              |
+| `smelt config default` | Print a default `init.lua` template with built-in setting values and commented examples             |
 | `smelt inspect`        | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
 | `smelt upgrade`        | Check for and install the newest smelt build                                                        |
-| `smelt upgrade check`  | Check for updates without installing                                                               |
+| `smelt upgrade check`  | Check for updates without installing                                                                |
 
 `smelt inspect` options:
 
@@ -37,10 +37,10 @@ with `smelt.remember(...)`.
 
 `smelt upgrade` options:
 
-| Flag                  | Description                                                             |
-| --------------------- | ----------------------------------------------------------------------- |
-| `--channel stable`    | Use the newest tagged GitHub release and prebuilt artifact (default)    |
-| `--channel unstable`  | Use `main` and install with `cargo install --git ... --branch main`     |
+| Flag                 | Description                                                          |
+| -------------------- | -------------------------------------------------------------------- |
+| `--channel stable`   | Use the newest tagged GitHub release and prebuilt artifact (default) |
+| `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main`  |
 
 `smelt upgrade check` accepts the same `--channel` flag and never installs.
 
