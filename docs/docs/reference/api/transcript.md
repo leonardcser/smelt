@@ -130,6 +130,16 @@ fun(): boolean
 
 Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
 
+## `smelt.transcript.next_block`
+
+```lua
+fun(opts: table?): table?
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+
 ## `smelt.transcript.node_at_row`
 
 ```lua
@@ -148,7 +158,7 @@ fun(opts: table?): table?
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
 
 ## `smelt.transcript.reveal_block`
 

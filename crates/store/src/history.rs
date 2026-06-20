@@ -667,6 +667,26 @@ pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
     ))
 }
 
+pub(crate) fn read_transcript_descriptor_centered_slice(
+    conn: &Connection,
+    center_descriptor_idx: u64,
+    before: usize,
+    after: usize,
+) -> Result<TranscriptDescriptorSlice> {
+    let _perf = perf::begin("store:transcript:read_descriptor_centered_slice");
+    let total_count = transcript_descriptor_count(conn)?;
+    if total_count == 0 {
+        return read_transcript_descriptor_slice_with_total(conn, (0..0).into(), total_count);
+    }
+    let center = (center_descriptor_idx as usize).min(total_count.saturating_sub(1));
+    let start = center.saturating_sub(before);
+    let end = center
+        .saturating_add(after)
+        .saturating_add(1)
+        .min(total_count);
+    read_transcript_descriptor_slice_with_total(conn, (start..end).into(), total_count)
+}
+
 pub(crate) fn read_transcript_descriptor_before_kind(
     conn: &Connection,
     kind: &str,
@@ -689,6 +709,33 @@ pub(crate) fn read_transcript_descriptor_before_kind(
         conn,
         &mut stmt,
         params![kind, before_or_at],
+        TranscriptDescriptorHydration::ObjectBacked,
+    )?;
+    Ok(records.pop())
+}
+
+pub(crate) fn read_transcript_descriptor_after_kind(
+    conn: &Connection,
+    kind: &str,
+    after_or_at_block_idx: u64,
+) -> Result<Option<TranscriptDescriptorRecord>> {
+    let _perf = perf::begin("store:transcript:read_descriptor_after_kind");
+    let after_or_at = checked_i64(after_or_at_block_idx, "after_or_at_block_idx")?;
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
+                origin_json, tool_state_json
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL
+           AND kind = ?1
+           AND block_idx >= ?2
+         ORDER BY block_idx ASC
+         LIMIT 1",
+    )?;
+    let mut records = read_transcript_descriptor_records_from_stmt(
+        conn,
+        &mut stmt,
+        params![kind, after_or_at],
         TranscriptDescriptorHydration::ObjectBacked,
     )?;
     Ok(records.pop())

@@ -30,16 +30,14 @@ fn block_snapshot_table(
 
 fn navigation_block_table(
     lua: &Lua,
-    idx: usize,
-    role: &'static str,
-    first_line: String,
-    already_at_top: bool,
+    block: crate::app::transcript::TranscriptNavigationBlock,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    t.set("idx", idx)?;
-    t.set("role", role)?;
-    t.set("first_line", first_line)?;
-    t.set("already_at_top", already_at_top)?;
+    t.set("idx", block.descriptor_index)?;
+    t.set("block_id", block.block_id.get())?;
+    t.set("role", block.role)?;
+    t.set("first_line", block.first_line)?;
+    t.set("already_at_top", block.already_at_anchor)?;
     Ok(t)
 }
 
@@ -388,20 +386,34 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "previous_block",
-        "Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
+        "Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
             let role = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
-            let snap = crate::lua::try_with_app(|app| {
+            let block = crate::lua::try_with_app(|app| {
                 app.previous_transcript_navigation_block(role.as_deref())
             })
             .flatten();
-            snap.map(|(idx, role, first_line, already_at_top)| {
-                navigation_block_table(lua, idx, role, first_line, already_at_top)
+            block.map(|block| navigation_block_table(lua, block))
+                .transpose()
+        },
+    )?;
+    m.fn_(
+        "next_block",
+        "Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
+        &["opts"],
+        |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
+            let role = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
+            let block = crate::lua::try_with_app(|app| {
+                app.next_transcript_navigation_block(role.as_deref())
             })
-            .transpose()
+            .flatten();
+            block.map(|block| navigation_block_table(lua, block))
+                .transpose()
         },
     )?;
     m.fn_(

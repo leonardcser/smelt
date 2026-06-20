@@ -388,6 +388,30 @@ impl SparseTranscriptDescriptors {
             .find_map(|(index, record)| (record.block_id == block_id).then_some(*index))
     }
 
+    fn navigation_record(
+        &self,
+        role: &str,
+        anchor: smelt_store::TranscriptDescriptorIndex,
+        direction: TranscriptNavigationDirection,
+    ) -> Option<(usize, TranscriptBlockRecordWithId)> {
+        match direction {
+            TranscriptNavigationDirection::Previous => self
+                .records
+                .range(..=anchor)
+                .rev()
+                .find_map(|(index, record)| {
+                    (descriptor_role(&record.record.descriptor) == role)
+                        .then(|| (index.get(), record.clone()))
+                }),
+            TranscriptNavigationDirection::Next => {
+                self.records.range(anchor..).find_map(|(index, record)| {
+                    (descriptor_role(&record.record.descriptor) == role)
+                        .then(|| (index.get(), record.clone()))
+                })
+            }
+        }
+    }
+
     #[cfg(test)]
     fn loaded_ranges(&self) -> &[Range<smelt_store::TranscriptDescriptorIndex>] {
         &self.loaded_ranges
@@ -1391,21 +1415,23 @@ impl TranscriptDocument {
         }
     }
 
-    fn navigation_snapshot_from_record(
+    fn navigation_block_from_record(
         index: usize,
         record: &TranscriptBlockRecordWithId,
-        already_at_top: bool,
-    ) -> Option<TranscriptNavigationSnapshot> {
+        current_block_id: BlockId,
+        current_row_offset: RowIndex,
+    ) -> Option<TranscriptNavigationBlock> {
         let first_line = descriptor_first_line(&record.record.descriptor);
         if first_line.is_empty() {
             return None;
         }
-        Some((
-            index,
-            descriptor_role(&record.record.descriptor),
+        Some(TranscriptNavigationBlock {
+            descriptor_index: index,
+            block_id: record.block_id,
+            role: descriptor_role(&record.record.descriptor),
             first_line,
-            already_at_top,
-        ))
+            already_at_anchor: record.block_id == current_block_id && current_row_offset == 0,
+        })
     }
 
     fn current_viewport_descriptor_anchor(&self) -> Option<(usize, BlockId, RowIndex)> {
@@ -1444,64 +1470,88 @@ impl TranscriptDocument {
             .map(|block_id| (0, block_id, 0))
     }
 
-    pub(crate) fn previous_navigation_block(
-        &mut self,
+    fn navigation_record_from_store(
+        &self,
+        role: &str,
+        anchor_index: usize,
+        direction: TranscriptNavigationDirection,
+    ) -> Option<(usize, TranscriptBlockRecordWithId)> {
+        let session_dir = self.session_dir.clone()?;
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
+        let record = match direction {
+            TranscriptNavigationDirection::Previous => db
+                .read_transcript_descriptor_before_kind(role, anchor_index as u64)
+                .ok()
+                .flatten()?,
+            TranscriptNavigationDirection::Next => db
+                .read_transcript_descriptor_after_kind(role, anchor_index as u64)
+                .ok()
+                .flatten()?,
+        };
+        let index = record.block_idx as usize;
+        let record = TranscriptBlockRecordWithId::try_from(record).ok()?;
+        Some((index, record))
+    }
+
+    fn choose_navigation_record(
+        loaded: Option<(usize, TranscriptBlockRecordWithId)>,
+        stored: Option<(usize, TranscriptBlockRecordWithId)>,
+        direction: TranscriptNavigationDirection,
+    ) -> Option<(usize, TranscriptBlockRecordWithId)> {
+        match (loaded, stored) {
+            (Some(loaded), Some(stored)) => match direction {
+                TranscriptNavigationDirection::Previous => {
+                    Some(if loaded.0 >= stored.0 { loaded } else { stored })
+                }
+                TranscriptNavigationDirection::Next => {
+                    Some(if loaded.0 <= stored.0 { loaded } else { stored })
+                }
+            },
+            (Some(record), None) | (None, Some(record)) => Some(record),
+            (None, None) => None,
+        }
+    }
+
+    fn navigation_block(
+        &self,
         role: Option<&str>,
-    ) -> Option<TranscriptNavigationSnapshot> {
-        let (before_index, current_block_id, current_row_offset) =
+        direction: TranscriptNavigationDirection,
+    ) -> Option<TranscriptNavigationBlock> {
+        let (anchor_index, current_block_id, current_row_offset) =
             self.current_viewport_descriptor_anchor()?;
         let role = role.unwrap_or("user");
 
         if self.sparse_descriptors.total_count().is_some() {
-            let mut best: Option<(usize, TranscriptBlockRecordWithId)> = None;
-
-            if let Some(session_dir) = self.session_dir.clone() {
-                if let Ok(db) =
-                    smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))
-                {
-                    if let Ok(Some(record)) =
-                        db.read_transcript_descriptor_before_kind(role, before_index as u64)
-                    {
-                        if let Ok(record_with_id) = TranscriptBlockRecordWithId::try_from(record) {
-                            best = Some((record_with_id.block_id.get() as usize, record_with_id));
-                        }
-                    }
-                }
-            }
-
-            for (index, record) in self
+            let anchor = smelt_store::TranscriptDescriptorIndex::new(anchor_index);
+            let loaded = self
                 .sparse_descriptors
-                .records
-                .range(..=smelt_store::TranscriptDescriptorIndex::new(before_index))
-                .rev()
-            {
-                if descriptor_role(&record.record.descriptor) != role {
-                    continue;
-                }
-                let index = index.get();
-                if best
-                    .as_ref()
-                    .is_none_or(|(best_index, _)| index > *best_index)
-                {
-                    best = Some((index, record.clone()));
-                }
-                break;
-            }
-
-            let (index, record) = best?;
-            let already_at_top = record.block_id == current_block_id && current_row_offset == 0;
-            return Self::navigation_snapshot_from_record(index, &record, already_at_top);
+                .navigation_record(role, anchor, direction);
+            let stored = self.navigation_record_from_store(role, anchor_index, direction);
+            let (index, record) = Self::choose_navigation_record(loaded, stored, direction)?;
+            return Self::navigation_block_from_record(
+                index,
+                &record,
+                current_block_id,
+                current_row_offset,
+            );
         }
 
         let history = self.history();
-        for (index, block_id) in history
-            .order
-            .iter()
-            .copied()
-            .enumerate()
-            .take(before_index.saturating_add(1))
-            .rev()
-        {
+        let iter: Box<dyn Iterator<Item = (usize, BlockId)> + '_> = match direction {
+            TranscriptNavigationDirection::Previous => Box::new(
+                history
+                    .order
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .take(anchor_index.saturating_add(1))
+                    .rev(),
+            ),
+            TranscriptNavigationDirection::Next => {
+                Box::new(history.order.iter().copied().enumerate().skip(anchor_index))
+            }
+        };
+        for (index, block_id) in iter {
             if transcript_history_role(history, block_id) != role {
                 continue;
             }
@@ -1509,14 +1559,29 @@ impl TranscriptDocument {
             if first_line.is_empty() {
                 continue;
             }
-            return Some((
-                index,
-                transcript_history_role(history, block_id),
+            return Some(TranscriptNavigationBlock {
+                descriptor_index: index,
+                block_id,
+                role: transcript_history_role(history, block_id),
                 first_line,
-                block_id == current_block_id && current_row_offset == 0,
-            ));
+                already_at_anchor: block_id == current_block_id && current_row_offset == 0,
+            });
         }
         None
+    }
+
+    pub(crate) fn previous_navigation_block(
+        &self,
+        role: Option<&str>,
+    ) -> Option<TranscriptNavigationBlock> {
+        self.navigation_block(role, TranscriptNavigationDirection::Previous)
+    }
+
+    pub(crate) fn next_navigation_block(
+        &self,
+        role: Option<&str>,
+    ) -> Option<TranscriptNavigationBlock> {
+        self.navigation_block(role, TranscriptNavigationDirection::Next)
     }
 
     pub(crate) fn descriptor_block_position(
@@ -4375,7 +4440,7 @@ mod document_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
         for idx in 0..100 {
-            if idx == 0 || idx == 50 {
+            if idx == 0 || idx == 50 || idx == 80 {
                 source.push(Block::User {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
@@ -4403,14 +4468,25 @@ mod document_tests {
         assert!(!active_history_contains(&document, "user 0"));
         assert!(!active_history_contains(&document, "user 50"));
 
-        let snapshot = document
+        let previous = document
             .previous_navigation_block(Some("user"))
             .expect("previous user block outside the active window");
 
-        assert_eq!(snapshot.0, 50);
-        assert_eq!(snapshot.1, "user");
-        assert_eq!(snapshot.2, "user 50");
-        assert!(!snapshot.3);
+        assert_eq!(previous.descriptor_index, 50);
+        assert_eq!(previous.block_id, BlockId::new(50));
+        assert_eq!(previous.role, "user");
+        assert_eq!(previous.first_line, "user 50");
+        assert!(!previous.already_at_anchor);
+
+        let next = document
+            .next_navigation_block(Some("user"))
+            .expect("next user block in the active window");
+
+        assert_eq!(next.descriptor_index, 80);
+        assert_eq!(next.block_id, BlockId::new(80));
+        assert_eq!(next.role, "user");
+        assert_eq!(next.first_line, "user 80");
+        assert!(!next.already_at_anchor);
         assert_eq!(document.active_descriptor_range, active_before);
         assert!(!active_history_contains(&document, "user 0"));
         assert!(!active_history_contains(&document, "user 50"));
@@ -4738,7 +4814,20 @@ type TranscriptBlockSnapshot = (
     String,
 );
 
-type TranscriptNavigationSnapshot = (usize, &'static str, String, bool);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TranscriptNavigationDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptNavigationBlock {
+    pub(crate) descriptor_index: usize,
+    pub(crate) block_id: BlockId,
+    pub(crate) role: &'static str,
+    pub(crate) first_line: String,
+    pub(crate) already_at_anchor: bool,
+}
 
 fn transcript_block_role(block: &Block) -> &'static str {
     match block {
@@ -5225,9 +5314,17 @@ impl TuiApp {
     pub(crate) fn previous_transcript_navigation_block(
         &mut self,
         role: Option<&str>,
-    ) -> Option<TranscriptNavigationSnapshot> {
+    ) -> Option<TranscriptNavigationBlock> {
         self.sync_transcript_renderer_generation();
         self.transcript.previous_navigation_block(role)
+    }
+
+    pub(crate) fn next_transcript_navigation_block(
+        &mut self,
+        role: Option<&str>,
+    ) -> Option<TranscriptNavigationBlock> {
+        self.sync_transcript_renderer_generation();
+        self.transcript.next_navigation_block(role)
     }
 
     pub(crate) fn reveal_transcript_descriptor_block(

@@ -1729,10 +1729,12 @@ Transcript display policy and rendered transcript inspection.
   Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
 - `smelt.transcript.is_empty` (UiHost) :: `fun(): boolean`
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
+- `smelt.transcript.next_block` (UiHost) :: `fun(opts: table?): table?`
+  Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`.
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
   Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
 - `smelt.transcript.previous_block` (UiHost) :: `fun(opts: table?): table?`
-  Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, role, first_line, already_at_top }`.
+  Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`.
 - `smelt.transcript.reveal_block` (UiHost) :: `fun(idx: integer, opts: table?): boolean`
   Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`

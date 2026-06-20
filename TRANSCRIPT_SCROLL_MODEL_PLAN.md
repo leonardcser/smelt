@@ -881,6 +881,13 @@ Acceptance:
 - Previous/next user lookup is O(log n) or bounded indexed SQL, not row-estimate search.
 - Lookup does not change `active_descriptor_range`, projection state, cursor, selection, or viewport.
 
+Phase 1 result:
+
+- Added indexed store lookups for previous and next descriptors by `kind` and descriptor index, plus a centered descriptor slice API for bounded target-window reads.
+- Added side-effect-free transcript navigation over loaded descriptor metadata with store fallback, selecting nearest descriptor/block identity in the requested direction without row estimates.
+- Navigation APIs now return descriptor index, block id, role, first preview line, and already-at-anchor state, never estimated `first_row`.
+- Regression coverage verifies previous and next user lookup do not mutate the active sparse descriptor window.
+
 ### Reset Phase 2: Add exact block reveal
 
 Goal: land semantic targets exactly using local rendered rows.

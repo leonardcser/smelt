@@ -472,12 +472,34 @@ impl SessionDb {
         history::read_transcript_descriptor_tail_slice_with_total(&self.conn, total_count, count)
     }
 
+    pub fn read_transcript_descriptor_centered_slice(
+        &self,
+        center_descriptor_idx: u64,
+        before: usize,
+        after: usize,
+    ) -> Result<TranscriptDescriptorSlice> {
+        history::read_transcript_descriptor_centered_slice(
+            &self.conn,
+            center_descriptor_idx,
+            before,
+            after,
+        )
+    }
+
     pub fn read_transcript_descriptor_before_kind(
         &self,
         kind: &str,
         before_or_at_block_idx: u64,
     ) -> Result<Option<TranscriptDescriptorRecord>> {
         history::read_transcript_descriptor_before_kind(&self.conn, kind, before_or_at_block_idx)
+    }
+
+    pub fn read_transcript_descriptor_after_kind(
+        &self,
+        kind: &str,
+        after_or_at_block_idx: u64,
+    ) -> Result<Option<TranscriptDescriptorRecord>> {
+        history::read_transcript_descriptor_after_kind(&self.conn, kind, after_or_at_block_idx)
     }
 
     pub fn search_transcript_candidates(
@@ -957,6 +979,28 @@ mod tests {
         assert_eq!(empty.start.get(), 4);
         assert_eq!(empty.total_count, 6);
 
+        let centered = db
+            .read_transcript_descriptor_centered_slice(3, 2, 1)
+            .unwrap();
+        assert_eq!(centered.start.get(), 1);
+        assert_eq!(centered.end().get(), 5);
+        let expected_centered = records[1..5]
+            .iter()
+            .cloned()
+            .map(without_search_text)
+            .collect::<Vec<_>>();
+        assert_eq!(centered.records, expected_centered);
+        assert_eq!(
+            db.read_transcript_descriptor_centered_slice(0, 5, 1)
+                .unwrap()
+                .records,
+            records[0..2]
+                .iter()
+                .cloned()
+                .map(without_search_text)
+                .collect::<Vec<_>>()
+        );
+
         let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
         assert_eq!(tail.start.get(), 4);
         assert_eq!(tail.end().get(), 6);
@@ -984,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_descriptor_before_kind_reads_nearest_matching_block() {
+    fn transcript_descriptor_navigation_by_kind_reads_nearest_matching_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..6)
@@ -1010,8 +1054,24 @@ mod tests {
             Some(without_search_text(records[1].clone()))
         );
         assert_eq!(
+            db.read_transcript_descriptor_after_kind("user", 0).unwrap(),
+            Some(without_search_text(records[1].clone()))
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_after_kind("user", 1).unwrap(),
+            Some(without_search_text(records[1].clone()))
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_after_kind("user", 2).unwrap(),
+            Some(without_search_text(records[4].clone()))
+        );
+        assert_eq!(
             db.read_transcript_descriptor_before_kind("tool", 5)
                 .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_after_kind("tool", 0).unwrap(),
             None
         );
     }
