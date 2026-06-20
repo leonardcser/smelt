@@ -190,7 +190,7 @@ impl TuiApp {
                 &self.lua,
                 &inline_options,
             );
-            return Some(self.transcript.cached_display_rows_for_range(
+            return Some(self.transcript.cached_exact_or_gap_display_rows_for_range(
                 &self.lua,
                 &theme,
                 TranscriptRenderContext {

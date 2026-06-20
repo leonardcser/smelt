@@ -326,12 +326,16 @@ impl TuiApp {
         let layout = {
             let _perf = smelt_perf::perf::begin("search:transcript:candidate_layout");
             match candidate_blocks {
-                Some(candidate_blocks) => self.transcript.materialize_search_layout_for_blocks(
-                    &self.lua,
-                    width,
-                    candidate_blocks,
-                ),
-                None => self.transcript.materialize_search_layout(&self.lua, width),
+                Some(candidate_blocks) => self
+                    .transcript
+                    .materialize_exact_loaded_search_layout_for_blocks(
+                        &self.lua,
+                        width,
+                        candidate_blocks,
+                    ),
+                None => self
+                    .transcript
+                    .materialize_exact_loaded_search_layout(&self.lua, width),
             }
         };
         let candidate_key = candidate_blocks.unwrap_or(&[]);
@@ -391,7 +395,7 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let total_rows = self
             .transcript
-            .estimated_total_rows(&self.lua, width)
+            .approximate_scrollbar_total_rows(&self.lua, width)
             .max(indexed_total_rows);
         Some(TranscriptSearchSession {
             key,

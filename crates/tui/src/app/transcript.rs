@@ -593,7 +593,7 @@ impl TranscriptExtentIndex {
         )
     }
 
-    fn mixed_virtual_total_rows(
+    fn approximate_mixed_scrollbar_total_rows(
         &mut self,
         descriptors: &SparseTranscriptDescriptors,
         active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
@@ -660,6 +660,15 @@ enum TranscriptScrollAnchor {
 enum TranscriptMaterializationPlan {
     Loaded(crate::content::transcript_buf::ProjectionPlan),
     UnloadedGap(SparseProjectionGap),
+}
+
+fn inert_sparse_gap_rows(count: RowIndex) -> Vec<DisplayRow> {
+    (0..count)
+        .map(|_| {
+            DisplayRow::new(String::new(), Vec::new())
+                .with_break_before(crate::smelt_edit::RowBreak::Hard)
+        })
+        .collect()
 }
 
 pub(crate) struct TranscriptProjectionPlan {
@@ -844,8 +853,12 @@ impl TranscriptDocument {
             .observe_exact_loaded_descriptor_rows(&self.sparse_descriptors, snapshot);
     }
 
-    fn mixed_virtual_total_rows(&mut self, width: u16, exact_loaded_rows: RowIndex) -> RowIndex {
-        self.extent_index.mixed_virtual_total_rows(
+    fn approximate_mixed_scrollbar_total_rows(
+        &mut self,
+        width: u16,
+        exact_loaded_rows: RowIndex,
+    ) -> RowIndex {
+        self.extent_index.approximate_mixed_scrollbar_total_rows(
             &self.sparse_descriptors,
             self.active_descriptor_range.as_ref(),
             self.session_dir.as_ref(),
@@ -854,8 +867,13 @@ impl TranscriptDocument {
         )
     }
 
-    fn virtual_row_to_loaded_row(&mut self, width: u16, row: RowIndex) -> RowIndex {
-        row.saturating_sub(self.estimated_sparse_prefix_row_offset(width))
+    fn approximate_loaded_row_for_virtual_content_row(
+        &mut self,
+        width: u16,
+        row: RowIndex,
+    ) -> Option<RowIndex> {
+        let offset = self.estimated_sparse_prefix_row_offset(width);
+        (row >= offset).then_some(row.saturating_sub(offset))
     }
 
     fn offset_node_row(
@@ -888,7 +906,7 @@ impl TranscriptDocument {
             .build_rows(lua, &mut self.transcript.history, width, theme)
     }
 
-    pub(crate) fn estimated_total_rows(
+    pub(crate) fn approximate_scrollbar_total_rows(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -896,10 +914,10 @@ impl TranscriptDocument {
         let loaded_rows =
             self.projection
                 .estimated_total_rows(lua, &mut self.transcript.history, width);
-        self.mixed_virtual_total_rows(width, loaded_rows)
+        self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
     }
 
-    pub(crate) fn materialize_block_layout(
+    pub(crate) fn materialize_exact_loaded_block_layout(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -955,7 +973,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> Vec<TranscriptBlockSnapshot> {
-        let layout = self.materialize_block_layout(lua, width);
+        let layout = self.materialize_exact_loaded_block_layout(lua, width);
         self.block_snapshots_from_layout(layout.into_iter())
     }
 
@@ -990,7 +1008,7 @@ impl TranscriptDocument {
         }
     }
 
-    pub(crate) fn materialize_search_layout(
+    pub(crate) fn materialize_exact_loaded_search_layout(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -1005,7 +1023,7 @@ impl TranscriptDocument {
         layout
     }
 
-    pub(crate) fn materialize_search_layout_for_blocks(
+    pub(crate) fn materialize_exact_loaded_search_layout_for_blocks(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -1031,7 +1049,7 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         forward: bool,
     ) -> Option<BlockId> {
-        let local_row = self.virtual_row_to_loaded_row(width, row);
+        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
         self.projection.block_id_at_or_before_row(
             lua,
             &mut self.transcript.history,
@@ -1397,7 +1415,7 @@ impl TranscriptDocument {
         let loaded_rows =
             self.projection
                 .estimated_total_rows(lua, &mut self.transcript.history, width);
-        let total_rows = self.mixed_virtual_total_rows(width, loaded_rows);
+        let total_rows = self.approximate_mixed_scrollbar_total_rows(width, loaded_rows);
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let loaded_start = row_offset;
         let loaded_end = row_offset.saturating_add(loaded_rows).min(total_rows);
@@ -1504,7 +1522,7 @@ impl TranscriptDocument {
         rows
     }
 
-    pub(crate) fn display_rows_for_range(
+    pub(crate) fn exact_or_gap_display_rows_for_range(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -1520,16 +1538,22 @@ impl TranscriptDocument {
         let mut rows = Vec::new();
         if start < row_offset {
             let prefix_end = end.min(row_offset);
-            rows.extend((start..prefix_end).map(|_| {
-                DisplayRow::new(String::new(), Vec::new())
-                    .with_break_before(crate::smelt_edit::RowBreak::Hard)
-            }));
+            rows.extend(inert_sparse_gap_rows(prefix_end.saturating_sub(start)));
             if end <= row_offset {
                 return DisplayRows { rows };
             }
         }
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        let loaded_end = row_offset.saturating_add(loaded_rows);
+        if start >= loaded_end {
+            return DisplayRows {
+                rows: inert_sparse_gap_rows(count),
+            };
+        }
         let local_start = start.saturating_sub(row_offset);
-        let local_end = end.saturating_sub(row_offset);
+        let local_end = end.saturating_sub(row_offset).min(loaded_rows);
         let mut loaded = self.projection.display_rows_for_range(
             lua,
             &mut self.transcript.history,
@@ -1538,6 +1562,9 @@ impl TranscriptDocument {
             local_start..local_end,
         );
         rows.append(&mut loaded.rows);
+        if end > loaded_end {
+            rows.extend(inert_sparse_gap_rows(end.saturating_sub(loaded_end)));
+        }
         DisplayRows { rows }
     }
 
@@ -1553,7 +1580,7 @@ impl TranscriptDocument {
         if query.is_empty() || count == 0 {
             return Vec::new();
         }
-        let display = self.display_rows_for_range(lua, width, theme, start, count);
+        let display = self.exact_or_gap_display_rows_for_range(lua, width, theme, start, count);
         let mut matches = Vec::new();
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = start.saturating_add(offset as RowIndex);
@@ -1564,7 +1591,7 @@ impl TranscriptDocument {
         matches
     }
 
-    pub(crate) fn cached_display_rows_for_range(
+    pub(crate) fn cached_exact_or_gap_display_rows_for_range(
         &mut self,
         lua: &LuaRuntime,
         theme: &Theme,
@@ -1586,7 +1613,7 @@ impl TranscriptDocument {
             return rows;
         }
         smelt_perf::perf::record_value("transcript:render_cache:miss", 1);
-        let rows = self.display_rows_for_range(lua, render.width, theme, start, count);
+        let rows = self.exact_or_gap_display_rows_for_range(lua, render.width, theme, start, count);
         self.render_cache.insert(key, rows.clone());
         rows
     }
@@ -1597,7 +1624,13 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        let local_row = self.virtual_row_to_loaded_row(width, row);
+        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        if local_row >= loaded_rows {
+            return None;
+        }
         self.projection
             .node_metadata_at_row(lua, &mut self.transcript.history, width, local_row)
             .map(|node| self.offset_node_row(width, node))
@@ -1609,7 +1642,13 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
-        let local_row = self.virtual_row_to_loaded_row(width, row);
+        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        if local_row >= loaded_rows {
+            return None;
+        }
         self.projection
             .row_anchor_at_row(lua, &mut self.transcript.history, width, local_row)
     }
@@ -1685,7 +1724,7 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         matches: impl FnMut(&BlockHistory, BlockId) -> bool,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        let local_row = self.virtual_row_to_loaded_row(width, row);
+        let local_row = self.approximate_loaded_row_for_virtual_content_row(width, row)?;
         self.projection
             .block_node_before_or_at_row(
                 lua,
@@ -1705,7 +1744,16 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
         activation: crate::content::transcript_buf::FoldActivation,
     ) -> bool {
-        let local_row = self.virtual_row_to_loaded_row(width, row);
+        let Some(local_row) = self.approximate_loaded_row_for_virtual_content_row(width, row)
+        else {
+            return false;
+        };
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        if local_row >= loaded_rows {
+            return false;
+        }
         let changed = self.projection.fold_node_at_row(
             lua,
             &mut self.transcript.history,
@@ -1775,7 +1823,7 @@ impl TranscriptDocument {
         changed
     }
 
-    pub(crate) fn copy_range(
+    pub(crate) fn copy_exact_loaded_range(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
@@ -1783,12 +1831,25 @@ impl TranscriptDocument {
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
         let row_offset = self.estimated_sparse_prefix_row_offset(width);
-        if range.end.row < row_offset {
+        if range.end.row < row_offset || (range.end.row == row_offset && range.end.byte_col == 0) {
             return crate::smelt_edit::CopyOutput::default();
         }
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
         let mut local_range = range;
         local_range.start.row = local_range.start.row.saturating_sub(row_offset);
-        local_range.end.row = local_range.end.row.saturating_sub(row_offset);
+        local_range.end.row = local_range
+            .end
+            .row
+            .saturating_sub(row_offset)
+            .min(loaded_rows);
+        if local_range.start.row > local_range.end.row
+            || (local_range.start.row == local_range.end.row
+                && local_range.start.byte_col >= local_range.end.byte_col)
+        {
+            return crate::smelt_edit::CopyOutput::default();
+        }
         self.projection
             .copy_range(lua, &mut self.transcript.history, width, theme, local_range)
     }
@@ -2064,7 +2125,7 @@ mod document_tests {
                 .projection
                 .estimated_total_rows(&lua, &mut document.transcript.history, 80);
 
-        let total_rows = document.estimated_total_rows(&lua, 80);
+        let total_rows = document.approximate_scrollbar_total_rows(&lua, 80);
 
         assert!(total_rows > loaded_rows);
         assert!(document.estimated_sparse_prefix_row_offset(80) > 0);
@@ -2144,6 +2205,101 @@ mod document_tests {
         assert!(rows.row_base >= offset.saturating_add(loaded_rows));
         assert!(rows.materialized_rows > 0);
         assert!(buf.lines().iter().all(|line| line.is_empty()));
+    }
+
+    #[test]
+    fn unloaded_sparse_gaps_do_not_provide_content_or_hit_targets() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let records = transcript_records(100);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            40..48,
+            None,
+        ));
+        let width = 80;
+        let offset = document.estimated_sparse_prefix_row_offset(width);
+        let gap_row = offset.saturating_sub(1);
+        assert!(gap_row > 0);
+
+        let display = document.exact_or_gap_display_rows_for_range(&lua, width, &theme, gap_row, 1);
+        assert_eq!(display.rows.len(), 1);
+        assert!(display.rows[0].text.is_empty());
+        assert!(display.rows[0].actions.is_empty());
+
+        let copy = document.copy_exact_loaded_range(
+            &lua,
+            width,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: gap_row,
+                    byte_col: 0,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: gap_row.saturating_add(1),
+                    byte_col: 0,
+                },
+            },
+        );
+        assert!(copy.is_empty());
+        assert!(document
+            .node_metadata_at_row(&lua, width, gap_row)
+            .is_none());
+
+        let action = {
+            let mut display_document =
+                TranscriptDisplayDocument::new(&mut document, &lua, width, &theme);
+            DisplayDocument::action_at(
+                &mut display_document,
+                crate::smelt_edit::DocPosition {
+                    row: gap_row,
+                    byte_col: 0,
+                },
+            )
+        };
+        assert!(action.is_none());
+
+        let loaded_rows =
+            document
+                .projection
+                .estimated_total_rows(&lua, &mut document.transcript.history, width);
+        let suffix_gap_row = offset.saturating_add(loaded_rows).saturating_add(1);
+        let display =
+            document.exact_or_gap_display_rows_for_range(&lua, width, &theme, suffix_gap_row, 1);
+        assert!(display.rows.iter().all(|row| row.text.is_empty()));
+        assert!(display.rows.iter().all(|row| row.actions.is_empty()));
+        let copy = document.copy_exact_loaded_range(
+            &lua,
+            width,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: suffix_gap_row,
+                    byte_col: 0,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: suffix_gap_row.saturating_add(1),
+                    byte_col: 0,
+                },
+            },
+        );
+        assert!(copy.is_empty());
+        assert!(document
+            .node_metadata_at_row(&lua, width, suffix_gap_row)
+            .is_none());
+        let action = {
+            let mut display_document =
+                TranscriptDisplayDocument::new(&mut document, &lua, width, &theme);
+            DisplayDocument::action_at(
+                &mut display_document,
+                crate::smelt_edit::DocPosition {
+                    row: suffix_gap_row,
+                    byte_col: 0,
+                },
+            )
+        };
+        assert!(action.is_none());
     }
 
     #[test]
@@ -2236,12 +2392,12 @@ mod document_tests {
         }
         let mut document = TranscriptDocument::from_transcript(source);
         let (_id, target_row, target_rows) = document
-            .materialize_block_layout(&lua, 80)
+            .materialize_exact_loaded_block_layout(&lua, 80)
             .into_iter()
             .find(|(id, _, _)| *id == BlockId::new(target_index as u64))
             .expect("target block row");
         let target_display_rows =
-            document.display_rows_for_range(&lua, 80, &theme, target_row, target_rows);
+            document.exact_or_gap_display_rows_for_range(&lua, 80, &theme, target_row, target_rows);
         let (row_offset, byte_col) = target_display_rows
             .rows
             .iter()
@@ -3293,7 +3449,9 @@ impl DisplayDocument for TranscriptDisplayDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
         DisplaySnapshot {
             generation: self.document.projection_generation(),
-            total_rows: self.document.estimated_total_rows(self.lua, self.width),
+            total_rows: self
+                .document
+                .approximate_scrollbar_total_rows(self.lua, self.width),
         }
     }
 
@@ -3301,7 +3459,7 @@ impl DisplayDocument for TranscriptDisplayDocument<'_> {
         &mut self,
         range: std::ops::Range<crate::smelt_edit::RowIndex>,
     ) -> crate::smelt_edit::DisplayRows {
-        self.document.display_rows_for_range(
+        self.document.exact_or_gap_display_rows_for_range(
             self.lua,
             self.width,
             self.theme,
@@ -3313,7 +3471,7 @@ impl DisplayDocument for TranscriptDisplayDocument<'_> {
     fn copy_range(&mut self, range: TextRange) -> Option<crate::smelt_edit::CopyOutput> {
         range.rows().map(|range| {
             self.document
-                .copy_range(self.lua, self.width, self.theme, range)
+                .copy_exact_loaded_range(self.lua, self.width, self.theme, range)
         })
     }
 }
