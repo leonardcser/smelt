@@ -1675,6 +1675,76 @@ No `store:transcript:descriptor_estimated_rows_requested` metric was emitted in 
 - Large unloaded estimate scans are replaced on render paths by bounded coarse fallback. This keeps first tail render fast while preserving content anchors if estimates refine later.
 - Unloaded sparse gaps materialize only inert placeholder rows. They do not provide copy text, actions, node metadata, or fold targets.
 
+## Final Phase 6 results
+
+All six phases are implemented. This section records the final validation run and the tradeoffs intentionally left in the completed scroll model.
+
+The full benchmark command was rerun with home temp storage:
+
+```bash
+mkdir -p /home/dev/tmp
+TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout \
+  --runs 1 \
+  --workloads mixed_10mib \
+  --search \
+  --search-bytes 524288000 \
+  --resume \
+  --resume-bytes 524288000 \
+  --no-warmup
+```
+
+Output was captured at:
+
+```text
+/home/dev/tmp/smelt-transcript-scroll-model-bench-phase6.txt
+```
+
+### Final 10 MiB mixed layout workload
+
+```text
+TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload=mixed_10mib run=1 input_bytes=10497943 generated_bytes=10499021 blocks=3404 rows=141762 first_ms=15.582 resize_ms=3.243 theme_ms=3.104 scroll12_ms=20.583 visible_ms=3.280 copy_ms=13.613 append_ms=7.127 no_cache_ms=15.045 allocs=35188 bytes_allocated=63187803
+```
+
+The `TRANSCRIPT_LAYOUT_COUNTERS_JSON` gate stayed at `full_row_builds=0` for first, resize, theme, scroll12, visible, copy, and append.
+
+### Final 500 MiB search/view workload
+
+```text
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=3.735 height_resize_ms=3.416 theme_color_ms=2.661 copy_mid_ms=0.292 nav_ctrl_d20_ms=26.220 nav_ctrl_u20_ms=19.486 nav_gg_ms=0.534 nav_G_ms=4.696 rare_ms=25.355 common_submit_ms=6.726 next100_ms=56.131 after_append_ms=12.066
+```
+
+Important bounded after-append counters:
+
+```text
+search:transcript:dirty_candidate_blocks last=1
+search:transcript:dirty_candidates_scanned last=1
+transcript:collect_nodes_range:rows total=42
+transcript:render_plan:reused last=1
+```
+
+### Final 500 MiB descriptor-backed resume workload
+
+```text
+TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes=524288000 generated_bytes=524288000 descriptors=128000 rows=7551997 setup_ms=16411.351 tail_load_ms=42.738 tail_render_ms=1.270
+```
+
+Important bounded resume counters:
+
+```text
+store:transcript:descriptor_slice_requested last=80
+store:transcript:descriptors_loaded last=80
+store:transcript:descriptor_json_bytes_loaded last=331120
+```
+
+No `store:transcript:descriptor_estimated_rows_requested` metric was emitted in this run, so first tail render did not synchronously scan the unloaded descriptor prefix for row estimates.
+
+### Final tradeoffs
+
+- `TranscriptDocument` now owns the sparse extent boundary, semantic viewport anchor, exact loaded descriptor observations, and approximate scrollbar extent naming.
+- `transcript_buf.rs` still owns render-plan reuse and exactification internals. It exposes exact height snapshots to the document extent index rather than becoming a second sparse extent model.
+- Large unloaded estimate scans are replaced on render paths by bounded coarse fallback. This keeps first tail render fast while preserving content anchors if estimates refine later.
+- Unloaded sparse gaps materialize only inert placeholder rows. They do not provide copy text, actions, node metadata, or fold targets.
+
 ## Benchmark gates for future changes
 
 Always run large transcript benchmarks with home temp storage:
