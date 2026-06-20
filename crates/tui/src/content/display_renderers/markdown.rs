@@ -760,6 +760,22 @@ mod tests {
     }
 
     #[test]
+    fn markdown_dim_survives_code_blocks() {
+        let md = "before\n\n```rust\nlet x = 1;\n```\n\nafter";
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", true, None);
+        });
+
+        for line in &block.lines {
+            for span in &line.spans {
+                if !span.text.trim().is_empty() {
+                    assert!(span.style.dim, "dim missing on span '{}'", span.text);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn markdown_code_block_can_contain_shorter_fenced_block() {
         let md = "````markdown\n```rust\nfn main() {}\n```\n````";
         let block = render_test(80, |sink| {

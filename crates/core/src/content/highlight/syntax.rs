@@ -73,6 +73,7 @@ pub fn render_code_block(
             out.mark_wrapped();
         }
         for (vi, vrow) in visual_rows.iter().enumerate() {
+            out.save_style();
             if vi == 0 {
                 let mut external_src = String::new();
                 if fence && line_idx == 0 {
@@ -92,9 +93,6 @@ pub fn render_code_block(
                 out.mark_soft_wrap_continuation();
             }
             if let Some(b) = bctx {
-                if dim {
-                    out.reset_style();
-                }
                 b.print_left(out);
             }
             if dim {
@@ -111,21 +109,15 @@ pub fn render_code_block(
                 }
             }
             if let Some(b) = bctx {
-                if dim {
-                    out.reset_style();
-                }
                 out.set_hl(b.group);
                 out.print(b.right);
             }
-            out.reset_style();
+            out.pop_style();
             out.newline();
         }
         rows += visual_rows.len() as u16;
     }
 
-    if dim {
-        out.reset_style();
-    }
     rows
 }
 
@@ -350,6 +342,7 @@ fn print_split_regions(
     bg: Option<Color>,
 ) -> usize {
     let mut col = 0;
+    out.save_style();
     for (style, text) in regions {
         if text.is_empty() {
             continue;
@@ -366,7 +359,7 @@ fn print_split_regions(
         out.print(text);
         col += UnicodeWidthStr::width(text.as_str());
     }
-    out.reset_style();
+    out.pop_style();
     col
 }
 
@@ -480,6 +473,23 @@ mod tests {
             );
         });
         assert_eq!(block.lines.len(), 3, "expected 3 rows");
+        for line in &block.lines {
+            for span in &line.spans {
+                if !span.text.trim().is_empty() {
+                    assert!(span.style.dim, "dim missing on span '{}'", span.text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_code_block_preserves_outer_dim_style() {
+        let block = render_test(80, |out| {
+            out.set_dim();
+            render_code_block(out, &["first", "second"], "rust", 80, false, None, false);
+            out.print("after");
+        });
+
         for line in &block.lines {
             for span in &line.spans {
                 if !span.text.trim().is_empty() {
