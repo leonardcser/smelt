@@ -1049,6 +1049,85 @@ Reset Phase 7 benchmark summary:
 - 500 MiB descriptor-backed resume stayed bounded with `descriptor_slice_requested=80`, `descriptors_loaded=80`, `descriptor_json_bytes_loaded=331120`, `tail_load_ms=21.520`, and `tail_render_ms=1.307`.
 - No `store:transcript:descriptor_estimated_rows` metric was emitted, so first tail render did not synchronously scan the unloaded descriptor prefix for row estimates.
 
+### Post-Phase 7 user retest: remaining local-scroll bugs
+
+User testing after Reset Phase 7 still reports two real interaction failures:
+
+- Bottom-edge drag selection after scrolling high into a session can move for a few ticks, then lock in place even though there is more newer content below.
+- Down-arrow or vim `j` movement can feel laggy or uneven, rather than advancing by one exact content row per keypress when not at a real boundary.
+
+This means Reset Phase 7 was not final. The branch is better, and the useful cleanup should stay, but the local movement model is still not correct by construction.
+
+Current diagnosis:
+
+1. `advance_transcript_drag_autoscroll_endpoint` still decides whether a transcript autoscroll tick is valid by comparing pre-projection `Window::scroll_top` with a numeric `new_scroll`. That can suppress a valid content-space tick before `TranscriptDocument` gets a chance to load, exactify, or resolve adjacent descriptors.
+2. `execute_document_view_command_for_win` still lets `DocumentViewExecutor` mutate generic row-document scroll and cursor state before deriving `TranscriptScrollIntent::UserDelta`. Keyboard row movement is therefore still inferred after a numeric window mutation instead of being owned by transcript projection from the start.
+3. `local_delta_scroll_target` still resolves local movement into an absolute virtual row and may rebase after descriptor loading or exact-height observation. This is a transitional repair path. It can make the effective user-visible velocity depend on changing row extents.
+4. Exact height observations are useful, but they must not become semantic authority. They may refine scrollbar totals and improve local exactness only after content anchors already determine the viewport.
+
+Cleanup retained after this audit:
+
+- Exact descriptor height observations are width-scoped and survive active descriptor window switches, so prefix and suffix estimates can use known exact heights without forgetting previous windows.
+- Local delta planning exactifies a bounded target window before projection, which improves exactness for nearby wheel, keyboard, and autoscroll movement.
+- Active descriptor window expansion is bounded, and replay tests now assert contiguous descriptor coverage for user-delta frames.
+
+These are useful Level 1 and Level 2 exactness improvements. They do not finish local motion ownership.
+
+### Reset Phase 8: Capture the remaining bad gestures
+
+Goal: make the two reported failures deterministic before changing more behavior.
+
+Tasks:
+
+- Add a full-frame bottom-edge drag selection replay that starts high in a sparse transcript, parks the pointer at the bottom edge, and runs enough ticks to cross multiple sparse descriptor windows.
+- Assert every tick before a proven real content boundary emits a `UserDelta` frame. The test must fail if the tick loop silently stops because a pre-projection numeric scroll comparison returned false.
+- Add a full-frame Down-arrow or vim `j` replay from an older sparse region. It should assert exact one-row cursor movement while the cursor is not at the viewport edge and exact one-row viewport movement once the cursor is pinned to the edge.
+- Extend trace assertions to distinguish three cases: real content boundary, descriptor load in progress, and incorrect local tick suppression.
+- Record whether the drag endpoint and cursor were adjusted before projection or after applying the exact viewport.
+
+Acceptance:
+
+- The current user report is reproduced or confidently ruled out by a deterministic test path.
+- Test failures identify whether the bad frame came from tick suppression, descriptor-window replacement, exact-height rebasing, event coalescing, or projection latency.
+- Local wheel, drag autoscroll, and keyboard movement tests assert per-tick content movement, not only monotonicity.
+
+### Reset Phase 9: Move transcript local motion before window mutation
+
+Goal: transcript local movement should be consumed as an intent by `TranscriptDocument` before `Window` or `DocumentViewExecutor` mutates numeric scroll state.
+
+Tasks:
+
+- Route transcript wheel, drag autoscroll, `MoveRows`, `ScrollRows`, `PageRows`, and half-page movement directly to transcript local movement intents.
+- Stop using `Window::scroll_top` mutation as the source of truth for transcript local movement. `Window::scroll_top` should be updated only from the applied transcript viewport.
+- Move drag endpoint and cursor edge adjustment to the applied viewport result so selection state follows exact materialized rows after projection.
+- Treat `new_scroll == scroll_top` as a possible stale numeric artifact for sparse transcripts, not as proof that a local drag tick cannot move.
+- Preserve generic `DocumentViewExecutor` behavior for non-transcript row documents.
+
+Acceptance:
+
+- Bottom-edge drag autoscroll keeps ticking across sparse windows until a real content boundary.
+- Down-arrow and vim `j` advance by one exact document row per keypress, with stable viewport movement at the edge.
+- Local movement frames never expose sparse placeholders and never use `ExactContentAnchor(EstimatedRow(_))` as a fallback.
+- `window_scroll_after_input == window_scroll_before` for transcript local inputs, because projection owns the resolved paint row.
+
+### Reset Phase 10: Delete transitional row-authority repairs
+
+Goal: finish with one owner for transcript local movement and no hidden numeric-row authority paths.
+
+Tasks:
+
+- Delete or narrow repair code that exists only because transcript input was first interpreted as `ExactRow(scroll_top)`.
+- Rename or restrict any method that returns approximate rows so exact consumers cannot call it accidentally.
+- Keep approximate row and fraction mapping only for scrollbar and explicit far seek.
+- Audit tests and remove assertions that only prove numeric implementation artifacts instead of content-anchor behavior.
+
+Acceptance:
+
+- One transcript viewport owner remains: `TranscriptDocument`.
+- One local movement owner remains: transcript intent projection.
+- `Window` paints and reports resolved viewport rows, but does not decide transcript sparse movement.
+- The plan can be closed only after a manual retest of the reported drag-down and Down-arrow scenarios.
+
 ## Superseded implementation phase archive
 
 
