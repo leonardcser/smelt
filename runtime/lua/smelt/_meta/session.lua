@@ -17,10 +17,6 @@ session.checkpoint = nil
 ---@type fun(name: string, text: string?, opts: table?): nil
 session.context_note = nil
 
---- Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
----@type fun(): table
-session.status = nil
-
 --- Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Use `status().context` for stale markers; stale counts are display-only and are not used as authoritative request baselines.
 ---@type fun(): integer?
 session.context_tokens = nil
@@ -101,6 +97,10 @@ session.rewind_to = nil
 --- Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
 ---@type fun(title: string, slug: string, history_len: integer): nil
 session.set_title_for_history = nil
+
+--- Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
+---@type fun(): table
+session.status = nil
 
 --- Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.
 ---@type fun(path: string): table

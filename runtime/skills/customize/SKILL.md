@@ -1485,8 +1485,6 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Set or clear a named hidden model-visible context note.
 - `smelt.session.context_tokens` :: `fun(): integer?`
   Latest non-background provider-reported active-context token count, or `nil` before the first usage report.
-- `smelt.session.context_tokens_stale` :: `fun(): boolean`
-  Whether the displayed context token count was reported by a different model/provider than the active model.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
 - `smelt.session.conversation` :: `fun(): table`
@@ -1525,6 +1523,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Rewind the session to a prior user turn.
 - `smelt.session.set_title_for_history` :: `fun(title: string, slug: string, history_len: integer): nil`
   Set the session title and slug for a specific history length.
+- `smelt.session.status` :: `fun(): table`
+  Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`.
 - `smelt.session.switch_cwd` :: `fun(path: string): table`
   Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions.
 - `smelt.session.system` :: `fun(): string`

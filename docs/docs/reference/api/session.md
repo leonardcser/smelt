@@ -28,11 +28,7 @@ Set or clear a named hidden model-visible context note. `context_note(name, text
 fun(): integer?
 ```
 
-Latest non-background provider-reported active-context token count, or `nil`
-before the first usage report. While a request is in flight this may be the
-previous turn's reading until the provider sends a fresh usage update. Use
-`status().context` for stale markers; stale counts are display-only and are not
-used as authoritative request baselines.
+Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Use `status().context` for stale markers; stale counts are display-only and are not used as authoritative request baselines.
 
 ## `smelt.session.context_window`
 
@@ -192,10 +188,7 @@ Set the session title and slug for a specific history length. Intended for title
 fun(): table
 ```
 
-Return compact live status for prompt/status bars: `{ model, provider, api_base,
-mode = { name, pending, marker }, reasoning = { effort, pending, marker },
-context = { tokens, window, stale, marker }, cost }`. Markers are `*` for
-pending config and `?` for stale readings.
+Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
 
 ## `smelt.session.switch_cwd`
 
