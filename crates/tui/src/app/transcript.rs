@@ -379,6 +379,8 @@ enum DescriptorRangeState {
     Missing,
 }
 
+const TRANSCRIPT_ESTIMATE_RANGE_QUERY_LIMIT: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct DescriptorRowsEstimateKey {
     width: u16,
@@ -389,6 +391,7 @@ struct DescriptorRowsEstimateKey {
 #[derive(Default)]
 struct TranscriptExtentIndex {
     descriptor_rows_estimate_cache: HashMap<DescriptorRowsEstimateKey, RowIndex>,
+    estimate_store: Option<(PathBuf, SqliteTranscriptStore)>,
 }
 
 impl TranscriptExtentIndex {
@@ -432,6 +435,18 @@ impl TranscriptExtentIndex {
             .max(1)
     }
 
+    fn store_for_session(&mut self, session_dir: &PathBuf) -> Option<&SqliteTranscriptStore> {
+        let needs_open = self
+            .estimate_store
+            .as_ref()
+            .is_none_or(|(open_dir, _)| open_dir != session_dir);
+        if needs_open {
+            let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+            self.estimate_store = Some((session_dir.clone(), store));
+        }
+        self.estimate_store.as_ref().map(|(_, store)| store)
+    }
+
     fn estimated_rows_for_unloaded_descriptor_range(
         &mut self,
         session_dir: Option<&PathBuf>,
@@ -449,8 +464,16 @@ impl TranscriptExtentIndex {
         if let Some(rows) = self.descriptor_rows_estimate_cache.get(&key).copied() {
             return Some(rows);
         }
+        let requested = range.end.saturating_sub(range.start);
+        if requested > TRANSCRIPT_ESTIMATE_RANGE_QUERY_LIMIT {
+            smelt_perf::perf::record_value(
+                "transcript:extent:descriptor_estimate_coarse_fallback_count",
+                requested as u64,
+            );
+            return None;
+        }
         let session_dir = session_dir?;
-        let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+        let store = self.store_for_session(session_dir)?;
         let rows = store.estimated_descriptor_rows(key.width, range).ok()? as RowIndex;
         self.descriptor_rows_estimate_cache.insert(key, rows);
         Some(rows)
@@ -2009,6 +2032,32 @@ mod document_tests {
         assert!(rows.row_base >= offset.saturating_add(loaded_rows));
         assert!(rows.materialized_rows > 0);
         assert!(buf.lines().iter().all(|line| line.is_empty()));
+    }
+
+    #[test]
+    fn large_sparse_prefix_uses_bounded_coarse_estimate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Transcript::new();
+        for idx in 0..2048 {
+            let content = if idx < 2000 {
+                format!("block {idx} {}", "wide text ".repeat(40))
+            } else {
+                format!("block {idx}")
+            };
+            source.push(Block::Text { content });
+        }
+        let records = source.history.descriptor_records();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            2000..2040,
+            Some(dir.path().to_path_buf()),
+        ));
+        let average_rows = document.estimated_average_descriptor_rows(20);
+
+        let prefix_rows = document.estimated_sparse_prefix_row_offset(20);
+
+        assert_eq!(prefix_rows, 2000 * average_rows);
     }
 
     #[test]
