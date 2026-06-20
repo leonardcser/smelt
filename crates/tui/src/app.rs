@@ -2559,7 +2559,12 @@ impl TuiApp {
                     }
 
                     if scroll_delta != 0 {
-                        let _ = self.ui.scroll_at(scroll_row, scroll_col, scroll_delta);
+                        let _ = self.scroll_at_with_transcript_intent(
+                            scroll_row,
+                            scroll_col,
+                            scroll_delta,
+                            format!("coalesced_wheel:{scroll_delta}"),
+                        );
                     }
 
                     self.dispatch_ui_window_events(false);
@@ -2663,7 +2668,7 @@ impl TuiApp {
                         .unwrap_or(MIN_FRAME_INTERVAL);
                     want.saturating_sub(since)
                 }), if has_animation => {
-                    if self.ui.tick_drag_autoscroll() {
+                    if self.tick_drag_autoscroll_with_transcript_intent() {
                         self.dispatch_ui_window_events(false);
                     }
                     self.publish_diff_signals();

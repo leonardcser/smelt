@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::search::SearchDirection;
 use crate::app::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptScrollTraceFrame};
 use crate::content::render_plan::RenderNodeId;
 
@@ -1387,7 +1388,62 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
 }
 
 #[test]
-#[ignore = "Phase 3 replaces the current row-target adapter with real transcript UserDelta intents"]
+fn transcript_scrollbar_click_preserves_fraction_intent() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    let (row, column, _, _) = transcript_scrollbar_point(&app, 3);
+    app.feed_one(SourceEvent::Term(Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        },
+    )));
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("scrollbar render frame");
+
+    assert!(
+        matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ScrollbarFraction { .. }
+        ),
+        "scrollbar clicks must preserve a fraction intent instead of collapsing to {:?}",
+        frame.scroll_intent
+    );
+}
+
+#[test]
+fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        SearchDirection::Forward,
+        "record-0150".to_string(),
+    );
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("search jump render frame");
+
+    assert!(
+        matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::SearchJump(
+                crate::app::transcript_scroll_trace::TranscriptTraceAnchor::Content { .. }
+            )
+        ),
+        "search jumps must preserve a semantic content anchor instead of collapsing to {:?}",
+        frame.scroll_intent
+    );
+}
+
+#[test]
 fn transcript_scroll_replay_requires_wheel_intent_before_numeric_row_target() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
     app.app.transcript.set_scroll_trace_enabled(true);

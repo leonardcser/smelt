@@ -910,6 +910,22 @@ impl TranscriptDocument {
         }
     }
 
+    pub(crate) fn trace_anchor_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+    ) -> TranscriptTraceAnchor {
+        let anchor = self
+            .row_anchor_at_row(lua, width, row)
+            .map(|anchor| TranscriptScrollAnchor::Content {
+                virtual_row: row,
+                anchor,
+            })
+            .unwrap_or(TranscriptScrollAnchor::EstimatedRow(row));
+        Self::trace_anchor(anchor)
+    }
+
     fn trace_projection_target(
         target: crate::content::transcript_buf::ScrollTarget,
     ) -> TranscriptProjectionTargetTrace {

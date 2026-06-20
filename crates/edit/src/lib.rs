@@ -1623,6 +1623,13 @@ impl Ui {
         })
     }
 
+    /// Current edge-drag autoscroll owner and row delta, if an in-flight drag
+    /// is requesting a tick. Hosts can inspect this before calling
+    /// [`Self::tick_drag_autoscroll`] to preserve semantic scroll intent.
+    pub fn drag_autoscroll_delta(&self) -> Option<(WinId, isize)> {
+        self.edge_drag_delta()
+    }
+
     /// Per-frame autoscroll step: when a left-button drag's pointer is parked
     /// at the top or bottom of the captured window's viewport, pan one row in
     /// that direction and move the selection endpoint to the new leading edge.

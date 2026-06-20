@@ -1,8 +1,11 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
+use crate::app::transcript_scroll_trace::{
+    TranscriptScrollIntent, TranscriptScrollTraceRenderInput,
+};
 use crate::app::{AppFocus, EventOutcome, PromptResizeClick, PromptResizeDrag, TuiApp};
 use crate::content::layout::HitRegion;
-use crate::smelt_edit::{HitTarget, WinId};
+use crate::smelt_edit::{HitTarget, RowIndex, WinId};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 const PROMPT_RESIZE_DOUBLE_CLICK_WINDOW: std::time::Duration =
@@ -101,7 +104,164 @@ fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usi
     (soft, hard)
 }
 
+struct TranscriptScrollInputCandidate {
+    label: String,
+    intent: TranscriptScrollIntent,
+    window_scroll_before: RowIndex,
+}
+
 impl TuiApp {
+    pub(crate) fn scroll_at_with_transcript_intent(
+        &mut self,
+        row: u16,
+        col: u16,
+        delta: isize,
+        label: impl Into<String>,
+    ) -> bool {
+        let candidate = self.transcript_window_at(row, col).and_then(|win| {
+            (win == crate::app::TRANSCRIPT_WIN).then(|| TranscriptScrollInputCandidate {
+                label: label.into(),
+                intent: TranscriptScrollIntent::UserDelta { rows: delta },
+                window_scroll_before: self.transcript_scroll_top(),
+            })
+        });
+        let panned = self.ui.scroll_at(row, col, delta);
+        if panned {
+            self.record_transcript_scroll_input(candidate);
+        }
+        panned
+    }
+
+    pub(crate) fn tick_drag_autoscroll_with_transcript_intent(&mut self) -> bool {
+        let candidate = self.ui.drag_autoscroll_delta().and_then(|(win, delta)| {
+            (win == crate::app::TRANSCRIPT_WIN).then(|| TranscriptScrollInputCandidate {
+                label: "drag_autoscroll".to_string(),
+                intent: TranscriptScrollIntent::UserDelta { rows: delta },
+                window_scroll_before: self.transcript_scroll_top(),
+            })
+        });
+        let panned = self.ui.tick_drag_autoscroll();
+        if panned {
+            self.record_transcript_scroll_input(candidate);
+        }
+        panned
+    }
+
+    pub(crate) fn transcript_scroll_top(&self) -> RowIndex {
+        self.ui
+            .win(crate::app::TRANSCRIPT_WIN)
+            .map(|win| win.scroll_top())
+            .unwrap_or(0)
+    }
+
+    fn transcript_window_at(&self, row: u16, col: u16) -> Option<WinId> {
+        match self.ui.hit_test(row, col, None)? {
+            HitTarget::Window(win) | HitTarget::Scrollbar { owner: win } => Some(win),
+            HitTarget::Paint(_) | HitTarget::Chrome { .. } => None,
+        }
+    }
+
+    fn transcript_wheel_input_candidate(
+        &self,
+        me: MouseEvent,
+    ) -> Option<TranscriptScrollInputCandidate> {
+        let rows = match me.kind {
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::ScrollDown => 3,
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => return None,
+            _ => return None,
+        };
+        (self.transcript_window_at(me.row, me.column)? == crate::app::TRANSCRIPT_WIN).then(|| {
+            TranscriptScrollInputCandidate {
+                label: match me.kind {
+                    MouseEventKind::ScrollUp => "wheel_up".to_string(),
+                    MouseEventKind::ScrollDown => "wheel_down".to_string(),
+                    _ => unreachable!(),
+                },
+                intent: TranscriptScrollIntent::UserDelta { rows },
+                window_scroll_before: self.transcript_scroll_top(),
+            }
+        })
+    }
+
+    fn transcript_scrollbar_input_candidate(
+        &self,
+        me: MouseEvent,
+        cap_before: Option<HitTarget>,
+    ) -> Option<TranscriptScrollInputCandidate> {
+        let owner = match me.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                match self.ui.hit_test(me.row, me.column, None)? {
+                    HitTarget::Scrollbar { owner } => owner,
+                    _ => return None,
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => match cap_before? {
+                HitTarget::Scrollbar { owner } => owner,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if owner != crate::app::TRANSCRIPT_WIN {
+            return None;
+        }
+        let intent = self
+            .transcript_scrollbar_fraction(me.row)
+            .unwrap_or_else(|| {
+                TranscriptScrollIntent::ApproximateRowSeek(self.transcript_scroll_top())
+            });
+        Some(TranscriptScrollInputCandidate {
+            label: "scrollbar".to_string(),
+            intent,
+            window_scroll_before: self.transcript_scroll_top(),
+        })
+    }
+
+    fn transcript_scrollbar_fraction(&self, row: u16) -> Option<TranscriptScrollIntent> {
+        let win = self.ui.win(crate::app::TRANSCRIPT_WIN)?;
+        let viewport = win.viewport?;
+        let bar = viewport.scrollbar?;
+        let rel_row = row.saturating_sub(viewport.rect.top);
+        let numerator = u64::from(bar.thumb_top_for_click(rel_row));
+        let denominator = u64::from(bar.max_thumb_top().max(1));
+        Some(TranscriptScrollIntent::ScrollbarFraction {
+            numerator,
+            denominator,
+        })
+    }
+
+    fn record_transcript_scroll_input(
+        &mut self,
+        candidate: Option<TranscriptScrollInputCandidate>,
+    ) {
+        let Some(candidate) = candidate else {
+            return;
+        };
+        self.record_transcript_scroll_intent(
+            candidate.label,
+            candidate.intent,
+            candidate.window_scroll_before,
+        );
+    }
+
+    pub(crate) fn record_transcript_scroll_intent(
+        &mut self,
+        label: impl Into<String>,
+        intent: TranscriptScrollIntent,
+        window_scroll_before: RowIndex,
+    ) {
+        if !self.transcript.scroll_trace_enabled() {
+            return;
+        }
+        self.transcript
+            .set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
+                input_event_or_tick: label.into(),
+                scroll_intent: intent,
+                window_scroll_before,
+                window_scroll_after_input: self.transcript_scroll_top(),
+            });
+    }
+
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         if self.update_prompt_resize_drag(me) {
@@ -111,11 +271,15 @@ impl TuiApp {
         // `Ui::dispatch_event` handles wheel-over-overlay, modal click-outside absorb,
         // and scrollbar drag. Anything unclaimed (`Ignored`) flows through below.
         let cap_before = self.ui.capture();
+        let scroll_input = self
+            .transcript_wheel_input_candidate(me)
+            .or_else(|| self.transcript_scrollbar_input_candidate(me, cap_before));
         if matches!(
             self.ui
                 .dispatch_event(crate::smelt_edit::Event::Mouse(me), &mut |_, _, _| {}),
             crate::smelt_edit::Status::Consumed
         ) {
+            self.record_transcript_scroll_input(scroll_input);
             if is_scroll_event(me.kind) {
                 self.pin_well_known_horizontal_scroll();
             }

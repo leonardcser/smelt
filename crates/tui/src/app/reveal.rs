@@ -1,11 +1,29 @@
+use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
 use crate::smelt_edit::{DocPosition, RowIndex, WinId};
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RevealScrollIntent {
+    SearchJump,
+}
+
+impl RevealScrollIntent {
+    fn trace_intent(
+        self,
+        anchor: crate::app::transcript_scroll_trace::TranscriptTraceAnchor,
+    ) -> TranscriptScrollIntent {
+        match self {
+            Self::SearchJump => TranscriptScrollIntent::SearchJump(anchor),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RevealOptions {
     pub(crate) top_padding: RowIndex,
     pub(crate) bottom_padding: RowIndex,
     pub(crate) cursor: bool,
+    pub(crate) transcript_scroll_intent: Option<RevealScrollIntent>,
 }
 
 impl Default for RevealOptions {
@@ -14,6 +32,7 @@ impl Default for RevealOptions {
             top_padding: 0,
             bottom_padding: 0,
             cursor: true,
+            transcript_scroll_intent: None,
         }
     }
 }
@@ -24,8 +43,14 @@ impl RevealOptions {
         Self {
             top_padding: edge_padding,
             bottom_padding: edge_padding,
-            cursor: true,
+            ..Self::default()
         }
+    }
+
+    pub(crate) fn search_result(leaf: WinId) -> Self {
+        let mut opts = Self::avoid_edge_chrome(leaf);
+        opts.transcript_scroll_intent = Some(RevealScrollIntent::SearchJump);
+        opts
     }
 }
 
@@ -39,54 +64,80 @@ impl TuiApp {
         mut position: DocPosition,
         opts: RevealOptions,
     ) {
-        let Some((buf_id, viewport_rows, is_row_backed)) = self.ui.win(leaf).map(|w| {
-            (
-                w.buf,
-                w.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
-                w.has_materialized_rows(),
-            )
-        }) else {
+        let Some((buf_id, viewport_rows, viewport_width, is_row_backed)) =
+            self.ui.win(leaf).map(|w| {
+                (
+                    w.buf,
+                    w.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
+                    w.viewport.map(|v| v.content_width).unwrap_or(1).max(1),
+                    w.has_materialized_rows(),
+                )
+            })
+        else {
             return;
+        };
+        let trace_before = if leaf == crate::app::TRANSCRIPT_WIN {
+            opts.transcript_scroll_intent
+                .map(|intent| (intent, self.transcript_scroll_top()))
+        } else {
+            None
         };
         let now = self.core.clock.instant_now();
-        let (win, buf) = self.ui.win_and_buf_mut(leaf, buf_id);
-        let (Some(win), Some(buf)) = (win, buf) else {
-            return;
-        };
 
-        let total_rows = win.scroll_row_total(buf);
-        position.row = position.row.min(total_rows.saturating_sub(1));
+        {
+            let (win, buf) = self.ui.win_and_buf_mut(leaf, buf_id);
+            let (Some(win), Some(buf)) = (win, buf) else {
+                return;
+            };
 
-        if opts.cursor {
-            if is_row_backed {
-                win.execute_document_view_command(
-                    buf,
-                    crate::smelt_edit::DocumentCommand::GotoPosition(position),
-                    viewport_rows,
-                    now,
-                );
+            let total_rows = win.scroll_row_total(buf);
+            position.row = position.row.min(total_rows.saturating_sub(1));
+
+            if opts.cursor {
+                if is_row_backed {
+                    win.execute_document_view_command(
+                        buf,
+                        crate::smelt_edit::DocumentCommand::GotoPosition(position),
+                        viewport_rows,
+                        now,
+                    );
+                } else {
+                    let cpos = buf.byte_at_display_byte_pos(
+                        crate::smelt_edit::row_to_usize(position.row),
+                        position.byte_col,
+                    );
+                    win.set_cpos(cpos);
+                    win.resync(buf, viewport_rows);
+                }
             } else {
-                let cpos = buf.byte_at_display_byte_pos(
-                    crate::smelt_edit::row_to_usize(position.row),
-                    position.byte_col,
+                let scroll_top = crate::smelt_edit::scroll_to_show(
+                    win.scroll_top(),
+                    position.row,
+                    viewport_rows,
                 );
-                win.set_cpos(cpos);
-                win.resync(buf, viewport_rows);
+                win.pin_scroll(scroll_top.min(max_scroll(total_rows, viewport_rows)));
             }
-        } else {
-            let scroll_top =
-                crate::smelt_edit::scroll_to_show(win.scroll_top(), position.row, viewport_rows);
-            win.pin_scroll(scroll_top.min(max_scroll(total_rows, viewport_rows)));
+
+            apply_reveal_padding(
+                win,
+                total_rows,
+                position.row,
+                viewport_rows,
+                opts.top_padding,
+                opts.bottom_padding,
+            );
         }
 
-        apply_reveal_padding(
-            win,
-            total_rows,
-            position.row,
-            viewport_rows,
-            opts.top_padding,
-            opts.bottom_padding,
-        );
+        if let Some((intent, window_scroll_before)) = trace_before {
+            let anchor =
+                self.transcript
+                    .trace_anchor_at_row(&self.lua, viewport_width, position.row);
+            self.record_transcript_scroll_intent(
+                "search_jump",
+                intent.trace_intent(anchor),
+                window_scroll_before,
+            );
+        }
     }
 }
 

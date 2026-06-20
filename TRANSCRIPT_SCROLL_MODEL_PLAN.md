@@ -813,6 +813,23 @@ Acceptance:
 - Trace shows transcript projection receiving the original user intent.
 - App/UI/Window code no longer needs transcript-specific sparse row interpretation to express user actions.
 
+Phase 3 implementation record:
+
+- Kept `TranscriptScrollIntent` as the trace-facing contract vocabulary and added production adapters at the app/UI boundary so transcript mouse wheel, coalesced wheel, drag autoscroll, scrollbar click/drag, and search reveal paths seed trace input with semantic intent before the render projection frame.
+- Added `Ui::drag_autoscroll_delta` so the app can observe the edge-drag owner and row delta before the generic UI mutates `Window::scroll_top`.
+- Routed transcript wheel and drag-autoscroll paths to `UserDelta`, scrollbar paths to `ScrollbarFraction` with an `ApproximateRowSeek` fallback, and search jumps to `SearchJump(Content { ... })` when the target row has a content anchor.
+- Added `TranscriptDocument::trace_anchor_at_row` to expose a trace-safe semantic anchor lookup without leaking the private viewport-anchor representation.
+- Converted the Phase 2 ignored wheel-intent red test into a normal regression and added production-path coverage for scrollbar fraction intents and search-jump semantic anchors.
+- The row-based `Window` mutations remain as the temporary adapter for behavior comparison. Phase 4 moves durable viewport state into `TranscriptDocument` so these intents become projection inputs instead of trace-only evidence.
+
+Phase 3 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-tui --features harness transcript_scroll -- --nocapture`
+- `cargo test -p smelt-tui --features harness preserves_ -- --nocapture`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness`
+
 ### Phase 4: Make `TranscriptDocument` own durable viewport state
 
 Goal: make `Window::scroll_top` derived for transcript windows.

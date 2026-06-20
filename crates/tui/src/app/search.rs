@@ -417,7 +417,7 @@ impl TuiApp {
         self.reveal_position(
             target,
             range.start,
-            crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
+            crate::app::reveal::RevealOptions::search_result(target),
         );
     }
 }

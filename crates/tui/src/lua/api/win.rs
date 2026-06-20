@@ -321,6 +321,7 @@ impl mlua::UserData for LuaWin {
                             top_padding,
                             bottom_padding,
                             cursor,
+                            ..Default::default()
                         },
                     );
                 });
