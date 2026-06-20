@@ -250,6 +250,7 @@ impl TuiApp {
         intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
     ) {
+        self.transcript.set_pending_scroll_intent(intent.clone());
         if !self.transcript.scroll_trace_enabled() {
             return;
         }

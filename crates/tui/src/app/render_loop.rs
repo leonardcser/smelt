@@ -213,6 +213,7 @@ impl TuiApp {
                 let cursor_screen_row = ui
                     .win(request.win)
                     .and_then(|win| win.cursor_screen_row(viewport_rows));
+                let transcript_follow_tail;
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
                     let width = request.content_width.max(1);
@@ -221,51 +222,33 @@ impl TuiApp {
                         .and_then(|win| win.viewport.map(|viewport| viewport.content_width));
                     let width_changed =
                         previous_content_width.is_some_and(|previous| previous != width);
-                    if transcript.scroll_trace_enabled() && !transcript.scroll_trace_has_pending_input() {
-                        let scroll_intent = if request.follow_tail {
-                            crate::app::transcript_scroll_trace::TranscriptScrollIntent::Tail
-                        } else if width_changed {
-                            crate::app::transcript_scroll_trace::TranscriptScrollIntent::ResizeReflow {
-                                previous_width: previous_content_width.unwrap_or(width),
-                            }
-                        } else {
-                            crate::app::transcript_scroll_trace::TranscriptScrollIntent::CurrentRowTarget(
-                                request.scroll_top,
-                            )
-                        };
-                        transcript.set_next_scroll_trace_input(
-                            crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput {
-                                input_event_or_tick: "render_frame".to_string(),
-                                scroll_intent,
-                                window_scroll_before: transcript
-                                    .last_traced_resolved_scroll_top()
-                                    .unwrap_or(request.scroll_top),
-                                window_scroll_after_input: request.scroll_top,
-                            },
-                        );
-                    }
-                    let scroll_target = if request.follow_tail {
-                        crate::content::transcript_buf::ScrollTarget::visible_tail()
-                    } else if width_changed {
-                        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
-                            request.scroll_top,
-                        )
-                    } else {
-                        crate::content::transcript_buf::ScrollTarget::visible_row(
-                            request.scroll_top,
-                        )
-                    };
-                    let plan = transcript.plan_projection_measured(
+                    let plan = transcript.plan_viewport_projection_measured(
                         lua,
                         width,
                         &theme,
-                        scroll_target,
+                        crate::app::transcript::TranscriptViewportProjectionInput {
+                            fallback_scroll_top: request.scroll_top,
+                            follow_tail: request.follow_tail,
+                            width_changed,
+                            previous_width: previous_content_width,
+                        },
                         viewport_rows,
                     );
                     let Some(buf) = ui.buf_mut(request.buf) else {
                         return;
                     };
-                    let tdata = transcript.project_planned(lua, buf, &theme, plan);
+                    let applied = transcript.project_applied_viewport(lua, buf, &theme, plan);
+                    transcript_follow_tail = applied.follow_tail;
+                    let tdata = applied.materialized_rows;
+                    debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
+                    debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
+                    debug_assert!(
+                        applied.exact_visible_range.end <= tdata.total_rows,
+                        "applied transcript viewport reports an out-of-bounds visible range"
+                    );
+                    if applied.placeholder_rows_visible {
+                        debug_assert!(applied.top_anchor.is_some());
+                    }
                     if let Some(win) = ui.win_mut(request.win) {
                         debug_assert!(tdata.total_rows >= tdata.row_base);
                         debug_assert!(
@@ -283,7 +266,7 @@ impl TuiApp {
                     }
                     if win.has_materialized_rows() {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
-                        if request.follow_tail {
+                        if transcript_follow_tail {
                             win.reveal_row_cursor(buf, viewport_rows);
                         }
                         win.scroll_left = 0;

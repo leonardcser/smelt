@@ -847,6 +847,23 @@ Acceptance:
 - Estimate refinement, exact height observation, and descriptor-window replacement cannot move visible content unless the pending intent asks to move.
 - `Window::scroll_top` remains correct for painting and scrollbars but is not the durable transcript position.
 
+Phase 4 implementation record:
+
+- Added `TranscriptViewportState` to `TranscriptDocument` with a semantic top anchor, row offset, viewport mode, pending scroll intent, and the latest resolved paint row.
+- Added `TranscriptViewportProjectionInput` and `AppliedTranscriptViewport` so the render loop passes geometry and legacy paint rows into the document, then applies only the resolved materialized rows, scrollbar extent, visible range, placeholder status, and tail-follow output back to `Window`.
+- Moved pending-intent resolution into transcript projection. Tail, preserve, resize, user/page deltas, content jumps, search jumps, scrollbar fraction seeks, approximate seeks, and current-row adapters now resolve inside `TranscriptDocument` against exact materialized anchors or stable sparse estimates.
+- Captured the top visible anchor after each projection so later preserve/delta projections use document-owned semantic state instead of reinterpreting `Window::scroll_top`.
+- Kept one named boundary adapter, `COMPAT(transcript-window-scroll-top-adapter)`, for tests and paths that still mutate `Window::scroll_top` directly. Phase 7 removes this after transcript row-authority writers are migrated to intents.
+- Added `transcript_viewport_state_preserves_anchor_without_window_scroll_change` to assert that a render with no new window scroll mutation preserves the document-owned top anchor and records `PreserveViewport` rather than an exact row target.
+
+Phase 4 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-tui --features harness transcript_scroll -- --nocapture`
+- `cargo test -p smelt-tui --features harness transcript_ -- --nocapture`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness`
+
 ### Phase 5: Rework local scrolling and autoscroll around exact content movement
 
 Goal: make nearby scrolling consistent and exact.

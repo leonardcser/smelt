@@ -1,9 +1,9 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::transcript_scroll_trace::{
-    TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollTrace,
-    TranscriptScrollTraceFrame, TranscriptScrollTraceFrameStart, TranscriptScrollTraceRenderInput,
-    TranscriptTraceAnchor, TranscriptVisibleContentAnchor,
+    TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
+    TranscriptScrollTrace, TranscriptScrollTraceFrame, TranscriptScrollTraceFrameStart,
+    TranscriptScrollTraceRenderInput, TranscriptTraceAnchor, TranscriptVisibleContentAnchor,
 };
 use crate::app::TuiApp;
 use crate::content::prompt_parser::{
@@ -630,7 +630,7 @@ pub(crate) struct TranscriptDocument {
     active_descriptor_range: Option<Range<smelt_store::TranscriptDescriptorIndex>>,
     session_dir: Option<PathBuf>,
     extent_index: TranscriptExtentIndex,
-    viewport_anchor: Option<TranscriptScrollAnchor>,
+    viewport_state: TranscriptViewportState,
     scroll_trace: Option<TranscriptScrollTrace>,
 }
 
@@ -665,6 +665,51 @@ enum TranscriptScrollAnchor {
         anchor: crate::content::transcript_buf::TranscriptRowAnchor,
     },
     EstimatedRow(RowIndex),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptViewportMode {
+    Tail,
+    Anchored,
+    FarSeek,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TranscriptViewportState {
+    top_anchor: Option<TranscriptScrollAnchor>,
+    top_offset_rows: isize,
+    mode: TranscriptViewportMode,
+    pending_intent: Option<TranscriptScrollIntent>,
+    resolved_scroll_top: Option<RowIndex>,
+}
+
+impl Default for TranscriptViewportState {
+    fn default() -> Self {
+        Self {
+            top_anchor: None,
+            top_offset_rows: 0,
+            mode: TranscriptViewportMode::Tail,
+            pending_intent: None,
+            resolved_scroll_top: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TranscriptViewportProjectionInput {
+    pub(crate) fallback_scroll_top: RowIndex,
+    pub(crate) follow_tail: bool,
+    pub(crate) width_changed: bool,
+    pub(crate) previous_width: Option<u16>,
+}
+
+pub(crate) struct AppliedTranscriptViewport {
+    pub(crate) materialized_rows: crate::smelt_edit::MaterializedRows,
+    pub(crate) top_anchor: Option<TranscriptTraceAnchor>,
+    pub(crate) scrollbar_total_rows: RowIndex,
+    pub(crate) exact_visible_range: Range<RowIndex>,
+    pub(crate) placeholder_rows_visible: bool,
+    pub(crate) follow_tail: bool,
 }
 
 enum TranscriptMaterializationPlan {
@@ -784,7 +829,7 @@ impl TranscriptDocument {
             active_descriptor_range,
             session_dir: loaded.session_dir,
             extent_index: TranscriptExtentIndex::default(),
-            viewport_anchor: None,
+            viewport_state: TranscriptViewportState::default(),
             scroll_trace: None,
         };
         if document.active_descriptor_range.is_some() {
@@ -889,6 +934,26 @@ impl TranscriptDocument {
         }
     }
 
+    pub(crate) fn set_pending_scroll_intent(&mut self, intent: TranscriptScrollIntent) {
+        self.viewport_state.mode = Self::viewport_mode_for_intent(&intent);
+        self.viewport_state.pending_intent = Some(intent);
+    }
+
+    fn viewport_mode_for_intent(intent: &TranscriptScrollIntent) -> TranscriptViewportMode {
+        match intent {
+            TranscriptScrollIntent::Tail => TranscriptViewportMode::Tail,
+            TranscriptScrollIntent::ScrollbarFraction { .. }
+            | TranscriptScrollIntent::ApproximateRowSeek(_)
+            | TranscriptScrollIntent::CurrentRowTarget(_) => TranscriptViewportMode::FarSeek,
+            TranscriptScrollIntent::PreserveViewport
+            | TranscriptScrollIntent::UserDelta { .. }
+            | TranscriptScrollIntent::PageDelta { .. }
+            | TranscriptScrollIntent::ExactContentAnchor(_)
+            | TranscriptScrollIntent::SearchJump(_)
+            | TranscriptScrollIntent::ResizeReflow { .. } => TranscriptViewportMode::Anchored,
+        }
+    }
+
     fn trace_descriptor_range(
         range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
     ) -> Option<TranscriptDescriptorTraceRange> {
@@ -955,7 +1020,7 @@ impl TranscriptDocument {
                 trace.record_timings(),
             )
         };
-        let viewport_anchor_before = self.viewport_anchor.map(Self::trace_anchor);
+        let viewport_anchor_before = self.viewport_state.top_anchor.map(Self::trace_anchor);
         let active_descriptor_range_before =
             Self::trace_descriptor_range(self.active_descriptor_range.as_ref());
         let prefix_estimate_before = self.estimated_sparse_prefix_row_offset(width);
@@ -997,7 +1062,7 @@ impl TranscriptDocument {
             self.trace_visible_content_anchor_at_row(lua, ctx.width, last_visible_row);
         let active_descriptor_range_after =
             Self::trace_descriptor_range(self.active_descriptor_range.as_ref());
-        let viewport_anchor_after = self.viewport_anchor.map(Self::trace_anchor);
+        let viewport_anchor_after = self.viewport_state.top_anchor.map(Self::trace_anchor);
         let visible_record_or_block_ids = self.visible_block_ids_for_virtual_range(
             rows.clamped_scroll..rows.clamped_scroll.saturating_add(viewport_rows),
             ctx.row_offset,
@@ -1546,7 +1611,7 @@ impl TranscriptDocument {
         let Some(TranscriptScrollAnchor::Content {
             virtual_row,
             anchor,
-        }) = self.viewport_anchor
+        }) = self.viewport_state.top_anchor
         else {
             return scroll_target;
         };
@@ -1580,7 +1645,7 @@ impl TranscriptDocument {
         top_row: RowIndex,
         fallback: TranscriptScrollAnchor,
     ) {
-        self.viewport_anchor = match fallback {
+        let top_anchor = match fallback {
             TranscriptScrollAnchor::Tail => Some(TranscriptScrollAnchor::Tail),
             TranscriptScrollAnchor::Content { .. } | TranscriptScrollAnchor::EstimatedRow(_) => {
                 self.row_anchor_at_row(lua, width, top_row)
@@ -1591,6 +1656,206 @@ impl TranscriptDocument {
                     .or(Some(fallback))
             }
         };
+        self.viewport_state.mode = match top_anchor {
+            Some(TranscriptScrollAnchor::Tail) => TranscriptViewportMode::Tail,
+            Some(TranscriptScrollAnchor::Content { .. }) => TranscriptViewportMode::Anchored,
+            Some(TranscriptScrollAnchor::EstimatedRow(_)) | None => TranscriptViewportMode::FarSeek,
+        };
+        self.viewport_state.top_anchor = top_anchor;
+        self.viewport_state.top_offset_rows = 0;
+    }
+
+    fn take_viewport_intent(
+        &mut self,
+        input: TranscriptViewportProjectionInput,
+    ) -> TranscriptScrollIntent {
+        if let Some(intent) = self.viewport_state.pending_intent.take() {
+            return intent;
+        }
+        // COMPAT(transcript-window-scroll-top-adapter): direct Window::pin_scroll
+        // callers still exist outside the transcript intent path. Capture their
+        // resolved row at the document boundary until Phase 7 removes row-authority writers.
+        if self
+            .viewport_state
+            .resolved_scroll_top
+            .is_some_and(|row| row != input.fallback_scroll_top)
+        {
+            return TranscriptScrollIntent::CurrentRowTarget(input.fallback_scroll_top);
+        }
+        if input.follow_tail {
+            TranscriptScrollIntent::Tail
+        } else if input.width_changed {
+            TranscriptScrollIntent::ResizeReflow {
+                previous_width: input.previous_width.unwrap_or_default(),
+            }
+        } else {
+            TranscriptScrollIntent::PreserveViewport
+        }
+    }
+
+    fn max_scroll_for_total(total_rows: RowIndex, viewport_rows: u16) -> RowIndex {
+        total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)))
+    }
+
+    fn add_rows(row: RowIndex, delta: isize) -> RowIndex {
+        if delta >= 0 {
+            row.saturating_add(delta as RowIndex)
+        } else {
+            row.saturating_sub(delta.unsigned_abs() as RowIndex)
+        }
+    }
+
+    fn row_for_trace_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: TranscriptTraceAnchor,
+    ) -> Option<RowIndex> {
+        match anchor {
+            TranscriptTraceAnchor::Tail => None,
+            TranscriptTraceAnchor::EstimatedRow(row) => Some(row),
+            TranscriptTraceAnchor::Content {
+                virtual_row,
+                node_id,
+                row_offset,
+            } => self
+                .row_for_anchor(
+                    lua,
+                    width,
+                    crate::content::transcript_buf::TranscriptRowAnchor {
+                        id: node_id,
+                        row_offset,
+                    },
+                )
+                .or(Some(virtual_row)),
+        }
+    }
+
+    fn row_for_viewport_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        fallback_scroll_top: RowIndex,
+    ) -> Option<RowIndex> {
+        match self.viewport_state.top_anchor {
+            // Tail-follow is an input intent, not durable row authority. A preserve
+            // frame after tail-follow keeps the resolved paint row unless `follow_tail`
+            // asks projection to seek tail again.
+            Some(TranscriptScrollAnchor::Tail) => Some(fallback_scroll_top),
+            Some(TranscriptScrollAnchor::Content {
+                virtual_row,
+                anchor,
+            }) => self
+                .row_for_anchor(lua, width, anchor)
+                .or(Some(virtual_row)),
+            Some(TranscriptScrollAnchor::EstimatedRow(row)) => Some(row),
+            None => Some(fallback_scroll_top),
+        }
+        .map(|row| Self::add_rows(row, self.viewport_state.top_offset_rows))
+    }
+
+    fn estimated_scrollbar_total_for_viewport(&mut self, lua: &LuaRuntime, width: u16) -> RowIndex {
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        self.approximate_mixed_scrollbar_total_rows(width, loaded_rows)
+    }
+
+    fn scroll_target_for_intent(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        fallback_scroll_top: RowIndex,
+        intent: &TranscriptScrollIntent,
+    ) -> crate::content::transcript_buf::ScrollTarget {
+        match intent {
+            TranscriptScrollIntent::Tail => {
+                crate::content::transcript_buf::ScrollTarget::visible_tail()
+            }
+            TranscriptScrollIntent::PreserveViewport => {
+                match self.row_for_viewport_anchor(lua, width, fallback_scroll_top) {
+                    Some(row) => {
+                        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
+                    }
+                    None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                }
+            }
+            TranscriptScrollIntent::ResizeReflow { .. } => {
+                crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                    fallback_scroll_top,
+                )
+            }
+            TranscriptScrollIntent::UserDelta { rows } => {
+                let base = self
+                    .row_for_viewport_anchor(lua, width, fallback_scroll_top)
+                    .unwrap_or(fallback_scroll_top);
+                crate::content::transcript_buf::ScrollTarget::visible_row(Self::add_rows(
+                    base, *rows,
+                ))
+            }
+            TranscriptScrollIntent::PageDelta { pages } => {
+                let base = self
+                    .row_for_viewport_anchor(lua, width, fallback_scroll_top)
+                    .unwrap_or(fallback_scroll_top);
+                let rows = pages.saturating_mul(viewport_rows.max(1) as isize);
+                crate::content::transcript_buf::ScrollTarget::visible_row(Self::add_rows(
+                    base, rows,
+                ))
+            }
+            TranscriptScrollIntent::ExactContentAnchor(anchor)
+            | TranscriptScrollIntent::SearchJump(anchor) => self
+                .row_for_trace_anchor(lua, width, *anchor)
+                .map(crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row)
+                .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail),
+            TranscriptScrollIntent::ScrollbarFraction {
+                numerator,
+                denominator,
+            } => {
+                let total_rows = self.estimated_scrollbar_total_for_viewport(lua, width);
+                let max_scroll = Self::max_scroll_for_total(total_rows, viewport_rows);
+                let denominator = (*denominator).max(1);
+                let row = ((*numerator).min(denominator) as u128)
+                    .saturating_mul(max_scroll as u128)
+                    .checked_div(denominator as u128)
+                    .unwrap_or(0)
+                    .min(RowIndex::MAX as u128) as RowIndex;
+                crate::content::transcript_buf::ScrollTarget::visible_row(row)
+            }
+            TranscriptScrollIntent::ApproximateRowSeek(row)
+            | TranscriptScrollIntent::CurrentRowTarget(row) => {
+                crate::content::transcript_buf::ScrollTarget::visible_row(*row)
+            }
+        }
+    }
+
+    pub(crate) fn plan_viewport_projection_measured(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        theme: &Theme,
+        input: TranscriptViewportProjectionInput,
+        viewport_rows: u16,
+    ) -> TranscriptProjectionPlan {
+        let intent = self.take_viewport_intent(input);
+        let scroll_target = self.scroll_target_for_intent(
+            lua,
+            width,
+            viewport_rows,
+            input.fallback_scroll_top,
+            &intent,
+        );
+        if self.scroll_trace_enabled() && !self.scroll_trace_has_pending_input() {
+            self.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
+                input_event_or_tick: "render_frame".to_string(),
+                scroll_intent: intent,
+                window_scroll_before: self
+                    .last_traced_resolved_scroll_top()
+                    .unwrap_or(input.fallback_scroll_top),
+                window_scroll_after_input: input.fallback_scroll_top,
+            });
+        }
+        self.plan_projection_measured(lua, width, theme, scroll_target, viewport_rows)
     }
 
     pub(crate) fn plan_projection_measured(
@@ -1729,7 +1994,10 @@ impl TranscriptDocument {
             .min(viewport_rows.saturating_mul(2))
             .min(total_rows.saturating_sub(gap.row_base));
         buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
-        self.viewport_anchor = Some(TranscriptScrollAnchor::EstimatedRow(gap.scroll_top));
+        self.viewport_state.top_anchor = Some(TranscriptScrollAnchor::EstimatedRow(gap.scroll_top));
+        self.viewport_state.top_offset_rows = 0;
+        self.viewport_state.mode = TranscriptViewportMode::FarSeek;
+        self.viewport_state.resolved_scroll_top = Some(gap.scroll_top);
         crate::smelt_edit::MaterializedRows {
             clamped_scroll: gap.scroll_top,
             row_base: gap.row_base,
@@ -1738,13 +2006,34 @@ impl TranscriptDocument {
         }
     }
 
-    pub(crate) fn project_planned(
+    fn applied_viewport(
+        &self,
+        rows: crate::smelt_edit::MaterializedRows,
+        viewport_rows: u16,
+        placeholder_rows_visible: bool,
+    ) -> AppliedTranscriptViewport {
+        let viewport_rows = RowIndex::from(viewport_rows.max(1));
+        AppliedTranscriptViewport {
+            materialized_rows: rows,
+            top_anchor: self.viewport_state.top_anchor.map(Self::trace_anchor),
+            scrollbar_total_rows: rows.total_rows,
+            exact_visible_range: rows.clamped_scroll
+                ..rows
+                    .clamped_scroll
+                    .saturating_add(viewport_rows)
+                    .min(rows.total_rows),
+            placeholder_rows_visible,
+            follow_tail: self.viewport_state.mode == TranscriptViewportMode::Tail,
+        }
+    }
+
+    pub(crate) fn project_applied_viewport(
         &mut self,
         lua: &LuaRuntime,
         buf: &mut Buffer,
         theme: &Theme,
         plan: TranscriptProjectionPlan,
-    ) -> crate::smelt_edit::MaterializedRows {
+    ) -> AppliedTranscriptViewport {
         let TranscriptProjectionPlan {
             materialization,
             row_offset,
@@ -1767,7 +2056,7 @@ impl TranscriptDocument {
             TranscriptMaterializationPlan::UnloadedGap(gap) => {
                 let rows = self.project_unloaded_sparse_gap(buf, total_rows, viewport_rows, gap);
                 self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, true);
-                return rows;
+                return self.applied_viewport(rows, viewport_rows, true);
             }
             TranscriptMaterializationPlan::Loaded(inner) => self.projection.project_planned(
                 lua,
@@ -1792,8 +2081,20 @@ impl TranscriptDocument {
             }
         }
         self.capture_viewport_anchor(lua, width, rows.clamped_scroll, scroll_anchor);
+        self.viewport_state.resolved_scroll_top = Some(rows.clamped_scroll);
         self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
-        rows
+        self.applied_viewport(rows, viewport_rows, false)
+    }
+
+    pub(crate) fn project_planned(
+        &mut self,
+        lua: &LuaRuntime,
+        buf: &mut Buffer,
+        theme: &Theme,
+        plan: TranscriptProjectionPlan,
+    ) -> crate::smelt_edit::MaterializedRows {
+        self.project_applied_viewport(lua, buf, theme, plan)
+            .materialized_rows
     }
 
     pub(crate) fn exact_or_gap_display_rows_for_range(
@@ -2520,6 +2821,58 @@ mod document_tests {
         assert!(frame.first_visible_content_anchor.is_some());
         assert!(!frame.visible_record_or_block_ids.is_empty());
         assert_eq!(frame.render_or_projection_ms, None);
+    }
+
+    #[test]
+    fn transcript_viewport_state_preserves_anchor_without_window_scroll_change() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 5;
+        let mut document = TranscriptDocument::from_transcript(fixed_transcript(40));
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(411), Default::default());
+
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(8),
+            viewport_rows,
+        );
+        let first = document.project_planned(&lua, &mut buf, &theme, plan);
+        assert_eq!(first.clamped_scroll, 8);
+
+        document.set_scroll_trace_enabled(true);
+        document.take_scroll_trace_frames();
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: first.clamped_scroll,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(
+            applied.materialized_rows.clamped_scroll,
+            first.clamped_scroll
+        );
+        assert_eq!(applied.exact_visible_range.start, first.clamped_scroll);
+        let frames = document.take_scroll_trace_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].scroll_intent,
+            TranscriptScrollIntent::PreserveViewport
+        );
+        assert_eq!(
+            frames[0].projection_target,
+            TranscriptProjectionTargetTrace::ReflowStableRow(first.clamped_scroll)
+        );
     }
 
     #[test]
