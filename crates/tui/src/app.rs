@@ -127,6 +127,8 @@ pub struct TuiApp {
         tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     pub(crate) context_tokens_updated_this_turn: bool,
+    /// Reasoning effort that is known to be in effect for the active turn/request.
+    pub(crate) applied_reasoning_effort: protocol::ReasoningEffort,
     pub(crate) cancel_generation: u64,
     /// Set while routing an engine event whose `TurnState` has been moved
     /// out of `self.agent` to satisfy borrowing. Lua callbacks can still
@@ -669,6 +671,29 @@ impl TuiApp {
             api_base: self.core.config.api_base.clone(),
             provider_type: self.core.config.provider_type.clone(),
         }
+    }
+
+    pub(crate) fn active_provider_supports_mid_turn_reasoning_changes(&self) -> bool {
+        engine::ProviderKind::from_config_and_url(
+            &self.core.config.provider_type,
+            &self.core.config.api_base,
+        )
+        .supports_mid_turn_reasoning_changes()
+    }
+
+    pub(crate) fn reasoning_effort_pending(&self) -> bool {
+        self.applied_reasoning_effort != self.core.config.reasoning_effort
+    }
+
+    pub(crate) fn mode_pending(&self) -> bool {
+        self.active_agent_turn_id().is_some()
+            && self.pending_history_appends.iter().any(|append| {
+                append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+            })
+    }
+
+    pub(crate) fn sync_reasoning_effort_applied(&mut self) {
+        self.applied_reasoning_effort = self.core.config.reasoning_effort;
     }
 
     pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
@@ -1217,6 +1242,7 @@ impl TuiApp {
         resume_preview_cache.set_inline_options(inline_options);
 
         let working_clock = Arc::clone(&clock);
+        let initial_reasoning_effort = app_config.reasoning_effort;
         let core = smelt_core::Core::new(
             app_config,
             engine,
@@ -1282,6 +1308,7 @@ impl TuiApp {
             process_completion_rx,
             app_event_rx,
             context_tokens_updated_this_turn: false,
+            applied_reasoning_effort: initial_reasoning_effort,
             cancel_generation: 0,
             dispatching_turn_id: None,
             busy_stack: BusyStack::default(),

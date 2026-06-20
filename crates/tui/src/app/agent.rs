@@ -172,6 +172,7 @@ impl TuiApp {
         self.next_turn_id += 1;
 
         let permissions = turn.permissions.clone();
+        self.applied_reasoning_effort = turn.reasoning_effort;
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
@@ -539,6 +540,7 @@ impl TuiApp {
         self.flush_streaming_text();
         self.clear_tool_drafts();
         self.finish_transcript_turn();
+        self.sync_reasoning_effort_applied();
 
         let (meta, start_queued) = match end {
             TurnEnd::Complete => {

@@ -7,7 +7,8 @@
 --     returned segments, composes via `_bar.compose_status`, and
 --     writes to the window's buffer.
 --
--- The built-in `core` source reads engine state directly from signals
+-- The built-in `core` source reads engine state from signals plus
+-- `smelt.session.status()` for values that carry pending/stale markers
 -- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
 -- `permission_pending`, `keymap_pending`, `vim_pending_input`, `cursor_pos`). Plugins extend the line by
 -- registering additional sources via `M.add(name, fn)`.
@@ -50,6 +51,7 @@ local function signal(name) return smelt.signal(name):get() end
 
 local function core_compose()
   local items = {}
+  local status = smelt.session.status and smelt.session.status() or {}
 
   -- Slug pill. SmeltSlug carries fg only; fall back to SmeltAccent's
   -- fg as the pill bg when no explicit bg has been set (default), so
@@ -84,11 +86,12 @@ local function core_compose()
   end
 
   -- Agent mode pill.
-  local mode_name = signal("agent_mode")
+  local mode = status.mode or {}
+  local mode_name = mode.name or signal("agent_mode")
   if mode_name and mode_name ~= "" then
     local icon = smelt.mode.icon and smelt.mode.icon(mode_name) or ""
     items[#items + 1] = {
-      text = " " .. icon .. mode_name .. " ",
+      text = " " .. icon .. mode_name .. (mode.marker or "") .. " ",
       style = smelt.mode.style and smelt.mode.style(mode_name) or { hl_group = "SmeltModeDefault" },
       priority = 1,
     }

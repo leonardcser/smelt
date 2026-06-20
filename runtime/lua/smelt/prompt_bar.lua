@@ -259,17 +259,19 @@ local function right_spans(opts)
   opts = opts or {}
   local bar_style = opts.bar_style or { fg = "SmeltBar" }
   local spans = {}
-  local model = smelt.model()
+  local status = smelt.session.status and smelt.session.status() or {}
+  local model = status.model or smelt.model()
   if model and model ~= "" then
     spans[#spans + 1] = {
       text = " " .. model,
       style = { fg = "Comment" },
       priority = SECONDARY_PRIORITY,
     }
-    local effort = smelt.reasoning()
+    local reasoning = status.reasoning or {}
+    local effort = reasoning.effort or smelt.reasoning()
     if effort and effort ~= "off" then
       spans[#spans + 1] = {
-        text = " " .. effort,
+        text = " " .. effort .. (reasoning.marker or ""),
         style = { fg = reasoning_color_group(effort) },
         priority = SECONDARY_PRIORITY,
       }
@@ -277,7 +279,8 @@ local function right_spans(opts)
   end
 
   if smelt.settings.show_tokens then
-    local ctx = smelt.session.context_tokens()
+    local context = status.context or {}
+    local ctx = context.tokens or smelt.session.context_tokens()
     if ctx then
       if #spans > 0 then
         spans[#spans + 1] = {
@@ -287,13 +290,12 @@ local function right_spans(opts)
           selectable = false,
         }
       end
-      local window = smelt.session.context_window()
-      local stale = smelt.session.context_tokens_stale()
-      local stale_mark = stale and "?" or ""
+      local window = context.window or smelt.session.context_window()
+      local stale_mark = context.marker or ""
       local tok_text
       if window and window > 0 then
         local pct = math.floor(ctx / window * 100)
-        tok_text = string.format(" %s%s (%d%%%s)", smelt.text.format_tokens(ctx), stale_mark, pct, stale_mark)
+        tok_text = string.format(" %s%s (%d%%)", smelt.text.format_tokens(ctx), stale_mark, pct)
       else
         tok_text = " " .. smelt.text.format_tokens(ctx) .. stale_mark
       end

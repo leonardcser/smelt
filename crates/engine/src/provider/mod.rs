@@ -602,6 +602,10 @@ impl ProviderKind {
         }
     }
 
+    pub fn supports_mid_turn_reasoning_changes(self) -> bool {
+        self.descriptor().mid_turn_reasoning_changes
+    }
+
     fn wire_api(self) -> WireApi {
         self.descriptor().wire_api
     }

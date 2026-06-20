@@ -34,7 +34,7 @@ local function fmt_context(ctx, window, stale)
     local used = tonumber(ctx) or 0
     local text = string.format("%s%s / %s", smelt.text.format_tokens(used), mark, smelt.text.format_tokens(window))
     local context_pct = pct(used, window)
-    if context_pct then text = text .. " (" .. context_pct .. mark .. ")" end
+    if context_pct then text = text .. " (" .. context_pct .. ")" end
     return text
   end
   return fmt_tokens(ctx) .. mark
@@ -85,6 +85,10 @@ local function session_lines(info, width)
   local lines, plain = {}, {}
   local wt = info.worktree or {}
   local tokens = info.tokens or {}
+  local status = smelt.session.status()
+  local context = status.context or {}
+  local mode = status.mode or {}
+  local reasoning = status.reasoning or {}
 
   add_header(lines, "session")
   add_kv(lines, plain, "id", info.id, width)
@@ -109,11 +113,11 @@ local function session_lines(info, width)
   add_kv(lines, plain, "provider", info.provider, width)
   add_kv(lines, plain, "model", info.model, width)
   add_kv(lines, plain, "api_base", info.api_base, width)
-  add_kv(lines, plain, "mode", info.mode, width)
-  add_kv(lines, plain, "reasoning", info.reasoning, width)
+  add_kv(lines, plain, "mode", empty(mode.name) .. (mode.marker or ""), width)
+  add_kv(lines, plain, "reasoning", empty(reasoning.effort) .. (reasoning.marker or ""), width)
 
   add_header(lines, "usage")
-  add_kv(lines, plain, "context", fmt_context(info.context_tokens, info.context_window, info.context_tokens_stale), width)
+  add_kv(lines, plain, "context", fmt_context(context.tokens, context.window, context.stale), width)
   add_kv(lines, plain, "tokens", string.format(
     "standard=%s input=%s output=%s cached=%s (read=%s write=%s) reasoning=%s",
     fmt_tokens(tokens.standard_total or 0),

@@ -608,6 +608,9 @@ impl TuiApp {
         self.core
             .signals
             .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));
+        if self.agent.is_none() {
+            self.sync_reasoning_effort_applied();
+        }
         self.core
             .engine
             .send(UiCommand::SetReasoningEffort { effort });
@@ -721,6 +724,84 @@ mod tests {
         ));
 
         assert_eq!(mode_blocks(&app.app), vec!["now in yolo mode"]);
+    }
+
+    #[test]
+    fn mode_pending_clears_when_cycling_back_to_applied_mode() {
+        let mut app = normal_app();
+        app.app.core.session.history = vec![user("hello")];
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert!(app.app.mode_pending());
+
+        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+        assert!(!app.app.mode_pending());
+    }
+
+    #[test]
+    fn reasoning_pending_clears_when_cycling_back_to_applied_effort() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.config.reasoning_effort = protocol::ReasoningEffort::Off;
+        app.app.sync_reasoning_effort_applied();
+        app.start_turn(1);
+
+        app.app
+            .set_reasoning_effort(protocol::ReasoningEffort::High, false);
+        assert!(app.app.reasoning_effort_pending());
+
+        app.app
+            .set_reasoning_effort(protocol::ReasoningEffort::Off, false);
+        assert!(!app.app.reasoning_effort_pending());
+    }
+
+    #[test]
+    fn switching_back_to_context_token_identity_clears_stale_marker() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.config.model = "old-model".into();
+        app.app.core.config.api_base = "https://old.example".into();
+        app.app.core.config.api_key_env = "OLD_KEY".into();
+        app.app.core.config.provider_type = "openai".into();
+        app.app.core.config.available_models = vec![
+            smelt_core::config::ResolvedModel {
+                key: "new/new-model".into(),
+                provider_name: "new".into(),
+                model_name: "new-model".into(),
+                api_base: "https://new.example".into(),
+                api_key_env: "NEW_KEY".into(),
+                provider_type: "openai".into(),
+                config: smelt_core::config::ModelConfig::default(),
+            },
+            smelt_core::config::ResolvedModel {
+                key: "old/old-model".into(),
+                provider_name: "old".into(),
+                model_name: "old-model".into(),
+                api_base: "https://old.example".into(),
+                api_key_env: "OLD_KEY".into(),
+                provider_type: "openai".into(),
+                config: smelt_core::config::ModelConfig::default(),
+            },
+        ];
+        let old_identity = app.app.active_context_token_identity();
+        app.app.core.session.history = vec![user("hello")];
+        app.app
+            .core
+            .session
+            .record_context_tokens(100, old_identity);
+
+        app.app.apply_model("new/new-model", false);
+        assert!(app
+            .app
+            .core
+            .session
+            .display_context_tokens_stale(&app.app.active_context_token_identity()));
+
+        app.app.apply_model("old/old-model", false);
+        assert!(!app
+            .app
+            .core
+            .session
+            .display_context_tokens_stale(&app.app.active_context_token_identity()));
     }
 
     #[test]
