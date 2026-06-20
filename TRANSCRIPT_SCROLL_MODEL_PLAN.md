@@ -930,6 +930,12 @@ Acceptance:
 - Scroll pills never call transcript `win:reveal(row)` for previous/next message navigation.
 - Runtime Lua regression tests assert semantic API use.
 
+Phase 3 result:
+
+- Confirmed the top scroll pill uses `smelt.transcript.previous_block({ role = "user" })` and clicks route through `smelt.transcript.reveal_block(...)`, not row lookup or transcript `win:reveal(row)`.
+- Strengthened the runtime Lua regression to assert the semantic role filter and exact reveal options used by the pill click.
+- Updated generated Lua API docs to classify `block_before_or_at_row` as row/debug lookup and `Win:reveal(row)` as generic row reveal, with transcript message navigation directed to `previous_block`, `next_block`, and `reveal_block`.
+
 ### Reset Phase 4: Rebuild viewport state around block anchors
 
 Goal: make the durable transcript viewport a block/descriptor anchor plus local screen placement.

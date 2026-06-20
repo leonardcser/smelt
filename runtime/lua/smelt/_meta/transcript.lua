@@ -13,7 +13,7 @@ local transcript = {}
 transcript.block_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. Uses the row index and does not materialize the full block layout.
+--- Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. This is a row/debug lookup for already-projected display coordinates; use `previous_block`, `next_block`, and `reveal_block` for semantic transcript navigation.
 ---@type fun(row: integer, opts: table?): table?
 transcript.block_before_or_at_row = nil
 

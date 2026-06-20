@@ -368,7 +368,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "block_before_or_at_row",
-        "Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. Uses the row index and does not materialize the full block layout.",
+        "Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. This is a row/debug lookup for already-projected display coordinates; use `previous_block`, `next_block`, and `reveal_block` for semantic transcript navigation.",
         &["row", "opts"],
         |lua, (row, opts): (crate::smelt_edit::RowIndex, Option<mlua::Table>)| -> LuaResult<Option<mlua::Table>> {
             let role = opts

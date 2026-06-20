@@ -810,6 +810,26 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
 }
 
 #[test]
+fn scroll_pills_source_uses_only_semantic_transcript_navigation() {
+    assert!(
+        SCROLL_PILLS_LUA.contains("smelt.transcript.previous_block({ role = \"user\" })"),
+        "top scroll pill should use semantic previous-block lookup"
+    );
+    assert!(
+        SCROLL_PILLS_LUA.contains("smelt.transcript.reveal_block("),
+        "top scroll pill should reveal descriptor blocks semantically"
+    );
+    assert!(
+        !SCROLL_PILLS_LUA.contains("block_before_or_at_row"),
+        "top scroll pill must not use row-based transcript lookup"
+    );
+    assert!(
+        !SCROLL_PILLS_LUA.contains(":reveal("),
+        "top scroll pill must not use generic row reveal for transcript navigation"
+    );
+}
+
+#[test]
 fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     let lua = mlua::Lua::new();
     lua.load(
@@ -821,6 +841,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         local cursor = 14
         local blocks = {}
         local previous_block_calls = 0
+        local previous_block_role = nil
         local row_lookup_calls = 0
         local revealed_block = nil
         local scroll = {
@@ -882,6 +903,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
             previous_block = function(opts)
               previous_block_calls = previous_block_calls + 1
               local role = opts and opts.role or nil
+              previous_block_role = role
               for i = #blocks, 1, -1 do
                 local b = blocks[i]
                 if role == nil or b.role == role then return b end
@@ -915,6 +937,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         function __set_focus(value) focus = value end
         function __set_blocks(value) blocks = value end
         function __previous_block_calls() return previous_block_calls end
+        function __previous_block_role() return previous_block_role end
         function __row_lookup_calls() return row_lookup_calls end
         function __revealed_block() return revealed_block end
         function __event(name) assert(handlers[name], name)() end
@@ -934,13 +957,16 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         .expect("read bottom overlay state");
     assert!(!bottom_under_cursor);
 
-    let (top_under_cursor, top_after_cursor_move, previous_block_calls, row_lookup_calls, revealed_idx): (
-        bool,
-        bool,
-        i64,
-        i64,
-        i64,
-    ) = lua
+    let (
+        top_under_cursor,
+        top_after_cursor_move,
+        previous_block_calls,
+        previous_block_role,
+        row_lookup_calls,
+        revealed_idx,
+        reveal_top_padding,
+        reveal_cursor,
+    ): (bool, bool, i64, String, i64, i64, i64, bool) = lua
         .load(
             r#"
             __set_blocks({ { idx = 1, role = "user", first_line = "previous message", already_at_top = false } })
@@ -950,7 +976,15 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
             __set_cursor(11)
             __publish("cursor_pos")
             __event("press")
-            return under, __active("smelt.scroll_pills.top"), __previous_block_calls(), __row_lookup_calls(), __revealed_block().idx
+            local revealed = __revealed_block()
+            return under,
+              __active("smelt.scroll_pills.top"),
+              __previous_block_calls(),
+              __previous_block_role(),
+              __row_lookup_calls(),
+              revealed.idx,
+              revealed.top_padding,
+              revealed.cursor
             "#,
         )
         .eval()
@@ -958,8 +992,11 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert!(!top_under_cursor);
     assert!(top_after_cursor_move);
     assert!(previous_block_calls > 0);
+    assert_eq!(previous_block_role, "user");
     assert_eq!(row_lookup_calls, 0);
     assert_eq!(revealed_idx, 1);
+    assert_eq!(reveal_top_padding, 1);
+    assert!(reveal_cursor);
 
     let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua
         .load(
