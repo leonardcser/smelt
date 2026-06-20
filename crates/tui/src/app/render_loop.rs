@@ -221,7 +221,7 @@ impl TuiApp {
                         .and_then(|win| win.viewport.map(|viewport| viewport.content_width));
                     let width_changed =
                         previous_content_width.is_some_and(|previous| previous != width);
-                    if transcript.scroll_trace_enabled() {
+                    if transcript.scroll_trace_enabled() && !transcript.scroll_trace_has_pending_input() {
                         let scroll_intent = if request.follow_tail {
                             crate::app::transcript_scroll_trace::TranscriptScrollIntent::Tail
                         } else if width_changed {

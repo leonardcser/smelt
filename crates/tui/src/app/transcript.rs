@@ -877,6 +877,12 @@ impl TranscriptDocument {
             .and_then(TranscriptScrollTrace::last_resolved_scroll_top)
     }
 
+    pub(crate) fn scroll_trace_has_pending_input(&self) -> bool {
+        self.scroll_trace
+            .as_ref()
+            .is_some_and(TranscriptScrollTrace::has_pending_input)
+    }
+
     pub(crate) fn set_next_scroll_trace_input(&mut self, input: TranscriptScrollTraceRenderInput) {
         if let Some(trace) = self.scroll_trace.as_mut() {
             trace.set_pending_input(input);
@@ -2498,6 +2504,43 @@ mod document_tests {
         assert!(frame.first_visible_content_anchor.is_some());
         assert!(!frame.visible_record_or_block_ids.is_empty());
         assert_eq!(frame.render_or_projection_ms, None);
+    }
+
+    #[test]
+    fn transcript_scroll_trace_records_injected_exact_observation_count() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let records = transcript_records(4);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..4,
+            None,
+        ));
+        document.extent_index.observe_exact_loaded_descriptor_rows(
+            &document.sparse_descriptors,
+            exact_height_snapshot(BlockId::new(1), width, records[1].content_hash, 17),
+        );
+        document.set_scroll_trace_enabled(true);
+        document.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
+            input_event_or_tick: "exact_height_refinement_probe".to_string(),
+            scroll_intent: TranscriptScrollIntent::PreserveViewport,
+            window_scroll_before: 0,
+            window_scroll_after_input: 0,
+        });
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(0),
+            10,
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(410), Default::default());
+        let _rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+        let frames = document.take_scroll_trace_frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].exact_observation_count, 1);
     }
 
     #[test]

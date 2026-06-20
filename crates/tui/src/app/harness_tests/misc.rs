@@ -1,4 +1,6 @@
 use super::*;
+use crate::app::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptScrollTraceFrame};
+use crate::content::render_plan::RenderNodeId;
 
 #[test]
 fn signal_api_reads_sets_and_subscribes_to_values() {
@@ -916,6 +918,491 @@ fn streaming_tool_and_compaction_updates_do_not_snap_scrolled_transcript_to_tail
             .all(|line| !line.contains("STREAMING_COMPACTION")),
         "streaming compaction tail became visible: {:?}",
         transcript_viewport_lines(&app)
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TranscriptReplayStep {
+    WheelUp { ticks: usize },
+    WheelDown { ticks: usize },
+    CoalescedWheel { rows: isize },
+    DragAutoscrollTop { ticks: usize },
+    DragAutoscrollBottom { ticks: usize },
+    Resize { width: u16, height: u16 },
+    StreamingAppend,
+    ScrollbarFarSeek { rel_row: u16 },
+    WheelUpUntilDescriptorRangeChanges { max_ticks: usize },
+}
+
+#[derive(Default)]
+struct TranscriptScrollReplayReport {
+    frames: Vec<TranscriptScrollTraceFrame>,
+    descriptor_range_changed: bool,
+}
+
+struct TranscriptScrollReplay {
+    steps: Vec<TranscriptReplayStep>,
+}
+
+impl TranscriptScrollReplay {
+    fn new(steps: Vec<TranscriptReplayStep>) -> Self {
+        Self { steps }
+    }
+
+    fn run(self, app: &mut TestApp) -> TranscriptScrollReplayReport {
+        app.app.transcript.set_scroll_trace_timings_enabled(true);
+        app.app.transcript.take_scroll_trace_frames();
+        let mut report = TranscriptScrollReplayReport::default();
+        for step in self.steps {
+            match step {
+                TranscriptReplayStep::WheelUp { ticks } => {
+                    for tick in 0..ticks {
+                        let before = app.app.transcript_win().scroll_top();
+                        wheel_transcript(app, crossterm::event::MouseEventKind::ScrollUp);
+                        set_replay_trace_input(
+                            app,
+                            format!("wheel_up:{tick}"),
+                            TranscriptScrollIntent::UserDelta { rows: -3 },
+                            before,
+                        );
+                        render_replay_frame(app, &mut report);
+                    }
+                }
+                TranscriptReplayStep::WheelDown { ticks } => {
+                    for tick in 0..ticks {
+                        let before = app.app.transcript_win().scroll_top();
+                        wheel_transcript(app, crossterm::event::MouseEventKind::ScrollDown);
+                        set_replay_trace_input(
+                            app,
+                            format!("wheel_down:{tick}"),
+                            TranscriptScrollIntent::UserDelta { rows: 3 },
+                            before,
+                        );
+                        render_replay_frame(app, &mut report);
+                    }
+                }
+                TranscriptReplayStep::CoalescedWheel { rows } => {
+                    let before = app.app.transcript_win().scroll_top();
+                    let (row, col) = transcript_content_point(app, 1);
+                    assert!(
+                        app.app.ui.scroll_at(row, col, rows),
+                        "coalesced wheel replay should pan the transcript"
+                    );
+                    set_replay_trace_input(
+                        app,
+                        format!("coalesced_wheel:{rows}"),
+                        TranscriptScrollIntent::UserDelta { rows },
+                        before,
+                    );
+                    render_replay_frame(app, &mut report);
+                }
+                TranscriptReplayStep::DragAutoscrollTop { ticks } => {
+                    start_transcript_edge_drag(app, TranscriptDragEdge::Top);
+                    for tick in 0..ticks {
+                        let before = app.app.transcript_win().scroll_top();
+                        if app.app.ui.tick_drag_autoscroll() {
+                            set_replay_trace_input(
+                                app,
+                                format!("drag_autoscroll_top:{tick}"),
+                                TranscriptScrollIntent::UserDelta { rows: -1 },
+                                before,
+                            );
+                            render_replay_frame(app, &mut report);
+                        }
+                    }
+                    finish_transcript_drag(app);
+                }
+                TranscriptReplayStep::DragAutoscrollBottom { ticks } => {
+                    start_transcript_edge_drag(app, TranscriptDragEdge::Bottom);
+                    for tick in 0..ticks {
+                        let before = app.app.transcript_win().scroll_top();
+                        if app.app.ui.tick_drag_autoscroll() {
+                            set_replay_trace_input(
+                                app,
+                                format!("drag_autoscroll_bottom:{tick}"),
+                                TranscriptScrollIntent::UserDelta { rows: 1 },
+                                before,
+                            );
+                            render_replay_frame(app, &mut report);
+                        }
+                    }
+                    finish_transcript_drag(app);
+                }
+                TranscriptReplayStep::Resize { width, height } => {
+                    let before = app.app.transcript_win().scroll_top();
+                    let previous_width = app
+                        .app
+                        .transcript_win()
+                        .viewport
+                        .map(|viewport| viewport.content_width)
+                        .unwrap_or(width);
+                    app.set_terminal_size(width, height);
+                    set_replay_trace_input(
+                        app,
+                        format!("resize:{width}x{height}"),
+                        TranscriptScrollIntent::ResizeReflow { previous_width },
+                        before,
+                    );
+                    render_replay_frame(app, &mut report);
+                }
+                TranscriptReplayStep::StreamingAppend => {
+                    let before = app.app.transcript_win().scroll_top();
+                    app.app
+                        .push_block(smelt_core::transcript_model::Block::Text {
+                            content: "replay streaming append should not move pinned viewport"
+                                .into(),
+                        });
+                    set_replay_trace_input(
+                        app,
+                        "streaming_append".to_string(),
+                        TranscriptScrollIntent::PreserveViewport,
+                        before,
+                    );
+                    render_replay_frame(app, &mut report);
+                }
+                TranscriptReplayStep::ScrollbarFarSeek { rel_row } => {
+                    let before = app.app.transcript_win().scroll_top();
+                    let (row, col, numerator, denominator) =
+                        transcript_scrollbar_point(app, rel_row);
+                    app.feed_one(SourceEvent::Term(Event::Mouse(
+                        crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::Down(
+                                crossterm::event::MouseButton::Left,
+                            ),
+                            row,
+                            column: col,
+                            modifiers: KeyModifiers::empty(),
+                        },
+                    )));
+                    set_replay_trace_input(
+                        app,
+                        format!("scrollbar_far_seek:{rel_row}"),
+                        TranscriptScrollIntent::ScrollbarFraction {
+                            numerator,
+                            denominator,
+                        },
+                        before,
+                    );
+                    render_replay_frame(app, &mut report);
+                    app.feed_one(SourceEvent::Term(Event::Mouse(
+                        crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::Up(
+                                crossterm::event::MouseButton::Left,
+                            ),
+                            row,
+                            column: col,
+                            modifiers: KeyModifiers::empty(),
+                        },
+                    )));
+                }
+                TranscriptReplayStep::WheelUpUntilDescriptorRangeChanges { max_ticks } => {
+                    for tick in 0..max_ticks {
+                        if report.descriptor_range_changed {
+                            break;
+                        }
+                        let before = app.app.transcript_win().scroll_top();
+                        wheel_transcript(app, crossterm::event::MouseEventKind::ScrollUp);
+                        set_replay_trace_input(
+                            app,
+                            format!("wheel_up_window_probe:{tick}"),
+                            TranscriptScrollIntent::UserDelta { rows: -3 },
+                            before,
+                        );
+                        render_replay_frame(app, &mut report);
+                    }
+                }
+            }
+        }
+        report
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptDragEdge {
+    Top,
+    Bottom,
+}
+
+fn render_replay_frame(app: &mut TestApp, report: &mut TranscriptScrollReplayReport) {
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    report.descriptor_range_changed |= frames
+        .iter()
+        .any(|frame| frame.active_descriptor_range_before != frame.active_descriptor_range_after);
+    report.frames.extend(frames);
+}
+
+fn set_replay_trace_input(
+    app: &mut TestApp,
+    input_event_or_tick: String,
+    scroll_intent: TranscriptScrollIntent,
+    window_scroll_before: crate::smelt_edit::RowIndex,
+) {
+    let window_scroll_after_input = app.app.transcript_win().scroll_top();
+    app.app.transcript.set_next_scroll_trace_input(
+        crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput {
+            input_event_or_tick,
+            scroll_intent,
+            window_scroll_before,
+            window_scroll_after_input,
+        },
+    );
+}
+
+fn transcript_content_point(app: &TestApp, rel_row: u16) -> (u16, u16) {
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    (
+        vp.rect
+            .top
+            .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1))),
+        vp.rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(1),
+    )
+}
+
+fn transcript_scrollbar_point(app: &TestApp, rel_row: u16) -> (u16, u16, u64, u64) {
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    let scrollbar = vp.scrollbar.expect("transcript scrollbar");
+    let denominator = u64::from(vp.rect.height.saturating_sub(1).max(1));
+    let numerator = u64::from(rel_row.min(vp.rect.height.saturating_sub(1)));
+    (
+        vp.rect
+            .top
+            .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1))),
+        scrollbar.col,
+        numerator,
+        denominator,
+    )
+}
+
+fn start_transcript_edge_drag(app: &mut TestApp, edge: TranscriptDragEdge) {
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    let col = vp
+        .rect
+        .left
+        .saturating_add(vp.gutter_width)
+        .saturating_add(1);
+    let down_row = vp.rect.top.saturating_add(vp.rect.height / 2);
+    let edge_row = match edge {
+        TranscriptDragEdge::Top => vp.rect.top,
+        TranscriptDragEdge::Bottom => vp.rect.bottom().saturating_sub(1),
+    };
+    app.feed_one(SourceEvent::Term(Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            row: down_row,
+            column: col,
+            modifiers: KeyModifiers::empty(),
+        },
+    )));
+    app.feed_one(SourceEvent::Term(Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            row: edge_row,
+            column: col,
+            modifiers: KeyModifiers::empty(),
+        },
+    )));
+}
+
+fn finish_transcript_drag(app: &mut TestApp) {
+    let (row, col) = transcript_content_point(app, 1);
+    app.feed_one(SourceEvent::Term(Event::Mouse(
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            row,
+            column: col,
+            modifiers: KeyModifiers::empty(),
+        },
+    )));
+}
+
+fn visible_anchor_order(frame: &TranscriptScrollTraceFrame) -> Option<(u8, u64, u64)> {
+    let anchor = frame.first_visible_content_anchor?;
+    match anchor.node_id {
+        RenderNodeId::Block(id) => Some((0, id.get(), anchor.row_offset)),
+        RenderNodeId::Group(id) => Some((1, id, anchor.row_offset)),
+    }
+}
+
+fn assert_monotonic_visible_anchors(frames: &[TranscriptScrollTraceFrame], upward: bool) {
+    let mut previous = None;
+    let mut compared = 0;
+    for frame in frames {
+        let Some(current) = visible_anchor_order(frame) else {
+            continue;
+        };
+        if let Some(previous) = previous {
+            if upward {
+                assert!(
+                    current <= previous,
+                    "visible content anchor moved down during upward replay: previous={previous:?}, current={current:?}, frame={frame:?}"
+                );
+            } else {
+                assert!(
+                    current >= previous,
+                    "visible content anchor moved up during downward replay: previous={previous:?}, current={current:?}, frame={frame:?}"
+                );
+            }
+            compared += 1;
+        }
+        previous = Some(current);
+    }
+    assert!(
+        compared > 0,
+        "replay did not produce comparable content anchors"
+    );
+}
+
+fn assert_local_scroll_frames_are_exact_and_fast(frames: &[TranscriptScrollTraceFrame]) {
+    assert!(!frames.is_empty(), "expected local scroll frames");
+    for frame in frames {
+        assert!(
+            !frame.placeholder_rows_visible,
+            "local scroll should not land in sparse placeholders: {frame:?}"
+        );
+        let ms = frame
+            .render_or_projection_ms
+            .expect("replay should enable projection timings");
+        assert!(
+            ms <= 250,
+            "projection frame exceeded latency budget: {ms}ms in {frame:?}"
+        );
+        assert!(
+            frame.first_visible_content_anchor.is_some(),
+            "local scroll should resolve an exact visible content anchor: {frame:?}"
+        );
+    }
+}
+
+#[test]
+fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(320, 78, 18);
+    let replay = TranscriptScrollReplay::new(vec![
+        TranscriptReplayStep::WheelUp { ticks: 8 },
+        TranscriptReplayStep::CoalescedWheel { rows: -9 },
+        TranscriptReplayStep::WheelDown { ticks: 4 },
+        TranscriptReplayStep::DragAutoscrollTop { ticks: 3 },
+        TranscriptReplayStep::WheelUpUntilDescriptorRangeChanges { max_ticks: 80 },
+        TranscriptReplayStep::Resize {
+            width: 70,
+            height: 20,
+        },
+        TranscriptReplayStep::StreamingAppend,
+        TranscriptReplayStep::DragAutoscrollBottom { ticks: 3 },
+        TranscriptReplayStep::ScrollbarFarSeek { rel_row: 3 },
+    ]);
+
+    let report = replay.run(&mut app);
+    assert!(!report.frames.is_empty(), "replay produced no trace frames");
+    assert!(
+        report.descriptor_range_changed,
+        "replay did not cover descriptor-window replacement: {:?}",
+        report.frames
+    );
+    assert!(
+        report.frames.iter().any(|frame| matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ResizeReflow { .. }
+        )),
+        "replay did not cover resize/reflow"
+    );
+    assert!(
+        report.frames.iter().any(|frame| matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ScrollbarFraction { .. }
+        )),
+        "replay did not cover scrollbar far seek"
+    );
+    for frame in report
+        .frames
+        .iter()
+        .filter(|frame| frame.placeholder_rows_visible)
+    {
+        assert!(
+            matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::ScrollbarFraction { .. }
+            ),
+            "only scrollbar far seek should be allowed to expose sparse placeholders: {frame:?}"
+        );
+    }
+
+    let wheel_up_frames: Vec<_> = report
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame.input_event_or_tick.starts_with("wheel_up:")
+                || frame
+                    .input_event_or_tick
+                    .starts_with("wheel_up_window_probe")
+                || frame.input_event_or_tick.starts_with("coalesced_wheel")
+        })
+        .cloned()
+        .collect();
+    let drag_top_frames: Vec<_> = report
+        .frames
+        .iter()
+        .filter(|frame| frame.input_event_or_tick.starts_with("drag_autoscroll_top"))
+        .cloned()
+        .collect();
+    let wheel_down_frames: Vec<_> = report
+        .frames
+        .iter()
+        .filter(|frame| frame.input_event_or_tick.starts_with("wheel_down"))
+        .cloned()
+        .collect();
+    let drag_bottom_frames: Vec<_> = report
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame
+                .input_event_or_tick
+                .starts_with("drag_autoscroll_bottom")
+        })
+        .cloned()
+        .collect();
+    assert_local_scroll_frames_are_exact_and_fast(&wheel_up_frames);
+    assert_local_scroll_frames_are_exact_and_fast(&drag_top_frames);
+    assert_local_scroll_frames_are_exact_and_fast(&wheel_down_frames);
+    assert_local_scroll_frames_are_exact_and_fast(&drag_bottom_frames);
+    assert_monotonic_visible_anchors(&wheel_up_frames, true);
+    assert_monotonic_visible_anchors(&drag_top_frames, true);
+    assert_monotonic_visible_anchors(&wheel_down_frames, false);
+    assert_monotonic_visible_anchors(&drag_bottom_frames, false);
+}
+
+#[test]
+#[ignore = "Phase 3 replaces the current row-target adapter with real transcript UserDelta intents"]
+fn transcript_scroll_replay_requires_wheel_intent_before_numeric_row_target() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
+    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frame = frames.first().expect("wheel render frame");
+
+    assert_eq!(
+        frame.scroll_intent,
+        TranscriptScrollIntent::UserDelta { rows: -3 },
+        "wheel replay must preserve the semantic user delta instead of collapsing to {:?}",
+        frame.scroll_intent
     );
 }
 

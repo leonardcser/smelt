@@ -781,6 +781,21 @@ Acceptance:
 - At least one replay or full-frame test fails on the current architecture for the observed lag/jitter class before the model rewrite.
 - Passing tests must prove stable content movement and bounded latency, not merely nondecreasing `scroll_top`.
 
+Phase 2 implementation record:
+
+- Added a transcript scroll replay helper in the harness tests that drives the real app path for wheel ticks, coalesced wheel deltas, drag-autoscroll ticks, resize/reflow, streaming append while pinned, descriptor-window replacement, and scrollbar far seek.
+- Added deterministic heterogeneous sparse transcript replay coverage using trace frames, visible content anchors, descriptor ranges, placeholder flags, and optional projection timings.
+- Added content-anchor assertions for local upward and downward movement, local placeholder rejection, and projection latency budgets. The assertions inspect trace anchors and block ids, not only `scroll_top`.
+- Added a direct trace test for an injected exact-height observation count so replay assertions can classify frames that run after extent refinement.
+- Added an ignored failing full-frame replay test, `transcript_scroll_replay_requires_wheel_intent_before_numeric_row_target`, that demonstrates the current architecture still collapses a wheel tick into `CurrentRowTarget(row)` instead of delivering `UserDelta { rows: -3 }` to transcript projection. This is the Phase 3 red test.
+
+Phase 2 validation:
+
+- `cargo fmt`
+- `cargo test -p smelt-tui --features harness transcript_scroll`
+- `cargo clippy -p smelt-tui --all-targets --features harness -- -D warnings`
+- Explicit red-test check: `cargo test -p smelt-tui --features harness transcript_scroll_replay_requires_wheel_intent_before_numeric_row_target -- --ignored --nocapture` fails with `CurrentRowTarget(...)` vs `UserDelta { rows: -3 }`.
+
 ### Phase 3: Introduce explicit `TranscriptScrollIntent`
 
 Goal: stop collapsing distinct user actions into numeric row requests before transcript projection sees them.
