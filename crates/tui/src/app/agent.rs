@@ -1,6 +1,6 @@
 use crate::app::{
-    DeferredDialog, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp, TurnState,
-    CONFIRM_DEFER_MS,
+    CommandTurnStart, DeferredDialog, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp,
+    TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -155,6 +155,7 @@ impl TuiApp {
     }
 
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> TurnState {
+        self.pending_continuation_token = None;
         {
             self.working.begin(TurnPhase::Working);
         };
@@ -238,21 +239,46 @@ impl TuiApp {
         })
     }
 
-    pub(crate) fn begin_custom_command_turn(
-        &mut self,
+    fn custom_command_parts(
+        &self,
         cmd: smelt_core::custom_commands::CustomCommand,
-    ) -> TurnState {
+    ) -> (
+        String,
+        String,
+        smelt_core::custom_commands::CommandOverrides,
+    ) {
         let evaluated = if self.core.config.settings.redact_secrets {
             engine::redact::redact(&cmd.body)
         } else {
-            cmd.body.clone()
+            cmd.body
         };
         let display = if self.core.config.settings.redact_secrets {
             engine::redact::redact(&format!("/{}", cmd.display))
         } else {
             format!("/{}", cmd.display)
         };
-        self.begin_command_request_turn(display, evaluated, cmd.overrides)
+        (display, evaluated, cmd.overrides)
+    }
+
+    pub(crate) fn begin_custom_command_turn(
+        &mut self,
+        cmd: smelt_core::custom_commands::CustomCommand,
+    ) -> TurnState {
+        let (display, evaluated, overrides) = self.custom_command_parts(cmd);
+        self.begin_command_request_turn(display, evaluated, overrides, CommandTurnStart::Fresh)
+    }
+
+    pub(crate) fn begin_custom_command_continuation(
+        &mut self,
+        cmd: smelt_core::custom_commands::CustomCommand,
+    ) -> TurnState {
+        let (display, evaluated, overrides) = self.custom_command_parts(cmd);
+        self.begin_command_request_turn(
+            display,
+            evaluated,
+            overrides,
+            CommandTurnStart::ContinueFromLast,
+        )
     }
 
     pub(crate) fn begin_command_request_turn(
@@ -260,6 +286,7 @@ impl TuiApp {
         display: String,
         evaluated: String,
         overrides: smelt_core::custom_commands::CommandOverrides,
+        start: CommandTurnStart,
     ) -> TurnState {
         let submitted = match evaluated.trim() {
             "" => None,
@@ -404,6 +431,10 @@ impl TuiApp {
             .map(|overrides| std::sync::Arc::new(self.core.permissions.with_overrides(overrides)))
             .unwrap_or_else(|| self.core.permissions.clone());
 
+        if matches!(start, CommandTurnStart::ContinueFromLast) {
+            self.working.continue_from_last(TurnPhase::Working);
+        }
+
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
             history,
@@ -438,6 +469,15 @@ impl TuiApp {
             self.working.finish(TurnOutcome::Interrupted);
         };
         self.queued_inputs.clear();
+    }
+
+    pub(crate) fn consume_continuation_token(&mut self, token: u64) -> bool {
+        if self.pending_continuation_token == Some(token) {
+            self.pending_continuation_token = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
@@ -478,10 +518,20 @@ impl TuiApp {
         }
 
         let interrupted = !matches!(end, TurnEnd::Complete);
+        let continuation_token = if interrupted {
+            self.pending_continuation_token = None;
+            None
+        } else {
+            let token = self.next_continuation_token;
+            self.next_continuation_token = self.next_continuation_token.wrapping_add(1).max(1);
+            self.pending_continuation_token = Some(token);
+            Some(token)
+        };
         self.core.signals.set_dyn(
             "turn_end",
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: interrupted,
+                continuation_token,
             }),
         );
         self.pump_lua();
@@ -1117,6 +1167,7 @@ mod tests {
             "/fix".into(),
             "fix it".into(),
             smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::Fresh,
         );
         app.app.agent = Some(turn);
 

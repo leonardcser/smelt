@@ -13,8 +13,7 @@ fun(name: string, args: table?, parent_call_id: string?): { content: string, is_
 ```
 
 Call another tool from within `execute`. Pass `parent_call_id` so streamed
-output groups under the parent invocation. Returns
-`{ content, is_error, metadata? }`.
+output groups under the parent invocation. Returns `{ content, is_error, metadata? }`.
 
 ## `smelt.tools.default_summary`
 
@@ -22,13 +21,7 @@ output groups under the parent invocation. Returns
 fun(args: table?): string
 ```
 
-Best-effort one-liner summary of a tool call's arguments. Picks a sensible field
-from `args` in priority order: `questions` (returns `"N question(s)"`),
-`pattern` (optionally suffixed with ` in <display path>`), then the first
-non-empty
-`command | file_path | notebook_path | path | url | query | name | id`. Returns
-`""` if nothing matches. Used as the default `summary` field on tools registered
-via `smelt.tools.register`.
+Best-effort one-liner summary of a tool call's arguments. Picks a sensible field from `args` in priority order: `questions` (returns `"N question(s)"`), `pattern` (optionally suffixed with ` in <display path>`), then the first non-empty `command | file_path | notebook_path | path | url | query | name | id`. Returns `""` if nothing matches. Used as the default `summary` field on tools registered via `smelt.tools.register`.
 
 ## `smelt.tools.list`
 
@@ -46,19 +39,12 @@ fun(name: string, mw: table): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Register middleware for tool `name`. Pass `""` (empty string) as `name` to match
-every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
+Register middleware for tool `name`. Pass `""` (empty string) as `name` to match every tool. `mw` is a table of `{ before = fn?, after = fn? }`:
 
-- `before(args, ctx)` runs synchronously before the tool executes. Return a
-  table to replace `args`; return `{ deny = true, reason = "..." }` to
-  short-circuit with an error result. Any other return is no-op.
-- `after(args, ctx, result)` runs after the tool completes and may return
-  `{ content, is_error }` to replace the result. NOTE: `after` currently only
-  fires for tools that complete synchronously; yielding tools (most builtins)
-  skip it until the task-runtime path is wired.
+- `before(args, ctx)` runs synchronously before the tool executes. Return a table to replace `args`; return `{ deny = true, reason = "..." }` to short-circuit with an error result. Any other return is no-op.
+- `after(args, ctx, result)` runs after the tool completes and may return `{ content, is_error }` to replace the result. NOTE: `after` currently only fires for tools that complete synchronously; yielding tools (most builtins) skip it until the task-runtime path is wired.
 
-Hooks fire in registration order; an earlier hook's replacement is visible to
-later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
+Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
 
 ## `smelt.tools.path_summary`
 
@@ -76,12 +62,9 @@ string; once final, all paths use `smelt.path.display`.
 fun(def: smelt.tools.ToolDef): smelt.Reg
 ```
 
-Types: [`smelt.tools.ToolDef`](types.md#smelttoolstooldef),
-[`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.tools.ToolDef`](types.md#smelttoolstooldef), [`smelt.Reg`](types.md#smeltreg)
 
-Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef)
-for every supported field; only `name` and `execute` are required. Returns a
-`Reg` whose `:remove()` unregisters the tool.
+Register a plugin tool. See [`smelt.tools.ToolDef`](types.md#smelttoolstooldef) for every supported field; only `name` and `execute` are required. Returns a `Reg` whose `:remove()` unregisters the tool.
 
 ## `smelt.tools.resolve`
 
@@ -89,8 +72,7 @@ for every supported field; only `name` and `execute` are required. Returns a
 fun(request_id: integer, call_id: string, result: table): nil
 ```
 
-Resolve the pending tool call `call_id` from request `request_id` with
-`{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.
+Resolve the pending tool call `call_id` from request `request_id` with `{ content, is_error, metadata? }`. Sends a `ToolResult` back to the engine.
 
 ## `smelt.tools.unregister`
 
@@ -98,5 +80,5 @@ Resolve the pending tool call `call_id` from request `request_id` with
 fun(name: string): boolean
 ```
 
-Unregister a previously-registered tool by `name`. Returns `true` if a tool was
-removed, `false` otherwise.
+Unregister a previously-registered tool by `name`. Returns `true` if a tool was removed, `false` otherwise.
+

@@ -46,6 +46,10 @@ engine.reload_when_idle = nil
 ---@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil
 engine.submit_command = nil
 
+--- Start an idle custom-command continuation without using the prompt queue. Returns `false` instead of queuing when a turn, compaction, or busy token is active or when `continuation_token` does not match the most recent completed turn. When it starts, the work elapsed timer carries forward from that completed turn.
+---@type fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?, continuation_token: integer?): boolean
+engine.submit_command_continuation = nil
+
 --- Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.
 ---@type fun(): string
 engine.summary_prefix = nil

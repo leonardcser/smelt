@@ -277,3 +277,39 @@ fn lua_goal_banner_uses_status_labels_and_unicode_ellipsis() {
         frame.text()
     );
 }
+
+#[test]
+fn lua_submit_command_continuation_carries_last_turn_elapsed_without_using_queue() {
+    let mut app = TestApp::builder().build();
+    let _ = app.drain_engine_sends();
+
+    app.start_turn(10);
+    app.feed_one(SourceEvent::Tick(750));
+    app.app.discard_turn(crate::app::TurnEnd::Complete);
+    let token = app
+        .app
+        .pending_continuation_token
+        .expect("completed turn continuation token");
+    app.feed_one(SourceEvent::Tick(1200));
+
+    assert!(app.run_lua(&format!(
+        r#"
+            assert(smelt.engine.submit_command_continuation("goal", "continue body", nil, "goal continue", {}) == false)
+            assert(smelt.engine.submit_command_continuation("goal", "continue body", nil, "goal continue", {}))
+        "#,
+        token + 1,
+        token
+    )));
+
+    assert!(app.app.queued_inputs.is_empty());
+    assert_eq!(
+        app.app.working.elapsed(),
+        Some(std::time::Duration::from_millis(750))
+    );
+
+    app.feed_one(SourceEvent::Tick(250));
+    assert_eq!(
+        app.app.working.elapsed(),
+        Some(std::time::Duration::from_millis(1000))
+    );
+}

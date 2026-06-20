@@ -28,8 +28,7 @@ Return true when a provider or normalized result is still loading.
 fun(item: table?): string?
 ```
 
-Return the stable identity key used to preserve selection across provider
-refreshes.
+Return the stable identity key used to preserve selection across provider refreshes.
 
 ## `smelt.provider.list`
 
@@ -37,8 +36,7 @@ refreshes.
 fun(): table
 ```
 
-Return every registered provider as an array of tables. Each entry has `name`,
-`type`, `api_base`, `api_key_env`, and a `models` array.
+Return every registered provider as an array of tables. Each entry has `name`, `type`, `api_base`, `api_key_env`, and a `models` array.
 
 ## `smelt.provider.middleware`
 
@@ -50,17 +48,11 @@ Types: [`smelt.Reg`](types.md#smeltreg)
 
 Register provider middleware. `mw` is a table of `{ on_response = fn }`:
 
-- `on_response(message)` - runs after the assistant message is fully assembled
-  but before it's appended to history. `message` is the same
-  `{ role = "assistant", content?, tool_calls? }` shape used everywhere else.
-  Return a replacement table to mutate it; any other return leaves it as-is.
+- `on_response(message)` - runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = "assistant", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.
 
-Hooks fire in registration order. Each hook sees the previous hook's
-replacement. Returns a `Reg` whose `:remove()` drops this middleware.
+Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.
 
-For streaming observation use `smelt.events.on("stream_delta", ...)` -
-synchronous mutation of mid-stream tokens isn't safe because the parser owns the
-partial state.
+For streaming observation use `smelt.events.on("stream_delta", ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 
 ## `smelt.provider.normalize`
 
@@ -68,11 +60,9 @@ partial state.
 fun(result: table[]|table?, opts?: { show_message?: boolean, loading_message?: string }): smelt.provider.NormalizedResult
 ```
 
-Types:
-[`smelt.provider.NormalizedResult`](types.md#smeltprovidernormalizedresult)
+Types: [`smelt.provider.NormalizedResult`](types.md#smeltprovidernormalizedresult)
 
-Normalize a provider result or plain row list into renderable rows plus loading
-state.
+Normalize a provider result or plain row list into renderable rows plus loading state.
 
 ## `smelt.provider.register`
 
@@ -80,11 +70,9 @@ state.
 fun(name: string, cfg: smelt.provider.Config): smelt.Reg
 ```
 
-Types: [`smelt.provider.Config`](types.md#smeltproviderconfig),
-[`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.provider.Config`](types.md#smeltproviderconfig), [`smelt.Reg`](types.md#smeltreg)
 
-Declare a provider named `name`. Re-registering replaces the previous entry of
-the same name. Returns a `Reg` whose `:remove()` drops the provider.
+Declare a provider named `name`. Re-registering replaces the previous entry of the same name. Returns a `Reg` whose `:remove()` drops the provider.
 
 ## `smelt.provider.synthetic_only`
 
@@ -93,3 +81,4 @@ fun(rows: table[]?): boolean
 ```
 
 Return true when the row list is exactly one synthetic status/message row.
+

@@ -12,10 +12,10 @@ Yield-then-resume coroutine bridge: alloc and resume external tasks.
 fun(...: fun(): any): any[]
 ```
 
-Run `fns` concurrently; wait for all to finish. Returns an array of results in
-the same order as the input. Errors from any branch propagate; the remaining
-branches still complete and their results are discarded. Must run inside a
-yielding context.
+Run `fns` concurrently; wait for all to finish. Returns an array of
+results in the same order as the input. Errors from any branch
+propagate; the remaining branches still complete and their results
+are discarded. Must run inside a yielding context.
 
 ## `smelt.task.alloc`
 
@@ -23,8 +23,7 @@ yielding context.
 fun(): integer
 ```
 
-Allocate and return a fresh external task id used to pair a yielded coroutine
-with a later `task.resume` call.
+Allocate and return a fresh external task id used to pair a yielded coroutine with a later `task.resume` call.
 
 ## `smelt.task.external`
 
@@ -32,12 +31,12 @@ with a later `task.resume` call.
 fun(start: fun(id: integer)): any
 ```
 
-Allocate an external task id, invoke `start(id)` to kick off whatever will
-eventually call `smelt.task.resume(id, value)` (or resolve through the Rust
-resume sink), and park until that resolution arrives. Returns the resolved
-value. Raises `cancelled` if the task is cancelled while parked. Plugin authors
-bridging custom Rust extensions use this to avoid hand-rolling the alloc +
-start + wait dance.
+Allocate an external task id, invoke `start(id)` to kick off whatever
+will eventually call `smelt.task.resume(id, value)` (or resolve through
+the Rust resume sink), and park until that resolution arrives. Returns
+the resolved value. Raises `cancelled` if the task is cancelled while
+parked. Plugin authors bridging custom Rust extensions use this to
+avoid hand-rolling the alloc + start + wait dance.
 
 ## `smelt.task.is_cancelled`
 
@@ -56,9 +55,10 @@ fun(...: fun(): any): integer, any
 ```
 
 Run `fns` concurrently; first to return wins. Returns the winner's
-`(index, result)` as multi-value, mirroring `task.timeout`'s `(value, err)`
-shape. All other branches are cancelled. Errors from any branch propagate
-(losers cancelled first). Must run inside a yielding context.
+`(index, result)` as multi-value, mirroring `task.timeout`'s
+`(value, err)` shape. All other branches are cancelled. Errors from
+any branch propagate (losers cancelled first). Must run inside a
+yielding context.
 
 ## `smelt.task.resume`
 
@@ -66,8 +66,7 @@ shape. All other branches are cancelled. Errors from any branch propagate
 fun(id: integer, value: any): nil
 ```
 
-Resume the yielded task `id` with `value`. The runtime delivers `value` as the
-return of the matching `coroutine.yield`.
+Resume the yielded task `id` with `value`. The runtime delivers `value` as the return of the matching `coroutine.yield`.
 
 ## `smelt.task.timeout`
 
@@ -75,11 +74,11 @@ return of the matching `coroutine.yield`.
 fun(ms: integer, fn: fun(): any): any, string?
 ```
 
-Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if `fn`
-finishes in time, or `(nil, "timeout")` if the deadline fires first - in which
-case `fn`'s coroutine is cancelled (any in-flight `smelt.sleep` / `task.wait`
-raises `cancelled` and the coroutine unwinds). Must run inside a yielding
-context.
+Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if
+`fn` finishes in time, or `(nil, "timeout")` if the deadline fires
+first - in which case `fn`'s coroutine is cancelled (any in-flight
+`smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
+unwinds). Must run inside a yielding context.
 
 ## `smelt.task.wait`
 
@@ -87,7 +86,8 @@ context.
 fun(id: integer, opts?: table): any
 ```
 
-Park the running task until `smelt.task.resume(id, value)` fires. Returns the
-resumed value. Pass `{ interactive = true }` (or `{ pauses_deadline = true }`)
-for user-facing waits such as dialogs; tool watchdog deadlines do not count wall
-time spent waiting for the user.
+Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
+Pass `{ interactive = true }` (or `{ pauses_deadline = true }`) for user-facing
+waits such as dialogs; tool watchdog deadlines do not count wall time spent
+waiting for the user.
+

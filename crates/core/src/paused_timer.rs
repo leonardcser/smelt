@@ -10,8 +10,12 @@ pub(crate) struct PausedTimer {
 
 impl PausedTimer {
     pub(crate) fn new(start: Instant) -> Self {
+        Self::with_elapsed(start, Duration::ZERO)
+    }
+
+    pub(crate) fn with_elapsed(now: Instant, elapsed: Duration) -> Self {
         Self {
-            start,
+            start: now.checked_sub(elapsed).unwrap_or(now),
             pause_started: None,
             paused: Duration::ZERO,
         }

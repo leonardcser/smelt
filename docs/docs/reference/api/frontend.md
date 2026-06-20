@@ -12,8 +12,7 @@ Query which frontend is active (TUI vs headless).
 fun(): boolean
 ```
 
-Return `true` when the frontend supports interactive prompts (a TTY user is
-present). Defaults to `true` when no host is installed.
+Return `true` when the frontend supports interactive prompts (a TTY user is present). Defaults to `true` when no host is installed.
 
 ## `smelt.frontend.kind`
 
@@ -21,5 +20,5 @@ present). Defaults to `true` when no host is installed.
 fun(): string
 ```
 
-Return the active frontend kind (e.g. `"tui"` or `"headless"`). Falls back to
-`"tui"` when no host is installed.
+Return the active frontend kind (e.g. `"tui"` or `"headless"`). Falls back to `"tui"` when no host is installed.
+

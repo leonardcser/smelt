@@ -4,11 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Named reactive values. `smelt.signal(name)` returns a sticky `Signal` handle
-with `:get`, `:set`, `:subscribe`, `:name`. `smelt.signal.new` declares a signal
-with an initial value. `smelt.signal.glob` subscribes across every name matching
-a glob pattern. Use `smelt.events.on` for event-shaped signals where only
-occurrences matter.
+Named reactive values. `smelt.signal(name)` returns a sticky `Signal` handle with `:get`, `:set`, `:subscribe`, `:name`. `smelt.signal.new` declares a signal with an initial value. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.
 
 ## `smelt.signal.glob`
 
@@ -18,9 +14,7 @@ fun(pattern: string, handler: fun(arg1: string, arg2: any, arg3: any)): smelt.Re
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Register `handler(name, value, previous)` for every signal whose name matches
-`pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob
-subscription.
+Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.
 
 ## `smelt.signal.new`
 
@@ -30,5 +24,5 @@ fun(name: smelt.signal.Name, initial: any): nil
 
 Types: [`smelt.signal.Name`](types.md#smeltsignalname)
 
-Declare a signal named `name` with `initial` as its starting value. No-op if the
-signal already exists.
+Declare a signal named `name` with `initial` as its starting value. No-op if the signal already exists.
+

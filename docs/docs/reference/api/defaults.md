@@ -4,6 +4,5 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Startup fallbacks for new sessions.
-`smelt.defaults({ model, mode, reasoning_effort })` sets each field; CLI flags
-and resumed-session state still win.
+Startup fallbacks for new sessions. `smelt.defaults({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.
+

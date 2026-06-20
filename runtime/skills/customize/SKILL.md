@@ -1266,6 +1266,8 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
   Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`.
 - `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil`
   Start an agent turn from a Lua-defined custom command (`/name`).
+- `smelt.engine.submit_command_continuation` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?, continuation_token: integer?): boolean`
+  Start an idle custom-command continuation without using the prompt queue.
 - `smelt.engine.summary_prefix` :: `fun(): string`
   Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.
 
@@ -1483,6 +1485,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Set or clear a named hidden model-visible context note.
 - `smelt.session.context_tokens` :: `fun(): integer?`
   Latest non-background provider-reported active-context token count, or `nil` before the first usage report.
+- `smelt.session.context_tokens_stale` :: `fun(): boolean`
+  Whether the displayed context token count was reported by a different model/provider than the active model.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
 - `smelt.session.conversation` :: `fun(): table`

@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Workspace file search. Owns background indexing, filesystem watching, and
-recent-selection ranking.
+Workspace file search. Owns background indexing, filesystem watching, and recent-selection ranking.
 
 ## `smelt.files.accept`
 
@@ -13,8 +12,7 @@ recent-selection ranking.
 fun(item: table, opts: table?): boolean, string?
 ```
 
-Record a selected file result for recent-selection ranking. Options: `{ cwd? }`.
-Returns `(true, nil)` or `(false, err)`.
+Record a selected file result for recent-selection ranking. Options: `{ cwd? }`. Returns `(true, nil)` or `(false, err)`.
 
 ## `smelt.files.rescan`
 
@@ -22,8 +20,7 @@ Returns `(true, nil)` or `(false, err)`.
 fun(opts: table?): boolean, string?
 ```
 
-Trigger an asynchronous full rescan for the current workspace or `opts.cwd`.
-Returns `(true, nil)` or `(false, err)`.
+Trigger an asynchronous full rescan for the current workspace or `opts.cwd`. Returns `(true, nil)` or `(false, err)`.
 
 ## `smelt.files.search`
 
@@ -31,10 +28,7 @@ Returns `(true, nil)` or `(false, err)`.
 fun(query: string, opts: table?): table
 ```
 
-Search workspace files. Returns
-`{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`.
-Items are `{ label, path, insert_text, kind, score }`. Options:
-`{ limit?, offset?, include_dirs?, cwd? }`.
+Search workspace files. Returns `{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`. Items are `{ label, path, insert_text, kind, score }`. Options: `{ limit?, offset?, include_dirs?, cwd? }`.
 
 ## `smelt.files.status`
 
@@ -42,5 +36,5 @@ Items are `{ label, path, insert_text, kind, score }`. Options:
 fun(opts: table?): table
 ```
 
-Return indexing status for the current workspace or `opts.cwd`:
-`{ root, initialized, files, scanned, scanning, watcher_ready, warmup_complete }`.
+Return indexing status for the current workspace or `opts.cwd`: `{ root, initialized, files, scanned, scanning, watcher_ready, warmup_complete }`.
+

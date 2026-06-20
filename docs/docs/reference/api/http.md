@@ -4,9 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Asynchronous HTTP get/post. Yields the calling coroutine until the response
-lands; runtime stays responsive. Errors use the `(value, err_string)`
-convention.
+Asynchronous HTTP get/post. Yields the calling coroutine until the response lands; runtime stays responsive. Errors use the `(value, err_string)` convention.
 
 ## `smelt.http.get`
 
@@ -17,9 +15,9 @@ fun(url: string, opts: table?): { status: integer, final_url: string, body: stri
 Perform an HTTP GET against `url`. Yields the calling coroutine until the
 response lands; the runtime stays responsive throughout. `opts` accepts
 `headers`, `timeout_secs`, and `max_redirects`. Returns
-`({ status, final_url, body, headers }, nil)` on success or `(nil, err)` on
-transport failure. Cancellation of the parent task drops the in-flight request
-and raises `cancelled` from this call.
+`({ status, final_url, body, headers }, nil)` on success or `(nil, err)`
+on transport failure. Cancellation of the parent task drops the in-flight
+request and raises `cancelled` from this call.
 
 ## `smelt.http.post`
 
@@ -37,3 +35,4 @@ fun(): string
 ```
 
 Return a randomly selected User-Agent string from the built-in pool.
+

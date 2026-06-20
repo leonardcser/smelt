@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Encode/decode JSON for Lua plugins. Tables with contiguous 1..N integer keys
-encode as arrays; other tables encode as objects.
+Encode/decode JSON for Lua plugins. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects.
 
 ## `smelt.json.decode`
 
@@ -13,8 +12,7 @@ encode as arrays; other tables encode as objects.
 fun(text: string): any, string?
 ```
 
-Decode JSON into a Lua value. Returns `(value, nil)` on success or
-`(nil, err_string)` on failure.
+Decode JSON into a Lua value. Returns `(value, nil)` on success or `(nil, err_string)` on failure.
 
 ## `smelt.json.encode`
 
@@ -22,6 +20,5 @@ Decode JSON into a Lua value. Returns `(value, nil)` on success or
 fun(value: any, opts: table?): string
 ```
 
-Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation.
-Tables with contiguous 1..N integer keys encode as arrays; other tables encode
-as objects.
+Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects.
+

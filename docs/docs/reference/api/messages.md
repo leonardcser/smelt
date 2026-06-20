@@ -12,8 +12,7 @@ Persistent message log with full bodies and tracebacks.
 fun(kind: string, source: string, msg: string): nil
 ```
 
-Append a new message of `kind` (`"error"`, `"warn"`/`"warning"`, anything else
-falls back to `"info"`) attributed to `source` with body `msg`.
+Append a new message of `kind` (`"error"`, `"warn"`/`"warning"`, anything else falls back to `"info"`) attributed to `source` with body `msg`.
 
 ## `smelt.messages.clear`
 
@@ -37,8 +36,7 @@ Return the total number of messages currently in the log.
 fun(): table
 ```
 
-Return every persisted message as rows of
-`{ kind, source, summary, full, ts_ms }`, ordered oldest-first.
+Return every persisted message as rows of `{ kind, source, summary, full, ts_ms }`, ordered oldest-first.
 
 ## `smelt.messages.mark_read`
 
@@ -46,8 +44,7 @@ Return every persisted message as rows of
 fun(): nil
 ```
 
-Mark every message in the log as read so `unread_count` returns `0` until new
-errors arrive.
+Mark every message in the log as read so `unread_count` returns `0` until new errors arrive.
 
 ## `smelt.messages.unread_count`
 
@@ -56,3 +53,4 @@ fun(): integer
 ```
 
 Return the number of unread error messages in the log.
+

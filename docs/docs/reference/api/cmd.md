@@ -4,11 +4,9 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-This namespace mixes Host and UiHost functions; each function below lists its
-exact tier.
+This namespace mixes Host and UiHost functions; each function below lists its exact tier.
 
-Register and list slash commands. `cmd.run` is injected by the TUI layer so it
-can access the live app state.
+Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state.
 
 ## `smelt.cmd.list`
 
@@ -18,9 +16,7 @@ fun(): table
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Return every registered slash command as a Lua array of
-`{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows.
-Sorted by name.
+Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows. Sorted by name.
 
 ## `smelt.cmd.picker`
 
@@ -28,14 +24,14 @@ Sorted by name.
 fun(name: string, opts: table?): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
-raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Register a slash command `name` that opens a prompt-docked picker when called
-without arguments, or invokes `opts.apply(arg)` directly when given one. See the
-file header for every accepted `opts` field (`items`, `apply`, `on_enter`,
-`on_dismiss`, `stay_open`, …). Returns nothing; the command lives until
-`/reload` or an explicit `smelt.cmd.register{...}:remove()` matching `name`.
+Register a slash command `name` that opens a prompt-docked picker when
+called without arguments, or invokes `opts.apply(arg)` directly when
+given one. See the file header for every accepted `opts` field
+(`items`, `apply`, `on_enter`, `on_dismiss`, `stay_open`, …). Returns
+nothing; the command lives until `/reload` or an explicit
+`smelt.cmd.register{...}:remove()` matching `name`.
 
 ## `smelt.cmd.register`
 
@@ -43,16 +39,11 @@ file header for every accepted `opts` field (`items`, `apply`, `on_enter`,
 fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 ```
 
-Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts),
-[`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](types.md#smeltreg)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Register a slash command `name` whose `handler` is invoked when the user runs
-it. `opts` accepts `desc`, `args`, `while_busy` (default `true`),
-`queue_when_busy` (default `false`), `startup_ok` (default `false`), `hidden`
-(default `false`), and `override` (default `false`). Returns a `Reg` whose
-`:remove()` unregisters the command.
+Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 
 ## `smelt.cmd.run`
 
@@ -60,8 +51,7 @@ it. `opts` accepts `desc`, `args`, `while_busy` (default `true`),
 fun(line: string): nil
 ```
 
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode
-raises.
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Execute the slash-command line `line` (with or without leading `/`) as if the
-user had typed it. Errors are surfaced as in-app notifications.
+Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
+

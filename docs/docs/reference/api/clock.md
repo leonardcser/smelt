@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Wall-clock time primitives. Host-tier so plugins can read absolute time in both
-TUI and headless contexts.
+Wall-clock time primitives. Host-tier so plugins can read absolute time in both TUI and headless contexts.
 
 ## `smelt.clock.unix_ms`
 
@@ -13,6 +12,5 @@ TUI and headless contexts.
 fun(): integer
 ```
 
-Return the current Unix timestamp in milliseconds. Backed by the host clock so
-tests can freeze time by overriding this function or swapping in a virtual
-clock.
+Return the current Unix timestamp in milliseconds. Backed by the host clock so tests can freeze time by overriding this function or swapping in a virtual clock.
+

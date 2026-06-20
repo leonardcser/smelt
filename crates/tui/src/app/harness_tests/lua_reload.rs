@@ -218,12 +218,13 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
         r#"
             local goal = require("smelt.goal")
             smelt.engine.is_running = function() return _G.__goal_running == true end
-            smelt.engine.submit_command = function(name, body, _overrides, display)
-                _G.__goal_submit = { name = name, body = body, display = display }
+            smelt.engine.submit_command_continuation = function(name, body, _overrides, display, continuation_token)
+                _G.__goal_submit = { name = name, body = body, display = display, continuation_token = continuation_token }
+                return continuation_token == 42
             end
             _G.__goal_running = true
             assert(goal.create("finish <the> & goal", { auto_continue = true }))
-            goal.schedule_auto_continue()
+            goal.schedule_auto_continue(42)
             _G.__goal_running = false
         "#,
     ));
@@ -234,6 +235,7 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
         r##"
             assert(_G.__goal_submit.name == "goal")
             assert(_G.__goal_submit.display == "goal continue")
+            assert(_G.__goal_submit.continuation_token == 42)
             assert(_G.__goal_submit.body:find("# Continue goal", 1, true))
             assert(_G.__goal_submit.body:find("finish &lt;the&gt; &amp; goal", 1, true))
             assert(_G.__goal_submit.body:find("Call update_goal_progress when starting a meaningful phase", 1, true))

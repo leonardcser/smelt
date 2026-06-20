@@ -119,6 +119,8 @@ pub struct TuiApp {
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
+    pub(crate) next_continuation_token: u64,
+    pub(crate) pending_continuation_token: Option<u64>,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
     process_completion_rx:
@@ -492,6 +494,12 @@ pub(crate) enum TurnEnd {
     Cancelled,
     /// Provider/engine error: queue is preserved so the user can retry.
     Errored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandTurnStart {
+    Fresh,
+    ContinueFromLast,
 }
 
 pub(crate) struct PendingTool {
@@ -1005,7 +1013,12 @@ impl TuiApp {
                 match req.turn_options {
                     QueuedTurnOptions::CustomCommand { overrides } => {
                         let text = req.content.text_content().into_owned();
-                        let turn = self.begin_command_request_turn(req.display, text, *overrides);
+                        let turn = self.begin_command_request_turn(
+                            req.display,
+                            text,
+                            *overrides,
+                            CommandTurnStart::Fresh,
+                        );
                         self.agent = Some(turn);
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
@@ -1262,6 +1275,8 @@ impl TuiApp {
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,
+            next_continuation_token: 1,
+            pending_continuation_token: None,
             pending_turn_meta: None,
             pending_history_appends: Vec::new(),
             process_completion_rx,

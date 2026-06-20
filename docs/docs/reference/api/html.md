@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG
-results.
+HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 
 ## `smelt.html.links`
 
@@ -13,8 +12,7 @@ results.
 fun(source: string, base: string?): string[]
 ```
 
-Extract all anchor `href` links from `source`. When `base` is supplied, relative
-URLs are resolved against it.
+Extract all anchor `href` links from `source`. When `base` is supplied, relative URLs are resolved against it.
 
 ## `smelt.html.parse_ddg_results`
 
@@ -22,8 +20,7 @@ URLs are resolved against it.
 fun(source: string): table
 ```
 
-Parse a DuckDuckGo HTML results page into rows of
-`{ title, link, description }`.
+Parse a DuckDuckGo HTML results page into rows of `{ title, link, description }`.
 
 ## `smelt.html.title`
 
@@ -39,8 +36,7 @@ Return the `<title>` text of `source`, or `nil` if no title element is present.
 fun(source: string, base: string?): table
 ```
 
-Convert `source` HTML to a `{ title, content, links }` table where `content` is
-markdown. Relative links resolve against `base` when supplied.
+Convert `source` HTML to a `{ title, content, links }` table where `content` is markdown. Relative links resolve against `base` when supplied.
 
 ## `smelt.html.to_text`
 
@@ -49,3 +45,4 @@ fun(source: string): string
 ```
 
 Strip HTML tags from `source` and return the visible text content.
+

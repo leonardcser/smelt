@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned
-processes are non-blocking; run processes wait for completion.
+Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
 
 ## `smelt.process.detach_foreground`
 
@@ -13,9 +12,7 @@ processes are non-blocking; run processes wait for completion.
 fun(): boolean
 ```
 
-Move the most recently started foreground streaming process to the background
-process registry. Returns true when a detach request was sent, false when no
-detachable foreground process is running.
+Move the most recently started foreground streaming process to the background process registry. Returns true when a detach request was sent, false when no detachable foreground process is running.
 
 ## `smelt.process.get_default_shell`
 
@@ -23,8 +20,7 @@ detachable foreground process is running.
 fun(): any
 ```
 
-Return the current default shell as `{ program, args }`, or `nil` when the
-built-in `sh -c` default is in effect.
+Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
 
 ## `smelt.process.kill`
 
@@ -32,8 +28,7 @@ built-in `sh -c` default is in effect.
 fun(id: string): nil
 ```
 
-Stop the registered process with `id`. Schedules the kill asynchronously; no-op
-when no host is installed.
+Stop the registered process with `id`. Schedules the kill asynchronously; no-op when no host is installed.
 
 ## `smelt.process.list`
 
@@ -41,9 +36,7 @@ when no host is installed.
 fun(): table
 ```
 
-Return the registry of running processes as rows of
-`{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is
-present when the OS exposes a child pid.
+Return the registry of running processes as rows of `{ id, pid?, command, elapsed_secs }`. `id` is the stable registry key; `pid` is present when the OS exposes a child pid.
 
 ## `smelt.process.output`
 
@@ -51,9 +44,7 @@ present when the OS exposes a child pid.
 fun(id: string): table
 ```
 
-Return the buffered output snapshot for registered process `id` without draining
-it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty
-table when no such process exists.
+Return the buffered output snapshot for registered process `id` without draining it. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
 
 ## `smelt.process.read_output`
 
@@ -61,9 +52,7 @@ table when no such process exists.
 fun(id: string): table
 ```
 
-Drain buffered output from the registered process `id`. Returns
-`{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no
-such process exists.
+Drain buffered output from the registered process `id`. Returns `{ text, running, exit_code?, elapsed_secs, pid? }`, or an empty table when no such process exists.
 
 ## `smelt.process.run`
 
@@ -71,14 +60,16 @@ such process exists.
 fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 ```
 
-Run `cmd` with `args` off the main thread. Yields the calling coroutine until
-the child exits; must be called from inside `smelt.spawn(fn)` or a
-`tool.execute`. `opts` accepts `cwd`, `env`, `timeout_secs`, `stdin`. Returns
-`({ stdout, stderr, exit_code, timed_out }, nil)` on success or `(nil, err)` on
-spawn failure. If the calling coroutine is cancelled (e.g. by
-`smelt.task.timeout` or by `:remove()` on the parent spawn), the child process
-is killed (SIGTERM to its process group) and `smelt.task.external` raises
-`cancelled` - same shape as every other yielding API.
+Run `cmd` with `args` off the main thread. Yields the calling
+coroutine until the child exits; must be called from inside
+`smelt.spawn(fn)` or a `tool.execute`. `opts` accepts `cwd`, `env`,
+`timeout_secs`, `stdin`. Returns
+`({ stdout, stderr, exit_code, timed_out }, nil)` on success or
+`(nil, err)` on spawn failure. If the calling coroutine is cancelled
+(e.g. by `smelt.task.timeout` or by `:remove()` on the parent spawn),
+the child process is killed (SIGTERM to its process group) and
+`smelt.task.external` raises `cancelled` - same shape as every other
+yielding API.
 
 ## `smelt.process.run_streaming`
 
@@ -86,11 +77,7 @@ is killed (SIGTERM to its process group) and `smelt.task.external` raises
 fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil
 ```
 
-Run `command` with a `timeout_ms` deadline, streaming each output line into the
-live tool call `call_id` and resolving task `task_id` with
-`{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }`
-if cancelled). When `background_on_timeout` is true, timeout detaches the
-still-running process into the process registry instead of killing it.
+Run `command` with a `timeout_ms` deadline, streaming each output line into the live tool call `call_id` and resolving task `task_id` with `{ content, is_error, timed_out, background_id? }` (or `{ __cancelled = true }` if cancelled). When `background_on_timeout` is true, timeout detaches the still-running process into the process registry instead of killing it.
 
 ## `smelt.process.set_default_shell`
 
@@ -98,10 +85,7 @@ still-running process into the process registry instead of killing it.
 fun(opts: table?): nil
 ```
 
-Override the wrapping shell used by `spawn_bg` and `run_streaming` for
-string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`);
-`opts.args` is the leading argv (e.g. `{ "-fc" }`), and the command string is
-appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
+Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`), and the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
 
 ## `smelt.process.spawn_bg`
 
@@ -109,10 +93,7 @@ appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
 fun(command: string): string
 ```
 
-Spawn `command` as a background child registered with the process registry. The
-wrapping shell defaults to `sh -c` and can be overridden process-wide via
-`smelt.process.set_default_shell`. Returns the process id; raises if no host is
-installed or the spawn fails.
+Spawn `command` as a background child registered with the process registry. The wrapping shell defaults to `sh -c` and can be overridden process-wide via `smelt.process.set_default_shell`. Returns the process id; raises if no host is installed or the spawn fails.
 
 ## `smelt.process.stop`
 
@@ -120,7 +101,8 @@ installed or the spawn fails.
 fun(id: string): { text: string }?, string?
 ```
 
-Stop a registered background process and return its buffered output. Yields the
-calling coroutine until the process has exited and the registry entry is
+Stop a registered background process and return its buffered output. Yields
+the calling coroutine until the process has exited and the registry entry is
 removed. Returns `({ text }, nil)` on success or `(nil, err)` when no process
 exists for `id`.
+

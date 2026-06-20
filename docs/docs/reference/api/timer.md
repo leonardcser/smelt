@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-One-shot and recurring timer callbacks. Each call returns a `Reg` whose
-`:remove()` cancels the timer.
+One-shot and recurring timer callbacks. Each call returns a `Reg` whose `:remove()` cancels the timer.
 
 ## `smelt.timer.every`
 
@@ -15,8 +14,7 @@ fun(ms: integer, handler: fun()): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Schedule `handler` to fire repeatedly every `ms` milliseconds. Returns a `Reg`
-whose `:remove()` stops the timer. Raises if `ms` is `0`.
+Schedule `handler` to fire repeatedly every `ms` milliseconds. Returns a `Reg` whose `:remove()` stops the timer. Raises if `ms` is `0`.
 
 ## `smelt.timer.set`
 
@@ -26,5 +24,5 @@ fun(ms: integer, handler: fun()): smelt.Reg
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Schedule `handler` to run once after `ms` milliseconds. Returns a `Reg` whose
-`:remove()` cancels the timer before it fires.
+Schedule `handler` to run once after `ms` milliseconds. Returns a `Reg` whose `:remove()` cancels the timer before it fires.
+

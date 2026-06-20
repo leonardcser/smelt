@@ -12,13 +12,7 @@ Config-time MCP server registration. Unknown fields raise errors.
 fun(): table
 ```
 
-Snapshot every declared MCP server. Each row is
-`{ name, description, server_info, config, status, tool_count, tools }` where
-`description` is the configured human summary, `server_info` is
-`{ name, version, instructions }?`, `status` is
-`{ kind = "disabled"|"connecting"|"connected"|"error", since_ms?, error?, at_ms? }`,
-and `tools` contains `{ server, name, qualified_name, description, schema }`
-rows. Lifecycle reads are sync - safe to call from a status renderer or keymap.
+Snapshot every declared MCP server. Each row is `{ name, description, server_info, config, status, tool_count, tools }` where `description` is the configured human summary, `server_info` is `{ name, version, instructions }?`, `status` is `{ kind = "disabled"|"connecting"|"connected"|"error", since_ms?, error?, at_ms? }`, and `tools` contains `{ server, name, qualified_name, description, schema }` rows. Lifecycle reads are sync - safe to call from a status renderer or keymap.
 
 ## `smelt.mcp.register`
 
@@ -26,12 +20,9 @@ rows. Lifecycle reads are sync - safe to call from a status renderer or keymap.
 fun(name: string, cfg: smelt.mcp.Config): smelt.Reg
 ```
 
-Types: [`smelt.mcp.Config`](types.md#smeltmcpconfig),
-[`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.mcp.Config`](types.md#smeltmcpconfig), [`smelt.Reg`](types.md#smeltreg)
 
-Declare an MCP server named `name`. See
-[`smelt.mcp.Config`](types.md#smeltmcpconfig). Returns a `Reg` whose `:remove()`
-drops the desired-state entry; the next `/reload` reconciles it away.
+Declare an MCP server named `name`. See [`smelt.mcp.Config`](types.md#smeltmcpconfig). Returns a `Reg` whose `:remove()` drops the desired-state entry; the next `/reload` reconciles it away.
 
 ## `smelt.mcp.status`
 
@@ -39,9 +30,7 @@ drops the desired-state entry; the next `/reload` reconciles it away.
 fun(name: string): string?
 ```
 
-Return the lifecycle status for server `name`: `"disabled"`, `"connecting"`,
-`"connected"`, or `"error"`. Returns `nil` when no server with that name is
-declared.
+Return the lifecycle status for server `name`: `"disabled"`, `"connecting"`, `"connected"`, or `"error"`. Returns `nil` when no server with that name is declared.
 
 ## `smelt.mcp.tools`
 
@@ -49,7 +38,5 @@ declared.
 fun(server: string?): table
 ```
 
-Snapshot every discovered MCP tool. Each row is
-`{ server, name, qualified_name, description, schema }`. When `server` is
-provided, only that server's tools are returned; otherwise tools from every
-connected server.
+Snapshot every discovered MCP tool. Each row is `{ server, name, qualified_name, description, schema }`. When `server` is provided, only that server's tools are returned; otherwise tools from every connected server.
+

@@ -426,6 +426,40 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    m.fn_(
+        "submit_command_continuation",
+        "Start an idle custom-command continuation without using the prompt queue. Returns `false` instead of queuing when a turn, compaction, or busy token is active or when `continuation_token` does not match the most recent completed turn. When it starts, the work elapsed timer carries forward from that completed turn.",
+        &["name", "body", "overrides", "display", "continuation_token"],
+        |_,
+         (name, body, overrides, display, continuation_token): (
+            String,
+            String,
+            Option<LuaCommandOverrides>,
+            Option<String>,
+            Option<u64>,
+        )|
+         -> LuaResult<bool> {
+            let Some(continuation_token) = continuation_token else {
+                return Ok(false);
+            };
+            let parsed = overrides.map(Into::into).unwrap_or_default();
+            Ok(crate::lua::with_app(|app| {
+                if app.prompt_input_is_busy() || !app.consume_continuation_token(continuation_token) {
+                    return false;
+                }
+                let cmd = smelt_core::custom_commands::CustomCommand {
+                    display: display.unwrap_or_else(|| name.clone()),
+                    name,
+                    body,
+                    overrides: parsed,
+                };
+                let turn = app.begin_custom_command_continuation(cmd);
+                app.agent = Some(turn);
+                true
+            }))
+        },
+    )?;
+
     // smelt.engine.ask({system, messages?, question?, model?, response_format?, reasoning_effort?, on_response})
     {
         let s = shared.clone();

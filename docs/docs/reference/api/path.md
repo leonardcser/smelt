@@ -20,8 +20,7 @@ Return the final component (file name) of `p`, or `nil` if `p` ends in `..`.
 fun(p: string): string?, string?
 ```
 
-Resolve `p` to its canonical absolute form (following symlinks). Returns
-`(path, nil)` on success or `(nil, err_string)` on failure.
+Resolve `p` to its canonical absolute form (following symlinks). Returns `(path, nil)` on success or `(nil, err_string)` on failure.
 
 ## `smelt.path.commands_dir`
 
@@ -29,8 +28,7 @@ Resolve `p` to its canonical absolute form (following symlinks). Returns
 fun(): string
 ```
 
-Return the absolute path to the slash-commands directory under the user config
-root.
+Return the absolute path to the slash-commands directory under the user config root.
 
 ## `smelt.path.config_dir`
 
@@ -46,8 +44,7 @@ Return the absolute path to smelt's user config directory.
 fun(p: string): string
 ```
 
-Return a user-friendly rendering of `p` for UI display (e.g. with the home dir
-abbreviated to `~`).
+Return a user-friendly rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).
 
 ## `smelt.path.display_streaming`
 
@@ -55,10 +52,7 @@ abbreviated to `~`).
 fun(p: string): string
 ```
 
-Return a user-friendly rendering of a possibly partial path for streaming tool
-summaries. Absolute paths that may still collapse to the current working
-directory or home directory return an empty string until enough path has
-arrived.
+Return a user-friendly rendering of a possibly partial path for streaming tool summaries. Absolute paths that may still collapse to the current working directory or home directory return an empty string until enough path has arrived.
 
 ## `smelt.path.expand`
 
@@ -66,8 +60,7 @@ arrived.
 fun(p: string): string
 ```
 
-Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not
-invoke a shell, expand globs, or canonicalize symlinks.
+Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not invoke a shell, expand globs, or canonicalize symlinks.
 
 ## `smelt.path.extension`
 
@@ -75,8 +68,7 @@ invoke a shell, expand globs, or canonicalize symlinks.
 fun(p: string): string?
 ```
 
-Return the file extension of `p` (without the leading dot), or `nil` if there is
-none.
+Return the file extension of `p` (without the leading dot), or `nil` if there is none.
 
 ## `smelt.path.is_absolute`
 
@@ -100,8 +92,7 @@ Join the variadic `parts` into a single path using the platform separator.
 fun(p: string): string
 ```
 
-Normalize `p` by collapsing redundant `.`, `..`, and separator components
-without touching the filesystem.
+Normalize `p` by collapsing redundant `.`, `..`, and separator components without touching the filesystem.
 
 ## `smelt.path.parent`
 
@@ -118,3 +109,4 @@ fun(base: string, target: string): string
 ```
 
 Return the path of `target` expressed relative to `base`.
+

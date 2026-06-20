@@ -452,9 +452,18 @@ function M.clear()
   apply("clear")
 end
 
-function M.continue(reason)
+function M.continue(reason, continuation_token)
   local goal = session_goal()
   if not is_active(goal) then return false end
+  if reason == "auto" and continuation_token then
+    return smelt.engine.submit_command_continuation(
+      "goal",
+      continuation_prompt(goal),
+      nil,
+      "goal continue",
+      continuation_token
+    ) ~= false
+  end
   smelt.engine.submit_command(
     "goal",
     continuation_prompt(goal),
@@ -464,14 +473,14 @@ function M.continue(reason)
   return true
 end
 
-function M.schedule_auto_continue()
+function M.schedule_auto_continue(continuation_token)
   if scheduled or not can_schedule_auto_continue() then return end
   scheduled = true
   local gen = generation
   smelt.timer.set(AUTO_DELAY_MS, function()
     scheduled = false
     if gen ~= generation or not should_auto_continue() then return end
-    M.continue("auto")
+    M.continue("auto", continuation_token)
   end)
 end
 
@@ -675,7 +684,7 @@ function M.setup()
   smelt.signal("session_epoch"):subscribe(sync_context_note)
   smelt.events.on("turn_end", function(ev)
     if ev and ev.cancelled then return end
-    M.schedule_auto_continue()
+    M.schedule_auto_continue(ev and ev.continuation_token)
   end)
 end
 

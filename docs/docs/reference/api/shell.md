@@ -12,8 +12,7 @@ Shell command splitting and interactive/background-operator validators.
 fun(command: string): string?
 ```
 
-Return a user-facing error message if `command` uses the shell `&` background
-operator, or `nil` otherwise.
+Return a user-facing error message if `command` uses the shell `&` background operator, or `nil` otherwise.
 
 ## `smelt.shell.check_interactive`
 
@@ -21,9 +20,7 @@ operator, or `nil` otherwise.
 fun(command: string): string?
 ```
 
-Return a user-facing error message if `command` would invoke an interactive
-program (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run
-non-interactively.
+Return a user-facing error message if `command` would invoke an interactive program (editor, REPL, pager, `git -i`, etc.), or `nil` if it is safe to run non-interactively.
 
 ## `smelt.shell.extract_paths`
 
@@ -31,8 +28,7 @@ non-interactively.
 fun(command: string): string[]
 ```
 
-Extract filesystem paths referenced by `command` for workspace permission
-checks.
+Extract filesystem paths referenced by `command` for workspace permission checks.
 
 ## `smelt.shell.has_output_redirection`
 
@@ -40,8 +36,7 @@ checks.
 fun(command: string): boolean
 ```
 
-Return true when `command` contains shell output redirection such as `>` or
-`>>`.
+Return true when `command` contains shell output redirection such as `>` or `>>`.
 
 ## `smelt.shell.split`
 
@@ -49,8 +44,7 @@ Return true when `command` contains shell output redirection such as `>` or
 fun(command: string): string[]
 ```
 
-Split `command` into the sequence of subcommands separated by shell operators
-(`;`, `&&`, `||`, `|`). Operators themselves are dropped.
+Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`). Operators themselves are dropped.
 
 ## `smelt.shell.split_with_ops`
 
@@ -58,5 +52,5 @@ Split `command` into the sequence of subcommands separated by shell operators
 fun(command: string): table
 ```
 
-Split `command` into subcommands and pair each with the operator that followed
-it. Returns rows of `{ command = string, op = string? }`.
+Split `command` into subcommands and pair each with the operator that followed it. Returns rows of `{ command = string, op = string? }`.
+

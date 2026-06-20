@@ -20,5 +20,5 @@ Read the current clipboard contents as a string, or `nil` if empty/unavailable.
 fun(text: string): nil
 ```
 
-Write `text` to the system clipboard. Raises if the clipboard backend is
-unavailable.
+Write `text` to the system clipboard. Raises if the clipboard backend is unavailable.
+

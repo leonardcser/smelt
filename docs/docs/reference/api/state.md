@@ -4,12 +4,13 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives
-`/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper
-that survives restarts too.
+Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.
 
 ## `smelt.state.persistent`
 
 ```lua
 fun(name: string, opts: { debounce_ms: integer? }?): table
 ```
+
+
+

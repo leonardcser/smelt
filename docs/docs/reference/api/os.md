@@ -12,8 +12,7 @@ Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.
 fun(): string
 ```
 
-Return the target CPU architecture as reported by `std::env::consts::ARCH` (e.g.
-`"x86_64"`, `"aarch64"`).
+Return the target CPU architecture as reported by `std::env::consts::ARCH` (e.g. `"x86_64"`, `"aarch64"`).
 
 ## `smelt.os.cwd`
 
@@ -21,8 +20,7 @@ Return the target CPU architecture as reported by `std::env::consts::ARCH` (e.g.
 fun(): string?, string?
 ```
 
-Return the current working directory as `(path, nil)`, or `(nil, err_string)` on
-failure.
+Return the current working directory as `(path, nil)`, or `(nil, err_string)` on failure.
 
 ## `smelt.os.exe_path`
 
@@ -30,9 +28,7 @@ failure.
 fun(): string?, string?
 ```
 
-Return the filesystem path to the running smelt binary as `(path, nil)` on
-success, or `(nil, err_string)` on failure. Useful for plugins that re-exec the
-binary or report install location.
+Return the filesystem path to the running smelt binary as `(path, nil)` on success, or `(nil, err_string)` on failure. Useful for plugins that re-exec the binary or report install location.
 
 ## `smelt.os.getenv`
 
@@ -56,9 +52,7 @@ Return the user's home directory, or `nil` if it cannot be determined.
 fun(url: string): boolean, string?
 ```
 
-Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and
-`file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or
-`(false, err_string)` if the scheme is rejected or every launcher errored.
+Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.
 
 ## `smelt.os.open_url_if_available`
 
@@ -66,8 +60,7 @@ Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and
 fun(url: string): table
 ```
 
-Open `url` only when the host environment can auto-open a browser. Returns
-`{ opened = bool, error = string?, reason = string? }`.
+Open `url` only when the host environment can auto-open a browser. Returns `{ opened = bool, error = string?, reason = string? }`.
 
 ## `smelt.os.pid`
 
@@ -83,8 +76,7 @@ Return the OS process id of the running smelt instance.
 fun(): string
 ```
 
-Return the target operating system as reported by `std::env::consts::OS` (e.g.
-`"macos"`, `"linux"`).
+Return the target operating system as reported by `std::env::consts::OS` (e.g. `"macos"`, `"linux"`).
 
 ## `smelt.os.set_cwd`
 
@@ -92,8 +84,7 @@ Return the target operating system as reported by `std::env::consts::OS` (e.g.
 fun(p: string): boolean, string?
 ```
 
-Change the process working directory to `p`. Returns `(true, nil)` on success or
-`(false, err_string)` on failure.
+Change the process working directory to `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 
 ## `smelt.os.setenv`
 
@@ -101,8 +92,7 @@ Change the process working directory to `p`. Returns `(true, nil)` on success or
 fun(name: string, value: string): nil
 ```
 
-Set the process environment variable `name` to `value`. Mutates the live process
-env; visible to subsequent `getenv` calls and child processes.
+Set the process environment variable `name` to `value`. Mutates the live process env; visible to subsequent `getenv` calls and child processes.
 
 ## `smelt.os.tempdir`
 
@@ -119,3 +109,4 @@ fun(name: string): nil
 ```
 
 Remove the environment variable `name` from the process environment.
+

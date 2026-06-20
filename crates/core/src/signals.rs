@@ -351,6 +351,7 @@ pub struct HistoryDelta {
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
     pub cancelled: bool,
+    pub continuation_token: Option<u64>,
 }
 
 /// Payload for the `tool_start` signal.
@@ -677,6 +678,9 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
             return mlua::Value::Nil;
         };
         let _ = t.set("cancelled", e.cancelled);
+        if let Some(token) = e.continuation_token {
+            let _ = t.set("continuation_token", token);
+        }
         mlua::Value::Table(t)
     });
     signals.register_lua_projector::<ToolStart, _>(|s, lua| {

@@ -121,6 +121,34 @@ impl WorkingState {
         }
     }
 
+    /// Start a new live turn by carrying forward the archived elapsed time from
+    /// the most recently completed turn. If a live turn already exists this is
+    /// just a phase update, matching `begin`.
+    pub fn continue_from_last(&mut self, phase: TurnPhase) {
+        let now = self.clock.instant_now();
+        let retry_deadline = retry_deadline_for(phase, now);
+        match self.live.as_mut() {
+            Some(live) => {
+                live.phase = phase;
+                live.retry_deadline = retry_deadline;
+            }
+            None => {
+                let elapsed = self
+                    .last
+                    .as_ref()
+                    .map_or(Duration::ZERO, |last| last.elapsed);
+                self.live = Some(LiveTurn {
+                    phase,
+                    timer: PausedTimer::with_elapsed(now, elapsed),
+                    retry_deadline,
+                    tps_samples: Vec::new(),
+                    last_spinner_frame: usize::MAX,
+                });
+                self.last = None;
+            }
+        }
+    }
+
     /// Archive the live turn's metadata as `last` and clear live.
     pub fn finish(&mut self, outcome: TurnOutcome) -> TurnMeta {
         let now = self.clock.instant_now();
@@ -442,6 +470,22 @@ mod tests {
         let meta = s.turn_meta().unwrap();
         assert!(!meta.interrupted);
         assert!(meta.avg_tps.is_none());
+    }
+
+    #[test]
+    fn continue_from_last_carries_elapsed_without_counting_idle_gap() {
+        let (clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        clock.advance(Duration::from_millis(750));
+        s.finish(TurnOutcome::Done);
+        assert_eq!(s.elapsed(), Some(Duration::from_millis(750)));
+
+        clock.advance(Duration::from_millis(1200));
+        s.continue_from_last(TurnPhase::Working);
+        assert_eq!(s.elapsed(), Some(Duration::from_millis(750)));
+
+        clock.advance(Duration::from_millis(250));
+        assert_eq!(s.elapsed(), Some(Duration::from_millis(1000)));
     }
 
     #[test]

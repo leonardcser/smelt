@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys
-to dedupe repeat fetches across a session.
+Process-wide HTTP response cache. Plugins can stash bodies under arbitrary keys to dedupe repeat fetches across a session.
 
 ## `smelt.http.cache.read`
 
@@ -13,8 +12,7 @@ to dedupe repeat fetches across a session.
 fun(key: string): string?
 ```
 
-Look up a cached HTTP response by `key`. Returns the stored string or `nil` if
-no entry exists.
+Look up a cached HTTP response by `key`. Returns the stored string or `nil` if no entry exists.
 
 ## `smelt.http.cache.write`
 
@@ -23,3 +21,4 @@ fun(key: string, value: string): nil
 ```
 
 Store `value` in the HTTP response cache under `key`.
+

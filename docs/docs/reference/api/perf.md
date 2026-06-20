@@ -4,8 +4,7 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Wrap a hot Lua
-block to see where time goes when perf collection is enabled.
+Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Wrap a hot Lua block to see where time goes when perf collection is enabled.
 
 ## `smelt.perf.time`
 
@@ -13,5 +12,5 @@ block to see where time goes when perf collection is enabled.
 fun(label: string, fn: fun(): any): any
 ```
 
-Run `fn()` and record its elapsed time under `label`. Returns whatever `fn`
-returns (single value). Cheap when perf collection is disabled.
+Run `fn()` and record its elapsed time under `label`. Returns whatever `fn` returns (single value). Cheap when perf collection is disabled.
+
