@@ -17,16 +17,6 @@ with `COMPAT(<id>)`.
   - `migrate_normalizes_pre_squash_user_version_to_current_baseline`
   - `existing_sqlite_session_migration_normalizes_pre_squash_schema_version`
 
-## transcript-window-scroll-top-adapter
-
-- Remove after: Phase 7 of `TRANSCRIPT_SCROLL_MODEL_PLAN.md`, once transcript row-authority writers are removed from `Window` and tests route viewport changes through transcript intents
-- Why: capture direct `Window::pin_scroll` and related numeric row updates at the transcript document boundary while Phase 4 makes `TranscriptDocument` the viewport-state owner
-- Code:
-  - `crates/tui/src/app/transcript.rs`: fallback from changed `fallback_scroll_top` to `TranscriptScrollIntent::CurrentRowTarget`
-- Tests:
-  - `transcript_viewport_state_preserves_anchor_without_window_scroll_change`
-  - transcript resize and mouse harness regressions that still call `Window::pin_scroll`
-
 ## session-v1-messages
 
 - Remove after: two alpha releases after session schema v2 ships
