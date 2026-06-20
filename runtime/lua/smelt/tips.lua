@@ -188,6 +188,10 @@ local interaction_tips = {
     text = "dismisses most dialogs",
   },
   {
+    id = "dialog.resize.drag",
+    text = "drag a dialog's top border to resize it",
+  },
+  {
     id = "esc.unqueue",
     key = "esc",
     text = "brings queued messages back into the prompt for editing",
