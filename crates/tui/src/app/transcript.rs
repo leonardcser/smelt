@@ -537,6 +537,7 @@ pub(crate) struct TranscriptDocument {
     active_descriptor_range: Option<Range<smelt_store::TranscriptDescriptorIndex>>,
     session_dir: Option<PathBuf>,
     extent_index: TranscriptExtentIndex,
+    viewport_anchor: Option<TranscriptScrollAnchor>,
 }
 
 pub(crate) struct TranscriptRenderContext {
@@ -562,6 +563,16 @@ struct SparseProjectionGap {
     end: RowIndex,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptScrollAnchor {
+    Tail,
+    Content {
+        virtual_row: RowIndex,
+        anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+    },
+    EstimatedRow(RowIndex),
+}
+
 enum TranscriptMaterializationPlan {
     Loaded(crate::content::transcript_buf::ProjectionPlan),
     UnloadedGap(SparseProjectionGap),
@@ -572,6 +583,8 @@ pub(crate) struct TranscriptProjectionPlan {
     row_offset: RowIndex,
     total_rows: RowIndex,
     requested_scroll: Option<RowIndex>,
+    scroll_anchor: TranscriptScrollAnchor,
+    width: u16,
     viewport_rows: u16,
 }
 
@@ -658,6 +671,7 @@ impl TranscriptDocument {
             active_descriptor_range,
             session_dir: loaded.session_dir,
             extent_index: TranscriptExtentIndex::default(),
+            viewport_anchor: None,
         };
         if document.active_descriptor_range.is_some() {
             document.install_active_descriptor_projection();
@@ -732,15 +746,6 @@ impl TranscriptDocument {
 
     fn estimated_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
         self.extent_index.estimated_sparse_prefix_rows(
-            &self.sparse_descriptors,
-            self.active_descriptor_range.as_ref(),
-            self.session_dir.as_ref(),
-            width,
-        )
-    }
-
-    fn estimated_sparse_suffix_rows(&mut self, width: u16) -> RowIndex {
-        self.extent_index.estimated_sparse_suffix_rows(
             &self.sparse_descriptors,
             self.active_descriptor_range.as_ref(),
             self.session_dir.as_ref(),
@@ -1163,6 +1168,72 @@ impl TranscriptDocument {
         self.activate_descriptor_window_range(range)
     }
 
+    fn resolve_exact_scroll_target_from_viewport_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
+    ) -> crate::content::transcript_buf::ScrollTarget {
+        let crate::content::transcript_buf::ScrollTarget::Visible(anchor) = scroll_target;
+        let requested_row = match anchor {
+            crate::content::transcript_buf::ScrollAnchor::Tail => {
+                return crate::content::transcript_buf::ScrollTarget::visible_tail();
+            }
+            crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_) => {
+                return scroll_target
+            }
+            crate::content::transcript_buf::ScrollAnchor::ExactRow(row) => row,
+        };
+        let Some(TranscriptScrollAnchor::Content {
+            virtual_row,
+            anchor,
+        }) = self.viewport_anchor
+        else {
+            return scroll_target;
+        };
+        if virtual_row != requested_row {
+            return scroll_target;
+        }
+        self.row_for_anchor(lua, width, anchor)
+            .map(crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row)
+            .unwrap_or(scroll_target)
+    }
+
+    fn scroll_anchor_for_projection_target(
+        &self,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
+    ) -> TranscriptScrollAnchor {
+        match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::Tail,
+            ) => TranscriptScrollAnchor::Tail,
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
+                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+            ) => TranscriptScrollAnchor::EstimatedRow(row),
+        }
+    }
+
+    fn capture_viewport_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        top_row: RowIndex,
+        fallback: TranscriptScrollAnchor,
+    ) {
+        self.viewport_anchor = match fallback {
+            TranscriptScrollAnchor::Tail => Some(TranscriptScrollAnchor::Tail),
+            TranscriptScrollAnchor::Content { .. } | TranscriptScrollAnchor::EstimatedRow(_) => {
+                self.row_anchor_at_row(lua, width, top_row)
+                    .map(|anchor| TranscriptScrollAnchor::Content {
+                        virtual_row: top_row,
+                        anchor,
+                    })
+                    .or(Some(fallback))
+            }
+        };
+    }
+
     pub(crate) fn plan_projection_measured(
         &mut self,
         lua: &LuaRuntime,
@@ -1171,6 +1242,9 @@ impl TranscriptDocument {
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
     ) -> TranscriptProjectionPlan {
+        let scroll_target =
+            self.resolve_exact_scroll_target_from_viewport_anchor(lua, width, scroll_target);
+        let scroll_anchor = self.scroll_anchor_for_projection_target(scroll_target);
         match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
@@ -1269,6 +1343,8 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             requested_scroll,
+            scroll_anchor,
+            width,
             viewport_rows,
         }
     }
@@ -1286,6 +1362,7 @@ impl TranscriptDocument {
             .min(viewport_rows.saturating_mul(2))
             .min(plan.total_rows.saturating_sub(gap.row_base));
         buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
+        self.viewport_anchor = Some(TranscriptScrollAnchor::EstimatedRow(gap.scroll_top));
         crate::smelt_edit::MaterializedRows {
             clamped_scroll: gap.scroll_top,
             row_base: gap.row_base,
@@ -1326,6 +1403,7 @@ impl TranscriptDocument {
                 rows.clamped_scroll = requested;
             }
         }
+        self.capture_viewport_anchor(lua, plan.width, rows.clamped_scroll, plan.scroll_anchor);
         rows
     }
 
@@ -1931,6 +2009,53 @@ mod document_tests {
         assert!(rows.row_base >= offset.saturating_add(loaded_rows));
         assert!(rows.materialized_rows > 0);
         assert!(buf.lines().iter().all(|line| line.is_empty()));
+    }
+
+    #[test]
+    fn viewport_content_anchor_survives_sparse_prefix_estimate_refinement() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let records = transcript_records(100);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            40..48,
+            None,
+        ));
+        let width = 80;
+        let viewport_rows = 10;
+        let original_top = document.estimated_sparse_prefix_row_offset(width);
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(408), Default::default());
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(original_top),
+            viewport_rows,
+        );
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+        assert_eq!(rows.clamped_scroll, original_top);
+        assert!(buf.lines().iter().any(|line| line.contains("block 40")));
+
+        let refined_top = original_top.saturating_add(25);
+        document.extent_index.descriptor_rows_estimate_cache.insert(
+            DescriptorRowsEstimateKey {
+                width,
+                start: 0,
+                end: 40,
+            },
+            refined_top,
+        );
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(rows.clamped_scroll),
+            viewport_rows,
+        );
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(rows.clamped_scroll, refined_top);
+        assert!(buf.lines().iter().any(|line| line.contains("block 40")));
     }
 
     #[test]
