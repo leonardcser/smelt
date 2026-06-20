@@ -158,6 +158,33 @@ fn lua_goal_banner_prefers_live_progress() {
 }
 
 #[test]
+fn lua_goal_banner_keeps_progress_visible_with_long_objective() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(48, 16);
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.create("finish a very long objective that would otherwise hide the stage label", { auto_continue = true }))
+            assert(goal.update_status({ progress = "Step 1/3, diagnosing" }))
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    assert!(
+        frame.rows[0].contains("Step 1/3, diagnosing"),
+        "progress should stay visible even when the objective is truncated:\n{}",
+        frame.text()
+    );
+    assert!(frame.rows[0].contains('…'), "frame:\n{}", frame.text());
+    assert!(
+        frame.rows[0].trim_end().ends_with("auto"),
+        "frame:\n{}",
+        frame.text()
+    );
+}
+
+#[test]
 fn lua_goal_banner_stays_above_transcript_scroll_pill() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 16);

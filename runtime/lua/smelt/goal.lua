@@ -163,9 +163,7 @@ local function context_text(goal)
     "Goal instructions:",
     "- Keep future work aligned with this objective unless the user says otherwise.",
     "- Use get_goal to inspect the current goal state.",
-    "- Progress is durable stage status, not live activity.",
-    "- Use update_goal_progress only for meaningful user-facing steps, sprints, phases, milestones, or validation passes.",
-    "- Leave progress unset when no durable stage label applies.",
+    "- Use update_goal_progress to record durable stage progress when starting each meaningful phase, including the first one.",
     "- At the end, call update_goal only if the goal is done or genuinely blocked.",
     "- Do not mark the goal done until current evidence proves the requested outcome is complete.",
   }, "\n")
@@ -200,9 +198,7 @@ local function continuation_prompt(goal)
     "",
     "## Instructions",
     "- Pick the next concrete step and execute it.",
-    "- Update goal progress only when entering a meaningful user-facing step, sprint, phase, milestone, or validation pass.",
-    "- Progress labels may include a brief stage description, such as 'Step 2/5, implementing parser changes'.",
-    "- Do not update progress for routine substeps, individual tool calls, or moment-to-moment activity.",
+    "- Call update_goal_progress when starting a meaningful phase, including the first one; skip routine substeps and live activity.",
     "- Preserve the original scope; do not redefine success around the work already done.",
     "- Before marking the goal done, verify the current state against every explicit requirement, artifact, command, test, and deliverable in the objective.",
     "- Treat incomplete, indirect, weak, or missing evidence as not done; gather stronger evidence or keep working.",
@@ -321,17 +317,24 @@ local function banner_mode(goal)
   return goal.auto_continue ~= false and "auto" or "manual"
 end
 
-local function banner_text(goal)
+local function banner_text(goal, width)
   local goal_text = present(goal.summary) or goal.objective
-  local progress = progress_label(goal.progress)
   if goal.state == STATE.BLOCKED and goal.reason then
-    local parts = { goal.reason, goal_text }
-    if progress then parts[#parts + 1] = progress end
-    return table.concat(parts, " · ")
+    goal_text = goal.reason .. " · " .. goal_text
   end
-  local parts = { goal_text }
-  if progress then parts[#parts + 1] = progress end
-  return table.concat(parts, " · ")
+
+  local progress = progress_label(goal.progress)
+  if not progress then return smelt.text.truncate(goal_text, width, { suffix = "…" }) end
+
+  local separator = " · "
+  local progress_width = smelt.text.width(progress)
+  local separator_width = smelt.text.width(separator)
+  if progress_width + separator_width >= width then
+    return smelt.text.truncate(progress, width, { suffix = "…" })
+  end
+
+  local goal_width = width - progress_width - separator_width
+  return smelt.text.truncate(goal_text, goal_width, { suffix = "…" }) .. separator .. progress
 end
 
 local function banner_row(goal, width)
@@ -357,7 +360,7 @@ local function banner_row(goal, width)
     }
   end
   local min_text_width = width - fixed_width
-  local text = smelt.text.fit(banner_text(goal), min_text_width, { suffix = "…" })
+  local text = banner_text(goal, min_text_width)
   local used = smelt.text.width(label) + smelt.text.width(text) + smelt.text.width(mode)
   local fill = string.rep(" ", math.max(width - used, 0))
   local row = label .. text .. fill .. mode
@@ -599,13 +602,13 @@ local function register_tools()
 
   smelt.tools.register({
     name = "update_goal_progress",
-    description = "Update the durable goal progress shown in the top goal bar. Use only for user-facing stages such as steps, sprints, phases, milestones, or validation passes. Labels may include a brief description of that stage, but must not report moment-to-moment activity. Prefer leaving progress unset when no meaningful long-term progress label applies. Do not use for routine substeps, individual tool calls, done, or blocked.",
+    description = "Update durable goal progress shown in the top goal bar. Call when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass, including the first one after a goal is set. Do not use for routine substeps, individual tool calls, live activity, done, or blocked.",
     parameters = {
       type = "object",
       properties = {
         progress = {
           type = "object",
-          description = "Durable user-facing progress. Use label for named steps, sprints, phases, milestones, or validation passes; use current/total or percent only when grounded in the goal or an explicit plan. The label may include a brief description of that stage, but not moment-to-moment activity.",
+          description = "Durable user-facing progress. Use label for a brief stage description, such as 'Step 2/5, implementing validation'; use current/total or percent only when grounded in the goal or an explicit plan.",
           properties = {
             label = { type = "string", description = "Durable progress label, such as 'Step 2/5, implementing validation', 'Sprint 1/3, stabilizing imports', '75%, validating regressions', or 'Review, simplifying changes'. Not moment-to-moment activity." },
             current = { type = "number", description = "Optional numeric current progress." },
