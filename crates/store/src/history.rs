@@ -479,6 +479,29 @@ pub(crate) fn transcript_descriptor_dense_extent(conn: &Connection) -> Result<us
     Ok(count as usize)
 }
 
+pub(crate) fn transcript_descriptor_index_for_block_idx(
+    conn: &Connection,
+    block_idx: u64,
+) -> Result<Option<TranscriptDescriptorIndex>> {
+    let _perf = perf::begin("store:transcript:descriptor_index_for_block");
+    let block_idx = checked_i64(block_idx, "block_idx")?;
+    let (before, exists): (i64, i64) = conn.query_row(
+        "SELECT
+             (SELECT COUNT(*)
+              FROM transcript_blocks
+              WHERE descriptor_json IS NOT NULL AND block_idx < ?1),
+             EXISTS(
+              SELECT 1
+              FROM transcript_blocks
+              WHERE descriptor_json IS NOT NULL AND block_idx = ?1
+             )",
+        [block_idx],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    perf::record_value("store:transcript:descriptor_block_found", exists as u64);
+    Ok((exists != 0).then(|| TranscriptDescriptorIndex::new(before.max(0) as usize)))
+}
+
 pub(crate) fn transcript_descriptor_estimated_rows(
     conn: &Connection,
     range: TranscriptDescriptorRange,

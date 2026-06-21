@@ -11,6 +11,80 @@ fn searchable_transcript_app() -> TestApp {
     app
 }
 
+fn sparse_display_only_search_app(
+    session_id: &str,
+    guard: &std::sync::MutexGuard<'static, ()>,
+) -> TestApp {
+    let mut app = TestApp::builder()
+        .with_vim(true)
+        .build_with_test_home_guard(guard);
+    app.app.handle_resize(80, 16);
+    let session_dir = smelt_core::session::dir_for_id(session_id);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+    let records = (0..200)
+        .map(|idx| {
+            let content = match idx {
+                20 => "early needle".to_string(),
+                199 => "tail needle".to_string(),
+                _ => format!("block {idx}"),
+            };
+            test_descriptor_record(idx, &content)
+        })
+        .collect::<Vec<_>>();
+    db.replace_transcript_descriptor_records(&records).unwrap();
+    drop(db);
+
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)
+        .expect("display-only transcript tail");
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.id = session_id.to_string();
+    app.app.load_session_display_only(
+        session,
+        loaded,
+        crate::app::DeferredSessionLoad {
+            id: session_id.to_string(),
+            history_len: 200,
+            checkpoint: None,
+        },
+    );
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+    app.render_silent();
+    app
+}
+
+fn test_descriptor_record(
+    block_idx: u64,
+    content: &str,
+) -> smelt_store::TranscriptDescriptorRecord {
+    smelt_store::TranscriptDescriptorRecord {
+        block_idx,
+        history_idx: None,
+        kind: "text".to_string(),
+        tool_call_id: None,
+        tool_name: None,
+        content_hash: "0".to_string(),
+        estimated_text_bytes: content.len() as u64,
+        preview_text: content.to_string(),
+        search_text: content.to_string(),
+        descriptor_json: serde_json::to_string(
+            &smelt_core::transcript_model::TranscriptBlockDescriptor::Text {
+                content: content.to_string(),
+            },
+        )
+        .unwrap(),
+        origin_json: Some(
+            serde_json::to_string(&smelt_core::BlockOrigin::History(block_idx as usize)).unwrap(),
+        ),
+        tool_state_json: None,
+    }
+}
+
 #[test]
 fn transcript_search_opens_status_input_and_repeats_matches() {
     let mut app = row_document_transcript_app(20, true);
@@ -49,6 +123,107 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     assert!(next_match.start.row > first_match.start.row);
     app.type_char('N');
     assert_eq!(transcript_row_cursor_row(&app), first_match.start.row);
+}
+
+#[test]
+fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
+    let guard = test_home_guard();
+    let mut app = sparse_display_only_search_app("sparse-search-forward", &guard);
+    app.type_char('G');
+
+    app.type_char('/');
+    app.type_text("needle");
+    app.press(KeyCode::Enter);
+
+    let tail_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    let tail_row = app
+        .app
+        .transcript_rows_and_breaks_range(tail_match.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(
+        tail_row.contains("tail needle"),
+        "matched row: {tail_row:?}"
+    );
+
+    app.type_char('n');
+    let early_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    assert!(early_match.start.row < tail_match.start.row);
+    assert_eq!(transcript_row_cursor_row(&app), early_match.start.row);
+    let early_row = app
+        .app
+        .transcript_rows_and_breaks_range(early_match.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(
+        early_row.contains("early needle"),
+        "matched row after repeat: {early_row:?}"
+    );
+}
+
+#[test]
+fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
+    let guard = test_home_guard();
+    let mut app = sparse_display_only_search_app("sparse-search-backward", &guard);
+    app.type_char('G');
+
+    app.type_char('/');
+    app.type_text("needle");
+    app.press(KeyCode::Enter);
+    let tail_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+
+    app.type_char('N');
+    let early_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    assert!(early_match.start.row < tail_match.start.row);
+    assert_eq!(transcript_row_cursor_row(&app), early_match.start.row);
+    let early_row = app
+        .app
+        .transcript_rows_and_breaks_range(early_match.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(
+        early_row.contains("early needle"),
+        "matched row after reverse repeat: {early_row:?}"
+    );
 }
 
 #[test]

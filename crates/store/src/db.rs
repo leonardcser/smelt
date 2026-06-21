@@ -8,8 +8,8 @@ use rusqlite::{Connection, OpenFlags};
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
 use crate::history::{
-    self, TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
-    TranscriptSearchCandidate,
+    self, TranscriptDescriptorIndex, TranscriptDescriptorRange, TranscriptDescriptorRecord,
+    TranscriptDescriptorSlice, TranscriptSearchCandidate,
 };
 use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
@@ -426,6 +426,13 @@ impl SessionDb {
     /// Use `transcript_descriptor_count` when sparse or synthetic block indices must be counted exactly.
     pub fn transcript_descriptor_dense_extent(&self) -> Result<usize> {
         history::transcript_descriptor_dense_extent(&self.conn)
+    }
+
+    pub fn transcript_descriptor_index_for_block_idx(
+        &self,
+        block_idx: u64,
+    ) -> Result<Option<TranscriptDescriptorIndex>> {
+        history::transcript_descriptor_index_for_block_idx(&self.conn, block_idx)
     }
 
     pub fn transcript_descriptor_estimated_rows(
@@ -960,6 +967,14 @@ mod tests {
         db.replace_transcript_descriptor_records(&records).unwrap();
 
         let slice = db.read_transcript_descriptor_slice((2..5).into()).unwrap();
+        assert_eq!(
+            db.transcript_descriptor_index_for_block_idx(20).unwrap(),
+            Some(TranscriptDescriptorIndex::new(2))
+        );
+        assert_eq!(
+            db.transcript_descriptor_index_for_block_idx(25).unwrap(),
+            None
+        );
         assert_eq!(slice.start.get(), 2);
         assert_eq!(slice.end().get(), 5);
         assert_eq!(slice.total_count, 6);

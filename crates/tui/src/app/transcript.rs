@@ -1614,6 +1614,41 @@ impl TranscriptDocument {
         None
     }
 
+    fn stored_descriptor_index_for_block_idx(&self, block_idx: u64) -> Option<usize> {
+        let session_dir = self.session_dir.clone()?;
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
+        db.transcript_descriptor_index_for_block_idx(block_idx)
+            .ok()
+            .flatten()
+            .map(|index| index.get())
+    }
+
+    pub(crate) fn activate_descriptor_window_for_block_idx(
+        &mut self,
+        width: u16,
+        block_idx: u64,
+        viewport_rows: u16,
+    ) -> bool {
+        if self.sparse_descriptors.total_count().is_none() {
+            return false;
+        }
+        let descriptor_index = self
+            .descriptor_index_for_block_id(BlockId::new(block_idx))
+            .or_else(|| self.stored_descriptor_index_for_block_idx(block_idx));
+        let Some(descriptor_index) = descriptor_index else {
+            return false;
+        };
+        let Some(range) = self.descriptor_window_range_around_center(
+            width,
+            descriptor_index,
+            viewport_rows,
+            true,
+        ) else {
+            return false;
+        };
+        self.activate_descriptor_window_range(range)
+    }
+
     fn content_anchor_at_row(
         &mut self,
         lua: &LuaRuntime,

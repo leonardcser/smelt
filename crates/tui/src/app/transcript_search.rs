@@ -3,7 +3,7 @@ use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::content::transcript_search_text::descriptor_search_text;
 use crate::smelt_edit::{DocPosition, DocRange, RowIndex};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
 const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
@@ -12,8 +12,11 @@ const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
 pub(crate) struct TranscriptSearchSession {
     pub(super) key: TranscriptSearchKey,
     pub(super) total_rows: RowIndex,
+    pub(super) candidate_backed: bool,
+    pub(super) candidate_blocks: Vec<u64>,
     pub(super) candidates: Vec<usize>,
     pub(super) scanned: Vec<bool>,
+    pub(super) scanned_blocks: HashSet<u64>,
     pub(super) matches: Vec<DocRange>,
     pub(super) current: Option<usize>,
 }
@@ -33,6 +36,7 @@ pub(super) struct TranscriptSearchStore {
 
 #[derive(Clone, Debug)]
 struct TranscriptSearchEntry {
+    block_ids: Vec<u64>,
     first_row: RowIndex,
     rows: RowIndex,
 }
@@ -135,6 +139,7 @@ fn push_search_entry(
 ) {
     let entry_index = entries.len();
     entries.push(TranscriptSearchEntry {
+        block_ids: layout_entry.block_ids.iter().map(|id| id.get()).collect(),
         first_row: layout_entry.first_row,
         rows: layout_entry.rows,
     });
@@ -192,6 +197,35 @@ impl TuiApp {
             text.push_str(&block_text);
         }
         text
+    }
+
+    fn transcript_search_viewport_rows(&self) -> u16 {
+        self.transcript_win()
+            .viewport
+            .map(|viewport| viewport.rect.height)
+            .unwrap_or(20)
+            .max(1)
+    }
+
+    fn activate_transcript_search_candidate_window(
+        &mut self,
+        candidate_blocks: &[u64],
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) {
+        let origin_block = self.transcript_candidate_origin_block(origin, direction);
+        let Some(block_idx) =
+            transcript_search_activation_block(candidate_blocks, origin_block, direction)
+        else {
+            return;
+        };
+        let width = self.transcript_width() as u16;
+        let viewport_rows = self.transcript_search_viewport_rows();
+        let _ = self.transcript.activate_descriptor_window_for_block_idx(
+            width,
+            block_idx,
+            viewport_rows,
+        );
     }
 
     fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
@@ -374,6 +408,9 @@ impl TuiApp {
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
         let candidate_backed = sqlite_candidates.available;
         let candidate_blocks = sqlite_candidates.block_indices;
+        if candidate_backed {
+            self.activate_transcript_search_candidate_window(&candidate_blocks, origin, direction);
+        }
         let (key, candidates, scanned_len, indexed_total_rows) = {
             let candidate_blocks_slice = candidate_backed.then_some(candidate_blocks.as_slice());
             let index = self.ensure_transcript_candidate_index(candidate_blocks_slice)?;
@@ -400,8 +437,11 @@ impl TuiApp {
         Some(TranscriptSearchSession {
             key,
             total_rows,
+            candidate_backed,
+            candidate_blocks,
             candidates,
             scanned: vec![false; scanned_len],
+            scanned_blocks: HashSet::new(),
             matches: Vec::new(),
             current: None,
         })
@@ -414,15 +454,25 @@ impl TuiApp {
         direction: SearchDirection,
     ) -> bool {
         self.sync_transcript_renderer_generation();
+        if session.key.width != self.transcript_width() as u16 {
+            return false;
+        }
+        if self
+            .cached_transcript_match(session, origin, direction)
+            .is_some()
+        {
+            return true;
+        }
+        if session.candidate_backed {
+            return self
+                .next_unscanned_transcript_candidate_block(session, origin, direction)
+                .is_some();
+        }
         let current_key = self.search.transcript_index.as_ref().map(|index| index.key);
         current_key == Some(session.key)
-            && session.key.width == self.transcript_width() as u16
-            && (self
-                .cached_transcript_match(session, origin, direction)
+            && self
+                .next_unscanned_transcript_candidate(session, origin, direction)
                 .is_some()
-                || self
-                    .next_unscanned_transcript_candidate(session, origin, direction)
-                    .is_some())
     }
 
     pub(super) fn sync_transcript_search_session(
@@ -435,7 +485,17 @@ impl TuiApp {
         if self.transcript_search_session_can_advance(session, origin, direction) {
             return true;
         }
+        if session.candidate_backed {
+            return false;
+        }
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
+        if sqlite_candidates.available {
+            self.activate_transcript_search_candidate_window(
+                &sqlite_candidates.block_indices,
+                origin,
+                direction,
+            );
+        }
         let candidate_blocks = sqlite_candidates
             .available
             .then_some(sqlite_candidates.block_indices.as_slice());
@@ -528,10 +588,31 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> Option<usize> {
+        if session.candidate_backed {
+            return self
+                .scan_transcript_candidate_blocks_until_match(session, query, origin, direction);
+        }
         loop {
             let entry_index =
                 self.next_unscanned_transcript_candidate(session, origin, direction)?;
             self.scan_transcript_candidate(session, query, entry_index);
+            if let Some(index) = self.cached_transcript_match(session, origin, direction) {
+                return Some(index);
+            }
+        }
+    }
+
+    fn scan_transcript_candidate_blocks_until_match(
+        &mut self,
+        session: &mut TranscriptSearchSession,
+        query: &str,
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) -> Option<usize> {
+        loop {
+            let block_idx =
+                self.next_unscanned_transcript_candidate_block(session, origin, direction)?;
+            self.scan_transcript_candidate_block(session, query, block_idx);
             if let Some(index) = self.cached_transcript_match(session, origin, direction) {
                 return Some(index);
             }
@@ -546,6 +627,12 @@ impl TuiApp {
         range: DocRange,
         direction: SearchDirection,
     ) {
+        if session.candidate_backed {
+            // Persisted candidate scans hydrate sparse transcript windows. Keep the
+            // active window on the match the user is jumping to; the next repeat
+            // can hydrate the next candidate on demand.
+            return;
+        }
         let target_matches =
             transcript_prefetch_target_len(session.matches.len(), current, direction);
         let mut scanned_entries = 0usize;
@@ -577,7 +664,8 @@ impl TuiApp {
             SearchDirection::Forward => session.candidates.iter().copied().find(|entry_index| {
                 !session.scanned.get(*entry_index).copied().unwrap_or(true)
                     && index.entries.get(*entry_index).is_some_and(|entry| {
-                        entry.first_row.saturating_add(entry.rows) > origin.row
+                        !transcript_entry_scanned(session, entry)
+                            && entry.first_row.saturating_add(entry.rows) > origin.row
                     })
             }),
             SearchDirection::Backward => {
@@ -588,13 +676,129 @@ impl TuiApp {
                     .copied()
                     .find(|entry_index| {
                         !session.scanned.get(*entry_index).copied().unwrap_or(true)
-                            && index
-                                .entries
-                                .get(*entry_index)
-                                .is_some_and(|entry| entry.first_row <= origin.row)
+                            && index.entries.get(*entry_index).is_some_and(|entry| {
+                                !transcript_entry_scanned(session, entry)
+                                    && entry.first_row <= origin.row
+                            })
                     })
             }
         }
+    }
+
+    fn next_unscanned_transcript_candidate_block(
+        &mut self,
+        session: &TranscriptSearchSession,
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) -> Option<u64> {
+        let origin_block = self.transcript_candidate_origin_block(origin, direction);
+        match direction {
+            SearchDirection::Forward => {
+                if let Some(origin_block) = origin_block {
+                    if let Some(block_idx) =
+                        session.candidate_blocks.iter().copied().find(|block_idx| {
+                            *block_idx >= origin_block
+                                && !session.scanned_blocks.contains(block_idx)
+                        })
+                    {
+                        return Some(block_idx);
+                    }
+                }
+                session
+                    .candidate_blocks
+                    .iter()
+                    .copied()
+                    .find(|block_idx| !session.scanned_blocks.contains(block_idx))
+            }
+            SearchDirection::Backward => {
+                if let Some(origin_block) = origin_block {
+                    if let Some(block_idx) =
+                        session
+                            .candidate_blocks
+                            .iter()
+                            .rev()
+                            .copied()
+                            .find(|block_idx| {
+                                *block_idx <= origin_block
+                                    && !session.scanned_blocks.contains(block_idx)
+                            })
+                    {
+                        return Some(block_idx);
+                    }
+                }
+                session
+                    .candidate_blocks
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|block_idx| !session.scanned_blocks.contains(block_idx))
+            }
+        }
+    }
+
+    fn transcript_candidate_origin_block(
+        &mut self,
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) -> Option<u64> {
+        let width = self.transcript_width() as u16;
+        self.transcript
+            .block_id_at_or_before_row(
+                &self.lua,
+                width,
+                origin.row,
+                matches!(direction, SearchDirection::Forward),
+            )
+            .map(|id| id.get())
+    }
+
+    fn scan_transcript_candidate_block(
+        &mut self,
+        session: &mut TranscriptSearchSession,
+        query: &str,
+        block_idx: u64,
+    ) {
+        let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate_block");
+        if !session.scanned_blocks.insert(block_idx) {
+            return;
+        }
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        let viewport_rows = self.transcript_search_viewport_rows();
+        let _ = self.transcript.activate_descriptor_window_for_block_idx(
+            width,
+            block_idx,
+            viewport_rows,
+        );
+        let layout = self
+            .transcript
+            .materialize_exact_loaded_search_layout_for_blocks(&self.lua, width, &[block_idx]);
+        let theme = self.ui.theme().clone();
+        let mut scanned_rows = 0;
+        for entry in layout.entries {
+            for id in &entry.block_ids {
+                session.scanned_blocks.insert(id.get());
+            }
+            scanned_rows += entry.rows;
+            if entry.rows == 0 {
+                continue;
+            }
+            let found = self.transcript.search_matches_for_row_range(
+                &self.lua,
+                width,
+                &theme,
+                entry.first_row,
+                entry.rows,
+                query,
+            );
+            merge_doc_ranges(&mut session.matches, found);
+        }
+        smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
+        smelt_perf::perf::record_value("search:transcript:scanned_rows", scanned_rows);
+        smelt_perf::perf::record_value(
+            "search:transcript:cached_matches",
+            session.matches.len() as u64,
+        );
     }
 
     fn scan_transcript_candidate(
@@ -604,18 +808,19 @@ impl TuiApp {
         entry_index: usize,
     ) {
         let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate");
-        let Some((first_row, rows)) = self
+        let Some((block_ids, first_row, rows)) = self
             .search
             .transcript_index
             .as_ref()
             .and_then(|index| index.entries.get(entry_index))
-            .map(|entry| (entry.first_row, entry.rows))
+            .map(|entry| (entry.block_ids.clone(), entry.first_row, entry.rows))
         else {
             return;
         };
         if let Some(scanned) = session.scanned.get_mut(entry_index) {
             *scanned = true;
         }
+        session.scanned_blocks.extend(block_ids);
         smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
         smelt_perf::perf::record_value("search:transcript:scanned_rows", rows);
         if rows == 0 {
@@ -632,6 +837,43 @@ impl TuiApp {
             "search:transcript:cached_matches",
             session.matches.len() as u64,
         );
+    }
+}
+
+fn transcript_entry_scanned(
+    session: &TranscriptSearchSession,
+    entry: &TranscriptSearchEntry,
+) -> bool {
+    !entry.block_ids.is_empty()
+        && entry
+            .block_ids
+            .iter()
+            .all(|block_idx| session.scanned_blocks.contains(block_idx))
+}
+
+fn transcript_search_activation_block(
+    candidate_blocks: &[u64],
+    origin_block: Option<u64>,
+    direction: SearchDirection,
+) -> Option<u64> {
+    match direction {
+        SearchDirection::Forward => origin_block
+            .and_then(|origin_block| {
+                candidate_blocks
+                    .iter()
+                    .copied()
+                    .find(|block_idx| *block_idx >= origin_block)
+            })
+            .or_else(|| candidate_blocks.first().copied()),
+        SearchDirection::Backward => origin_block
+            .and_then(|origin_block| {
+                candidate_blocks
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|block_idx| *block_idx <= origin_block)
+            })
+            .or_else(|| candidate_blocks.last().copied()),
     }
 }
 
