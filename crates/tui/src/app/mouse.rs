@@ -1,5 +1,6 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
+use crate::app::transcript::TranscriptProjectionRestore;
 use crate::app::transcript_scroll_trace::{
     TranscriptScrollIntent, TranscriptScrollTraceRenderInput,
 };
@@ -111,14 +112,6 @@ struct TranscriptScrollInputCandidate {
     window_scroll_before: RowIndex,
 }
 
-fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
-    if delta >= 0 {
-        row.saturating_add(delta as RowIndex)
-    } else {
-        row.saturating_sub(delta.unsigned_abs() as RowIndex)
-    }
-}
-
 impl TuiApp {
     pub(crate) fn scroll_at_with_transcript_intent(
         &mut self,
@@ -158,86 +151,64 @@ impl TuiApp {
             intent: TranscriptScrollIntent::UserDelta { rows: delta },
             window_scroll_before: self.transcript_scroll_top(),
         };
-        if !self.advance_transcript_drag_autoscroll_endpoint(delta) {
+        let Some(restore) = self.advance_transcript_drag_autoscroll_endpoint(delta) else {
             return false;
-        }
-        self.record_transcript_scroll_input(Some(candidate));
+        };
+        self.record_transcript_scroll_intent_for_projection(
+            candidate.label,
+            candidate.intent,
+            candidate.window_scroll_before,
+            restore,
+            None,
+        );
         true
     }
 
-    fn advance_transcript_drag_autoscroll_endpoint(&mut self, delta: isize) -> bool {
-        let (viewport_rows, total_rows, scroll_top, mut state) = {
-            let Some(win) = self.ui.win(crate::app::TRANSCRIPT_WIN) else {
-                return false;
-            };
-            let Some(viewport) = win.viewport else {
-                return false;
-            };
+    fn advance_transcript_drag_autoscroll_endpoint(
+        &mut self,
+        delta: isize,
+    ) -> Option<TranscriptProjectionRestore> {
+        let (viewport_rows, scroll_top, total_rows, mut state) = {
+            let win = self.ui.win(crate::app::TRANSCRIPT_WIN)?;
+            let viewport = win.viewport?;
             let state = win.document_view_state();
             if !state.active {
-                return false;
+                return None;
             }
             (
                 viewport.rect.height,
-                state.materialized.total_rows,
                 win.scroll_top(),
+                state.materialized.total_rows,
                 state,
             )
         };
         if viewport_rows == 0 || total_rows == 0 || delta == 0 {
-            return false;
+            return None;
+        }
+        let max_scroll = total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)));
+        if (delta < 0 && scroll_top == 0) || (delta > 0 && scroll_top >= max_scroll) {
+            return None;
         }
 
-        let max_scroll = total_rows.saturating_sub(RowIndex::from(viewport_rows));
-        let current_scroll = scroll_top.min(max_scroll);
-        let new_scroll = add_signed_row(current_scroll, delta).min(max_scroll);
-        if new_scroll == scroll_top {
-            return false;
-        }
-
-        let edge_row = if delta < 0 {
-            new_scroll
-        } else {
-            new_scroll
-                .saturating_add(RowIndex::from(viewport_rows.saturating_sub(1)))
-                .min(total_rows.saturating_sub(1))
-        };
-        let byte_col = state.drag_endpoint.unwrap_or(state.cursor).byte_col;
         if state.selection_anchor.is_none() {
             state.selection_anchor = state.drag_endpoint.or(Some(state.cursor));
             state.selection_includes_cursor_cell = true;
         }
-        let cursor = crate::smelt_edit::DocPosition {
-            row: edge_row,
-            byte_col,
-        };
-        state.cursor = cursor;
-        state.drag_endpoint = Some(cursor);
+        if state.drag_endpoint.is_none() {
+            state.drag_endpoint = Some(state.cursor);
+        }
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
             win.set_document_view_state(state);
         }
-        true
-    }
-
-    fn advance_transcript_selection_cursor_for_user_delta(&mut self, delta: isize) {
-        if delta == 0 {
-            return;
-        }
-        let Some(win) = self.ui.win(crate::app::TRANSCRIPT_WIN) else {
-            return;
+        let edge_row = if delta < 0 {
+            0
+        } else {
+            viewport_rows.saturating_sub(1)
         };
-        if !win.selection_active() {
-            return;
-        }
-        let mut state = win.document_view_state();
-        if !state.active || state.drag_endpoint.is_some() || state.materialized.total_rows == 0 {
-            return;
-        }
-        state.cursor.row = add_signed_row(state.cursor.row, delta)
-            .min(state.materialized.total_rows.saturating_sub(1));
-        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            win.set_document_view_state(state);
-        }
+        Some(TranscriptProjectionRestore {
+            cursor_screen_row: None,
+            drag_endpoint_screen_row: Some(edge_row),
+        })
     }
 
     pub(crate) fn transcript_scroll_top(&self) -> RowIndex {
@@ -330,10 +301,12 @@ impl TuiApp {
         let Some(candidate) = candidate else {
             return;
         };
-        self.record_transcript_scroll_intent(
+        self.record_transcript_scroll_intent_for_projection(
             candidate.label,
             candidate.intent,
             candidate.window_scroll_before,
+            TranscriptProjectionRestore::default(),
+            None,
         );
     }
 
@@ -343,11 +316,12 @@ impl TuiApp {
         intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
     ) {
-        self.record_transcript_scroll_intent_with_selection_update(
+        self.record_transcript_scroll_intent_for_projection(
             label,
             intent,
             window_scroll_before,
-            true,
+            TranscriptProjectionRestore::default(),
+            None,
         );
     }
 
@@ -356,34 +330,48 @@ impl TuiApp {
         label: impl Into<String>,
         intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
+        restore: TranscriptProjectionRestore,
+        local_scroll_top: Option<RowIndex>,
     ) {
-        self.record_transcript_scroll_intent_with_selection_update(
+        self.record_transcript_scroll_intent_for_projection(
             label,
             intent,
             window_scroll_before,
-            false,
+            restore,
+            local_scroll_top,
         );
     }
 
-    fn record_transcript_scroll_intent_with_selection_update(
+    fn record_transcript_scroll_intent_for_projection(
         &mut self,
         label: impl Into<String>,
         intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
-        update_selection_cursor: bool,
+        mut restore: TranscriptProjectionRestore,
+        local_scroll_top: Option<RowIndex>,
     ) {
         let label = label.into();
-        if update_selection_cursor {
-            if let TranscriptScrollIntent::UserDelta { rows } = intent {
-                self.advance_transcript_selection_cursor_for_user_delta(rows);
-            }
+        if matches!(intent, TranscriptScrollIntent::UserDelta { .. })
+            && restore.cursor_screen_row.is_none()
+        {
+            restore.cursor_screen_row = self
+                .ui
+                .win(crate::app::TRANSCRIPT_WIN)
+                .filter(|win| {
+                    win.selection_active() && win.document_view_state().drag_endpoint.is_none()
+                })
+                .and_then(|win| {
+                    win.viewport
+                        .and_then(|v| win.cursor_screen_row(v.rect.height))
+                });
         }
         if !matches!(intent, TranscriptScrollIntent::Tail) {
             if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
                 win.pin_current_scroll();
             }
         }
-        self.transcript.set_pending_scroll_intent(intent.clone());
+        self.transcript
+            .set_pending_projection(intent.clone(), restore, local_scroll_top);
         if !self.transcript.scroll_trace_enabled() {
             return;
         }

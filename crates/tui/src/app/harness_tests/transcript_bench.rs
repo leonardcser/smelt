@@ -246,6 +246,15 @@ fn perf_duration_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 
         .unwrap_or(0)
 }
 
+fn perf_duration_count(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> usize {
+    snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == label)
+        .map(|row| row.count)
+        .unwrap_or(0)
+}
+
 fn perf_value_total(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
     snapshot
         .values
@@ -327,13 +336,21 @@ struct SearchBenchSample {
     nav_ctrl_u20_ms: f64,
     nav_gg_ms: f64,
     nav_g_ms: f64,
+    burst_top_ctrl_d80_ms: f64,
+    burst_top_down80_ms: f64,
+    burst_bottom_ctrl_u80_ms: f64,
+    burst_bottom_up80_ms: f64,
+    burst_mid_ctrl_d80_ms: f64,
+    burst_mid_down80_ms: f64,
+    burst_mid_ctrl_u80_ms: f64,
+    burst_mid_up80_ms: f64,
     rare_ms: f64,
     common_submit_ms: f64,
     next100_ms: f64,
     after_append_ms: f64,
 }
 
-fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 12] {
+fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 20] {
     [
         ("width_resize", sample.width_resize_ms),
         ("height_resize", sample.height_resize_ms),
@@ -343,11 +360,32 @@ fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64
         ("nav_ctrl_u20", sample.nav_ctrl_u20_ms),
         ("nav_gg", sample.nav_gg_ms),
         ("nav_G", sample.nav_g_ms),
+        ("burst_top_ctrl_d80", sample.burst_top_ctrl_d80_ms),
+        ("burst_top_down80", sample.burst_top_down80_ms),
+        ("burst_bottom_ctrl_u80", sample.burst_bottom_ctrl_u80_ms),
+        ("burst_bottom_up80", sample.burst_bottom_up80_ms),
+        ("burst_mid_ctrl_d80", sample.burst_mid_ctrl_d80_ms),
+        ("burst_mid_down80", sample.burst_mid_down80_ms),
+        ("burst_mid_ctrl_u80", sample.burst_mid_ctrl_u80_ms),
+        ("burst_mid_up80", sample.burst_mid_up80_ms),
         ("rare", sample.rare_ms),
         ("common_submit", sample.common_submit_ms),
         ("next100", sample.next100_ms),
         ("after_append", sample.after_append_ms),
     ]
+}
+
+fn assert_no_full_block_renders_for_scroll(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+    for metric in [
+        "transcript:display_model:render_full_to_buffer",
+        "transcript:display_model:render_full_fallback",
+    ] {
+        let full_renders = perf_duration_count(snapshot, metric);
+        assert_eq!(
+            full_renders, 0,
+            "{label} recorded {metric} {full_renders} times while scrolling; row anchors must stay lightweight"
+        );
+    }
 }
 
 fn assert_view_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
@@ -367,6 +405,9 @@ fn assert_view_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &st
         rebuild_us, 0,
         "{label} rebuilt the full row index in {rebuild_us}us"
     );
+    if matches!(label, "nav_ctrl_d20" | "nav_ctrl_u20") {
+        assert_no_full_block_renders_for_scroll(snapshot, label);
+    }
 }
 
 fn assert_copy_operation_gates(
@@ -395,6 +436,184 @@ fn assert_copy_operation_gates(
         rebuild_us, 0,
         "{label} rebuilt the full row index in {rebuild_us}us"
     );
+}
+
+fn assert_burst_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+    assert_no_full_search_hot_path_reads(snapshot, label);
+    let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
+    assert!(
+        materialized_rows <= 4096,
+        "{label} materialized {materialized_rows} rows, expected bounded viewport work"
+    );
+    assert_no_full_block_renders_for_scroll(snapshot, label);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BurstBenchKey {
+    CtrlD,
+    CtrlU,
+    Down,
+    Up,
+}
+
+impl BurstBenchKey {
+    fn press(self, app: &mut TestApp) {
+        match self {
+            Self::CtrlD => app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Self::CtrlU => app.press_mod(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Self::Down => app.press(KeyCode::Down),
+            Self::Up => app.press(KeyCode::Up),
+        }
+    }
+
+    fn max_rows_per_event(self, viewport_rows: u16) -> crate::smelt_edit::RowIndex {
+        match self {
+            Self::CtrlD | Self::CtrlU => crate::smelt_edit::RowIndex::from(viewport_rows.max(1)),
+            Self::Down | Self::Up => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BurstBenchPosition {
+    Top,
+    Middle,
+    Bottom,
+}
+
+fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
+    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 100, 32)
+        .expect("load sparse bench transcript tail");
+    app.app.clear_transcript();
+    app.app.transcript.replace_loaded_transcript(loaded);
+    app.app.handle_resize(100, 32);
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+    app.render_silent();
+}
+
+fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition) {
+    match position {
+        BurstBenchPosition::Top => {
+            app.type_char('g');
+            app.type_char('g');
+        }
+        BurstBenchPosition::Middle => {
+            let descriptor = app
+                .app
+                .transcript
+                .descriptor_total_count()
+                .expect("sparse descriptor count")
+                / 2;
+            assert!(
+                app.app
+                    .reveal_transcript_descriptor_block(descriptor, 1, true),
+                "middle descriptor reveal failed for descriptor {descriptor}"
+            );
+        }
+        BurstBenchPosition::Bottom => {
+            app.type_char('G');
+        }
+    }
+    app.render_silent();
+}
+
+fn assert_burst_bench_projection_bounded(
+    label: &str,
+    frames: &[crate::app::transcript_scroll_trace::TranscriptScrollTraceFrame],
+    before_scroll: crate::smelt_edit::RowIndex,
+    max_input_rows: crate::smelt_edit::RowIndex,
+    max_projection_delta: crate::smelt_edit::RowIndex,
+    strict_projection_delta: bool,
+) {
+    let mut checked = 0usize;
+    for frame in frames {
+        let crate::app::transcript_scroll_trace::TranscriptScrollIntent::UserDelta { rows } =
+            frame.scroll_intent
+        else {
+            continue;
+        };
+        let input_rows = rows.unsigned_abs() as crate::smelt_edit::RowIndex;
+        assert!(
+            input_rows <= max_input_rows,
+            "{label} over-accumulated a single burst input: input_rows={input_rows}, max_input_rows={max_input_rows}, frame={frame:?}"
+        );
+        let crate::app::transcript_scroll_trace::TranscriptProjectionTargetTrace::ExactRow(target) =
+            frame.projection_target
+        else {
+            panic!("{label} projected user delta through a non-exact target: {frame:?}");
+        };
+        if strict_projection_delta {
+            let delta = target.abs_diff(before_scroll);
+            assert!(
+                delta <= max_projection_delta,
+                "{label} over-accumulated burst navigation: before_scroll={before_scroll}, target={target}, delta={delta}, max_delta={max_projection_delta}, frame={frame:?}"
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "{label} produced no user-delta projection frames: {frames:?}"
+    );
+}
+
+fn measure_transcript_burst_operation(
+    app: &mut TestApp,
+    label: &'static str,
+    report_perf: bool,
+    position: BurstBenchPosition,
+    key: BurstBenchKey,
+) -> f64 {
+    const BURST_EVENTS: usize = 80;
+
+    prepare_burst_bench_position(app, position);
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport")
+        .rect
+        .height
+        .max(1);
+    let before_scroll = app.app.transcript_win().scroll_top();
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+    smelt_perf::perf::clear();
+    let start = std::time::Instant::now();
+    for _ in 0..BURST_EVENTS {
+        key.press(app);
+    }
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        before_scroll,
+        "{label} mutated Window::scroll_top before projection"
+    );
+    app.render_silent();
+    let ms = elapsed_ms(start.elapsed());
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    let max_input_rows = key.max_rows_per_event(viewport_rows);
+    let max_projection_delta = max_input_rows
+        .saturating_mul(BURST_EVENTS as crate::smelt_edit::RowIndex)
+        .saturating_add(crate::smelt_edit::RowIndex::from(viewport_rows).saturating_mul(2));
+    assert_burst_bench_projection_bounded(
+        label,
+        &frames,
+        before_scroll,
+        max_input_rows,
+        max_projection_delta,
+        matches!(position, BurstBenchPosition::Top),
+    );
+    let snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot(label, &snapshot);
+    }
+    assert_burst_operation_gates(&snapshot, label);
+    ms
 }
 
 fn measure_transcript_view_operation(
@@ -617,6 +836,64 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         dirty_scanned <= 1,
         "after_append scanned {dirty_scanned} dirty blocks, expected only the appended suffix"
     );
+
+    install_sparse_resume_bench_transcript(&mut app);
+    let burst_top_ctrl_d80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_top_ctrl_d80",
+        report_perf,
+        BurstBenchPosition::Top,
+        BurstBenchKey::CtrlD,
+    );
+    let burst_top_down80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_top_down80",
+        report_perf,
+        BurstBenchPosition::Top,
+        BurstBenchKey::Down,
+    );
+    let burst_bottom_ctrl_u80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_bottom_ctrl_u80",
+        report_perf,
+        BurstBenchPosition::Bottom,
+        BurstBenchKey::CtrlU,
+    );
+    let burst_bottom_up80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_bottom_up80",
+        report_perf,
+        BurstBenchPosition::Bottom,
+        BurstBenchKey::Up,
+    );
+    let burst_mid_ctrl_d80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_mid_ctrl_d80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::CtrlD,
+    );
+    let burst_mid_down80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_mid_down80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::Down,
+    );
+    let burst_mid_ctrl_u80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_mid_ctrl_u80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::CtrlU,
+    );
+    let burst_mid_up80_ms = measure_transcript_burst_operation(
+        &mut app,
+        "burst_mid_up80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::Up,
+    );
     smelt_perf::perf::set_enabled(false);
 
     SearchBenchSample {
@@ -630,6 +907,14 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         nav_ctrl_u20_ms,
         nav_gg_ms,
         nav_g_ms,
+        burst_top_ctrl_d80_ms,
+        burst_top_down80_ms,
+        burst_bottom_ctrl_u80_ms,
+        burst_bottom_up80_ms,
+        burst_mid_ctrl_d80_ms,
+        burst_mid_down80_ms,
+        burst_mid_ctrl_u80_ms,
+        burst_mid_up80_ms,
         rare_ms,
         common_submit_ms,
         next100_ms,

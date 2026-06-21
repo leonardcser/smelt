@@ -1128,6 +1128,108 @@ Acceptance:
 - `Window` paints and reports resolved viewport rows, but does not decide transcript sparse movement.
 - The plan can be closed only after a manual retest of the reported drag-down and Down-arrow scenarios.
 
+Reset Phase 8 to 10 implementation record:
+
+- Added deterministic bottom-edge drag-select autoscroll coverage that starts high in a sparse resumed transcript, parks the pointer at the bottom edge, runs 320 ticks, requires every tick to produce a frame, and asserts monotonic visible content, exact and fast `UserDelta` frames, exact-row targets, no pre-projection `Window::scroll_top` mutation, and contiguous descriptor coverage.
+- Added a live-render regression for the manual bottom-edge drag failure. The test runs `drag tick -> render -> no-input render` repeatedly and asserts the no-input render preserves both the resolved scroll row and visible content from the preceding drag tick.
+- Added focused Down-arrow coverage for both cursor movement inside the viewport and lower-edge movement. The tests assert one exact document row per keypress, no viewport movement before the cursor reaches the edge, and one visible-row viewport movement while the cursor remains parked on the lower edge.
+- Routed transcript local document commands without active selection through `TranscriptScrollIntent::UserDelta` before applying numeric window scroll. The generic `DocumentViewExecutor` still computes cursor state, but transcript projection owns the resolved paint scroll row for local movement.
+- Changed transcript drag autoscroll so pre-projection numeric `new_scroll == scroll_top` no longer suppresses valid sparse ticks. Drag endpoints are parked by pending screen row and restored after exact projection against materialized rows.
+- Added `TranscriptDocument` pending cursor and drag-endpoint screen-row state for post-projection placement. The render loop now applies pending row placement after materialized rows and resolved scroll are installed on `Window`.
+- Removed the transitional selection-cursor repair path that advanced visual selection by stale numeric rows before projection. Visual selection wheel scrolling now preserves the cursor screen row through the same post-projection path.
+- Kept `ApproximateRowSeek` and `EstimatedRow` restricted to explicit far seek, scrollbar fallback, and trace fallback surfaces. Local motion tests now assert that `UserDelta` frames do not fall back to `ExactContentAnchor(EstimatedRow(_))`.
+- Investigated the manual drag retest trace at `/home/dev/tmp/transcript-interaction-trace.jsonl`. The trace showed drag ticks continued, but each `UserDelta { rows: 1 }` projection was followed by a no-input `PreserveViewport` frame that resolved one row back through `ReflowStableRow`, making the drag appear to lock.
+- Changed no-input `PreserveViewport` projection to use the exact resolved row with `visible_row(row)` rather than `visible_reflow_stable_row(row)`, so render-only frames preserve the viewport installed by the preceding local input instead of reinterpreting and undoing it.
+
+Reset Phase 8 to 10 validation:
+
+- `cargo test -p smelt-tui --features harness transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks`
+- `cargo test -p smelt-tui --features harness transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking`
+- `cargo test -p smelt-tui --features harness transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport`
+- `cargo test -p smelt-tui --features harness transcript_cursor_down_at_lower_edge_moves_one_visible_row_per_step`
+- `cargo test -p smelt-tui --features harness transcript_cursor_down_inside_viewport_moves_one_row_without_scrolling`
+- `cargo test -p smelt-tui --features harness wheel_scroll_in_visual_mode_preserves_cursor_screen_row`
+- `cargo test -p smelt-tui --features harness transcript_scroll`
+- `cargo test -p smelt-tui --features harness app::transcript::document_tests`
+- `cargo nextest run --workspace --features smelt-tui/harness` with `3871 passed, 7 skipped`
+- `cargo fmt && cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings`
+- `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib`
+
+Reset Phase 8 to 10 benchmark summary:
+
+- 10 MiB mixed layout after the live-render rollback fix: `first_ms=15.644`, `resize_ms=3.291`, `theme_ms=3.050`, `scroll12_ms=20.401`, `visible_ms=3.311`, `copy_ms=13.898`, `append_ms=7.564`, `no_cache_ms=15.555`, with `full_row_builds=0` for first, resize, theme, scroll12, visible, copy, append, and no-cache passes.
+- Navigation/search suite over 16,000 rows after the live-render rollback fix: `search_ms=1.244`, `ctrl_d20_ms=6.907`, `ctrl_u20_ms=6.157`, `gg_ms=0.248`, `G_ms=0.260`.
+
+Manual retest status:
+
+- Automated coverage for the reported bottom-edge drag-down and Down-arrow scenarios now passes.
+- The first manual drag retest after the local-intent changes still locked. Its trace identified the no-input `PreserveViewport` rollback fixed above.
+- The follow-up manual retest after the live-render rollback fix passed for the reported drag-down and Down-arrow scenarios.
+
+Follow-up key-repeat performance investigation and fix:
+
+- Parsed `/home/dev/tmp/transcript-interaction-trace.jsonl`. Projection timings were not the source of the one-second lock: 46 projection frames averaged about 1.1 ms, with an 8 ms max and no frame above 20 ms.
+- The trace did show event-loop starvation and stale local-delta accumulation. After `gg`, many `HalfPageRows(1)` inputs were dispatched before a render. `Window::scroll_top` stayed at 0 while document commands computed larger and larger local deltas, producing a `UserDelta { rows: 1105 }` input and an `ExactRow(36465)` target.
+- Added a sparse key-repeat regression that dispatches 80 events without rendering for top-down, bottom-up, and middle up/down cases, covering Ctrl-D, Ctrl-U, Down-arrow, and Up-arrow. It asserts no pre-projection `Window::scroll_top` mutation, exact local targets, bounded per-input deltas, and bounded top-of-transcript projection deltas.
+- Added 50 MiB sparse-resume burst metrics to the transcript search benchmark for the same key families and start positions.
+- Fixed deferred transcript document commands to use a transcript-owned pending local scroll base between renders. Repeated keypresses now add one semantic step each instead of recomputing each step from stale `Window::scroll_top`.
+- Bounded live terminal-event draining to 64 events or 8 ms per frame, whichever comes first, so key repeat cannot starve rendering while the terminal queue remains non-empty.
+
+Follow-up validation:
+
+- `cargo test -p smelt-tui --features harness transcript_key_repeat_bursts_do_not_overaccumulate_sparse_local_motion`
+- `cargo test -p smelt-tui --features harness transcript_cursor_down`
+- `cargo test -p smelt-tui --features harness transcript_drag_autoscroll_bottom`
+- `cargo test -p smelt-tui --features harness transcript_scroll`
+- `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_50mib --search --search-bytes 52428800 --no-warmup`
+- `cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness` with `3872 passed, 7 skipped`
+
+Follow-up benchmark summary:
+
+- 50 MiB sparse burst benchmark sample after the key-repeat fix: `burst_top_ctrl_d80_ms=112.179`, `burst_top_down80_ms=164.664`, `burst_bottom_ctrl_u80_ms=444.999`, `burst_bottom_up80_ms=587.091`, `burst_mid_ctrl_d80_ms=918.317`, `burst_mid_down80_ms=924.227`, `burst_mid_ctrl_u80_ms=954.363`, `burst_mid_up80_ms=1816.519`. These intentionally dispatch 80 events without the live event-loop yield, so they stress semantic coalescing and per-event cost rather than the new live frame budget.
+- 50 MiB mixed layout in the same run: `first_ms=72.107`, `resize_ms=3.826`, `theme_ms=3.411`, `scroll12_ms=22.360`, `visible_ms=1.827`, `copy_ms=68.949`, `append_ms=27.786`, `no_cache_ms=68.727`, with `full_row_builds=0` for first, resize, theme, scroll12, visible, copy, append, and no-cache passes.
+
+Follow-up render-full scroll performance investigation and fix:
+
+- Investigated the user-reported perf profile where `transcript:display_rows_for_range` p99 was about 50 ms and `transcript:display_model:render_full_to_buffer` / `render:layout` p99 was about 40 ms while `render_range_to_buffer` stayed sub-millisecond to low-millisecond.
+- Root cause: the visible projection hot path rendered only a row range, then rendered the whole block again when `row_start != 0` just to compute `display_offset` for per-row anchors. The same path also walked each rendered row to precompute display offsets for all anchors. That made ordinary exact-row scrolling pay full-block render cost even though scroll projection itself only needed lightweight row anchors.
+- Fixed the hot path so projected row anchors store `display_offset: None`. Exact-row scrolling no longer computes text display offsets. Reflow-stable projection computes the old display offset lazily only when a previously materialized `RenderedBlock` anchor actually needs it.
+- Kept fallback `Node` anchors as row-offset anchors. This preserves search jump and sparse content-anchor semantics when there is no previous materialized rendered-block row to reflow from.
+- Added `scrolled_projection_does_not_render_full_block_for_row_anchors` to guard the root cause with a large single block scrolled into the middle.
+- Added 50 MiB search benchmark gates for scroll operations that assert neither `transcript:display_model:render_full_to_buffer` nor `transcript:display_model:render_full_fallback` occurs while scrolling.
+
+Follow-up render-full validation:
+
+- `cargo test -p smelt-tui --features harness scrolled_projection_does_not_render_full_block_for_row_anchors`
+- `cargo test -p smelt-tui --features harness key_repeat_burst`
+- `cargo test -p smelt-tui --features harness transcript_scroll`
+- `cargo test -p smelt-tui --features harness transcript_cursor_down`
+- `cargo test -p smelt-tui --features harness transcript_drag_autoscroll_bottom`
+- `TMPDIR=/home/dev/tmp cargo xtask bench-transcript-layout --runs 1 --workloads mixed_50mib --search --search-bytes 52428800 --no-warmup`
+- `cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings`
+- `cargo nextest run --workspace --features smelt-tui/harness` with `3874 passed, 7 skipped`
+
+Follow-up render-full benchmark summary:
+
+- 50 MiB sparse search/navigation sample after the render-full fix: `nav_ctrl_d20_ms=14.673`, `nav_ctrl_u20_ms=13.849`, `nav_gg_ms=0.402`, `nav_G_ms=0.505`, `burst_top_ctrl_d80_ms=101.017`, `burst_top_down80_ms=106.099`, `burst_bottom_ctrl_u80_ms=437.955`, `burst_bottom_up80_ms=612.330`, `burst_mid_ctrl_d80_ms=914.038`, `burst_mid_down80_ms=950.760`, `burst_mid_ctrl_u80_ms=978.860`, `burst_mid_up80_ms=1541.522`.
+- 50 MiB mixed layout after the render-full fix: `first_ms=64.900`, `resize_ms=2.901`, `theme_ms=2.592`, `scroll12_ms=12.251`, `visible_ms=0.828`, `copy_ms=62.719`, `append_ms=27.486`, `no_cache_ms=66.819`, with `scroll12` materializing `940` rows over 12 jumps and `max_range_materialized_rows=80`.
+- The perf output for `burst_mid_up80` showed the remaining range work was bounded and sub-millisecond per call: `display_rows_for_range count=80 total_us=10500 p95_us=246 max_us=268` and `render_range_to_buffer count=80 total_us=10277 p95_us=237 max_us=257`. The high 80-event synthetic burst wall time is dominated by trace-enabled per-event sparse bookkeeping, not the reported full-render frame root cause.
+
+Reflection cleanup before commit:
+
+- Replaced separate pending transcript intent, local-scroll base, cursor-row, and drag-endpoint row fields with one pending projection command that owns the intent, optional local command base, and document-view restore rows.
+- Replaced transcript-specific `Window` restore hooks with one generic document-view screen-row restore API that names cursor selection policy and drag-endpoint restoration explicitly.
+- Split projected row anchors from display-offset reflow anchors so exact-row scrolling cannot accidentally fill display offsets through an `Option` convention.
+- Restored a real bottom-boundary guard for drag autoscroll and added `transcript_drag_autoscroll_bottom_stops_at_real_bottom`.
+
+Reflection cleanup validation:
+
+- Focused tests passed for `transcript_drag_autoscroll_bottom`, `transcript_cursor_down`, `key_repeat_burst`, `transcript_scroll`, `scrolled_projection_does_not_render_full_block_for_row_anchors`, and `wheel_scroll_in_visual_mode_preserves_cursor_screen_row`.
+- `cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings` passed.
+- `cargo nextest run --workspace --features smelt-tui/harness` passed with `3875 passed, 7 skipped`.
+- 50 MiB benchmark passed after cleanup: search sample `nav_ctrl_d20_ms=14.685`, `nav_ctrl_u20_ms=13.696`, `burst_mid_up80_ms=1537.040`; layout sample `scroll12_ms=13.713`, `visible_ms=0.886`, with `scroll12` still at `full_row_builds=0` and `max_range_materialized_rows=80`.
+
 ## Superseded implementation phase archive
 
 

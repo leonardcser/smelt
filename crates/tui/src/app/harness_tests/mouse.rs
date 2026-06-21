@@ -87,6 +87,7 @@ fn wheel_scroll_in_visual_mode_preserves_cursor_screen_row() {
         column: 10,
         modifiers: crossterm::event::KeyModifiers::empty(),
     })));
+    app.render_silent();
 
     let row_after = transcript_row_cursor_row(&app);
     // With the fix the cursor follows the viewport, so it should have

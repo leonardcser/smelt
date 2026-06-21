@@ -75,10 +75,11 @@ pub use row::{
 };
 pub use vim::VimMode;
 pub use window::{
-    clamp_scroll, materialized_row_range, resolve_document_command, scroll_to_show, CursorShape,
-    DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject, DocumentViewExecutor,
-    DocumentViewState, DrawContext, EventCtx, MouseCtx, RowYankFlash, ScrollbarState, SplitConfig,
-    VerticalScroll, Window, WindowSurface, WindowViewport,
+    clamp_scroll, materialized_row_range, resolve_document_command, scroll_to_show,
+    CursorScreenRowSelection, CursorShape, DocumentCommand, DocumentCopy, DocumentKeyResult,
+    DocumentTextObject, DocumentViewExecutor, DocumentViewScreenRowRestore, DocumentViewState,
+    DrawContext, EventCtx, MouseCtx, RowYankFlash, ScrollbarState, SplitConfig, VerticalScroll,
+    Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.

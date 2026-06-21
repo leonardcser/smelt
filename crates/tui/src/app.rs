@@ -43,6 +43,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+const TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME: usize = 64;
+const TERMINAL_EVENT_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
+
 pub(crate) struct ContextWindowUpdate {
     pub(crate) request_id: u64,
     pub(crate) model: String,
@@ -2537,6 +2540,8 @@ impl TuiApp {
                         Some(ev)
                     };
 
+                    let drain_started_at = Instant::now();
+                    let mut drained_events = 1usize;
                     if let Some(ev) = absorb(
                         ev,
                         &mut scroll_delta,
@@ -2548,7 +2553,13 @@ impl TuiApp {
                         }
                     }
 
-                    while let Ok(ev) = term_events.try_recv() {
+                    while drained_events < TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME
+                        && drain_started_at.elapsed() < TERMINAL_EVENT_DRAIN_MAX_DURATION
+                    {
+                        let Ok(ev) = term_events.try_recv() else {
+                            break;
+                        };
+                        drained_events = drained_events.saturating_add(1);
                         if let Some(ev) = absorb(
                             ev,
                             &mut scroll_delta,

@@ -210,7 +210,8 @@ impl TuiApp {
                     return;
                 }
                 let viewport_rows = request.rect.height;
-                let cursor_screen_row = ui
+                let pending_restore = transcript.take_pending_projection_restore();
+                let fallback_cursor_screen_row = ui
                     .win(request.win)
                     .and_then(|win| win.cursor_screen_row(viewport_rows));
                 let transcript_follow_tail;
@@ -261,9 +262,18 @@ impl TuiApp {
                 }
                 let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
                 if let (Some(win), Some(buf)) = (win, buf) {
-                    if let Some(screen_row) = cursor_screen_row {
-                        win.restore_cursor_screen_row(buf, screen_row);
+                    let mut restore = crate::smelt_edit::DocumentViewScreenRowRestore {
+                        cursor: pending_restore.cursor_screen_row,
+                        cursor_selection:
+                            crate::smelt_edit::CursorScreenRowSelection::RestoreActiveSelection,
+                        drag_endpoint: pending_restore.drag_endpoint_screen_row,
+                    };
+                    if restore.cursor.is_none() {
+                        restore.cursor = fallback_cursor_screen_row;
+                        restore.cursor_selection =
+                            crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
                     }
+                    win.restore_document_view_screen_rows(buf, restore);
                     if win.has_materialized_rows() {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
                         if transcript_follow_tail {

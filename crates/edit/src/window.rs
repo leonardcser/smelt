@@ -40,6 +40,20 @@ pub struct DrawContext {
     pub vim_mode: VimMode,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorScreenRowSelection {
+    #[default]
+    SkipActiveSelection,
+    RestoreActiveSelection,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocumentViewScreenRowRestore {
+    pub cursor: Option<u16>,
+    pub cursor_selection: CursorScreenRowSelection,
+    pub drag_endpoint: Option<u16>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ViewportHit {
     Scrollbar,
@@ -949,13 +963,48 @@ impl Window {
         }
     }
 
+    /// Reposition document-view endpoints so they sit at their requested screen
+    /// rows in the current layout. Cursor restoration can either skip or update
+    /// an active selection; drag-endpoint restoration is explicit because it is
+    /// only valid for document-view drags.
+    pub fn restore_document_view_screen_rows(
+        &mut self,
+        buf: &Buffer,
+        restore: DocumentViewScreenRowRestore,
+    ) {
+        if let Some(screen_row) = restore.cursor {
+            self.restore_cursor_screen_row_inner(buf, screen_row, restore.cursor_selection);
+        }
+        if let Some(screen_row) = restore.drag_endpoint {
+            self.restore_document_drag_endpoint_screen_row_inner(buf, screen_row);
+        }
+    }
+
     /// Reposition the cursor so it sits at `scroll_top + screen_row` in the
     /// current layout - used after a layout/scroll restore so the cursor
     /// stays visually fixed relative to the viewport instead of drifting
     /// off-screen as reflow shifts visual rows. Reassigns `cpos` to whatever
     /// byte lands at that visual row using the preferred display column.
     pub fn restore_cursor_screen_row(&mut self, buf: &Buffer, screen_row: u16) {
-        if self.selection_active() {
+        self.restore_document_view_screen_rows(
+            buf,
+            DocumentViewScreenRowRestore {
+                cursor: Some(screen_row),
+                cursor_selection: CursorScreenRowSelection::SkipActiveSelection,
+                drag_endpoint: None,
+            },
+        );
+    }
+
+    fn restore_cursor_screen_row_inner(
+        &mut self,
+        buf: &Buffer,
+        screen_row: u16,
+        selection: CursorScreenRowSelection,
+    ) {
+        if self.selection_active()
+            && matches!(selection, CursorScreenRowSelection::SkipActiveSelection)
+        {
             return;
         }
         let total = self.visual_row_total(buf);
@@ -991,6 +1040,30 @@ impl Window {
         text.cpos = cpos;
         text.cursor_row = row;
         text.cursor_col = col;
+    }
+
+    fn restore_document_drag_endpoint_screen_row_inner(&mut self, buf: &Buffer, screen_row: u16) {
+        if !self.document_view_state_ref().active {
+            return;
+        }
+        if self.document_view_state_ref().drag_endpoint.is_none() {
+            return;
+        }
+        let total = self.visual_row_total(buf);
+        if total == 0 {
+            return;
+        }
+        let target_abs_row = self
+            .scroll_top
+            .saturating_add(screen_row as RowIndex)
+            .min(self.scroll_row_total(buf).saturating_sub(1));
+        let mut state = *self.document_view_state_ref();
+        let mut cursor = state.cursor;
+        self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut cursor, target_abs_row);
+        state.cursor = cursor;
+        state.drag_endpoint = Some(cursor);
+        self.project_row_cursor_to_local(state, buf);
+        *self.document_view_state_mut() = state;
     }
 
     /// `true` when `self.layout` was built against `buf`'s current

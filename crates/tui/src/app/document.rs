@@ -3,7 +3,9 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::json;
 
-use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext};
+use crate::app::transcript::{
+    TranscriptDisplayDocument, TranscriptProjectionRestore, TranscriptRenderContext,
+};
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
 use crate::smelt_edit::{
@@ -449,13 +451,32 @@ impl TuiApp {
                 cursor,
             )
         };
+        let local_transcript_command = win == crate::app::TRANSCRIPT_WIN
+            && matches!(
+                command,
+                DocumentCommand::MoveRows(_)
+                    | DocumentCommand::PageRows(_)
+                    | DocumentCommand::HalfPageRows(_)
+                    | DocumentCommand::ScrollRows(_)
+            );
+        let selection_active_before =
+            state.selection_anchor.is_some() || state.drag_endpoint.is_some();
+        let defer_local_transcript_scroll = local_transcript_command && !selection_active_before;
         let window_scroll_before = scroll_top;
+        if defer_local_transcript_scroll {
+            scroll_top = self.transcript.local_command_scroll_top(scroll_top);
+        }
+        let command_scroll_before = scroll_top;
+        let pending_local_scroll_before =
+            defer_local_transcript_scroll && self.transcript.has_pending_local_scroll_top();
         let trace_transcript_command =
             win == crate::app::TRANSCRIPT_WIN && self.transcript.scroll_trace_enabled();
         if trace_transcript_command {
-            let scroll_anchor =
-                self.transcript
-                    .trace_anchor_at_row(&self.lua, viewport_cols.max(1), scroll_top);
+            let scroll_anchor = self.transcript.trace_anchor_at_row(
+                &self.lua,
+                viewport_cols.max(1),
+                command_scroll_before,
+            );
             let cursor_anchor = self.transcript.trace_anchor_at_row(
                 &self.lua,
                 viewport_cols.max(1),
@@ -466,6 +487,7 @@ impl TuiApp {
                 json!({
                     "command": format!("{:?}", command),
                     "window_scroll_before": window_scroll_before,
+                    "command_scroll_before": command_scroll_before,
                     "scroll_anchor_before": format!("{:?}", scroll_anchor),
                     "viewer_cursor_before": trace_doc_position_json(cursor),
                     "document_state_cursor_before": trace_doc_position_json(state.cursor),
@@ -505,26 +527,54 @@ impl TuiApp {
         })?;
 
         let transcript_scroll_intent =
-            if win == crate::app::TRANSCRIPT_WIN && scroll_top != window_scroll_before {
-                let rows = signed_row_delta(window_scroll_before, scroll_top);
-                let intent = match command {
-                    DocumentCommand::MoveRows(_)
-                    | DocumentCommand::PageRows(_)
-                    | DocumentCommand::HalfPageRows(_)
-                    | DocumentCommand::ScrollRows(_) => TranscriptScrollIntent::UserDelta { rows },
-                    _ => {
-                        let anchor = self.transcript.trace_anchor_at_row(
-                            &self.lua,
-                            viewport_cols.max(1),
-                            scroll_top,
-                        );
-                        TranscriptScrollIntent::ExactContentAnchor(anchor)
-                    }
+            if win == crate::app::TRANSCRIPT_WIN && scroll_top != command_scroll_before {
+                let rows = signed_row_delta(command_scroll_before, scroll_top);
+                let intent = if local_transcript_command {
+                    TranscriptScrollIntent::UserDelta { rows }
+                } else {
+                    let anchor = self.transcript.trace_anchor_at_row(
+                        &self.lua,
+                        viewport_cols.max(1),
+                        scroll_top,
+                    );
+                    TranscriptScrollIntent::ExactContentAnchor(anchor)
                 };
-                Some(("document_command", intent, window_scroll_before))
+                let restore = if defer_local_transcript_scroll {
+                    TranscriptProjectionRestore {
+                        cursor_screen_row: Some(screen_row_or_edge(
+                            state.cursor.row,
+                            scroll_top,
+                            viewport_rows,
+                        )),
+                        drag_endpoint_screen_row: None,
+                    }
+                } else {
+                    TranscriptProjectionRestore::default()
+                };
+                Some(("document_command", intent, window_scroll_before, restore))
             } else {
                 None
             };
+        let defer_transcript_window_scroll = defer_local_transcript_scroll;
+        if defer_transcript_window_scroll {
+            if !pending_local_scroll_before {
+                self.transcript.prime_local_scroll_base(
+                    &self.lua,
+                    viewport_cols.max(1),
+                    viewport_rows,
+                    command_scroll_before,
+                );
+            }
+            if let Some((label, intent, before, restore)) = transcript_scroll_intent.as_ref() {
+                self.record_transcript_scroll_intent_from_document_command(
+                    *label,
+                    intent.clone(),
+                    *before,
+                    *restore,
+                    Some(scroll_top),
+                );
+            }
+        }
 
         {
             let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
@@ -535,22 +585,33 @@ impl TuiApp {
                 win_ref.set_vim_mode(vim_mode);
             }
             win_ref.scroll_left = scroll_left;
-            match command {
-                DocumentCommand::ScrollRows(_) => {
-                    win_ref.set_scroll(scroll_top, buf_ref);
-                    win_ref.update_tail_state(buf_ref, viewport_rows);
+            if !defer_transcript_window_scroll {
+                match command {
+                    DocumentCommand::ScrollRows(_) => {
+                        win_ref.set_scroll(scroll_top, buf_ref);
+                        win_ref.update_tail_state(buf_ref, viewport_rows);
+                    }
+                    DocumentCommand::CenterScroll => win_ref.pin_scroll(scroll_top),
+                    DocumentCommand::PanColumns(_) => {}
+                    _ => {
+                        win_ref.set_resolved_scroll(scroll_top);
+                        win_ref.pin_current_scroll();
+                    }
                 }
-                DocumentCommand::CenterScroll => win_ref.pin_scroll(scroll_top),
-                DocumentCommand::PanColumns(_) => {}
-                _ => {
-                    win_ref.set_resolved_scroll(scroll_top);
-                    win_ref.pin_current_scroll();
-                }
+                win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
             }
-            win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
         }
-        if let Some((label, intent, before)) = transcript_scroll_intent {
-            self.record_transcript_scroll_intent_from_document_command(label, intent, before);
+        if !defer_transcript_window_scroll {
+            self.transcript.clear_pending_local_scroll_top();
+            if let Some((label, intent, before, restore)) = transcript_scroll_intent.as_ref() {
+                self.record_transcript_scroll_intent_from_document_command(
+                    *label,
+                    intent.clone(),
+                    *before,
+                    *restore,
+                    None,
+                );
+            }
         }
         if trace_transcript_command {
             let cursor_anchor = self.transcript.trace_anchor_at_row(
@@ -582,6 +643,18 @@ fn signed_row_delta(before: RowIndex, after: RowIndex) -> isize {
     } else {
         -(before.saturating_sub(after).min(isize::MAX as RowIndex) as isize)
     }
+}
+
+fn screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
+    let rel = row.checked_sub(scroll_top);
+    rel.and_then(|rel| (rel < RowIndex::from(viewport_rows)).then_some(rel as u16))
+        .unwrap_or_else(|| {
+            if row < scroll_top {
+                0
+            } else {
+                viewport_rows.saturating_sub(1)
+            }
+        })
 }
 
 fn trace_doc_position_json(position: DocPosition) -> serde_json::Value {

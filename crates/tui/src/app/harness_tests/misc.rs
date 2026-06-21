@@ -5,6 +5,7 @@ use crate::app::transcript_scroll_trace::{
     TranscriptScrollTraceFrame, TranscriptTraceAnchor,
 };
 use crate::content::render_plan::RenderNodeId;
+use crate::smelt_edit::RowIndex;
 
 #[test]
 fn signal_api_reads_sets_and_subscribes_to_values() {
@@ -1564,6 +1565,175 @@ fn assert_user_delta_targets_exact_rows(frames: &[TranscriptScrollTraceFrame]) {
     }
 }
 
+fn assert_user_delta_inputs_do_not_pre_scroll(frames: &[TranscriptScrollTraceFrame]) {
+    assert!(!frames.is_empty(), "expected user delta frames");
+    assert!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                frame.scroll_intent,
+                TranscriptScrollIntent::UserDelta { .. }
+            ))
+            .all(|frame| frame.window_scroll_after_input == frame.window_scroll_before),
+        "local user delta mutated Window::scroll_top before transcript projection: {frames:?}"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TranscriptBurstKey {
+    CtrlD,
+    CtrlU,
+    Down,
+    Up,
+}
+
+impl TranscriptBurstKey {
+    fn press(self, app: &mut TestApp) {
+        match self {
+            Self::CtrlD => app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Self::CtrlU => app.press_mod(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Self::Down => app.press(KeyCode::Down),
+            Self::Up => app.press(KeyCode::Up),
+        }
+    }
+
+    fn moves_down(self) -> bool {
+        matches!(self, Self::CtrlD | Self::Down)
+    }
+
+    fn max_rows_per_event(self, viewport_rows: u16) -> RowIndex {
+        match self {
+            Self::CtrlD | Self::CtrlU => RowIndex::from(viewport_rows.max(1)),
+            Self::Down | Self::Up => 1,
+        }
+    }
+}
+
+fn assert_burst_projection_delta_bounded(
+    label: &str,
+    frames: &[TranscriptScrollTraceFrame],
+    before_scroll: RowIndex,
+    max_delta: RowIndex,
+) {
+    let mut checked = 0;
+    for frame in frames {
+        let TranscriptScrollIntent::UserDelta { .. } = frame.scroll_intent else {
+            continue;
+        };
+        let TranscriptProjectionTargetTrace::ExactRow(target) = frame.projection_target else {
+            panic!("{label} projected user delta through a non-exact target: {frame:?}");
+        };
+        let delta = target.abs_diff(before_scroll);
+        assert!(
+            delta <= max_delta,
+            "{label} over-accumulated a no-render key burst: before_scroll={before_scroll}, target={target}, delta={delta}, max_delta={max_delta}, frame={frame:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "{label} produced no user-delta projection frames: {frames:?}"
+    );
+}
+
+fn run_transcript_key_burst(app: &mut TestApp, label: &str, key: TranscriptBurstKey) {
+    const BURST_EVENTS: usize = 80;
+
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport")
+        .rect
+        .height
+        .max(1);
+    let before_scroll = app.app.transcript_win().scroll_top();
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    for _ in 0..BURST_EVENTS {
+        key.press(app);
+    }
+
+    let scroll_before_render = app.app.transcript_win().scroll_top();
+    assert_eq!(
+        scroll_before_render, before_scroll,
+        "{label} mutated Window::scroll_top before projection"
+    );
+
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_user_delta_targets_exact_rows(&frames);
+    assert_user_delta_inputs_do_not_pre_scroll(&frames);
+    let max_delta = key
+        .max_rows_per_event(viewport_rows)
+        .saturating_mul(BURST_EVENTS as RowIndex)
+        .saturating_add(RowIndex::from(viewport_rows).saturating_mul(2));
+    assert_burst_projection_delta_bounded(label, &frames, before_scroll, max_delta);
+
+    let after_scroll = app.app.transcript_win().scroll_top();
+    if key.moves_down() {
+        assert!(
+            after_scroll >= before_scroll,
+            "{label} moved upward after a downward burst: before_scroll={before_scroll}, after_scroll={after_scroll}, frames={frames:?}"
+        );
+    } else {
+        assert!(
+            after_scroll <= before_scroll,
+            "{label} moved downward after an upward burst: before_scroll={before_scroll}, after_scroll={after_scroll}, frames={frames:?}"
+        );
+    }
+}
+
+fn prepare_transcript_burst_app(app: &mut TestApp) {
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+}
+
+fn jump_transcript_top(app: &mut TestApp) {
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        0,
+        "gg should reach the top before a key-repeat burst"
+    );
+}
+
+fn jump_transcript_bottom(app: &mut TestApp) {
+    app.type_char('G');
+    app.render_silent();
+    assert!(
+        app.app.transcript_win().scroll_top() > 0,
+        "G should reach a non-top viewport before an upward key-repeat burst"
+    );
+}
+
+fn jump_transcript_middle(app: &mut TestApp) {
+    let descriptor = app
+        .app
+        .transcript
+        .descriptor_total_count()
+        .expect("sparse descriptor count")
+        / 2;
+    assert!(
+        app.app
+            .reveal_transcript_descriptor_block(descriptor, 1, true),
+        "middle descriptor reveal failed for descriptor {descriptor}"
+    );
+    app.render_silent();
+    let scroll = app.app.transcript_win().scroll_top();
+    assert!(
+        scroll > 0,
+        "middle reveal should leave the top: scroll={scroll}"
+    );
+}
+
 fn assert_user_delta_descriptor_coverage_moves_contiguously(frames: &[TranscriptScrollTraceFrame]) {
     let mut previous: Option<TranscriptDescriptorTraceRange> = None;
     for frame in frames {
@@ -1770,6 +1940,73 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
 }
 
 #[test]
+fn transcript_key_repeat_bursts_do_not_overaccumulate_sparse_local_motion() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    prepare_transcript_burst_app(&mut app);
+
+    jump_transcript_top(&mut app);
+    run_transcript_key_burst(&mut app, "top Ctrl-D burst", TranscriptBurstKey::CtrlD);
+    jump_transcript_top(&mut app);
+    run_transcript_key_burst(&mut app, "top Down-arrow burst", TranscriptBurstKey::Down);
+
+    jump_transcript_bottom(&mut app);
+    run_transcript_key_burst(&mut app, "bottom Ctrl-U burst", TranscriptBurstKey::CtrlU);
+    jump_transcript_bottom(&mut app);
+    run_transcript_key_burst(&mut app, "bottom Up-arrow burst", TranscriptBurstKey::Up);
+
+    jump_transcript_middle(&mut app);
+    run_transcript_key_burst(&mut app, "middle Ctrl-D burst", TranscriptBurstKey::CtrlD);
+    jump_transcript_middle(&mut app);
+    run_transcript_key_burst(
+        &mut app,
+        "middle Down-arrow burst",
+        TranscriptBurstKey::Down,
+    );
+    jump_transcript_middle(&mut app);
+    run_transcript_key_burst(&mut app, "middle Ctrl-U burst", TranscriptBurstKey::CtrlU);
+    jump_transcript_middle(&mut app);
+    run_transcript_key_burst(&mut app, "middle Up-arrow burst", TranscriptBurstKey::Up);
+}
+
+#[test]
+fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    prepare_transcript_burst_app(&mut app);
+    jump_transcript_bottom(&mut app);
+
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+    app.type_char('g');
+    app.type_char('g');
+    for _ in 0..80 {
+        TranscriptBurstKey::CtrlD.press(&mut app);
+    }
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        0,
+        "gg should update the document command base before the held Ctrl-D burst renders"
+    );
+
+    app.render_silent();
+    let frames = app.app.transcript.take_scroll_trace_frames();
+    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_user_delta_targets_exact_rows(&frames);
+    assert_user_delta_inputs_do_not_pre_scroll(&frames);
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport")
+        .rect
+        .height
+        .max(1);
+    let max_delta = RowIndex::from(viewport_rows)
+        .saturating_mul(80)
+        .saturating_add(RowIndex::from(viewport_rows).saturating_mul(2));
+    assert_burst_projection_delta_bounded("gg then Ctrl-D burst", &frames, 0, max_delta);
+}
+
+#[test]
 fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
     app.app.transcript.set_scroll_trace_timings_enabled(true);
@@ -1794,6 +2031,302 @@ fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
     );
     assert_local_scroll_frames_are_exact_and_fast(&frames);
     assert_monotonic_visible_anchors(&frames, true);
+}
+
+#[test]
+fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    assert!(app.run_lua(
+        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
+    ));
+    app.render_silent();
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    let initial_record = first_visible_record_index(&app).expect("initial visible record");
+    assert!(
+        initial_record < 200,
+        "test must start high in sparse content, got record {initial_record}: {:?}",
+        transcript_viewport_lines(&app)
+    );
+    start_transcript_edge_drag(&mut app, TranscriptDragEdge::Bottom);
+    let mut frames = Vec::new();
+    let mut latest = initial_record;
+    for tick in 0..320 {
+        assert!(
+            app.app.tick_drag_autoscroll_with_transcript_intent(),
+            "bottom-edge drag tick {tick} stopped before reaching newer content: first={:?}, last={:?}, scroll_top={}, lines={:?}",
+            first_visible_record_index(&app),
+            last_visible_record_index(&app),
+            app.app.transcript_win().scroll_top(),
+            transcript_viewport_lines(&app)
+        );
+        app.render_silent();
+        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        let current = first_visible_record_index(&app).unwrap_or_else(|| {
+            panic!(
+                "bottom-edge drag tick {tick} rendered no visible record marker: lines={:?}",
+                transcript_viewport_lines(&app)
+            )
+        });
+        assert!(
+            current >= latest,
+            "bottom-edge drag moved backward: latest={latest}, current={current}, lines={:?}",
+            transcript_viewport_lines(&app)
+        );
+        latest = current;
+    }
+    finish_transcript_drag(&mut app);
+
+    let final_record = first_visible_record_index(&app).expect("final visible record");
+    assert!(
+        final_record > initial_record.saturating_add(40),
+        "bottom-edge drag autoscroll did not advance through newer sparse content: initial_record={initial_record}, final_record={final_record}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    assert!(
+        frames.len() >= 300,
+        "bottom-edge drag produced too few frames before locking: {} frames",
+        frames.len()
+    );
+    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_monotonic_visible_anchors(&frames, false);
+    assert_user_delta_targets_exact_rows(&frames);
+    assert_user_delta_inputs_do_not_pre_scroll(&frames);
+    assert_user_delta_descriptor_coverage_moves_contiguously(&frames);
+}
+
+#[test]
+fn transcript_drag_autoscroll_bottom_stops_at_real_bottom() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    prepare_transcript_burst_app(&mut app);
+    jump_transcript_bottom(&mut app);
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport")
+        .rect
+        .height
+        .max(1);
+    let state = app.app.transcript_win().document_view_state();
+    let max_scroll = state
+        .materialized
+        .total_rows
+        .saturating_sub(RowIndex::from(viewport_rows));
+    assert!(
+        app.app.transcript_win().scroll_top() >= max_scroll,
+        "G should reach the real transcript bottom before testing drag boundary"
+    );
+
+    start_transcript_edge_drag(&mut app, TranscriptDragEdge::Bottom);
+    assert!(
+        !app.app.tick_drag_autoscroll_with_transcript_intent(),
+        "bottom-edge drag autoscroll should stop when the resolved viewport is already at the real bottom"
+    );
+    finish_transcript_drag(&mut app);
+}
+
+#[test]
+fn transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    assert!(app.run_lua(
+        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
+    ));
+    app.render_silent();
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    start_transcript_edge_drag(&mut app, TranscriptDragEdge::Bottom);
+    let mut frames = Vec::new();
+    for tick in 0..80 {
+        let before_scroll = app.app.transcript_win().scroll_top();
+        assert!(
+            app.app.tick_drag_autoscroll_with_transcript_intent(),
+            "bottom-edge drag tick {tick} stopped before a real boundary"
+        );
+        app.render_silent();
+        let after_tick_scroll = app.app.transcript_win().scroll_top();
+        let after_tick_lines = transcript_viewport_lines(&app);
+        frames.extend(app.app.transcript.take_scroll_trace_frames());
+
+        app.render_silent();
+        let after_idle_scroll = app.app.transcript_win().scroll_top();
+        let after_idle_lines = transcript_viewport_lines(&app);
+        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        assert_eq!(
+            after_idle_scroll, after_tick_scroll,
+            "no-input render after bottom-edge drag tick {tick} changed the resolved scroll row: before_scroll={before_scroll}, after_tick_scroll={after_tick_scroll}, after_idle_scroll={after_idle_scroll}, frames={frames:?}"
+        );
+        assert_eq!(
+            after_idle_lines, after_tick_lines,
+            "no-input render after bottom-edge drag tick {tick} changed visible content: before_scroll={before_scroll}, after_tick_scroll={after_tick_scroll}, after_idle_scroll={after_idle_scroll}, frames={frames:?}"
+        );
+    }
+    finish_transcript_drag(&mut app);
+
+    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_user_delta_inputs_do_not_pre_scroll(&frames);
+}
+
+#[test]
+fn transcript_cursor_down_inside_viewport_moves_one_row_without_scrolling() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    assert!(app.run_lua(
+        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
+    ));
+    app.render_silent();
+    app.app.transcript_win_mut().set_vim_enabled(true);
+    app.app
+        .transcript_win_mut()
+        .set_vim_mode(crate::smelt_edit::VimMode::Normal);
+
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .map(|viewport| viewport.rect.height)
+        .expect("transcript viewport");
+    let (click_row, click_col) = transcript_content_point(&app, 2);
+    let mouse = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        row: click_row,
+        column: click_col,
+        modifiers: KeyModifiers::empty(),
+    };
+    let pos = app
+        .app
+        .document_view_position_at_mouse_for_win(crate::app::TRANSCRIPT_WIN, mouse)
+        .expect("transcript cursor position");
+    let mut state = app.app.transcript_win().document_view_state();
+    state.cursor = pos;
+    state.drag_endpoint = None;
+    state.selection_anchor = None;
+    app.app.transcript_win_mut().set_document_view_state(state);
+    app.render_silent();
+
+    for step in 0..4 {
+        let before_lines = transcript_viewport_lines(&app);
+        let before = app.app.transcript_win().document_view_state();
+        let before_scroll = app.app.transcript_win().scroll_top();
+        let now = app.app.core.clock.instant_now();
+        app.app.execute_document_view_command_for_win(
+            crate::app::TRANSCRIPT_WIN,
+            crate::smelt_edit::DocumentCommand::MoveRows(1),
+            viewport_rows,
+            now,
+        );
+        app.render_silent();
+        let after_lines = transcript_viewport_lines(&app);
+        let after = app.app.transcript_win().document_view_state();
+        let after_scroll = app.app.transcript_win().scroll_top();
+        assert_eq!(
+            after_scroll, before_scroll,
+            "cursor-down step {step} scrolled before the cursor reached the edge: before_lines={before_lines:?}, after_lines={after_lines:?}"
+        );
+        assert_eq!(
+            after.cursor.row,
+            before.cursor.row.saturating_add(1),
+            "cursor-down step {step} did not move exactly one row inside the viewport: before={:?}, after={:?}, lines={after_lines:?}",
+            before.cursor,
+            after.cursor
+        );
+        assert_eq!(
+            after_lines, before_lines,
+            "cursor-down step {step} changed visible content before the cursor reached the edge"
+        );
+    }
+}
+
+#[test]
+fn transcript_cursor_down_at_lower_edge_moves_one_visible_row_per_step() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
+    assert!(app.run_lua(
+        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
+    ));
+    app.render_silent();
+    app.app.transcript_win_mut().set_vim_enabled(true);
+    app.app
+        .transcript_win_mut()
+        .set_vim_mode(crate::smelt_edit::VimMode::Normal);
+
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .map(|viewport| viewport.rect.height)
+        .expect("transcript viewport");
+    let lower_edge = viewport_rows.saturating_sub(1);
+    let (click_row, click_col) = transcript_content_point(&app, lower_edge);
+    let mouse = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        row: click_row,
+        column: click_col,
+        modifiers: KeyModifiers::empty(),
+    };
+    let pos = app
+        .app
+        .document_view_position_at_mouse_for_win(crate::app::TRANSCRIPT_WIN, mouse)
+        .expect("transcript cursor position");
+    let mut state = app.app.transcript_win().document_view_state();
+    state.cursor = pos;
+    state.drag_endpoint = None;
+    state.selection_anchor = None;
+    app.app.transcript_win_mut().set_document_view_state(state);
+    app.render_silent();
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    let mut frames = Vec::new();
+    for step in 0..160 {
+        let before_lines = transcript_viewport_lines(&app);
+        let before = app.app.transcript_win().document_view_state();
+        let before_scroll = app.app.transcript_win().scroll_top();
+        let before_screen_row = before.cursor.row.saturating_sub(before_scroll);
+        assert_eq!(
+            before_screen_row, lower_edge as u64,
+            "cursor must stay parked at the lower edge before step {step}: cursor={:?}, scroll_top={before_scroll}, lines={before_lines:?}",
+            before.cursor
+        );
+
+        let now = app.app.core.clock.instant_now();
+        app.app.execute_document_view_command_for_win(
+            crate::app::TRANSCRIPT_WIN,
+            crate::smelt_edit::DocumentCommand::MoveRows(1),
+            viewport_rows,
+            now,
+        );
+        app.render_silent();
+        frames.extend(app.app.transcript.take_scroll_trace_frames());
+
+        let after_lines = transcript_viewport_lines(&app);
+        let after = app.app.transcript_win().document_view_state();
+        let after_scroll = app.app.transcript_win().scroll_top();
+        let after_screen_row = after.cursor.row.saturating_sub(after_scroll);
+        assert_eq!(
+            after_screen_row, before_screen_row,
+            "cursor-down step {step} moved the cursor away from the lower edge: before_cursor={:?}, after_cursor={:?}, before_scroll={before_scroll}, after_scroll={after_scroll}, after_lines={after_lines:?}",
+            before.cursor, after.cursor
+        );
+        assert!(
+            after.cursor.row >= after_scroll
+                && after.cursor.row < after_scroll.saturating_add(u64::from(viewport_rows)),
+            "cursor-down step {step} left the cursor outside the resolved viewport: after_cursor={:?}, after_scroll={after_scroll}, after_lines={after_lines:?}",
+            after.cursor
+        );
+        assert_viewport_shifted_down_one_row(step, &before_lines, &after_lines);
+    }
+
+    assert_local_scroll_frames_are_exact_and_fast(&frames);
+    assert_user_delta_inputs_do_not_pre_scroll(&frames);
+    assert!(
+        frames.iter().all(|frame| !matches!(
+            frame.scroll_intent,
+            TranscriptScrollIntent::ExactContentAnchor(TranscriptTraceAnchor::EstimatedRow(_))
+        )),
+        "cursor-down lower-edge movement fell back to estimated exact-row anchors: {frames:?}"
+    );
+    assert_user_delta_descriptor_coverage_moves_contiguously(&frames);
 }
 
 #[test]
@@ -2125,10 +2658,35 @@ fn wheel_transcript(app: &mut TestApp, kind: crossterm::event::MouseEventKind) {
     )));
 }
 
+fn assert_viewport_shifted_down_one_row(step: usize, before: &[String], after: &[String]) {
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "cursor-down step {step} changed viewport line count: before={before:?}, after={after:?}"
+    );
+    let overlap = before.len().saturating_sub(1);
+    assert!(
+        overlap > 0,
+        "cursor-down step {step} needs a non-empty viewport: before={before:?}, after={after:?}"
+    );
+    assert_eq!(
+        &after[..overlap],
+        &before[1..],
+        "cursor-down step {step} did not shift the viewport by exactly one visible row"
+    );
+}
+
 fn first_visible_record_index(app: &TestApp) -> Option<usize> {
     transcript_viewport_lines(app)
         .into_iter()
         .find_map(|line| parse_record_index(&line))
+}
+
+fn last_visible_record_index(app: &TestApp) -> Option<usize> {
+    transcript_viewport_lines(app)
+        .into_iter()
+        .filter_map(|line| parse_record_index(&line))
+        .next_back()
 }
 
 fn parse_record_index(line: &str) -> Option<usize> {

@@ -790,12 +790,36 @@ enum TranscriptViewportMode {
     FarSeek,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptProjectionRestore {
+    pub(crate) cursor_screen_row: Option<u16>,
+    pub(crate) drag_endpoint_screen_row: Option<u16>,
+}
+
+impl TranscriptProjectionRestore {
+    pub(crate) fn merge(&mut self, other: Self) {
+        if other.cursor_screen_row.is_some() {
+            self.cursor_screen_row = other.cursor_screen_row;
+        }
+        if other.drag_endpoint_screen_row.is_some() {
+            self.drag_endpoint_screen_row = other.drag_endpoint_screen_row;
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingTranscriptProjection {
+    intent: TranscriptScrollIntent,
+    restore: TranscriptProjectionRestore,
+    local_scroll_top: Option<RowIndex>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TranscriptViewportState {
     top_anchor: Option<TranscriptScrollAnchor>,
     top_offset_rows: isize,
     mode: TranscriptViewportMode,
-    pending_intent: Option<TranscriptScrollIntent>,
+    pending_projection: Option<PendingTranscriptProjection>,
     resolved_scroll_top: Option<RowIndex>,
 }
 
@@ -805,7 +829,7 @@ impl Default for TranscriptViewportState {
             top_anchor: None,
             top_offset_rows: 0,
             mode: TranscriptViewportMode::Tail,
-            pending_intent: None,
+            pending_projection: None,
             resolved_scroll_top: None,
         }
     }
@@ -1086,18 +1110,92 @@ impl TranscriptDocument {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn set_pending_scroll_intent(&mut self, intent: TranscriptScrollIntent) {
-        let intent = match (self.viewport_state.pending_intent.take(), intent) {
+        self.set_pending_projection(intent, TranscriptProjectionRestore::default(), None);
+    }
+
+    pub(crate) fn set_pending_projection(
+        &mut self,
+        intent: TranscriptScrollIntent,
+        restore: TranscriptProjectionRestore,
+        local_scroll_top: Option<RowIndex>,
+    ) {
+        let previous = self.viewport_state.pending_projection.take();
+        let mut next_restore = restore;
+        let (intent, local_scroll_top) = match (previous, intent) {
             (
-                Some(TranscriptScrollIntent::UserDelta { rows: pending }),
+                Some(PendingTranscriptProjection {
+                    intent: TranscriptScrollIntent::UserDelta { rows: pending },
+                    restore: mut pending_restore,
+                    local_scroll_top: pending_local_scroll_top,
+                }),
                 TranscriptScrollIntent::UserDelta { rows },
-            ) => TranscriptScrollIntent::UserDelta {
-                rows: pending.saturating_add(rows),
-            },
-            (Some(_), intent) | (None, intent) => intent,
+            ) => {
+                pending_restore.merge(next_restore);
+                next_restore = pending_restore;
+                (
+                    TranscriptScrollIntent::UserDelta {
+                        rows: pending.saturating_add(rows),
+                    },
+                    local_scroll_top.or(pending_local_scroll_top),
+                )
+            }
+            (_, intent @ TranscriptScrollIntent::UserDelta { .. }) => (intent, local_scroll_top),
+            (_, intent) => (intent, None),
         };
         self.viewport_state.mode = Self::viewport_mode_for_intent(&intent);
-        self.viewport_state.pending_intent = Some(intent);
+        self.viewport_state.pending_projection = Some(PendingTranscriptProjection {
+            intent,
+            restore: next_restore,
+            local_scroll_top,
+        });
+    }
+
+    pub(crate) fn local_command_scroll_top(&self, fallback: RowIndex) -> RowIndex {
+        self.viewport_state
+            .pending_projection
+            .as_ref()
+            .and_then(|pending| pending.local_scroll_top)
+            .unwrap_or(fallback)
+    }
+
+    pub(crate) fn has_pending_local_scroll_top(&self) -> bool {
+        self.viewport_state
+            .pending_projection
+            .as_ref()
+            .and_then(|pending| pending.local_scroll_top)
+            .is_some()
+    }
+
+    pub(crate) fn prime_local_scroll_base(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        scroll_top: RowIndex,
+    ) {
+        self.capture_viewport_anchor(
+            lua,
+            width,
+            scroll_top,
+            viewport_rows,
+            TranscriptScrollAnchor::EstimatedRow(scroll_top),
+        );
+    }
+
+    pub(crate) fn clear_pending_local_scroll_top(&mut self) {
+        if let Some(pending) = self.viewport_state.pending_projection.as_mut() {
+            pending.local_scroll_top = None;
+        }
+    }
+
+    pub(crate) fn take_pending_projection_restore(&mut self) -> TranscriptProjectionRestore {
+        self.viewport_state
+            .pending_projection
+            .as_mut()
+            .map(|pending| std::mem::take(&mut pending.restore))
+            .unwrap_or_default()
     }
 
     fn viewport_mode_for_intent(intent: &TranscriptScrollIntent) -> TranscriptViewportMode {
@@ -2154,8 +2252,8 @@ impl TranscriptDocument {
         &mut self,
         input: TranscriptViewportProjectionInput,
     ) -> TranscriptScrollIntent {
-        if let Some(intent) = self.viewport_state.pending_intent.take() {
-            return intent;
+        if let Some(pending) = self.viewport_state.pending_projection.take() {
+            return pending.intent;
         }
         if input.follow_tail {
             TranscriptScrollIntent::Tail
@@ -2225,13 +2323,7 @@ impl TranscriptDocument {
         fallback_scroll_top: RowIndex,
     ) -> Option<RowIndex> {
         match self.viewport_state.top_anchor {
-            // Tail-follow is an input intent, not durable row authority. Local
-            // movement after tail-follow starts from the last resolved paint row
-            // so generic Window pre-scroll cannot apply the same delta twice.
-            Some(TranscriptScrollAnchor::Tail) => self
-                .viewport_state
-                .resolved_scroll_top
-                .or(Some(fallback_scroll_top)),
+            Some(TranscriptScrollAnchor::Tail) => Some(fallback_scroll_top),
             Some(TranscriptScrollAnchor::Content(anchor)) => {
                 self.row_for_content_anchor(lua, width, viewport_rows, anchor)
             }
@@ -2376,9 +2468,7 @@ impl TranscriptDocument {
             }
             TranscriptScrollIntent::PreserveViewport => {
                 match self.row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top) {
-                    Some(row) => {
-                        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
-                    }
+                    Some(row) => crate::content::transcript_buf::ScrollTarget::visible_row(row),
                     None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
                 }
             }
@@ -2657,6 +2747,7 @@ impl TranscriptDocument {
         self.viewport_state.top_offset_rows = 0;
         self.viewport_state.mode = TranscriptViewportMode::FarSeek;
         self.viewport_state.resolved_scroll_top = Some(gap.scroll_top);
+        self.viewport_state.pending_projection = None;
         crate::smelt_edit::MaterializedRows {
             clamped_scroll: gap.scroll_top,
             row_base: gap.row_base,
@@ -2747,6 +2838,7 @@ impl TranscriptDocument {
             scroll_anchor,
         );
         self.viewport_state.resolved_scroll_top = Some(rows.clamped_scroll);
+        self.viewport_state.pending_projection = None;
         self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
         self.applied_viewport(rows, viewport_rows, false)
     }
@@ -3543,7 +3635,7 @@ mod document_tests {
         );
         assert_eq!(
             frames[0].projection_target,
-            TranscriptProjectionTargetTrace::ReflowStableRow(first.clamped_scroll)
+            TranscriptProjectionTargetTrace::ExactRow(first.clamped_scroll)
         );
     }
 
