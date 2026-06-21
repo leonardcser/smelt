@@ -43,9 +43,10 @@ fn sparse_display_only_search_app(
     app.app.load_session_display_only(
         session,
         loaded,
-        crate::app::DisplayOnlySessionState {
-            full_session_id: session_id.to_string(),
-            persisted_history_len: 200,
+        crate::app::DeferredSessionLoad {
+            id: session_id.to_string(),
+            history_len: 200,
+            checkpoint: None,
         },
     );
     app.app.app_focus = AppFocus::Content;
@@ -94,6 +95,7 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     assert!(app.state().cmdline_open);
     app.type_text("alpha");
     app.press(KeyCode::Enter);
+    app.render_silent();
 
     let first_match = app
         .app
@@ -108,6 +110,7 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     assert_eq!(transcript_row_cursor_row(&app), first_match.start.row);
 
     app.type_char('n');
+    app.render_silent();
     let next_match = app
         .app
         .search
@@ -121,6 +124,7 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     assert_eq!(transcript_row_cursor_row(&app), next_match.start.row);
     assert!(next_match.start.row > first_match.start.row);
     app.type_char('N');
+    app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), first_match.start.row);
 }
 
@@ -157,6 +161,7 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     );
 
     app.type_char('n');
+    app.render_silent();
     let early_match = app
         .app
         .search
@@ -203,6 +208,7 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
         .unwrap();
 
     app.type_char('N');
+    app.render_silent();
     let early_match = app
         .app
         .search
@@ -298,11 +304,14 @@ fn transcript_search_reverse_repeat_wraps_from_first_match() {
     app.type_char('/');
     app.type_text("alpha");
     app.press(KeyCode::Enter);
+    app.render_silent();
     let first_row = transcript_row_cursor_row(&app);
 
     app.type_char('N');
+    app.render_silent();
     assert!(transcript_row_cursor_row(&app) > first_row);
     app.type_char('n');
+    app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), first_row);
 }
 
@@ -314,6 +323,7 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
     app.type_char('/');
     app.type_text("row 010");
     app.press(KeyCode::Enter);
+    app.render_silent();
 
     let match_row = app
         .app
@@ -344,6 +354,7 @@ fn transcript_search_jump_keeps_match_above_bottom_overlay() {
     app.type_char('/');
     app.type_text("row 090");
     app.press(KeyCode::Enter);
+    app.render_silent();
 
     let match_row = app
         .app
