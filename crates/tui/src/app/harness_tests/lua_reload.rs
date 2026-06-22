@@ -56,11 +56,11 @@ fn lua_config_session_and_transcript_contracts_are_available() {
             assert(type(info.worktree) == "table")
 
             assert(smelt.transcript.is_empty() == false)
-            local text = smelt.transcript.text()
+            local text = smelt.transcript.loaded_text_expensive()
             assert(text:find("hello from lua api test", 1, true))
-            local blocks = smelt.transcript.blocks()
+            local blocks = smelt.transcript.loaded_blocks_expensive()
             assert(#blocks >= 1)
-            assert(type(blocks[1].idx) == "number")
+            assert(type(blocks[1].descriptor_index) == "number")
             assert(type(blocks[1].role) == "string")
             assert(type(smelt.transcript.rows(0, 2)) == "table")
 
@@ -942,7 +942,7 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
     fn transcript_rows(app: &mut TestApp) -> Vec<String> {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         app.app
-            .materialize_full_transcript_display_rows_expensive()
+            .materialize_loaded_transcript_display_rows_expensive()
             .iter()
             .cloned()
             .collect()

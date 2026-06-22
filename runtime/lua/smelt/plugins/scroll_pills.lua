@@ -19,7 +19,7 @@ local state = {
   top_buf = nil,
   top_win = nil,
   top_width = nil,
-  top_target_idx = nil,
+  top_target_descriptor_index = nil,
 }
 
 -- ── Common lifecycle ───────────────────────────────────────────────────
@@ -138,8 +138,8 @@ local function open_top(width)
     scrollbar = false,
   })
   win:on("press", function()
-    if state.top_target_idx then
-      smelt.transcript.reveal_block(state.top_target_idx, { top_padding = 1, cursor = true })
+    if state.top_target_descriptor_index then
+      smelt.transcript.reveal_block(state.top_target_descriptor_index, { top_padding = 1, cursor = true })
     end
   end)
   state.top_buf = buf
@@ -189,7 +189,7 @@ local function refresh_top(scroll)
 
   if state.top_overlay and state.top_width ~= width then close_top() end
   if not state.top_overlay then open_top(width) end
-  state.top_target_idx = target.idx
+  state.top_target_descriptor_index = target.descriptor_index
   paint_top_row(width, target.first_line)
 end
 

@@ -5,7 +5,7 @@
 smelt.keymap.set("n", "<C-y>", function()
     local win = smelt.focus()
     if win == "transcript" then
-        local text = smelt.transcript.text()
+        local text = smelt.transcript.loaded_text_expensive()
         if #text > 0 then
             smelt.clipboard.write(text)
             smelt.notify("transcript copied")

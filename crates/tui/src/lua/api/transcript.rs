@@ -13,18 +13,15 @@ use super::buf::LuaBuf;
 
 fn block_snapshot_table(
     lua: &Lua,
-    idx: usize,
-    role: &'static str,
-    first_row: crate::smelt_edit::RowIndex,
-    rows: crate::smelt_edit::RowIndex,
-    first_line: String,
+    snap: crate::app::transcript::TranscriptBlockSnapshot,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    t.set("idx", idx)?;
-    t.set("role", role)?;
-    t.set("first_row", first_row)?;
-    t.set("rows", rows)?;
-    t.set("first_line", first_line)?;
+    t.set("descriptor_index", snap.descriptor_index)?;
+    t.set("block_id", snap.block_id.get())?;
+    t.set("role", snap.role)?;
+    t.set("first_row", snap.first_row)?;
+    t.set("rows", snap.rows)?;
+    t.set("first_line", snap.first_line)?;
     Ok(t)
 }
 
@@ -33,7 +30,7 @@ fn navigation_block_table(
     block: crate::app::transcript::TranscriptNavigationBlock,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    t.set("idx", block.descriptor_index)?;
+    t.set("descriptor_index", block.descriptor_index)?;
     t.set("block_id", block.block_id.get())?;
     t.set("role", block.role)?;
     t.set("first_line", block.first_line)?;
@@ -288,54 +285,48 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
-        "text",
-        "Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).",
+        "loaded_text_expensive",
+        "Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active descriptor window loaded. Prefer `rows(start, count)` for bounded display reads.",
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
-                app.materialize_full_transcript_display_rows_expensive().join("\n")
+                app.materialize_loaded_transcript_display_rows_expensive().join("\n")
             })
             .unwrap_or_default())
         },
     )?;
     m.fn_(
         "is_empty",
-        "Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).",
+        "Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `loaded_blocks_expensive()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).",
         &[],
         |_, ()| -> LuaResult<bool> {
             Ok(crate::lua::try_with_app(|app| app.transcript.is_empty()).unwrap_or(true))
         },
     )?;
     m.fn_(
-        "blocks",
-        "Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `\"user\"|\"assistant\"|\"thinking\"|\"tool\"|\"code\"|\"exec\"|\"compacted\"|\"compaction_preview\"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.",
+        "loaded_blocks_expensive",
+        "Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` is the stable sparse descriptor index accepted by `reveal_block`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let snaps = crate::lua::try_with_app(|app| app.transcript_block_snapshots())
+            let snaps = crate::lua::try_with_app(|app| app.loaded_transcript_block_snapshots())
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(snaps.len(), 0)?;
-            for (i, (idx, role, first_row, rows, first_line)) in snaps.into_iter().enumerate() {
-                out.set(
-                    i + 1,
-                    block_snapshot_table(lua, idx, role, first_row, rows, first_line)?,
-                )?;
+            for (i, snap) in snaps.into_iter().enumerate() {
+                out.set(i + 1, block_snapshot_table(lua, snap)?)?;
             }
             Ok(out)
         },
     )?;
     m.fn_(
         "visible_blocks",
-        "Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.",
+        "Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let snaps = crate::lua::try_with_app(|app| app.visible_transcript_block_snapshots())
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(snaps.len(), 0)?;
-            for (i, (idx, role, first_row, rows, first_line)) in snaps.into_iter().enumerate() {
-                out.set(
-                    i + 1,
-                    block_snapshot_table(lua, idx, role, first_row, rows, first_line)?,
-                )?;
+            for (i, snap) in snaps.into_iter().enumerate() {
+                out.set(i + 1, block_snapshot_table(lua, snap)?)?;
             }
             Ok(out)
         },
@@ -355,38 +346,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
-        "block_at_row",
-        "Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.",
+        "loaded_block_at_row",
+        "Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ descriptor_index, block_id, role, first_row, rows, first_line }`.",
         &["row"],
         |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
-            let snap = crate::lua::try_with_app(|app| app.transcript_block_at_row(row)).flatten();
-            snap.map(|(idx, role, first_row, rows, first_line)| {
-                block_snapshot_table(lua, idx, role, first_row, rows, first_line)
-            })
-            .transpose()
-        },
-    )?;
-    m.fn_(
-        "block_before_or_at_row",
-        "Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. This is a row/debug lookup for already-projected display coordinates; use `previous_block`, `next_block`, and `reveal_block` for semantic transcript navigation.",
-        &["row", "opts"],
-        |lua, (row, opts): (crate::smelt_edit::RowIndex, Option<mlua::Table>)| -> LuaResult<Option<mlua::Table>> {
-            let role = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
-            let snap = crate::lua::try_with_app(|app| {
-                app.transcript_block_before_or_at_row(row, role.as_deref())
-            })
-            .flatten();
-            snap.map(|(idx, role, first_row, rows, first_line)| {
-                block_snapshot_table(lua, idx, role, first_row, rows, first_line)
-            })
-            .transpose()
+            let snap = crate::lua::try_with_app(|app| app.loaded_transcript_block_at_row(row)).flatten();
+            snap.map(|snap| block_snapshot_table(lua, snap)).transpose()
         },
     )?;
     m.fn_(
         "previous_block",
-        "Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
+        "Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
             let role = opts
@@ -402,7 +372,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "next_block",
-        "Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
+        "Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
             let role = opts
@@ -418,9 +388,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "reveal_block",
-        "Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.",
-        &["idx", "opts"],
-        |_, (idx, opts): (usize, Option<mlua::Table>)| -> LuaResult<bool> {
+        "Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.",
+        &["descriptor_index", "opts"],
+        |_, (descriptor_index, opts): (usize, Option<mlua::Table>)| -> LuaResult<bool> {
             let top_padding = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<crate::smelt_edit::RowIndex>>("top_padding").ok().flatten())
@@ -430,7 +400,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .and_then(|t| t.get::<Option<bool>>("cursor").ok().flatten())
                 .unwrap_or(true);
             Ok(crate::lua::try_with_app(|app| {
-                app.reveal_transcript_descriptor_block(idx, top_padding, cursor)
+                app.reveal_transcript_descriptor_block(descriptor_index, top_padding, cursor)
             })
             .unwrap_or(false))
         },

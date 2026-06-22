@@ -1344,7 +1344,7 @@ fn finish_transcript_drag(app: &mut TestApp) {
 
 #[derive(Clone, Debug)]
 struct RevealedUserBlock {
-    idx: usize,
+    descriptor_index: usize,
     block_id: u64,
     first_line: String,
 }
@@ -1355,8 +1355,8 @@ fn reveal_user_block_via_lua(app: &mut TestApp, direction: &str) -> RevealedUser
             r#"
             local block = assert(smelt.transcript.previous_block({ role = "user" }))
             assert(block.role == "user")
-            assert(smelt.transcript.reveal_block(block.idx, { top_padding = 1, cursor = true }))
-            _G.transcript_revealed_idx = block.idx
+            assert(smelt.transcript.reveal_block(block.descriptor_index, { top_padding = 1, cursor = true }))
+            _G.transcript_revealed_descriptor_index = block.descriptor_index
             _G.transcript_revealed_block_id = block.block_id
             _G.transcript_revealed_first_line = block.first_line
             "#
@@ -1365,8 +1365,8 @@ fn reveal_user_block_via_lua(app: &mut TestApp, direction: &str) -> RevealedUser
             r#"
             local block = assert(smelt.transcript.next_block({ role = "user" }))
             assert(block.role == "user")
-            assert(smelt.transcript.reveal_block(block.idx, { top_padding = 1, cursor = true }))
-            _G.transcript_revealed_idx = block.idx
+            assert(smelt.transcript.reveal_block(block.descriptor_index, { top_padding = 1, cursor = true }))
+            _G.transcript_revealed_descriptor_index = block.descriptor_index
             _G.transcript_revealed_block_id = block.block_id
             _G.transcript_revealed_first_line = block.first_line
             "#
@@ -1376,8 +1376,8 @@ fn reveal_user_block_via_lua(app: &mut TestApp, direction: &str) -> RevealedUser
     assert!(app.run_lua(snippet));
     let globals = app.app.lua.lua.globals();
     RevealedUserBlock {
-        idx: globals
-            .get::<usize>("transcript_revealed_idx")
+        descriptor_index: globals
+            .get::<usize>("transcript_revealed_descriptor_index")
             .expect("revealed descriptor index"),
         block_id: globals
             .get::<u64>("transcript_revealed_block_id")
@@ -1405,7 +1405,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
             row_offset,
             screen_padding_top,
         } => {
-            assert_eq!(descriptor_index, block.idx);
+            assert_eq!(descriptor_index, block.descriptor_index);
             assert_eq!(
                 block_id,
                 smelt_core::transcript_model::BlockId::new(block.block_id)
@@ -1457,7 +1457,7 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         older.first_line
     );
     assert!(
-        older.idx < previous.idx,
+        older.descriptor_index < previous.descriptor_index,
         "repeated previous-user reveal should walk backward by descriptor identity: previous={previous:?}, older={older:?}"
     );
 
@@ -1486,7 +1486,7 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         next.first_line
     );
     assert!(
-        next.idx > previous.idx,
+        next.descriptor_index > previous.descriptor_index,
         "next user reveal should move forward by descriptor identity: previous={previous:?}, next={next:?}"
     );
 }

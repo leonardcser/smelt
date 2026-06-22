@@ -7,21 +7,6 @@
 ---@class smelt.transcript
 local transcript = {}
 
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
----@type fun(row: integer): table?
-transcript.block_at_row = nil
-
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. This is a row/debug lookup for already-projected display coordinates; use `previous_block`, `next_block`, and `reveal_block` for semantic transcript navigation.
----@type fun(row: integer, opts: table?): table?
-transcript.block_before_or_at_row = nil
-
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
----@type fun(): table
-transcript.blocks = nil
-
 --- Add or replace named middleware around the root renderer. Later extensions
 --- run first. The callback receives `(next, block, ctx)` and may return its own
 --- layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
@@ -63,12 +48,27 @@ transcript.get_renderer = nil
 transcript.invalidate_renderer = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+--- Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `loaded_blocks_expensive()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
 ---@type fun(): boolean
 transcript.is_empty = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+--- Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ descriptor_index, block_id, role, first_row, rows, first_line }`.
+---@type fun(row: integer): table?
+transcript.loaded_block_at_row = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` is the stable sparse descriptor index accepted by `reveal_block`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
+---@type fun(): table
+transcript.loaded_blocks_expensive = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active descriptor window loaded. Prefer `rows(start, count)` for bounded display reads.
+---@type fun(): string
+transcript.loaded_text_expensive = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
 ---@type fun(opts: table?): table?
 transcript.next_block = nil
 
@@ -78,13 +78,13 @@ transcript.next_block = nil
 transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+--- Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
 ---@type fun(opts: table?): table?
 transcript.previous_block = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
----@type fun(idx: integer, opts: table?): boolean
+--- Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+---@type fun(descriptor_index: integer, opts: table?): boolean
 transcript.reveal_block = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
@@ -108,12 +108,7 @@ transcript.set_renderer = nil
 transcript.stream = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).
----@type fun(): string
-transcript.text = nil
-
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.
+--- Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
 ---@type fun(): table
 transcript.visible_blocks = nil
 

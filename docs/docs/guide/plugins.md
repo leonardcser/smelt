@@ -251,7 +251,7 @@ shapes.
 ```lua
 smelt.keymap.set("n", "<C-y>", function()
   local where = smelt.focus()
-  local text  = where == "transcript" and smelt.transcript.text() or smelt.prompt.text()
+  local text  = where == "transcript" and smelt.transcript.loaded_text_expensive() or smelt.prompt.text()
   smelt.clipboard.write(text)
 end)
 

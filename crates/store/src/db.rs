@@ -422,8 +422,8 @@ impl SessionDb {
         history::transcript_descriptor_count(&self.conn)
     }
 
-    /// Fast descriptor extent for dense transcript tables written by the current store.
-    /// Use `transcript_descriptor_count` when sparse or synthetic block indices must be counted exactly.
+    /// Fast descriptor extent using the stored descriptor ordinal.
+    /// This is equivalent to the descriptor count for current stores.
     pub fn transcript_descriptor_dense_extent(&self) -> Result<usize> {
         history::transcript_descriptor_dense_extent(&self.conn)
     }
@@ -493,20 +493,28 @@ impl SessionDb {
         )
     }
 
-    pub fn read_transcript_descriptor_before_kind(
+    pub fn read_transcript_descriptor_before_kind_at_index(
         &self,
         kind: &str,
-        before_or_at_block_idx: u64,
+        before_or_at_descriptor_index: u64,
     ) -> Result<Option<TranscriptDescriptorRecord>> {
-        history::read_transcript_descriptor_before_kind(&self.conn, kind, before_or_at_block_idx)
+        history::read_transcript_descriptor_before_kind_at_index(
+            &self.conn,
+            kind,
+            before_or_at_descriptor_index,
+        )
     }
 
-    pub fn read_transcript_descriptor_after_kind(
+    pub fn read_transcript_descriptor_after_kind_at_index(
         &self,
         kind: &str,
-        after_or_at_block_idx: u64,
+        after_or_at_descriptor_index: u64,
     ) -> Result<Option<TranscriptDescriptorRecord>> {
-        history::read_transcript_descriptor_after_kind(&self.conn, kind, after_or_at_block_idx)
+        history::read_transcript_descriptor_after_kind_at_index(
+            &self.conn,
+            kind,
+            after_or_at_descriptor_index,
+        )
     }
 
     pub fn search_transcript_candidates(
@@ -1043,50 +1051,54 @@ mod tests {
     }
 
     #[test]
-    fn transcript_descriptor_navigation_by_kind_reads_nearest_matching_blocks() {
+    fn transcript_descriptor_navigation_by_kind_reads_nearest_matching_indexes() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..6)
-            .map(|idx| transcript_record(idx, &format!("block-{idx}"), &format!("text {idx}")))
+            .map(|idx| transcript_record(idx * 10, &format!("block-{idx}"), &format!("text {idx}")))
             .collect::<Vec<_>>();
         records[1].kind = "user".into();
         records[4].kind = "user".into();
         db.replace_transcript_descriptor_records(&records).unwrap();
 
         assert_eq!(
-            db.read_transcript_descriptor_before_kind("user", 5)
+            db.read_transcript_descriptor_before_kind_at_index("user", 5)
                 .unwrap(),
             Some(without_search_text(records[4].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_before_kind("user", 4)
+            db.read_transcript_descriptor_before_kind_at_index("user", 4)
                 .unwrap(),
             Some(without_search_text(records[4].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_before_kind("user", 3)
+            db.read_transcript_descriptor_before_kind_at_index("user", 3)
                 .unwrap(),
             Some(without_search_text(records[1].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind("user", 0).unwrap(),
+            db.read_transcript_descriptor_after_kind_at_index("user", 0)
+                .unwrap(),
             Some(without_search_text(records[1].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind("user", 1).unwrap(),
+            db.read_transcript_descriptor_after_kind_at_index("user", 1)
+                .unwrap(),
             Some(without_search_text(records[1].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind("user", 2).unwrap(),
+            db.read_transcript_descriptor_after_kind_at_index("user", 2)
+                .unwrap(),
             Some(without_search_text(records[4].clone()))
         );
         assert_eq!(
-            db.read_transcript_descriptor_before_kind("tool", 5)
+            db.read_transcript_descriptor_before_kind_at_index("tool", 5)
                 .unwrap(),
             None
         );
         assert_eq!(
-            db.read_transcript_descriptor_after_kind("tool", 0).unwrap(),
+            db.read_transcript_descriptor_after_kind_at_index("tool", 0)
+                .unwrap(),
             None
         );
     }

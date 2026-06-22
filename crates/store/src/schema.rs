@@ -86,6 +86,7 @@ fn ensure_schema_shape(conn: &Connection) -> Result<()> {
     // have the same user_version with older table shapes.
     ensure_schema_columns(conn)?;
     conn.execute_batch(SCHEMA)?;
+    backfill_transcript_descriptor_indexes(conn)?;
     Ok(())
 }
 
@@ -93,6 +94,27 @@ fn ensure_schema_columns(conn: &Connection) -> Result<()> {
     for column in SAME_VERSION_REPAIR_COLUMNS {
         add_column_if_missing(conn, column.table, column.definition)?;
     }
+    Ok(())
+}
+
+fn backfill_transcript_descriptor_indexes(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "transcript_blocks")?
+        || !column_exists(conn, "transcript_blocks", "descriptor_idx")?
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE transcript_blocks
+         SET descriptor_idx = (
+             SELECT COUNT(*)
+             FROM transcript_blocks AS previous
+             WHERE previous.descriptor_json IS NOT NULL
+               AND previous.block_idx < transcript_blocks.block_idx
+         )
+         WHERE descriptor_json IS NOT NULL
+           AND descriptor_idx IS NULL",
+        [],
+    )?;
     Ok(())
 }
 
@@ -166,6 +188,10 @@ const SAME_VERSION_REPAIR_COLUMNS: &[RepairColumn] = &[
     RepairColumn {
         table: "history_items",
         definition: "created_at INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "descriptor_idx INTEGER",
     },
     RepairColumn {
         table: "transcript_blocks",
@@ -417,6 +443,7 @@ CREATE INDEX IF NOT EXISTS history_items_created_at_idx ON history_items(created
 
 CREATE TABLE IF NOT EXISTS transcript_blocks (
     block_idx INTEGER PRIMARY KEY,
+    descriptor_idx INTEGER,
     history_idx INTEGER REFERENCES history_items(idx) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     tool_call_id TEXT,
@@ -432,10 +459,15 @@ CREATE TABLE IF NOT EXISTS transcript_blocks (
     tool_state_json TEXT
 );
 CREATE INDEX IF NOT EXISTS transcript_blocks_history_idx ON transcript_blocks(history_idx, block_idx);
-CREATE INDEX IF NOT EXISTS transcript_blocks_kind_idx ON transcript_blocks(kind, block_idx);
+CREATE UNIQUE INDEX IF NOT EXISTS transcript_blocks_descriptor_idx
+    ON transcript_blocks(descriptor_idx)
+    WHERE descriptor_json IS NOT NULL;
+CREATE INDEX IF NOT EXISTS transcript_blocks_kind_idx
+    ON transcript_blocks(kind, descriptor_idx)
+    WHERE descriptor_json IS NOT NULL;
 CREATE INDEX IF NOT EXISTS transcript_blocks_tool_call_id_idx ON transcript_blocks(tool_call_id);
 CREATE INDEX IF NOT EXISTS transcript_blocks_extent_idx
-    ON transcript_blocks(block_idx, kind, estimated_rows, estimated_text_bytes, preview_text)
+    ON transcript_blocks(descriptor_idx, kind, estimated_rows, estimated_text_bytes, preview_text)
     WHERE descriptor_json IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS objects (

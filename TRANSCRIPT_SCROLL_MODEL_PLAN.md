@@ -104,7 +104,7 @@ No step requires exact prefix height.
 
 Remove or rewrite the following as part of the reset:
 
-- `block_before_or_at_row(row, ...)` from top-pill and semantic navigation paths. Keep only as a compatibility/debug row query if still needed.
+- `block_before_or_at_row(row, ...)` from top-pill, semantic navigation paths, and public Lua. Keep only private debug helpers if still needed.
 - `win:reveal(row, ...)` for transcript semantic navigation. Replace with `transcript:reveal_block(...)`, `transcript:previous_block(...)`, or equivalent.
 - Passive row lookup helpers added only to make previous-user pills safer while still using estimated rows.
 - `opts.passive = true` on row lookup if the final API no longer uses row lookup for semantic navigation.
@@ -934,7 +934,7 @@ Phase 3 result:
 
 - Confirmed the top scroll pill uses `smelt.transcript.previous_block({ role = "user" })` and clicks route through `smelt.transcript.reveal_block(...)`, not row lookup or transcript `win:reveal(row)`.
 - Strengthened the runtime Lua regression to assert the semantic role filter and exact reveal options used by the pill click.
-- Updated generated Lua API docs to classify `block_before_or_at_row` as row/debug lookup and `Win:reveal(row)` as generic row reveal, with transcript message navigation directed to `previous_block`, `next_block`, and `reveal_block`.
+- Removed the public `block_before_or_at_row` Lua API instead of carrying a row/debug compatibility surface; generated docs now expose only semantic block navigation plus generic row reveal.
 
 ### Reset Phase 4: Rebuild viewport state around block anchors
 

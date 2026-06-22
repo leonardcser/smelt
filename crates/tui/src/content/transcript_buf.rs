@@ -1870,32 +1870,6 @@ impl TranscriptProjection {
         self.node_at_prepared_row(history, row)
     }
 
-    pub(crate) fn block_node_before_or_at_row(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        history: &mut BlockHistory,
-        width: u16,
-        row: RowIndex,
-        mut matches: impl FnMut(&BlockHistory, BlockId) -> bool,
-    ) -> Option<TranscriptNodeRow> {
-        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
-        self.prepare_row_index_with_env(env.clone(), history, width);
-        let mut index = self.measurements.active.node_index_before_or_at_row(row)?;
-        loop {
-            let node = self.measurements.active.nodes.get(index)?;
-            if let Some(block_id) = node.id.as_block_id() {
-                if matches(history, block_id) {
-                    let _ = self.exactify_node_range(env.clone(), history, index..index + 1);
-                    return self.node_at_prepared_index(history, index, row);
-                }
-            }
-            if index == 0 {
-                return None;
-            }
-            index -= 1;
-        }
-    }
-
     fn node_at_prepared_row(
         &self,
         history: &BlockHistory,
@@ -3458,50 +3432,6 @@ mod tests {
         assert_eq!(second.total_rows, first.total_rows);
         assert_eq!(counters.display_layouts, 0);
         assert_eq!(counters.exact_height_measured_blocks, 0);
-    }
-
-    #[test]
-    fn block_before_lookup_uses_bounded_layout_work() {
-        let lua = test_lua();
-        let theme = Theme::default();
-        let mut transcript = Transcript::new();
-        for i in 0..200 {
-            transcript.push(Block::User {
-                text: format!("user prompt {i}"),
-                image_labels: Vec::new(),
-            });
-            transcript.push(Block::Text {
-                content: format!("assistant response {i}\n{}", "detail line\n".repeat(12)),
-            });
-        }
-        let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(102), Default::default());
-        let rows = project_with_lua(
-            &mut projection,
-            &lua,
-            &mut buf,
-            &mut transcript.history,
-            80,
-            &theme,
-            ScrollTarget::visible_tail(),
-            20,
-        );
-        projection.reset_counters();
-
-        let node = projection
-            .block_node_before_or_at_row(
-                &lua,
-                &mut transcript.history,
-                80,
-                rows.total_rows / 2,
-                |history, id| history.block_kind(id) == Some("user"),
-            )
-            .expect("user block before midpoint");
-        let counters = projection.counters();
-        assert!(node.id.as_block_id().is_some());
-        assert!(counters.full_row_builds == 0);
-        assert!(counters.display_layouts <= 1);
-        assert!(counters.exact_height_measured_blocks <= 1);
     }
 
     #[test]

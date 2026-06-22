@@ -169,7 +169,7 @@ pub enum LuaOp {
     },
 
     /// Call one of the recently-added read-only Lua APIs: `win:scroll()`
-    /// getter, `paint:rect()`, `smelt.transcript.blocks()`,
+    /// getter, `paint:rect()`, `smelt.transcript.loaded_blocks_expensive()`,
     /// `smelt.text.fit(s, w)`, `win:content_width()`,
     /// `smelt.session.text(id)`, `smelt.session.texts({ids})`.
     /// `kind % 7` picks the probe. These surfaces aren't reached by the
@@ -908,7 +908,7 @@ fn emit_api_probe(out: &mut String, fn_idx: u16, arg_kind: u8, api_metas: &[(&st
 /// `kind % 7` picks one of the recently-added read-only APIs:
 /// 0: `win:scroll()` (getter) on a tracked win
 /// 1: `paint:rect()` on a tracked paint handle
-/// 2: `smelt.transcript.blocks()`
+/// 2: `smelt.transcript.loaded_blocks_expensive()`
 /// 3: `smelt.text.fit(string, width)`
 /// 4: `win:content_width()` on a tracked win
 /// 5: `smelt.session.text(id)` against a missing id (sidecar fallback path)
@@ -930,7 +930,7 @@ fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
         }
         2 => {
             out.push_str(
-                "pcall(function() return smelt.transcript and smelt.transcript.blocks and smelt.transcript.blocks() end)\n",
+                "pcall(function() return smelt.transcript and smelt.transcript.loaded_blocks_expensive and smelt.transcript.loaded_blocks_expensive() end)\n",
             );
         }
         3 => {

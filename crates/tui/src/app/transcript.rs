@@ -777,6 +777,26 @@ struct TranscriptContentAnchor {
     fallback_row: RowIndex,
 }
 
+// Durable origin for semantic transcript navigation. Search/reveal intents set this
+// to the target block; normal viewport projection falls back to the top visible
+// content anchor; far-seek gaps clear it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranscriptSemanticAnchor {
+    descriptor_index: usize,
+    block_id: BlockId,
+    row_offset: RowIndex,
+}
+
+impl From<TranscriptContentAnchor> for TranscriptSemanticAnchor {
+    fn from(anchor: TranscriptContentAnchor) -> Self {
+        Self {
+            descriptor_index: anchor.descriptor_index,
+            block_id: anchor.block_id,
+            row_offset: anchor.intra_block_row,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TranscriptScrollAnchor {
     Tail,
@@ -819,6 +839,7 @@ struct PendingTranscriptProjection {
 struct TranscriptViewportState {
     top_anchor: Option<TranscriptScrollAnchor>,
     top_offset_rows: isize,
+    semantic_anchor: Option<TranscriptSemanticAnchor>,
     mode: TranscriptViewportMode,
     pending_projection: Option<PendingTranscriptProjection>,
     resolved_scroll_top: Option<RowIndex>,
@@ -829,6 +850,7 @@ impl Default for TranscriptViewportState {
         Self {
             top_anchor: None,
             top_offset_rows: 0,
+            semantic_anchor: None,
             mode: TranscriptViewportMode::Tail,
             pending_projection: None,
             resolved_scroll_top: None,
@@ -1053,6 +1075,7 @@ pub(crate) struct TranscriptProjectionPlan {
     total_rows: RowIndex,
     requested_scroll: Option<RowIndex>,
     cursor_target: Option<TranscriptCursorTarget>,
+    semantic_anchor: Option<TranscriptSemanticAnchor>,
     scroll_anchor: TranscriptScrollAnchor,
     width: u16,
     viewport_rows: u16,
@@ -1403,6 +1426,38 @@ impl TranscriptDocument {
         )
     }
 
+    fn semantic_anchor_for_intent(
+        intent: &TranscriptScrollIntent,
+    ) -> Option<TranscriptSemanticAnchor> {
+        match intent {
+            TranscriptScrollIntent::RevealBlock {
+                descriptor_index,
+                block_id,
+                row_offset,
+                ..
+            } => Some(TranscriptSemanticAnchor {
+                descriptor_index: *descriptor_index,
+                block_id: *block_id,
+                row_offset: *row_offset,
+            }),
+            TranscriptScrollIntent::SearchJump {
+                anchor:
+                    TranscriptSearchAnchor::Content {
+                        descriptor_index,
+                        block_id,
+                        row_anchor,
+                        ..
+                    },
+                ..
+            } => Some(TranscriptSemanticAnchor {
+                descriptor_index: *descriptor_index,
+                block_id: *block_id,
+                row_offset: row_anchor.row_offset,
+            }),
+            _ => None,
+        }
+    }
+
     fn trace_descriptor_range(
         range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
     ) -> Option<TranscriptDescriptorTraceRange> {
@@ -1688,6 +1743,28 @@ impl TranscriptDocument {
             .collect()
     }
 
+    fn block_snapshot_for_block(
+        &self,
+        block_id: BlockId,
+        first_row: crate::smelt_edit::RowIndex,
+        rows: crate::smelt_edit::RowIndex,
+    ) -> Option<TranscriptBlockSnapshot> {
+        let history = self.history();
+        let block = history.block(block_id)?;
+        let descriptor_index = self
+            .descriptor_index_for_block_id(block_id)
+            .or_else(|| self.stored_descriptor_index_for_block_idx(block_id.get()))
+            .or_else(|| history.order.iter().position(|id| *id == block_id))?;
+        Some(TranscriptBlockSnapshot {
+            descriptor_index,
+            block_id,
+            role: transcript_block_role(block),
+            first_row,
+            rows,
+            first_line: transcript_block_first_line(block),
+        })
+    }
+
     fn block_snapshots_from_layout(
         &self,
         layout: impl Iterator<
@@ -1698,24 +1775,11 @@ impl TranscriptDocument {
             ),
         >,
     ) -> Vec<TranscriptBlockSnapshot> {
-        let mut out = Vec::new();
-        let history = self.history();
-        for (block_id, first_row, rows) in layout {
-            let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
-                continue;
-            };
-            let Some(block) = history.block(block_id) else {
-                continue;
-            };
-            out.push((
-                idx,
-                transcript_block_role(block),
-                first_row,
-                rows,
-                transcript_block_first_line(block),
-            ));
-        }
-        out
+        layout
+            .filter_map(|(block_id, first_row, rows)| {
+                self.block_snapshot_for_block(block_id, first_row, rows)
+            })
+            .collect()
     }
 
     pub(crate) fn visible_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
@@ -1729,39 +1793,6 @@ impl TranscriptDocument {
     ) -> Vec<TranscriptBlockSnapshot> {
         let layout = self.materialize_exact_loaded_block_layout(lua, width);
         self.block_snapshots_from_layout(layout.into_iter())
-    }
-
-    pub(crate) fn block_snapshot_before_or_at_row(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        row: crate::smelt_edit::RowIndex,
-        role: Option<&str>,
-    ) -> Option<TranscriptBlockSnapshot> {
-        let _ = self.activate_descriptor_window_for_approximate_display_row(width, row, 20);
-        loop {
-            if let Some(node) =
-                self.loaded_block_node_before_or_at_virtual_row(lua, width, row, |history, id| {
-                    role.is_none_or(|role| transcript_history_role(history, id) == role)
-                        && !transcript_raw_first_line(history, id).is_empty()
-                })
-            {
-                let block_id = node.id.as_block_id()?;
-                let history = self.history();
-                let idx = history.order.iter().position(|id| *id == block_id)?;
-                return Some((
-                    idx,
-                    transcript_history_role(history, block_id),
-                    node.first_row,
-                    node.rows,
-                    transcript_raw_first_line(history, block_id),
-                ));
-            }
-
-            if !self.activate_previous_descriptor_window(width, 20) {
-                return None;
-            }
-        }
     }
 
     fn navigation_block_from_record(
@@ -1959,6 +1990,10 @@ impl TranscriptDocument {
     }
 
     fn current_viewport_descriptor_anchor(&self) -> Option<(usize, BlockId, RowIndex)> {
+        if let Some(anchor) = self.viewport_state.semantic_anchor {
+            return Some((anchor.descriptor_index, anchor.block_id, anchor.row_offset));
+        }
+
         if let Some(TranscriptScrollAnchor::Content(anchor)) = self.viewport_state.top_anchor {
             return Some((
                 anchor.descriptor_index,
@@ -1995,16 +2030,23 @@ impl TranscriptDocument {
         let record = match direction {
             TranscriptNavigationDirection::Previous => {
                 let before = anchor_index.checked_sub(1)?;
-                db.read_transcript_descriptor_before_kind(role, before as u64)
+                db.read_transcript_descriptor_before_kind_at_index(role, before as u64)
                     .ok()
                     .flatten()?
             }
             TranscriptNavigationDirection::Next => db
-                .read_transcript_descriptor_after_kind(role, anchor_index.saturating_add(1) as u64)
+                .read_transcript_descriptor_after_kind_at_index(
+                    role,
+                    anchor_index.saturating_add(1) as u64,
+                )
                 .ok()
                 .flatten()?,
         };
-        let index = record.block_idx as usize;
+        let index = db
+            .transcript_descriptor_index_for_block_idx(record.block_idx)
+            .ok()
+            .flatten()?
+            .get();
         let record = TranscriptBlockRecordWithId::try_from(record).ok()?;
         Some((index, record))
     }
@@ -2229,32 +2271,6 @@ impl TranscriptDocument {
         let visible_descriptors =
             (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
         visible_descriptors.saturating_mul(4).max(32).min(total)
-    }
-
-    fn previous_descriptor_window_range(
-        &self,
-        width: u16,
-        viewport_rows: u16,
-    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let active = self.active_descriptor_range.clone()?;
-        let end = active.start.get();
-        if end == 0 {
-            return None;
-        }
-        let total = self.sparse_descriptors.total_count()?;
-        let count = self.descriptor_window_count(width, viewport_rows, total);
-        let start = end.saturating_sub(count);
-        Some(
-            smelt_store::TranscriptDescriptorIndex::new(start)
-                ..smelt_store::TranscriptDescriptorIndex::new(end),
-        )
-    }
-
-    fn activate_previous_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
-        let Some(range) = self.previous_descriptor_window_range(width, viewport_rows) else {
-            return false;
-        };
-        self.activate_descriptor_window_range(range)
     }
 
     fn descriptor_window_range_around_center(
@@ -2935,6 +2951,7 @@ impl TranscriptDocument {
     ) -> TranscriptProjectionPlan {
         let intent = self.take_viewport_intent(input);
         let allow_sparse_placeholders = Self::intent_is_approximate_row_seek(&intent);
+        let semantic_anchor = Self::semantic_anchor_for_intent(&intent);
         let (scroll_target, cursor_target) = self.scroll_target_for_intent(
             lua,
             width,
@@ -2961,6 +2978,7 @@ impl TranscriptDocument {
             allow_sparse_placeholders,
         );
         plan.cursor_target = cursor_target;
+        plan.semantic_anchor = semantic_anchor;
         plan
     }
 
@@ -3102,6 +3120,7 @@ impl TranscriptDocument {
             total_rows,
             requested_scroll,
             cursor_target: None,
+            semantic_anchor: None,
             scroll_anchor,
             width,
             viewport_rows,
@@ -3126,6 +3145,7 @@ impl TranscriptDocument {
         buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
         self.viewport_state.top_anchor = Some(TranscriptScrollAnchor::EstimatedRow(gap.scroll_top));
         self.viewport_state.top_offset_rows = 0;
+        self.viewport_state.semantic_anchor = None;
         self.viewport_state.mode = TranscriptViewportMode::FarSeek;
         self.viewport_state.resolved_scroll_top = Some(gap.scroll_top);
         self.viewport_state.pending_projection = None;
@@ -3173,6 +3193,7 @@ impl TranscriptDocument {
             total_rows,
             requested_scroll,
             cursor_target,
+            semantic_anchor,
             scroll_anchor,
             width,
             viewport_rows,
@@ -3223,6 +3244,11 @@ impl TranscriptDocument {
             viewport_rows,
             scroll_anchor,
         );
+        let captured_semantic_anchor = match self.viewport_state.top_anchor {
+            Some(TranscriptScrollAnchor::Content(anchor)) => Some(anchor.into()),
+            _ => None,
+        };
+        self.viewport_state.semantic_anchor = semantic_anchor.or(captured_semantic_anchor);
         self.viewport_state.resolved_scroll_top = Some(rows.clamped_scroll);
         self.viewport_state.pending_projection = None;
         self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
@@ -3434,51 +3460,6 @@ impl TranscriptDocument {
             },
         };
         TranscriptSearchMatch::new(range, anchor.anchor)
-    }
-
-    fn loaded_block_node_before_or_at_virtual_row(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        row: crate::smelt_edit::RowIndex,
-        matches: impl FnMut(&BlockHistory, BlockId) -> bool,
-    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        let (loaded_start, loaded_end) = self.active_virtual_row_span(lua, width)?;
-        if row < loaded_start || loaded_start >= loaded_end {
-            return None;
-        }
-        let local_row = row
-            .min(loaded_end.saturating_sub(1))
-            .saturating_sub(loaded_start);
-        self.projection
-            .block_node_before_or_at_row(
-                lua,
-                &mut self.transcript.history,
-                width,
-                local_row,
-                matches,
-            )
-            .map(|node| self.offset_node_row(width, node))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn block_node_before_or_at_row(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        row: crate::smelt_edit::RowIndex,
-        matches: impl FnMut(&BlockHistory, BlockId) -> bool,
-    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        let local_row = self.exact_loaded_row_for_virtual_content_row(lua, width, row)?;
-        self.projection
-            .block_node_before_or_at_row(
-                lua,
-                &mut self.transcript.history,
-                width,
-                local_row,
-                matches,
-            )
-            .map(|node| self.offset_node_row(width, node))
     }
 
     pub(crate) fn fold_node_at_row(
@@ -4396,9 +4377,6 @@ mod document_tests {
             .node_metadata_at_row(&lua, width, gap_row)
             .is_none());
         assert!(document.row_anchor_at_row(&lua, width, gap_row).is_none());
-        assert!(document
-            .block_node_before_or_at_row(&lua, width, gap_row, |_, _| true)
-            .is_none());
         assert!(!document.fold_node_at_row(
             &lua,
             width,
@@ -4450,9 +4428,6 @@ mod document_tests {
             .is_none());
         assert!(document
             .row_anchor_at_row(&lua, width, suffix_gap_row)
-            .is_none());
-        assert!(document
-            .block_node_before_or_at_row(&lua, width, suffix_gap_row, |_, _| true)
             .is_none());
         assert!(!document.fold_node_at_row(
             &lua,
@@ -5423,74 +5398,6 @@ mod document_tests {
     }
 
     #[test]
-    fn sparse_block_lookup_translates_virtual_rows_for_top_pill() {
-        let lua = LuaRuntime::new();
-        let mut source = Transcript::new();
-        for idx in 0..100 {
-            if idx % 10 == 0 {
-                source.push(Block::User {
-                    text: format!("user {idx}"),
-                    image_labels: Vec::new(),
-                });
-            } else {
-                source.push(Block::Text {
-                    content: format!("assistant {idx}"),
-                });
-            }
-        }
-        let records = source.history.descriptor_records();
-        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
-            &records,
-            40..48,
-            None,
-        ));
-        let offset = document.approximate_sparse_prefix_row_offset(80);
-
-        let snapshot = document
-            .block_snapshot_before_or_at_row(&lua, 80, offset.saturating_add(1), Some("user"))
-            .expect("loaded user block before virtual row");
-
-        assert_eq!(snapshot.1, "user");
-        assert_eq!(snapshot.4, "user 40");
-        assert_eq!(snapshot.2, offset);
-    }
-
-    #[test]
-    fn sparse_block_lookup_loads_window_for_requested_virtual_row() {
-        let lua = LuaRuntime::new();
-        let dir = tempfile::tempdir().unwrap();
-        let mut source = Transcript::new();
-        for idx in 0..100 {
-            if idx % 10 == 0 {
-                source.push(Block::User {
-                    text: format!("user {idx}"),
-                    image_labels: Vec::new(),
-                });
-            } else {
-                source.push(Block::Text {
-                    content: format!("assistant {idx}"),
-                });
-            }
-        }
-        let records = source.history.descriptor_records();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
-        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
-            &records,
-            68..100,
-            Some(dir.path().to_path_buf()),
-        ));
-        assert!(!active_history_contains(&document, "user 40"));
-
-        let snapshot = document
-            .block_snapshot_before_or_at_row(&lua, 80, 81, Some("user"))
-            .expect("user block loaded for requested row");
-
-        assert_eq!(snapshot.1, "user");
-        assert_eq!(snapshot.4, "user 40");
-        assert!(active_history_contains(&document, "user 40"));
-    }
-
-    #[test]
     fn sparse_previous_navigation_block_preserves_active_descriptor_window() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Transcript::new();
@@ -5767,41 +5674,6 @@ mod document_tests {
         assert_eq!(anchor_after.descriptor_index, descriptor_index);
         assert_eq!(anchor_after.block_id, block_id);
         assert_eq!(anchor_after.intra_block_row, anchor.intra_block_row);
-    }
-
-    #[test]
-    fn sparse_block_lookup_searches_previous_windows_for_role_match() {
-        let lua = LuaRuntime::new();
-        let dir = tempfile::tempdir().unwrap();
-        let mut source = Transcript::new();
-        for idx in 0..100 {
-            if idx == 0 || idx == 90 {
-                source.push(Block::User {
-                    text: format!("user {idx}"),
-                    image_labels: Vec::new(),
-                });
-            } else {
-                source.push(Block::Text {
-                    content: format!("assistant {idx}"),
-                });
-            }
-        }
-        let records = source.history.descriptor_records();
-        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
-        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
-            &records,
-            68..100,
-            Some(dir.path().to_path_buf()),
-        ));
-        assert!(!active_history_contains(&document, "user 0"));
-
-        let snapshot = document
-            .block_snapshot_before_or_at_row(&lua, 80, 161, Some("user"))
-            .expect("previous user block outside the initial lookup window");
-
-        assert_eq!(snapshot.1, "user");
-        assert_eq!(snapshot.4, "user 0");
-        assert!(active_history_contains(&document, "user 0"));
     }
 
     #[test]
@@ -6128,13 +6000,15 @@ impl ResumePreviewCache {
     }
 }
 
-type TranscriptBlockSnapshot = (
-    usize,
-    &'static str,
-    crate::smelt_edit::RowIndex,
-    crate::smelt_edit::RowIndex,
-    String,
-);
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptBlockSnapshot {
+    pub(crate) descriptor_index: usize,
+    pub(crate) block_id: BlockId,
+    pub(crate) role: &'static str,
+    pub(crate) first_row: crate::smelt_edit::RowIndex,
+    pub(crate) rows: crate::smelt_edit::RowIndex,
+    pub(crate) first_line: String,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TranscriptNavigationDirection {
@@ -6370,12 +6244,13 @@ impl TuiApp {
         !self.transcript.is_empty()
     }
 
-    /// Explicit full transcript materialization for APIs/tests that request the
-    /// whole post-render display text. Do not use for normal viewport rendering.
-    pub(crate) fn materialize_full_transcript_display_rows_expensive(
+    /// Explicit loaded transcript materialization for APIs/tests that request the
+    /// currently loaded post-render display text. Do not use for normal viewport
+    /// rendering.
+    pub(crate) fn materialize_loaded_transcript_display_rows_expensive(
         &mut self,
     ) -> Arc<Vec<String>> {
-        let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full:explicit");
+        let _perf = smelt_perf::perf::begin("transcript:materialize_rows_loaded:explicit");
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
@@ -6602,44 +6477,31 @@ impl TuiApp {
         cpos
     }
 
-    /// Snapshot of the laid-out transcript blocks as `(idx, role, first_row,
-    /// rows, first_line)`. `idx` is 0-based into `transcript.history.order` to
-    /// match `session.rewind_to(block_idx)`. `first_line` is the first
-    /// non-empty line of the block's raw source text (truncated upstream by
-    /// the caller as needed). Returns empty when no projection has run yet
-    /// (i.e. before the first frame).
+    /// Snapshot of the laid-out transcript blocks. `descriptor_index` is the
+    /// stable sparse descriptor index accepted by `transcript.reveal_block`,
+    /// while `block_id` is the stable block identity. Returns empty when no
+    /// projection has run yet.
     pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
         self.transcript.visible_block_snapshots()
     }
 
-    pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
+    pub(crate) fn loaded_transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         self.transcript
             .materialize_block_snapshots(&self.lua, width)
     }
 
-    pub(crate) fn transcript_block_at_row(
+    pub(crate) fn loaded_transcript_block_at_row(
         &mut self,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<TranscriptBlockSnapshot> {
-        self.transcript_block_snapshots()
+        self.loaded_transcript_block_snapshots()
             .into_iter()
-            .find(|(_, _, first_row, rows, _)| {
-                let end = first_row.saturating_add(*rows);
-                row >= *first_row && row < end
+            .find(|snap| {
+                let end = snap.first_row.saturating_add(snap.rows);
+                row >= snap.first_row && row < end
             })
-    }
-
-    pub(crate) fn transcript_block_before_or_at_row(
-        &mut self,
-        row: crate::smelt_edit::RowIndex,
-        role: Option<&str>,
-    ) -> Option<TranscriptBlockSnapshot> {
-        self.sync_transcript_renderer_generation();
-        let width = self.transcript_width() as u16;
-        self.transcript
-            .block_snapshot_before_or_at_row(&self.lua, width, row, role)
     }
 
     pub(crate) fn previous_transcript_navigation_block(
@@ -7059,11 +6921,11 @@ mod tests {
         });
         assert!(app.fold_transcript_node_at_row(0, FoldAction::Open, FoldActivation::AnyNodeRow));
         app.render_normal_to(&mut std::io::sink());
-        let before = app.transcript_block_snapshots();
+        let before = app.loaded_transcript_block_snapshots();
         let target_start = before
             .iter()
-            .find(|(_, _, _, _, first_line)| first_line == "anchor target")
-            .map(|(_, _, row, _, _)| *row)
+            .find(|snap| snap.first_line == "anchor target")
+            .map(|snap| snap.first_row)
             .expect("target block before fold");
         app.submit_search(
             app.well_known.transcript,
@@ -7100,11 +6962,11 @@ mod tests {
         }
 
         assert!(app.fold_transcript_node_at_row(0, FoldAction::Close, FoldActivation::AnyNodeRow));
-        let after = app.transcript_block_snapshots();
+        let after = app.loaded_transcript_block_snapshots();
         let new_target_start = after
             .iter()
-            .find(|(_, _, _, _, first_line)| first_line == "anchor target")
-            .map(|(_, _, row, _, _)| *row)
+            .find(|snap| snap.first_line == "anchor target")
+            .map(|snap| snap.first_row)
             .expect("target block after fold");
         let win = app.transcript_win();
         let state = win.document_view_state();

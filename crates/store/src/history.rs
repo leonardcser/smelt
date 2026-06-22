@@ -1,5 +1,5 @@
 use protocol::HistoryItem;
-use rusqlite::{params, params_from_iter, Connection, Statement};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Statement};
 use serde_json::{json, Value};
 use smelt_perf::perf;
 use std::ops::Range;
@@ -368,15 +368,30 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
         records.len() as u64,
     );
     let start_descriptor_idx = checked_i64(start_descriptor_idx as u64, "start_descriptor_idx")?;
+    let first_replacement_block_idx = records
+        .first()
+        .map(|record| checked_i64(record.block_idx, "block_idx"))
+        .transpose()?;
     let search_deleted = conn.execute(
-        "DELETE FROM transcript_search WHERE block_idx >= ?1",
-        [start_descriptor_idx],
+        "DELETE FROM transcript_search
+         WHERE block_idx IN (
+             SELECT block_idx FROM transcript_blocks
+             WHERE descriptor_idx >= ?1
+                OR (?2 IS NOT NULL AND block_idx >= ?2)
+         )",
+        params![start_descriptor_idx, first_replacement_block_idx],
     )?;
     let descriptor_deleted = conn.execute(
-        "DELETE FROM transcript_blocks WHERE block_idx >= ?1",
-        [start_descriptor_idx],
+        "DELETE FROM transcript_blocks
+         WHERE descriptor_idx >= ?1
+            OR (?2 IS NOT NULL AND block_idx >= ?2)",
+        params![start_descriptor_idx, first_replacement_block_idx],
     )?;
-    for record in records {
+    for (offset, record) in records.iter().enumerate() {
+        let descriptor_idx = checked_i64(
+            start_descriptor_idx as u64 + offset as u64,
+            "descriptor_idx",
+        )?;
         let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
         let mut refs = Vec::new();
         normalize_metadata(Some(conn), &mut descriptor, compression, &mut refs)?;
@@ -391,6 +406,7 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
         };
         insert_transcript_descriptor_record(
             conn,
+            descriptor_idx,
             record,
             &descriptor_json,
             tool_state_json.as_deref(),
@@ -418,6 +434,7 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
 
 fn insert_transcript_descriptor_record(
     conn: &Connection,
+    descriptor_idx: i64,
     record: &TranscriptDescriptorRecord,
     descriptor_json: &str,
     tool_state_json: Option<&str>,
@@ -429,12 +446,13 @@ fn insert_transcript_descriptor_record(
         .transpose()?;
     conn.execute(
         "INSERT INTO transcript_blocks (
-            block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+            block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
             estimated_text_bytes, descriptor_json, origin_json, tool_state_json,
             preview_text, search_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             block_idx,
+            descriptor_idx,
             history_idx,
             record.kind,
             record.tool_call_id,
@@ -466,7 +484,7 @@ pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
 pub(crate) fn transcript_descriptor_dense_extent(conn: &Connection) -> Result<usize> {
     let _perf = perf::begin("store:transcript:descriptor_dense_extent");
     let count: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(block_idx) + 1, 0)
+        "SELECT COALESCE(MAX(descriptor_idx) + 1, 0)
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL",
         [],
@@ -485,21 +503,20 @@ pub(crate) fn transcript_descriptor_index_for_block_idx(
 ) -> Result<Option<TranscriptDescriptorIndex>> {
     let _perf = perf::begin("store:transcript:descriptor_index_for_block");
     let block_idx = checked_i64(block_idx, "block_idx")?;
-    let (before, exists): (i64, i64) = conn.query_row(
-        "SELECT
-             (SELECT COUNT(*)
-              FROM transcript_blocks
-              WHERE descriptor_json IS NOT NULL AND block_idx < ?1),
-             EXISTS(
-              SELECT 1
-              FROM transcript_blocks
-              WHERE descriptor_json IS NOT NULL AND block_idx = ?1
-             )",
-        [block_idx],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    perf::record_value("store:transcript:descriptor_block_found", exists as u64);
-    Ok((exists != 0).then(|| TranscriptDescriptorIndex::new(before.max(0) as usize)))
+    let index: Option<i64> = conn
+        .query_row(
+            "SELECT descriptor_idx
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL AND block_idx = ?1",
+            [block_idx],
+            |row| row.get(0),
+        )
+        .optional()?;
+    perf::record_value(
+        "store:transcript:descriptor_block_found",
+        u64::from(index.is_some()),
+    );
+    Ok(index.map(|index| TranscriptDescriptorIndex::new(index.max(0) as usize)))
 }
 
 pub(crate) fn transcript_descriptor_estimated_rows(
@@ -533,9 +550,9 @@ pub(crate) fn transcript_descriptor_estimated_rows(
          FROM (
              SELECT kind, estimated_rows, estimated_text_bytes, preview_text
              FROM transcript_blocks
-             WHERE descriptor_json IS NOT NULL
-             ORDER BY block_idx
-             LIMIT ?2 OFFSET ?3
+             WHERE descriptor_idx >= ?3
+               AND descriptor_idx < ?3 + ?2
+             ORDER BY descriptor_idx
          )",
         params![
             checked_i64(width, "descriptor_estimated_rows_width")?,
@@ -565,7 +582,7 @@ pub(crate) fn read_transcript_descriptor_records(
                 origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
-         ORDER BY block_idx",
+         ORDER BY descriptor_idx",
     )?;
     let records = read_transcript_descriptor_records_from_stmt(
         conn,
@@ -614,9 +631,9 @@ pub(crate) fn read_transcript_descriptor_slice_with_total(
                 estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
                 origin_json, tool_state_json
          FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
-         ORDER BY block_idx
-         LIMIT ?1 OFFSET ?2",
+         WHERE descriptor_idx >= ?2
+           AND descriptor_idx < ?2 + ?1
+         ORDER BY descriptor_idx",
     )?;
     let records = read_transcript_descriptor_records_from_stmt(
         conn,
@@ -671,7 +688,7 @@ pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
                 origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
-         ORDER BY block_idx DESC
+         ORDER BY descriptor_idx DESC
          LIMIT ?1",
     )?;
     let mut records = read_transcript_descriptor_records_from_stmt(
@@ -710,13 +727,16 @@ pub(crate) fn read_transcript_descriptor_centered_slice(
     read_transcript_descriptor_slice_with_total(conn, (start..end).into(), total_count)
 }
 
-pub(crate) fn read_transcript_descriptor_before_kind(
+pub(crate) fn read_transcript_descriptor_before_kind_at_index(
     conn: &Connection,
     kind: &str,
-    before_or_at_block_idx: u64,
+    before_or_at_descriptor_index: u64,
 ) -> Result<Option<TranscriptDescriptorRecord>> {
     let _perf = perf::begin("store:transcript:read_descriptor_before_kind");
-    let before_or_at = checked_i64(before_or_at_block_idx, "before_or_at_block_idx")?;
+    let before_or_at = checked_i64(
+        before_or_at_descriptor_index,
+        "before_or_at_descriptor_index",
+    )?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
@@ -724,8 +744,8 @@ pub(crate) fn read_transcript_descriptor_before_kind(
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
            AND kind = ?1
-           AND block_idx <= ?2
-         ORDER BY block_idx DESC
+           AND descriptor_idx <= ?2
+         ORDER BY descriptor_idx DESC
          LIMIT 1",
     )?;
     let mut records = read_transcript_descriptor_records_from_stmt(
@@ -737,13 +757,13 @@ pub(crate) fn read_transcript_descriptor_before_kind(
     Ok(records.pop())
 }
 
-pub(crate) fn read_transcript_descriptor_after_kind(
+pub(crate) fn read_transcript_descriptor_after_kind_at_index(
     conn: &Connection,
     kind: &str,
-    after_or_at_block_idx: u64,
+    after_or_at_descriptor_index: u64,
 ) -> Result<Option<TranscriptDescriptorRecord>> {
     let _perf = perf::begin("store:transcript:read_descriptor_after_kind");
-    let after_or_at = checked_i64(after_or_at_block_idx, "after_or_at_block_idx")?;
+    let after_or_at = checked_i64(after_or_at_descriptor_index, "after_or_at_descriptor_index")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
@@ -751,8 +771,8 @@ pub(crate) fn read_transcript_descriptor_after_kind(
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
            AND kind = ?1
-           AND block_idx >= ?2
-         ORDER BY block_idx ASC
+           AND descriptor_idx >= ?2
+         ORDER BY descriptor_idx ASC
          LIMIT 1",
     )?;
     let mut records = read_transcript_descriptor_records_from_stmt(

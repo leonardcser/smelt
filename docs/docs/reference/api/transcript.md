@@ -8,36 +8,6 @@ This namespace mixes Host and UiHost functions; each function below lists its ex
 
 Transcript display policy and rendered transcript inspection. Host-tier renderer hooks are layered with UiHost read APIs when a TUI is active.
 
-## `smelt.transcript.block_at_row`
-
-```lua
-fun(row: integer): table?
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
-
-## `smelt.transcript.block_before_or_at_row`
-
-```lua
-fun(row: integer, opts: table?): table?
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. This is a row/debug lookup for already-projected display coordinates; use `previous_block`, `next_block`, and `reveal_block` for semantic transcript navigation.
-
-## `smelt.transcript.blocks`
-
-```lua
-fun(): table
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
-
 ## `smelt.transcript.extend_renderer`
 
 ```lua
@@ -128,7 +98,37 @@ fun(): boolean
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `loaded_blocks_expensive()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+
+## `smelt.transcript.loaded_block_at_row`
+
+```lua
+fun(row: integer): table?
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ descriptor_index, block_id, role, first_row, rows, first_line }`.
+
+## `smelt.transcript.loaded_blocks_expensive`
+
+```lua
+fun(): table
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` is the stable sparse descriptor index accepted by `reveal_block`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
+
+## `smelt.transcript.loaded_text_expensive`
+
+```lua
+fun(): string
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active descriptor window loaded. Prefer `rows(start, count)` for bounded display reads.
 
 ## `smelt.transcript.next_block`
 
@@ -138,7 +138,7 @@ fun(opts: table?): table?
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
 
 ## `smelt.transcript.node_at_row`
 
@@ -158,17 +158,17 @@ fun(opts: table?): table?
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
+Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
 
 ## `smelt.transcript.reveal_block`
 
 ```lua
-fun(idx: integer, opts: table?): boolean
+fun(descriptor_index: integer, opts: table?): boolean
 ```
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
 
 ## `smelt.transcript.rows`
 
@@ -209,16 +209,6 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.transcript.StreamOpts`](
 
 Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
 
-## `smelt.transcript.text`
-
-```lua
-fun(): string
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).
-
 ## `smelt.transcript.visible_blocks`
 
 ```lua
@@ -227,5 +217,5 @@ fun(): table
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.
+Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
 

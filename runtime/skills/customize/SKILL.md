@@ -195,7 +195,7 @@ leader value they were created with. The default leader is a single backslash
 ```lua
 -- In ~/.config/smelt/init.lua
 smelt.keymap.set("n", "<C-y>", function()
-  local text = smelt.transcript.text()
+  local text = smelt.transcript.loaded_text_expensive()
   smelt.clipboard.write(text)
   smelt.notify("copied transcript")
 end)
@@ -1707,12 +1707,6 @@ Reasoning-effort selector.
 
 Transcript display policy and rendered transcript inspection.
 
-- `smelt.transcript.block_at_row` (UiHost) :: `fun(row: integer): table?`
-  Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
-- `smelt.transcript.block_before_or_at_row` (UiHost) :: `fun(row: integer, opts: table?): table?`
-  Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`.
-- `smelt.transcript.blocks` (UiHost) :: `fun(): table`
-  Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
 - `smelt.transcript.extend_renderer` (Host) :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg`
   Add or replace named middleware around the root renderer.
 - `smelt.transcript.fold_all` (UiHost) :: `fun(action: string): boolean`
@@ -1729,23 +1723,27 @@ Transcript display policy and rendered transcript inspection.
   Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
 - `smelt.transcript.is_empty` (UiHost) :: `fun(): boolean`
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
+- `smelt.transcript.loaded_block_at_row` (UiHost) :: `fun(row: integer): table?`
+  Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block.
+- `smelt.transcript.loaded_blocks_expensive` (UiHost) :: `fun(): table`
+  Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`.
+- `smelt.transcript.loaded_text_expensive` (UiHost) :: `fun(): string`
+  Return the currently loaded transcript display text as a single newline-joined string.
 - `smelt.transcript.next_block` (UiHost) :: `fun(opts: table?): table?`
-  Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`.
+  Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`.
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
   Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
 - `smelt.transcript.previous_block` (UiHost) :: `fun(opts: table?): table?`
-  Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ idx, block_id, role, first_line, already_at_top }`.
-- `smelt.transcript.reveal_block` (UiHost) :: `fun(idx: integer, opts: table?): boolean`
-  Reveal transcript descriptor block `idx` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+  Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`.
+- `smelt.transcript.reveal_block` (UiHost) :: `fun(descriptor_index: integer, opts: table?): boolean`
+  Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
   Return rendered transcript display rows in `[start, start + count)`.
 - `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`
   Replace the base transcript renderer used when the host asks Lua for a transcript block layout.
 - `smelt.transcript.stream` (UiHost) :: `fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream`
   Create a transcript-shaped streaming renderer for `buf`.
-- `smelt.transcript.text` (UiHost) :: `fun(): string`
-  Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).
 - `smelt.transcript.visible_blocks` (UiHost) :: `fun(): table`
-  Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
+  Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries.
 
 <!-- API_INDEX_END -->

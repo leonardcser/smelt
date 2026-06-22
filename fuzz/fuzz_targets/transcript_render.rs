@@ -256,10 +256,10 @@ fn transcript_probe(app: &mut TestApp, kind: u8, row: u16, count: u8) {
     let snippet = match kind % 10 {
         0 => format!("pcall(function() return smelt.transcript.rows({row}, {count}) end)"),
         1 => format!("pcall(function() return smelt.transcript.node_at_row({row}) end)"),
-        2 => format!("pcall(function() return smelt.transcript.block_at_row({row}) end)"),
-        3 => "pcall(function() return smelt.transcript.blocks() end)".to_string(),
+        2 => format!("pcall(function() return smelt.transcript.loaded_block_at_row({row}) end)"),
+        3 => "pcall(function() return smelt.transcript.loaded_blocks_expensive() end)".to_string(),
         4 => "pcall(function() return smelt.transcript.visible_blocks() end)".to_string(),
-        5 => "pcall(function() return smelt.transcript.text() end)".to_string(),
+        5 => "pcall(function() return smelt.transcript.loaded_text_expensive() end)".to_string(),
         6 => format!("pcall(function() return smelt.transcript.fold_at_row({row}, 'toggle') end)"),
         7 => "pcall(function() return smelt.transcript.fold_kind('thinking', 'toggle') end)".to_string(),
         8 => "pcall(function() return smelt.transcript.fold_all('open') end)".to_string(),

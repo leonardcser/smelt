@@ -910,8 +910,8 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
               end
               return nil
             end,
-            reveal_block = function(idx, opts)
-              revealed_block = { idx = idx, top_padding = opts and opts.top_padding or nil, cursor = opts and opts.cursor or nil }
+            reveal_block = function(descriptor_index, opts)
+              revealed_block = { descriptor_index = descriptor_index, top_padding = opts and opts.top_padding or nil, cursor = opts and opts.cursor or nil }
               return true
             end,
             block_before_or_at_row = function()
@@ -969,7 +969,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     ): (bool, bool, i64, String, i64, i64, i64, bool) = lua
         .load(
             r#"
-            __set_blocks({ { idx = 1, role = "user", first_line = "previous message", already_at_top = false } })
+            __set_blocks({ { descriptor_index = 1, role = "user", first_line = "previous message", already_at_top = false } })
             __set_cursor(10)
             __event("scrolled")
             local under = __active("smelt.scroll_pills.top")
@@ -982,7 +982,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
               __previous_block_calls(),
               __previous_block_role(),
               __row_lookup_calls(),
-              revealed.idx,
+              revealed.descriptor_index,
               revealed.top_padding,
               revealed.cursor
             "#,
