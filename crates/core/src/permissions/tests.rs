@@ -1144,6 +1144,22 @@ fn workspace_bash_ls_directory_requires_that_directory() {
 }
 
 #[test]
+fn workspace_bash_du_find_tmp_command_requires_tmp_not_root() {
+    let p = perms_with_workspace("/home/user/project");
+    let command = r#"du -sh /tmp 2>/dev/null; find /tmp -maxdepth 1 -user "$USER" \( -name 'smelt*' -o -name '*swap*' -o -name '.tmp*' \) -printf '%f\n' 2>/dev/null | wc -l; find /tmp -maxdepth 1 -user "$USER" -name '.tmp*' -mtime +1 -printf '%p\0' 2>/dev/null | xargs -0r du -sch 2>/dev/null | tail -1"#;
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: canonical_abs("/tmp")
+        }]
+    );
+}
+
+#[test]
 fn workspace_bash_mkdir_requires_created_directory_not_parent() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

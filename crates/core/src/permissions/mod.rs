@@ -868,7 +868,7 @@ fn dedupe_requirements(requirements: &mut Vec<PermissionRequirement>) {
 
 fn display_dir_for_effect(effect: &PathEffect) -> PathBuf {
     let raw = std::path::Path::new(&effect.raw_path);
-    if effect.target_kind == PathTargetKind::Directory {
+    if effect.target_kind == PathTargetKind::Directory || effect.path.is_dir() {
         return effect.path.clone();
     }
     if !raw.is_absolute() && !effect.raw_path.starts_with("~/") {
