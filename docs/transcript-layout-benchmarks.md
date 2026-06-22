@@ -49,10 +49,18 @@ The app-level navigation/search benchmark uses an 8,000-block warmed transcript
 and reports:
 
 - `/needle-target` search submission plus redraw;
+- `/common-token` submission and 100 `n` result jumps plus redraws;
+- append-then-search timing for incremental search-index invalidation;
 - 20 Ctrl-D half-page moves plus redraws;
 - 20 Ctrl-U half-page moves plus redraws;
 - `gg` plus redraw;
-- `G` plus redraw.
+- `G` plus redraw;
+- sparse/resumed 80-key burst scroll timings without scroll trace enabled,
+  reported with the `prod_burst_*` prefix;
+- sparse/resumed 80-key burst scroll timings with scroll trace enabled,
+  reported with the `burst_*` prefix for diagnostic projection-frame counters;
+- sparse/resumed search submission and 100 `n` result jumps, reported with the
+  `sparse_*` prefix.
 
 The xtask command forces `--test-threads=1` so global perf/allocation counters
 and CPU contention from the projection and navigation suites do not contaminate
