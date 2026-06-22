@@ -14,6 +14,10 @@ use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
 use smelt_buffer::buffer::SpanMeta;
 
+mod diff_inline;
+
+use diff_inline::{annotate_inline_highlights, full_line_highlight, inline_highlights_for_pair};
+
 struct DiffChange {
     tag: ChangeTag,
     value: String,
@@ -37,11 +41,32 @@ pub struct DiffIr {
     pub(crate) lines: Vec<DiffLine>,
 }
 
+/// UTF-8 byte range into a rendered diff line. Diff lines expand tabs before
+/// inline ranges are computed, so these offsets always refer to displayed text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffByteRange {
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum DiffLine {
-    Context { lineno: usize, text: String },
-    Delete { lineno: usize, text: String },
-    Insert { lineno: usize, text: String },
+    Context {
+        lineno: usize,
+        text: String,
+    },
+    Delete {
+        lineno: usize,
+        text: String,
+        #[serde(default)]
+        highlights: Vec<DiffByteRange>,
+    },
+    Insert {
+        lineno: usize,
+        text: String,
+        #[serde(default)]
+        highlights: Vec<DiffByteRange>,
+    },
     Ellipsis,
 }
 
@@ -58,11 +83,19 @@ fn context_line(lineno: usize, text: String) -> DiffLine {
 }
 
 fn delete_line(lineno: usize, text: String) -> DiffLine {
-    DiffLine::Delete { lineno, text }
+    DiffLine::Delete {
+        lineno,
+        text,
+        highlights: Vec::new(),
+    }
 }
 
 fn insert_line(lineno: usize, text: String) -> DiffLine {
-    DiffLine::Insert { lineno, text }
+    DiffLine::Insert {
+        lineno,
+        text,
+        highlights: Vec::new(),
+    }
 }
 
 fn push_expanded_tabs(out: &mut String, s: &str) {
@@ -242,6 +275,8 @@ pub fn build_diff_ir_ext_with_base(
             lines.push(context_line(after_start + idx + 1, text));
         }
     }
+
+    annotate_inline_highlights(&mut lines);
 
     DiffIr {
         max_display_lineno: dv.max_display_lineno,
@@ -455,30 +490,94 @@ pub fn print_inline_diff_ext(
     print_diff_ir(out, &cache, gutter, indent_cells, skip, max_rows)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderMeta {
+    fg: (u8, u8, u8),
+    highlighted: bool,
+}
+
 #[derive(Debug, Clone)]
 struct RenderSpan {
     text: String,
-    fg: (u8, u8, u8),
+    meta: RenderMeta,
 }
 
-fn syntax_spans_for_line(h: &mut HighlightLines, line: &str) -> Vec<RenderSpan> {
+fn range_contains(ranges: &[DiffByteRange], idx: usize) -> bool {
+    ranges
+        .iter()
+        .any(|range| idx >= range.start && idx < range.end)
+}
+
+fn push_render_span(spans: &mut Vec<RenderSpan>, text: String, meta: RenderMeta) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut() {
+        if last.meta == meta {
+            last.text.push_str(&text);
+            return;
+        }
+    }
+    spans.push(RenderSpan { text, meta });
+}
+
+fn syntax_spans_for_line_with_highlights(
+    h: &mut HighlightLines,
+    line: &str,
+    highlights: &[DiffByteRange],
+) -> Vec<RenderSpan> {
     let mut line_with_nl = String::with_capacity(line.len() + 1);
     line_with_nl.push_str(line);
     line_with_nl.push('\n');
+    let mut byte_pos = 0usize;
+    let mut spans = Vec::new();
     h.highlight_line(&line_with_nl, &SYNTAX_SET)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(style, text)| {
+        .for_each(|(style, text)| {
             let text = text.trim_end_matches('\n').trim_end_matches('\r');
-            (!text.is_empty()).then(|| RenderSpan {
-                text: text.to_string(),
-                fg: (style.foreground.r, style.foreground.g, style.foreground.b),
-            })
-        })
-        .collect()
+            if text.is_empty() {
+                return;
+            }
+            let fg = (style.foreground.r, style.foreground.g, style.foreground.b);
+            let mut chunk = String::new();
+            let mut chunk_highlighted: Option<bool> = None;
+            for ch in text.chars() {
+                let highlighted = range_contains(highlights, byte_pos);
+                if let Some(current) = chunk_highlighted {
+                    if current != highlighted {
+                        push_render_span(
+                            &mut spans,
+                            std::mem::take(&mut chunk),
+                            RenderMeta {
+                                fg,
+                                highlighted: current,
+                            },
+                        );
+                    }
+                }
+                chunk_highlighted = Some(highlighted);
+                chunk.push(ch);
+                byte_pos += ch.len_utf8();
+            }
+            if let Some(highlighted) = chunk_highlighted {
+                push_render_span(&mut spans, chunk, RenderMeta { fg, highlighted });
+            }
+        });
+    spans
 }
 
-fn print_syntax_spans(out: &mut LineBuilder, spans: &[RenderSpan], bg: Option<Color>) -> usize {
+#[cfg(test)]
+fn syntax_spans_for_line(h: &mut HighlightLines, line: &str) -> Vec<RenderSpan> {
+    syntax_spans_for_line_with_highlights(h, line, &[])
+}
+
+fn print_syntax_spans(
+    out: &mut LineBuilder,
+    spans: &[RenderSpan],
+    row_bg: Option<Color>,
+    inline_bg: Option<Color>,
+) -> usize {
     use unicode_width::UnicodeWidthStr;
 
     let mut col = 0;
@@ -486,13 +585,18 @@ fn print_syntax_spans(out: &mut LineBuilder, spans: &[RenderSpan], bg: Option<Co
         if span.text.is_empty() {
             continue;
         }
+        let bg = if span.meta.highlighted {
+            inline_bg.or(row_bg)
+        } else {
+            row_bg
+        };
         if let Some(bg_color) = bg {
             out.set_bg(bg_color);
         }
         out.set_fg(Color::Rgb {
-            r: span.fg.0,
-            g: span.fg.1,
-            b: span.fg.2,
+            r: span.meta.fg.0,
+            g: span.meta.fg.1,
+            b: span.meta.fg.2,
         });
         out.print(&span.text);
         col += UnicodeWidthStr::width(span.text.as_str());
@@ -501,16 +605,17 @@ fn print_syntax_spans(out: &mut LineBuilder, spans: &[RenderSpan], bg: Option<Co
     col
 }
 
-fn split_syntax_spans_into_rows(
+fn split_syntax_spans_into_rows_with_highlights(
     h: &mut HighlightLines,
     line: &str,
+    highlights: &[DiffByteRange],
     max_width: usize,
 ) -> Vec<Vec<RenderSpan>> {
-    let spans = syntax_spans_for_line(h, line);
+    let spans = syntax_spans_for_line_with_highlights(h, line, highlights);
     let line = InlineLine::new(
         spans
             .into_iter()
-            .map(|span| InlineRun::new(span.text, span.fg, BreakPolicy::PreserveSpaces))
+            .map(|span| InlineRun::new(span.text, span.meta, BreakPolicy::PreserveSpaces))
             .collect(),
     );
     line.wrap_ranges(max_width.max(1))
@@ -519,15 +624,61 @@ fn split_syntax_spans_into_rows(
             row.into_iter()
                 .map(|run| RenderSpan {
                     text: run.text,
-                    fg: run.meta,
+                    meta: run.meta,
                 })
                 .collect()
         })
         .collect()
 }
 
+#[cfg(test)]
+fn split_syntax_spans_into_rows(
+    h: &mut HighlightLines,
+    line: &str,
+    max_width: usize,
+) -> Vec<Vec<RenderSpan>> {
+    split_syntax_spans_into_rows_with_highlights(h, line, &[], max_width)
+}
+
 fn diff_line_rows(layout: &InlineLine<()>, max_width: usize) -> usize {
     layout.wrap_rows(max_width.max(1))
+}
+
+#[derive(Clone, Copy)]
+struct DiffSidePalette {
+    row_bg: Option<Color>,
+    inline_bg: Option<Color>,
+}
+
+#[derive(Clone, Copy)]
+struct DiffPalette {
+    add: DiffSidePalette,
+    del: DiffSidePalette,
+}
+
+fn active_diff_palette() -> DiffPalette {
+    let theme = crate::theme::active();
+    let del_row = theme.get("SmeltDiffDelBg").bg;
+    let add_row = theme.get("SmeltDiffAddBg").bg;
+    DiffPalette {
+        add: DiffSidePalette {
+            row_bg: add_row,
+            inline_bg: theme.get("SmeltDiffAddInlineBg").bg.or(add_row),
+        },
+        del: DiffSidePalette {
+            row_bg: del_row,
+            inline_bg: theme.get("SmeltDiffDelInlineBg").bg.or(del_row),
+        },
+    }
+}
+
+impl DiffPalette {
+    fn split_side(self, side: SplitSide) -> DiffSidePalette {
+        match side {
+            SplitSide::Left => self.del,
+            SplitSide::Right => self.add,
+        }
+    }
 }
 
 pub fn measure_diff_ir(cache: &DiffIr, width: u16, gutter: GutterStyle, indent_cells: u16) -> u16 {
@@ -619,9 +770,7 @@ pub fn print_diff_ir_with_width(
     // Diff row fills come from the active theme. Themes that omit
     // `SmeltDiffAddBg` / `SmeltDiffDelBg` produce diffs without a row
     // background (text still highlights via syntax colors).
-    let theme = crate::theme::active();
-    let bg_del = theme.get("SmeltDiffDelBg").bg;
-    let bg_add = theme.get("SmeltDiffAddBg").bg;
+    let palette = active_diff_palette();
 
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(&cache.syntax_ext)
@@ -658,34 +807,53 @@ pub fn print_diff_ir_with_width(
                 seen_rows = seen_rows.saturating_add(1);
             }
             _ => {
-                let (source_line, sign, bg, text) = match line {
+                let (source_line, sign, bg, inline_bg, text, highlights) = match line {
                     DiffLine::Context { lineno, text } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
                         None,
                         None,
+                        None,
                         text.as_str(),
+                        &[][..],
                     ),
-                    DiffLine::Delete { lineno, text } => (
+                    DiffLine::Delete {
+                        lineno,
+                        text,
+                        highlights,
+                    } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
                         Some(('-', Color::Red)),
-                        bg_del,
+                        palette.del.row_bg,
+                        palette.del.inline_bg,
                         text.as_str(),
+                        highlights.as_slice(),
                     ),
-                    DiffLine::Insert { lineno, text } => (
+                    DiffLine::Insert {
+                        lineno,
+                        text,
+                        highlights,
+                    } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
                         Some(('+', Color::Green)),
-                        bg_add,
+                        palette.add.row_bg,
+                        palette.add.inline_bg,
                         text.as_str(),
+                        highlights.as_slice(),
                     ),
                     DiffLine::Ellipsis => unreachable!(),
                 };
-                let visual_rows = split_syntax_spans_into_rows(&mut h, text, max_content);
+                let visual_rows = split_syntax_spans_into_rows_with_highlights(
+                    &mut h,
+                    text,
+                    highlights,
+                    max_content,
+                );
                 let pad_meta = SpanMeta::unselectable();
                 for (vi, vrow) in visual_rows.iter().enumerate() {
                     if seen_rows < skip {
@@ -720,7 +888,7 @@ pub fn print_diff_ir_with_width(
                         } else {
                             out.print("  ");
                         }
-                        print_syntax_spans(out, vrow, bg);
+                        print_syntax_spans(out, vrow, bg, inline_bg);
                         if let Some(bgv) = bg {
                             out.set_bg(bgv);
                             out.pad_row_to_layout_width(pad_meta.clone());
@@ -728,7 +896,7 @@ pub fn print_diff_ir_with_width(
                         out.reset_style();
                     } else {
                         out.print("  ");
-                        print_syntax_spans(out, vrow, None);
+                        print_syntax_spans(out, vrow, None, None);
                     }
                     out.newline();
                     emitted = emitted.saturating_add(1);
@@ -804,6 +972,7 @@ pub struct SplitDiffCell {
     /// True for delete/insert rows (paints the row-fill bg); false for
     /// `Equal` context rows.
     pub changed: bool,
+    pub highlights: Vec<DiffByteRange>,
 }
 
 /// Self-contained diff IR. Computed once, then replayed per side.
@@ -828,6 +997,20 @@ pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
     let flush = |rows: &mut Vec<SplitDiffRow>,
                  dels: &mut Vec<SplitDiffCell>,
                  ins: &mut Vec<SplitDiffCell>| {
+        let pairs = dels.len().min(ins.len());
+        for i in 0..pairs {
+            let (left_highlights, right_highlights) =
+                inline_highlights_for_pair(&dels[i].text, &ins[i].text);
+            dels[i].highlights = left_highlights;
+            ins[i].highlights = right_highlights;
+        }
+        for cell in dels.iter_mut().skip(pairs) {
+            cell.highlights = full_line_highlight(&cell.text);
+        }
+        for cell in ins.iter_mut().skip(pairs) {
+            cell.highlights = full_line_highlight(&cell.text);
+        }
+
         let n = dels.len().max(ins.len());
         for i in 0..n {
             rows.push(SplitDiffRow {
@@ -850,11 +1033,13 @@ pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
                     text: text.clone(),
                     lineno: old_lineno,
                     changed: false,
+                    highlights: Vec::new(),
                 };
                 let right = SplitDiffCell {
                     text,
                     lineno: new_lineno,
                     changed: false,
+                    highlights: Vec::new(),
                 };
                 rows.push(SplitDiffRow {
                     left: Some(left),
@@ -867,6 +1052,7 @@ pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
                     text,
                     lineno: old_lineno,
                     changed: true,
+                    highlights: Vec::new(),
                 });
             }
             ChangeTag::Insert => {
@@ -875,6 +1061,7 @@ pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
                     text,
                     lineno: new_lineno,
                     changed: true,
+                    highlights: Vec::new(),
                 });
             }
         }
@@ -895,27 +1082,16 @@ fn paint_diff_line(
     text: &str,
     h: &mut HighlightLines,
     bg: Option<Color>,
+    inline_bg: Option<Color>,
+    highlights: &[DiffByteRange],
     source_line: smelt_buffer::buffer::SourceLine,
 ) {
     if let Some(bg) = bg {
         out.fill_line_bg(bg);
     }
     out.set_source_line(source_line);
-    let line_with_nl = format!("{}\n", text);
-    if let Ok(regions) = h.highlight_line(&line_with_nl, &SYNTAX_SET) {
-        for (style, span) in regions {
-            let span = span.trim_end_matches('\n').trim_end_matches('\r');
-            if span.is_empty() {
-                continue;
-            }
-            out.set_fg(Color::Rgb {
-                r: style.foreground.r,
-                g: style.foreground.g,
-                b: style.foreground.b,
-            });
-            out.print(span);
-        }
-    }
+    let spans = syntax_spans_for_line_with_highlights(h, text, highlights);
+    print_syntax_spans(out, &spans, bg, inline_bg);
     out.reset_style();
     out.newline();
 }
@@ -942,11 +1118,7 @@ pub fn print_split_diff_side(
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let theme = syntax_theme();
     let mut h = HighlightLines::new(syntax, theme);
-    let theme = crate::theme::active();
-    let bg_changed = match side {
-        SplitSide::Left => theme.get("SmeltDiffDelBg").bg,
-        SplitSide::Right => theme.get("SmeltDiffAddBg").bg,
-    };
+    let side_palette = active_diff_palette().split_side(side);
     for row in &plan.rows {
         let cell = match side {
             SplitSide::Left => row.left.as_ref(),
@@ -957,7 +1129,13 @@ pub fn print_split_diff_side(
                 out,
                 &c.text,
                 &mut h,
-                if c.changed { bg_changed } else { None },
+                if c.changed { side_palette.row_bg } else { None },
+                if c.changed {
+                    side_palette.inline_bg
+                } else {
+                    None
+                },
+                &c.highlights,
                 smelt_buffer::buffer::SourceLine::Linear { lineno: c.lineno },
             ),
             None => paint_synthetic_row(out),
@@ -1022,6 +1200,27 @@ mod split_tests {
         }
     }
 
+    fn highlighted_text(cell: &SplitDiffCell) -> String {
+        cell.highlights
+            .iter()
+            .map(|range| &cell.text[range.start..range.end])
+            .collect()
+    }
+
+    #[test]
+    fn split_diff_marks_changed_characters_inside_paired_rows() {
+        let plan = compute_split_diff("let x = 1;\n", "let x = 42;\n");
+        let row = plan
+            .rows
+            .iter()
+            .find(|row| row.left.as_ref().is_some_and(|cell| cell.changed))
+            .expect("changed row");
+        let left = row.left.as_ref().unwrap();
+        let right = row.right.as_ref().unwrap();
+        assert_eq!(highlighted_text(left), "1");
+        assert_eq!(highlighted_text(right), "42");
+    }
+
     #[test]
     fn split_diff_pads_with_synthetic_when_one_side_only_inserts() {
         let (l, r) = split("alpha\ngamma\n", "alpha\nNEW\ngamma\n");
@@ -1081,6 +1280,77 @@ mod tests {
         std::fs::write(&path, new).unwrap();
         let cache = build_diff_ir(old, new, path.to_str().unwrap(), "");
         assert_text_layouts_measure(&cache);
+    }
+
+    #[test]
+    fn diff_ir_marks_changed_characters_inside_replaced_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("numbers.rs");
+        let old = "let x = 1;\n";
+        let new = "let x = 42;\n";
+        std::fs::write(&path, new).unwrap();
+        let cache = build_diff_ir(old, new, path.to_str().unwrap(), "");
+
+        let mut saw_delete = false;
+        let mut saw_insert = false;
+        for line in &cache.lines {
+            match line {
+                DiffLine::Delete {
+                    text, highlights, ..
+                } => {
+                    assert_eq!(text, "let x = 1;");
+                    let highlighted: String = highlights
+                        .iter()
+                        .map(|range| &text[range.start..range.end])
+                        .collect();
+                    assert_eq!(highlighted, "1");
+                    saw_delete = true;
+                }
+                DiffLine::Insert {
+                    text, highlights, ..
+                } => {
+                    assert_eq!(text, "let x = 42;");
+                    let highlighted: String = highlights
+                        .iter()
+                        .map(|range| &text[range.start..range.end])
+                        .collect();
+                    assert_eq!(highlighted, "42");
+                    saw_insert = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_delete);
+        assert!(saw_insert);
+    }
+
+    #[test]
+    fn syntax_spans_preserve_inline_highlight_metadata_when_wrapping() {
+        let theme = syntax_theme();
+        let syntax = SYNTAX_SET.find_syntax_plain_text();
+        let mut h = HighlightLines::new(syntax, theme);
+        let rows = split_syntax_spans_into_rows_with_highlights(
+            &mut h,
+            "abcdef",
+            &[DiffByteRange { start: 2, end: 5 }],
+            3,
+        );
+        let flags: Vec<(String, bool)> = rows
+            .iter()
+            .flat_map(|row| {
+                row.iter()
+                    .map(|span| (span.text.clone(), span.meta.highlighted))
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("ab".to_string(), false),
+                ("c".to_string(), true),
+                ("de".to_string(), true),
+                ("f".to_string(), false),
+            ]
+        );
     }
 
     #[test]

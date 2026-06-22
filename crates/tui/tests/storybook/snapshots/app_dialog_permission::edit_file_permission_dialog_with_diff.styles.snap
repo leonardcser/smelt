@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 516
 expression: frame.styles_text()
 ---
 dim: 80 24
@@ -9,13 +10,21 @@ dim: 80 24
  13   0   3 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
  13   3   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
  13   5   9 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
- 13  14  14 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 13  14   8 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 13  22   3 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 110, g: 35, b: 35 }
+ 13  25   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 13  26   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 110, g: 35, b: 35 }
+ 13  27   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 60, g: 20, b: 20 }
  13  28   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
  13  30  49 bg=Rgb { r: 60, g: 20, b: 20 }
  14   0   3 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
  14   3   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
  14   5   9 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
- 14  14  14 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 14  14   8 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 14  22   3 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 35, g: 95, b: 35 }
+ 14  25   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 14  26   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 35, g: 95, b: 35 }
+ 14  27   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 20, g: 50, b: 20 }
  14  28   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
  14  30  49 bg=Rgb { r: 20, g: 50, b: 20 }
  15   0  80 fg=AnsiValue(244)

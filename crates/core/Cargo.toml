@@ -26,7 +26,7 @@ globset = { workspace = true }
 ignore = { workspace = true }
 syntect = "5"
 two-face = "0.5"
-similar = "3"
+similar = { version = "3", features = ["inline"] }
 seahash = "4"
 mlua = { workspace = true }
 scraper = "0.27"

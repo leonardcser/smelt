@@ -84,9 +84,11 @@ return {
   -- underneath.
   SmeltExecPrefix     = fg({ ansi = 197 }, { bold = true }),
 
-  -- Diff renderer row fills. Override these like any other group.
-  SmeltDiffAddBg      = bg({ dark = { rgb = { 20, 50, 20 } }, light = { rgb = { 218, 242, 218 } } }),
-  SmeltDiffDelBg      = bg({ dark = { rgb = { 60, 20, 20 } }, light = { rgb = { 248, 218, 218 } } }),
+  -- Diff renderer row fills and inline change fills. Override these like any other group.
+  SmeltDiffAddBg       = bg({ dark = { rgb = { 20, 50, 20 } }, light = { rgb = { 218, 242, 218 } } }),
+  SmeltDiffDelBg       = bg({ dark = { rgb = { 60, 20, 20 } }, light = { rgb = { 248, 218, 218 } } }),
+  SmeltDiffAddInlineBg = bg({ dark = { rgb = { 35, 95, 35 } }, light = { rgb = { 180, 230, 180 } } }),
+  SmeltDiffDelInlineBg = bg({ dark = { rgb = { 110, 35, 35 } }, light = { rgb = { 242, 175, 175 } } }),
 
   -- ── Semantic / nvim-standard names: aliases into the base set. ────
   Comment             = "SmeltMuted",

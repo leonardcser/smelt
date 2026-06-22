@@ -272,8 +272,9 @@ impl FromLua for ColorDecl {
 /// either a `StyleDecl` table or a string referencing another group
 /// in the same spec as the value. Compile via [`compile`] to produce
 /// a runtime `Theme`. Every themable color lives here - there are no
-/// special-case fields. The diff renderer's row fills are just
-/// `SmeltDiffAddBg` / `SmeltDiffDelBg` groups, scrollbar colors are
+/// special-case fields. The diff renderer's row and inline fills are
+/// `SmeltDiffAddBg` / `SmeltDiffDelBg` and
+/// `SmeltDiffAddInlineBg` / `SmeltDiffDelInlineBg` groups, scrollbar colors are
 /// `SmeltScrollbarTrack` / `…Thumb`, and so on.
 #[derive(Debug, Default, Clone)]
 pub struct ThemeSpec {
@@ -284,7 +285,7 @@ impl ThemeSpec {
     const DOC: &'static str = "Flat map keyed by highlight-group name \
 (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a \
 `StyleDecl` table or a string referencing another group in the same \
-spec. Every themable color (foreground, background, diff row fills, \
+spec. Every themable color (foreground, background, diff row and inline fills, \
 scrollbar colors, mode indicators) is just a group.";
 }
 
@@ -742,6 +743,22 @@ mod tests {
                 r: 60,
                 g: 20,
                 b: 20
+            })
+        );
+        assert_eq!(
+            theme.get("SmeltDiffAddInlineBg").bg,
+            Some(Color::Rgb {
+                r: 35,
+                g: 95,
+                b: 35
+            })
+        );
+        assert_eq!(
+            theme.get("SmeltDiffDelInlineBg").bg,
+            Some(Color::Rgb {
+                r: 110,
+                g: 35,
+                b: 35
             })
         );
     }
