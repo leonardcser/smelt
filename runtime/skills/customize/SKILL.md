@@ -487,7 +487,10 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `auto_reload` | `bool` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/,  completers/, tools/, dialogs/, runtime overrides) and dispatch  `/reload` when any of them changes. Prompt inputs such as  AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after  compaction. A group is a user message, a plain assistant message,  or an assistant tool-use step together with its tool outputs. |
+| `request_audit` | `"off"` \| `"summary"` \| `"full"` | `"summary"` | Request audit storage mode. `summary` keeps timing, token, cost, and size  metadata only; `full` stores reconstructable provider payloads; `off`  disables request audit writes. |
 | `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
+| `web_search_provider` | `"duckduckgo"` \| `"brave"` | `"duckduckgo"` | Search provider used by the built-in `web_search` tool. |
+| `brave_search_api_key_env` | string | `"BRAVE_SEARCH_API_KEY"` | Environment variable containing the Brave Search API key. |
 | `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved  inside the git root and contain worktrees directly; absolute paths are  external roots and get a per-repository bucket. Supports leading `~`,  `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
 | `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a  pill when an update is available; `"auto"` installs in  background on detection. |
 | `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases,  including prereleases) or `"unstable"` (`main` HEAD). |
@@ -1264,6 +1267,8 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
   Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`.
 - `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil`
   Start an agent turn from a Lua-defined custom command (`/name`).
+- `smelt.engine.submit_command_continuation` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?, continuation_token: integer?): boolean`
+  Start an idle custom-command continuation without using the prompt queue.
 - `smelt.engine.summary_prefix` :: `fun(): string`
   Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.
 
@@ -1519,6 +1524,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Rewind the session to a prior user turn.
 - `smelt.session.set_title_for_history` :: `fun(title: string, slug: string, history_len: integer): nil`
   Set the session title and slug for a specific history length.
+- `smelt.session.status` :: `fun(): table`
+  Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`.
 - `smelt.session.switch_cwd` :: `fun(path: string): table`
   Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions.
 - `smelt.session.system` :: `fun(): string`
