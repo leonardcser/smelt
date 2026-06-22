@@ -35,6 +35,7 @@ const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
 const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
 const TRANSCRIPT_ACTIVE_DESCRIPTOR_WINDOW_MAX_MULTIPLIER: usize = 3;
 const TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS: RowIndex = 2;
+const TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE: usize = 1024;
 
 pub(crate) struct LoadedDescriptorWindow {
     pub(crate) start: smelt_store::TranscriptDescriptorIndex,
@@ -440,6 +441,56 @@ struct TranscriptDescriptorExtentModel<'a> {
     fallback_rows_per_descriptor: RowIndex,
 }
 
+fn persisted_descriptor_rows_to_transcript_rows(
+    estimated_descriptor_rows: RowIndex,
+    descriptor_count: usize,
+) -> RowIndex {
+    estimated_descriptor_rows.saturating_sub(RowIndex::from(descriptor_count > 0))
+}
+
+#[derive(Clone, Debug)]
+struct DescriptorPrefixEstimateIndex {
+    width: u16,
+    total_count: usize,
+    stride: usize,
+    prefix_rows: Vec<RowIndex>,
+}
+
+impl DescriptorPrefixEstimateIndex {
+    fn matches(&self, width: u16, total_count: usize) -> bool {
+        self.width == width.max(1)
+            && self.total_count == total_count
+            && self.stride == TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE
+    }
+
+    fn total_rows(&self) -> RowIndex {
+        self.prefix_rows.last().copied().unwrap_or_default()
+    }
+
+    fn chunk_for_row(&self, row: RowIndex) -> Option<(usize, usize, RowIndex)> {
+        if self.total_count == 0 || self.prefix_rows.len() < 2 {
+            return None;
+        }
+        let row = row.min(self.total_rows().saturating_sub(1));
+        let mut lo = 0usize;
+        let mut hi = self.prefix_rows.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.prefix_rows[mid] <= row {
+                lo = mid.saturating_add(1);
+            } else {
+                hi = mid;
+            }
+        }
+        let chunk = lo
+            .saturating_sub(1)
+            .min(self.prefix_rows.len().saturating_sub(2));
+        let start = chunk.saturating_mul(self.stride).min(self.total_count);
+        let end = start.saturating_add(self.stride).min(self.total_count);
+        Some((start, end, self.prefix_rows[chunk]))
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ExactDescriptorRowsKey {
     descriptor_index: usize,
@@ -453,22 +504,33 @@ struct ExactDescriptorRowsKey {
 #[derive(Default)]
 struct TranscriptExtentIndex {
     descriptor_rows_estimate_cache: HashMap<DescriptorRowsEstimateKey, RowIndex>,
+    descriptor_prefix_estimate: Option<DescriptorPrefixEstimateIndex>,
     estimate_store: Option<(PathBuf, SqliteTranscriptStore)>,
     exact_descriptor_rows: HashMap<ExactDescriptorRowsKey, RowIndex>,
     latest_exact_descriptor_rows: BTreeMap<(u16, usize), ExactDescriptorRowsKey>,
 }
 
 impl TranscriptExtentIndex {
-    fn clear_exact_descriptor_rows(&mut self) {
+    fn clear_exact_local_descriptor_rows(&mut self) {
         self.exact_descriptor_rows.clear();
         self.latest_exact_descriptor_rows.clear();
+    }
+
+    fn clear_persisted_descriptor_estimates(&mut self) {
+        self.descriptor_rows_estimate_cache.clear();
+        self.descriptor_prefix_estimate = None;
+        self.estimate_store = None;
     }
 
     fn exact_observation_count(&self) -> usize {
         self.exact_descriptor_rows.len()
     }
 
-    fn exact_rows_for_descriptor(&self, descriptor_index: usize, width: u16) -> Option<RowIndex> {
+    fn exact_local_rows_for_descriptor(
+        &self,
+        descriptor_index: usize,
+        width: u16,
+    ) -> Option<RowIndex> {
         let width = width.max(1);
         let key = self
             .latest_exact_descriptor_rows
@@ -516,7 +578,7 @@ impl TranscriptExtentIndex {
         }
     }
 
-    fn approximate_rows_for_loaded_descriptors(
+    fn local_rows_for_loaded_descriptors(
         &self,
         descriptors: &SparseTranscriptDescriptors,
         width: u16,
@@ -525,7 +587,7 @@ impl TranscriptExtentIndex {
             .records
             .iter()
             .map(|(index, record)| {
-                self.exact_rows_for_descriptor(index.get(), width)
+                self.exact_local_rows_for_descriptor(index.get(), width)
                     .unwrap_or_else(|| {
                         record
                             .record
@@ -543,7 +605,7 @@ impl TranscriptExtentIndex {
         descriptors.loaded_descriptor_count()
     }
 
-    fn approximate_average_rows_per_loaded_descriptor(
+    fn fallback_average_rows_per_loaded_descriptor(
         &self,
         descriptors: &SparseTranscriptDescriptors,
         width: u16,
@@ -552,7 +614,7 @@ impl TranscriptExtentIndex {
         if loaded == 0 {
             return 2;
         }
-        self.approximate_rows_for_loaded_descriptors(descriptors, width)
+        self.local_rows_for_loaded_descriptors(descriptors, width)
             .saturating_add(loaded.saturating_sub(1))
             .saturating_div(loaded)
             .max(1)
@@ -564,6 +626,7 @@ impl TranscriptExtentIndex {
             .as_ref()
             .is_none_or(|(open_dir, _)| open_dir != session_dir);
         if needs_open {
+            self.clear_persisted_descriptor_estimates();
             let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
             self.estimate_store = Some((session_dir.clone(), store));
         }
@@ -609,7 +672,7 @@ impl TranscriptExtentIndex {
             active_range: active_descriptor_range.map(|range| range.start.get()..range.end.get()),
             total_count: descriptors.total_count(),
             fallback_rows_per_descriptor: self
-                .approximate_average_rows_per_loaded_descriptor(descriptors, width),
+                .fallback_average_rows_per_loaded_descriptor(descriptors, width),
         }
     }
 
@@ -631,38 +694,7 @@ impl TranscriptExtentIndex {
         if range.start >= range.end {
             return 0;
         }
-        let width = model.width;
-        let exact_rows = self
-            .latest_exact_descriptor_rows
-            .range((width, range.start)..(width, range.end))
-            .filter_map(|(&(exact_width, descriptor_index), key)| {
-                debug_assert_eq!(exact_width, width);
-                self.exact_descriptor_rows
-                    .get(key)
-                    .copied()
-                    .map(|rows| (descriptor_index, rows))
-            })
-            .collect::<Vec<_>>();
-
-        let mut total: RowIndex = 0;
-        let mut cursor = range.start;
-        for (descriptor_index, rows) in exact_rows {
-            if cursor < descriptor_index {
-                total =
-                    total.saturating_add(self.estimated_rows_for_missing_descriptor_range(
-                        model,
-                        cursor..descriptor_index,
-                    ));
-            }
-            total = total.saturating_add(rows);
-            cursor = descriptor_index.saturating_add(1);
-        }
-        if cursor < range.end {
-            total = total.saturating_add(
-                self.estimated_rows_for_missing_descriptor_range(model, cursor..range.end),
-            );
-        }
-        total
+        self.estimated_rows_for_missing_descriptor_range(model, range)
     }
 
     fn estimated_rows_before_descriptor(
@@ -678,7 +710,78 @@ impl TranscriptExtentIndex {
         model: &TranscriptDescriptorExtentModel<'_>,
     ) -> Option<RowIndex> {
         let total = model.total_count?;
-        Some(self.estimated_rows_for_descriptor_range(model, 0..total))
+        let rows = self.estimated_rows_for_descriptor_range(model, 0..total);
+        Some(persisted_descriptor_rows_to_transcript_rows(rows, total))
+    }
+
+    fn ensure_descriptor_prefix_estimate(
+        &mut self,
+        model: &TranscriptDescriptorExtentModel<'_>,
+    ) -> Option<&DescriptorPrefixEstimateIndex> {
+        let total = model.total_count?;
+        let width = model.width.max(1);
+        if self
+            .descriptor_prefix_estimate
+            .as_ref()
+            .is_some_and(|index| index.matches(width, total))
+        {
+            return self.descriptor_prefix_estimate.as_ref();
+        }
+
+        let stride = TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE;
+        let mut prefix_rows = Vec::with_capacity(total.saturating_add(stride - 1) / stride + 1);
+        prefix_rows.push(0);
+        let mut rows: RowIndex = 0;
+        let mut start = 0;
+        while start < total {
+            let end = start.saturating_add(stride).min(total);
+            rows = rows.saturating_add(self.estimated_rows_for_descriptor_range(model, start..end));
+            prefix_rows.push(rows);
+            start = end;
+        }
+        self.descriptor_prefix_estimate = Some(DescriptorPrefixEstimateIndex {
+            width,
+            total_count: total,
+            stride,
+            prefix_rows,
+        });
+        self.descriptor_prefix_estimate.as_ref()
+    }
+
+    fn estimated_descriptor_for_row(
+        &mut self,
+        model: &TranscriptDescriptorExtentModel<'_>,
+        row: RowIndex,
+    ) -> Option<(usize, RowIndex)> {
+        let total = model.total_count?;
+        if total == 0 {
+            return None;
+        }
+        let (chunk_start, chunk_end, chunk_base_rows) = self
+            .ensure_descriptor_prefix_estimate(model)?
+            .chunk_for_row(row)?;
+        if chunk_start >= chunk_end {
+            return None;
+        }
+
+        let target_in_chunk = row.saturating_sub(chunk_base_rows);
+        let mut lo = chunk_start;
+        let mut hi = chunk_end;
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            let before_mid = self.estimated_rows_for_descriptor_range(model, chunk_start..mid);
+            if before_mid <= target_in_chunk {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let before_descriptor = self.estimated_rows_for_descriptor_range(model, chunk_start..lo);
+        let descriptor_start = chunk_base_rows.saturating_add(before_descriptor);
+        Some((
+            lo.min(total.saturating_sub(1)),
+            row.saturating_sub(descriptor_start),
+        ))
     }
 
     fn estimated_sparse_prefix_rows(
@@ -714,15 +817,8 @@ impl TranscriptExtentIndex {
         model: &TranscriptDescriptorExtentModel<'_>,
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
-        if let (Some(estimated_total), Some(active)) = (
-            self.estimated_total_descriptor_rows(model),
-            model.active_range.as_ref(),
-        ) {
-            let estimated_active =
-                self.estimated_rows_for_descriptor_range(model, active.start..active.end);
-            return estimated_total
-                .saturating_sub(estimated_active)
-                .saturating_add(exact_loaded_rows);
+        if let Some(estimated_total) = self.estimated_total_descriptor_rows(model) {
+            return estimated_total;
         }
 
         self.estimated_sparse_prefix_rows(model)
@@ -845,6 +941,20 @@ struct SparseProjectionGap {
     scroll_top: RowIndex,
     row_base: RowIndex,
     end: RowIndex,
+}
+
+fn minimum_materialized_total_rows(
+    row_base: RowIndex,
+    clamped_scroll: RowIndex,
+    viewport_rows: u16,
+) -> RowIndex {
+    let viewport_rows = RowIndex::from(viewport_rows.max(1));
+    let visible_end = if clamped_scroll == 0 {
+        0
+    } else {
+        clamped_scroll.saturating_add(viewport_rows)
+    };
+    row_base.max(visible_end)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1274,8 +1384,12 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn merge_descriptor_window(&mut self, window: LoadedDescriptorWindow) -> bool {
+        let previous_total = self.descriptors.total_count();
         if !self.descriptors.merge_window(&window) {
             return false;
+        }
+        if previous_total != self.descriptors.total_count() {
+            self.extent_index.clear_persisted_descriptor_estimates();
         }
         record_descriptor_window_metrics(&window);
         self.install_active_descriptor_projection();
@@ -1755,7 +1869,7 @@ impl TranscriptDocument {
 
     fn approximate_average_descriptor_rows(&self, width: u16) -> RowIndex {
         self.extent_index
-            .approximate_average_rows_per_loaded_descriptor(&self.descriptors.sparse, width)
+            .fallback_average_rows_per_loaded_descriptor(&self.descriptors.sparse, width)
     }
 
     fn approximate_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
@@ -1817,7 +1931,7 @@ impl TranscriptDocument {
     }
 
     fn clear_transcript_layout_caches(&mut self) {
-        self.extent_index.clear_exact_descriptor_rows();
+        self.extent_index.clear_exact_local_descriptor_rows();
     }
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
@@ -2441,15 +2555,34 @@ impl TranscriptDocument {
         )
     }
 
+    fn estimated_descriptor_for_display_row(
+        &mut self,
+        width: u16,
+        row: RowIndex,
+    ) -> Option<(usize, RowIndex)> {
+        let model = self.extent_index.descriptor_extent_model(
+            &self.descriptors.sparse,
+            self.descriptors.active_range(),
+            self.descriptors.session_dir(),
+            width,
+        );
+        self.extent_index.estimated_descriptor_for_row(&model, row)
+    }
+
     fn descriptor_window_range_for_approximate_display_row(
-        &self,
+        &mut self,
         width: u16,
         row: RowIndex,
         viewport_rows: u16,
     ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
         let total = self.descriptors.total_count()?;
-        let center = ((row / avg_rows) as usize).min(total.saturating_sub(1));
+        let center = self
+            .estimated_descriptor_for_display_row(width, row)
+            .map(|(descriptor_index, _)| descriptor_index)
+            .unwrap_or_else(|| {
+                let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
+                ((row / avg_rows) as usize).min(total.saturating_sub(1))
+            });
         self.descriptor_window_range_around_center(width, center, viewport_rows, true)
     }
 
@@ -3397,12 +3530,16 @@ impl TranscriptDocument {
             cursor_target.and_then(|target| self.resolve_cursor_target(lua, width, target));
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
         rows.row_base = rows.row_base.saturating_add(row_offset);
-        rows.total_rows = total_rows;
+        let viewport_rows_count = RowIndex::from(viewport_rows.max(1));
+        rows.total_rows = total_rows.max(minimum_materialized_total_rows(
+            rows.row_base,
+            rows.clamped_scroll,
+            viewport_rows,
+        ));
         if let Some(requested) = requested_scroll {
-            let viewport_rows = RowIndex::from(viewport_rows.max(1));
-            let requested = requested.min(total_rows.saturating_sub(viewport_rows));
+            let requested = requested.min(rows.total_rows.saturating_sub(viewport_rows_count));
             if requested >= rows.row_base
-                && requested.saturating_add(viewport_rows)
+                && requested.saturating_add(viewport_rows_count)
                     <= rows.row_base.saturating_add(rows.materialized_rows)
             {
                 rows.clamped_scroll = requested;
@@ -4886,7 +5023,7 @@ mod document_tests {
         let block_id = BlockId::new(1);
         let raw_estimate = document
             .extent_index
-            .approximate_rows_for_loaded_descriptors(&document.descriptors.sparse, width);
+            .local_rows_for_loaded_descriptors(&document.descriptors.sparse, width);
 
         document.extent_index.observe_exact_loaded_descriptor_rows(
             &document.descriptors.sparse,
@@ -4895,7 +5032,7 @@ mod document_tests {
 
         let refined = document
             .extent_index
-            .approximate_rows_for_loaded_descriptors(&document.descriptors.sparse, width);
+            .local_rows_for_loaded_descriptors(&document.descriptors.sparse, width);
         assert_eq!(raw_estimate, 6);
         assert_eq!(refined, 21);
         assert_eq!(document.approximate_average_descriptor_rows(width), 7);
@@ -4918,13 +5055,15 @@ mod document_tests {
         );
 
         assert_eq!(
-            document.extent_index.exact_rows_for_descriptor(0, width),
+            document
+                .extent_index
+                .exact_local_rows_for_descriptor(0, width),
             Some(19)
         );
         assert_eq!(
             document
                 .extent_index
-                .exact_rows_for_descriptor(0, width - 1),
+                .exact_local_rows_for_descriptor(0, width - 1),
             None
         );
         document.extent_index.observe_exact_loaded_descriptor_rows(
@@ -4934,31 +5073,37 @@ mod document_tests {
         assert_eq!(
             document
                 .extent_index
-                .exact_rows_for_descriptor(0, width - 1),
+                .exact_local_rows_for_descriptor(0, width - 1),
             Some(23)
         );
         assert_eq!(
-            document.extent_index.exact_rows_for_descriptor(0, width),
+            document
+                .extent_index
+                .exact_local_rows_for_descriptor(0, width),
             Some(19)
         );
 
         document.invalidate_theme();
         assert_eq!(
-            document.extent_index.exact_rows_for_descriptor(0, width),
+            document
+                .extent_index
+                .exact_local_rows_for_descriptor(0, width),
             Some(19),
             "theme invalidation should keep exact descriptor heights"
         );
         assert_eq!(
             document
                 .extent_index
-                .exact_rows_for_descriptor(0, width - 1),
+                .exact_local_rows_for_descriptor(0, width - 1),
             Some(23),
             "theme invalidation should keep width-scoped exact descriptor heights"
         );
 
         assert!(document.invalidate_renderer_if_changed(8, Some(11)));
         assert_eq!(
-            document.extent_index.exact_rows_for_descriptor(0, width),
+            document
+                .extent_index
+                .exact_local_rows_for_descriptor(0, width),
             None
         );
 
@@ -4968,7 +5113,9 @@ mod document_tests {
         );
         document.set_inline_options(InlineOptions::default());
         assert_eq!(
-            document.extent_index.exact_rows_for_descriptor(0, width),
+            document
+                .extent_index
+                .exact_local_rows_for_descriptor(0, width),
             None
         );
     }
@@ -5008,7 +5155,7 @@ mod document_tests {
     }
 
     #[test]
-    fn exact_descriptor_rows_survive_active_window_switch_and_refine_prefix() {
+    fn exact_descriptor_rows_survive_active_window_switch_without_refining_prefix_estimate() {
         let width = 80;
         let records = transcript_records(8);
         let dir = tempfile::tempdir().unwrap();
@@ -5034,20 +5181,15 @@ mod document_tests {
         let persisted_prefix = db
             .transcript_descriptor_estimated_rows((0..5).into(), width)
             .unwrap() as RowIndex;
-        let descriptor_one_estimate = db
-            .transcript_descriptor_estimated_rows((1..2).into(), width)
-            .unwrap() as RowIndex;
-        let expected = persisted_prefix
-            .saturating_sub(descriptor_one_estimate)
-            .saturating_add(17);
-
         assert_eq!(
-            document.extent_index.exact_rows_for_descriptor(1, width),
+            document
+                .extent_index
+                .exact_local_rows_for_descriptor(1, width),
             Some(17)
         );
         assert_eq!(
             document.approximate_sparse_prefix_row_offset(width),
-            expected
+            persisted_prefix
         );
     }
 
@@ -7343,5 +7485,80 @@ mod tests {
                 Some(smelt_core::BlockOrigin::History(2)),
             ]
         );
+    }
+
+    #[test]
+    fn approximate_row_seek_uses_descriptor_prefix_estimates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut records = (0..300).map(test_descriptor_record).collect::<Vec<_>>();
+        records[0].estimated_text_bytes = 1_000;
+        db.replace_transcript_descriptor_records(&records).unwrap();
+        let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
+        drop(db);
+
+        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+            .expect("loaded tail");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+
+        let range = document
+            .descriptor_window_range_for_approximate_display_row(10, 120, 10)
+            .expect("descriptor range");
+
+        assert!(
+            range.start.get() <= 10 && 10 < range.end.get(),
+            "seek should center near the descriptor whose cumulative estimate contains the row: {range:?}"
+        );
+        assert!(
+            range.end.get() < 60,
+            "seek must not use loaded tail average rows per descriptor: {range:?}"
+        );
+    }
+
+    #[test]
+    fn scrollbar_total_ignores_exact_loaded_height_refinements_for_sparse_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = (0..16).map(test_descriptor_record).collect::<Vec<_>>();
+        db.replace_transcript_descriptor_records(&records).unwrap();
+        let tail = db.read_transcript_descriptor_tail_slice(4).unwrap();
+        drop(db);
+
+        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+            .expect("loaded tail");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+        let before = document.approximate_mixed_scrollbar_total_rows(10, 1_000);
+
+        let active_start = document.descriptors.active_range().unwrap().start.get();
+        let block_id = document
+            .descriptors
+            .sparse
+            .record(smelt_store::TranscriptDescriptorIndex::new(active_start))
+            .unwrap()
+            .block_id;
+        let snapshot = crate::content::transcript_buf::TranscriptExactHeightSnapshot {
+            width: 10,
+            renderer_generation: 0,
+            renderer_cache_key: None,
+            presentation_generation: 0,
+            observations: vec![
+                crate::content::transcript_buf::TranscriptExactHeightObservation {
+                    block_id,
+                    key: smelt_core::transcript_model::LayoutKey {
+                        width: 10,
+                        view_state: smelt_core::transcript_model::ViewState::Expanded,
+                        content_hash: 0,
+                        sidecar_hash: 0,
+                    },
+                    rows: 1_000,
+                },
+            ],
+        };
+        document
+            .extent_index
+            .observe_exact_loaded_descriptor_rows(&document.descriptors.sparse, snapshot);
+        let after = document.approximate_mixed_scrollbar_total_rows(10, 1_000);
+
+        assert_eq!(before, after);
     }
 }

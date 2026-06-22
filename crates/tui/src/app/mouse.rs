@@ -103,10 +103,16 @@ fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usi
     (soft, hard)
 }
 
+enum TranscriptScrollInputResolution {
+    UseCapturedIntent,
+    UseResolvedScrollAfterDispatch,
+}
+
 struct TranscriptScrollInputCandidate {
     label: String,
     intent: TranscriptScrollIntent,
     window_scroll_before: RowIndex,
+    resolution: TranscriptScrollInputResolution,
 }
 
 impl TuiApp {
@@ -122,6 +128,7 @@ impl TuiApp {
                 label: label.into(),
                 intent: TranscriptScrollIntent::UserDelta { rows: delta },
                 window_scroll_before: self.transcript_scroll_top(),
+                resolution: TranscriptScrollInputResolution::UseCapturedIntent,
             })
         });
         if candidate.is_some() {
@@ -147,6 +154,7 @@ impl TuiApp {
             label: "drag_autoscroll".to_string(),
             intent: TranscriptScrollIntent::UserDelta { rows: delta },
             window_scroll_before: self.transcript_scroll_top(),
+            resolution: TranscriptScrollInputResolution::UseCapturedIntent,
         };
         let Some(restore) = self.advance_transcript_drag_autoscroll_endpoint(delta) else {
             return false;
@@ -242,6 +250,7 @@ impl TuiApp {
                 },
                 intent: TranscriptScrollIntent::UserDelta { rows },
                 window_scroll_before: self.transcript_scroll_top(),
+                resolution: TranscriptScrollInputResolution::UseCapturedIntent,
             }
         })
     }
@@ -272,10 +281,16 @@ impl TuiApp {
             .unwrap_or_else(|| {
                 TranscriptScrollIntent::ApproximateRowSeek(self.transcript_scroll_top())
             });
+        let resolution = if matches!(me.kind, MouseEventKind::Drag(MouseButton::Left)) {
+            TranscriptScrollInputResolution::UseResolvedScrollAfterDispatch
+        } else {
+            TranscriptScrollInputResolution::UseCapturedIntent
+        };
         Some(TranscriptScrollInputCandidate {
             label: "scrollbar".to_string(),
             intent,
             window_scroll_before: self.transcript_scroll_top(),
+            resolution,
         })
     }
 
@@ -299,9 +314,15 @@ impl TuiApp {
         let Some(candidate) = candidate else {
             return;
         };
+        let intent = match candidate.resolution {
+            TranscriptScrollInputResolution::UseCapturedIntent => candidate.intent,
+            TranscriptScrollInputResolution::UseResolvedScrollAfterDispatch => {
+                TranscriptScrollIntent::ApproximateRowSeek(self.transcript_scroll_top())
+            }
+        };
         self.record_transcript_scroll_intent_for_projection(
             candidate.label,
-            candidate.intent,
+            intent,
             candidate.window_scroll_before,
             TranscriptProjectionRestore::default(),
             None,
