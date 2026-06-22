@@ -52,6 +52,34 @@ pub struct SessionMigrationBatchReport {
     pub failures: Vec<SessionMigrationFailure>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionDirKind {
+    Empty,
+    MigrationStatus,
+    SqliteOnly,
+    SqliteWithMetadata,
+    SqliteWithLegacySidecars,
+    LegacySidecars,
+}
+
+pub(crate) fn classify_session_dir(dir_path: &Path) -> SessionDirKind {
+    let has_db = dir_path.join("session.db").is_file();
+    let has_meta = dir_path.join("meta.json").is_file();
+    let has_split = dir_path.join("history.jsonl").is_file();
+    let has_legacy = dir_path.join("session.json").is_file();
+    let has_migration_status = dir_path.join(MIGRATION_STATUS_FILE).is_file();
+    let has_legacy_sidecars = has_split || has_legacy;
+
+    match (has_db, has_meta, has_legacy_sidecars, has_migration_status) {
+        (true, _, true, _) => SessionDirKind::SqliteWithLegacySidecars,
+        (true, true, false, _) => SessionDirKind::SqliteWithMetadata,
+        (true, false, false, _) => SessionDirKind::SqliteOnly,
+        (false, _, true, _) => SessionDirKind::LegacySidecars,
+        (false, _, false, true) => SessionDirKind::MigrationStatus,
+        (false, _, false, false) => SessionDirKind::Empty,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionMigrationEvent {
     Started { pending: usize },
@@ -136,27 +164,30 @@ fn migrate_session_dir_to_db_inner(
     crate::session::cleanup_stale_import_temp_files(dir_path);
 
     let db_path = dir_path.join("session.db");
+    let kind = classify_session_dir(dir_path);
+
+    match kind {
+        SessionDirKind::SqliteOnly => return Ok(SessionMigrationOutcome::Skipped),
+        SessionDirKind::SqliteWithMetadata | SessionDirKind::SqliteWithLegacySidecars => {
+            match smelt_store::SessionDb::open(&db_path) {
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(SessionMigrationError::OpenDatabase {
+                        message: err.to_string(),
+                    });
+                }
+            }
+            crate::session::cleanup_migrated_legacy_artifacts(dir_path);
+            return Ok(SessionMigrationOutcome::Skipped);
+        }
+        SessionDirKind::LegacySidecars => {}
+        SessionDirKind::Empty | SessionDirKind::MigrationStatus => {
+            return Ok(SessionMigrationOutcome::Skipped);
+        }
+    }
+
     let has_split = dir_path.join("history.jsonl").is_file();
     let has_legacy = dir_path.join("session.json").is_file();
-
-    if db_path.is_file() {
-        match smelt_store::SessionDb::open(&db_path) {
-            Ok(_) => {}
-            Err(err) if has_split || has_legacy => {
-                return Err(SessionMigrationError::OpenDatabase {
-                    message: err.to_string(),
-                });
-            }
-            Err(_) => {}
-        }
-        crate::session::cleanup_migrated_legacy_artifacts(dir_path);
-        return Ok(SessionMigrationOutcome::Skipped);
-    }
-
-    if !has_split && !has_legacy {
-        return Ok(SessionMigrationOutcome::Skipped);
-    }
-
     let (session, loaded_legacy_json) = if has_split {
         match crate::session::read_jsonl_session(dir_path) {
             Ok(session) => (session, false),
@@ -201,8 +232,10 @@ pub fn ensure_session_db(dir_path: &Path) -> SessionMigrationResult<()> {
 }
 
 pub(crate) fn session_dir_needs_migration(dir_path: &Path) -> bool {
-    !dir_path.join("session.db").is_file()
-        && (dir_path.join("history.jsonl").is_file() || dir_path.join("session.json").is_file())
+    matches!(
+        classify_session_dir(dir_path),
+        SessionDirKind::LegacySidecars
+    )
 }
 
 fn session_dir_id(dir_path: &Path) -> String {
@@ -374,20 +407,20 @@ pub(crate) fn read_migration_status(dir_path: &Path) -> Option<SessionMigrationS
 }
 
 pub(crate) fn migration_status_for_dir(dir_path: &Path) -> Option<SessionMigrationStatus> {
-    if dir_path.join("session.db").is_file() {
-        return None;
+    match classify_session_dir(dir_path) {
+        SessionDirKind::SqliteOnly
+        | SessionDirKind::SqliteWithMetadata
+        | SessionDirKind::SqliteWithLegacySidecars
+        | SessionDirKind::Empty => None,
+        SessionDirKind::MigrationStatus => read_migration_status(dir_path),
+        SessionDirKind::LegacySidecars => {
+            read_migration_status(dir_path).or(Some(SessionMigrationStatus {
+                state: SessionMigrationState::Pending,
+                message: None,
+                updated_at_ms: 0,
+            }))
+        }
     }
-    if let Some(status) = read_migration_status(dir_path) {
-        return Some(status);
-    }
-    if dir_path.join("history.jsonl").is_file() || dir_path.join("session.json").is_file() {
-        return Some(SessionMigrationStatus {
-            state: SessionMigrationState::Pending,
-            message: None,
-            updated_at_ms: 0,
-        });
-    }
-    None
 }
 
 #[cfg(test)]
@@ -411,6 +444,7 @@ mod tests {
             )
             .unwrap();
         drop(db);
+        fs::write(dir.path().join("meta.json"), b"{}").unwrap();
 
         let outcome = migrate_session_dir_to_db(dir.path()).unwrap();
         assert_eq!(outcome, SessionMigrationOutcome::Skipped);

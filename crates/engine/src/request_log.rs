@@ -1,11 +1,10 @@
 //! Persistent provider request audit for session introspection.
 
 use protocol::request_log::{RequestError, RequestLogEntry, RequestResponse};
-use std::path::Path;
 
 /// Append one request attempt to the session's SQLite request audit.
 pub fn append(
-    session_dir: &Path,
+    db: &smelt_store::SessionDb,
     ctx: RequestContext,
     info: &crate::provider::RequestAttemptInfo<'_>,
     pricing: &crate::pricing::ResolvedPricing,
@@ -15,7 +14,6 @@ pub fn append(
         return Ok(None);
     };
     let entry = build_entry(ctx, info, pricing);
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
     db.append_request_attempt(&entry, payload_mode).map(Some)
 }
 
@@ -231,8 +229,9 @@ mod tests {
             background: false,
         };
 
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let id = append(
-            session_dir,
+            &db,
             ctx,
             &info,
             &zero_pricing(),
@@ -241,13 +240,17 @@ mod tests {
         .unwrap();
 
         assert!(id.is_none());
-        assert!(!session_dir.join("session.db").exists());
+        let attempts = db
+            .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+            .unwrap();
+        assert!(attempts.is_empty());
     }
 
     #[test]
     fn request_log_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let session_dir = tmp.path();
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
 
         let body = serde_json::json!({"model": "gpt-test", "messages": []});
         let url = "https://api.example.com/v1/chat/completions";
@@ -280,7 +283,7 @@ mod tests {
             background: false,
         };
         append(
-            session_dir,
+            &db,
             ctx,
             &info,
             &zero_pricing(),
@@ -310,7 +313,7 @@ mod tests {
             background: false,
         };
         append(
-            session_dir,
+            &db,
             ctx_err,
             &info_err,
             &zero_pricing(),
@@ -318,7 +321,6 @@ mod tests {
         )
         .unwrap();
 
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let attempts = db
             .query_request_attempts(&smelt_store::RequestAuditQuery {
                 order: smelt_store::RequestAuditOrder::OldestFirst,

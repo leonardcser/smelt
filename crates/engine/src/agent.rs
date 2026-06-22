@@ -11,6 +11,7 @@ use protocol::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::time::Instant;
@@ -20,6 +21,33 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn open_request_audit_db(
+    session_dir: &Path,
+    mode: crate::RequestAuditMode,
+) -> Result<Option<smelt_store::SessionDb>, smelt_store::StoreError> {
+    if mode.payload_mode().is_none() {
+        return Ok(None);
+    }
+    let db_path = session_dir.join("session.db");
+    if !db_path.is_file() {
+        return Ok(None);
+    }
+    smelt_store::SessionDb::open(db_path).map(Some)
+}
+
+fn append_request_audit_to_existing_session(
+    session_dir: &Path,
+    ctx: crate::request_log::RequestContext,
+    info: &crate::provider::RequestAttemptInfo<'_>,
+    pricing: &crate::pricing::ResolvedPricing,
+    mode: crate::RequestAuditMode,
+) -> Result<(), smelt_store::StoreError> {
+    if let Some(db) = open_request_audit_db(session_dir, mode)? {
+        let _ = crate::request_log::append(&db, ctx, info, pricing, mode)?;
+    }
+    Ok(())
 }
 
 fn last_note_kind(items: &[HistoryItem]) -> Option<protocol::HistoryNoteKind> {
@@ -441,9 +469,13 @@ fn spawn_engine_ask(
                     history_len: None,
                     background: true,
                 };
-                if let Err(err) =
-                    crate::request_log::append(&log_session_dir, ctx, &info, &resolved, audit_mode)
-                {
+                if let Err(err) = append_request_audit_to_existing_session(
+                    &log_session_dir,
+                    ctx,
+                    &info,
+                    &resolved,
+                    audit_mode,
+                ) {
                     let _ = audit_tx.send(EngineEvent::RequestAuditError {
                         message: format!("request audit write failed: {err}"),
                     });
@@ -2423,9 +2455,13 @@ impl<'a> Turn<'a> {
                     history_len: Some(history_len),
                     background: false,
                 };
-                if let Err(err) =
-                    crate::request_log::append(&session_dir, ctx, &info, &pricing, audit_mode)
-                {
+                if let Err(err) = append_request_audit_to_existing_session(
+                    &session_dir,
+                    ctx,
+                    &info,
+                    &pricing,
+                    audit_mode,
+                ) {
                     let _ = event_tx.send(EngineEvent::RequestAuditError {
                         message: format!("request audit write failed: {err}"),
                     });
@@ -2608,6 +2644,16 @@ impl PricingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_request_audit_db_skips_missing_database() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let db = open_request_audit_db(dir.path(), crate::RequestAuditMode::Full).unwrap();
+
+        assert!(db.is_none());
+        assert!(!dir.path().join("session.db").exists());
+    }
 
     #[test]
     fn load_model_history_reads_requested_store_range() {

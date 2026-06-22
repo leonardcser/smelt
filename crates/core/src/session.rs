@@ -2033,39 +2033,10 @@ fn load_meta_for_dir(path: PathBuf, mode: MetaLoadMode) -> Option<SessionMeta> {
 }
 
 fn load_list_meta_without_db(path: &Path) -> Option<SessionMeta> {
-    if let Some(meta) = migration_meta_for_dir(path) {
-        return Some(meta);
+    match crate::session_migration::classify_session_dir(path) {
+        crate::session_migration::SessionDirKind::SqliteOnly => None,
+        _ => migration_meta_for_dir(path),
     }
-    let id = path.file_name().and_then(|name| name.to_str())?.to_string();
-    let updated_at_ms = file_modified_ms(&path.join("session.db"))?;
-    Some(SessionMeta {
-        id,
-        title: None,
-        slug: None,
-        first_user_message: None,
-        created_at_ms: updated_at_ms,
-        updated_at_ms,
-        mode: None,
-        reasoning_effort: None,
-        model: None,
-        cwd: None,
-        parent_id: None,
-        context_tokens: None,
-        history_len: None,
-        checkpoint: None,
-        text_bytes: None,
-        migration: None,
-    })
-}
-
-fn file_modified_ms(path: &Path) -> Option<u64> {
-    path.metadata()
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_millis() as u64)
 }
 
 fn load_meta_sidecar(path: &Path, contents: &str, mode: MetaLoadMode) -> Option<SessionMeta> {
@@ -2553,7 +2524,7 @@ mod tests {
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
 
-        for id in &ids {
+        for id in ids.iter().take(2) {
             let meta = listed
                 .iter()
                 .find(|meta| meta.id == *id)
@@ -2562,6 +2533,10 @@ mod tests {
             assert!(meta.checkpoint.is_none());
             assert_eq!(meta.text_bytes, None);
         }
+        assert!(
+            listed.iter().all(|meta| meta.id != ids[2]),
+            "db-only sessions without sidecar metadata are not resumable list entries"
+        );
         for label in ["store:db:open_read_only", "store:db:open_read_write"] {
             let count = snapshot
                 .durations
