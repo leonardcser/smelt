@@ -176,7 +176,7 @@ impl VimContext<'_> {
 
 // ── Internal types ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Op {
     Delete,
     Change,
@@ -233,6 +233,84 @@ pub(crate) enum SubState {
     WaitingChangeSurroundReplacement(char),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepeatKey {
+    Char(char),
+    Left,
+    Right,
+    Backspace,
+    Home,
+    End,
+}
+
+impl RepeatKey {
+    fn from_key(key: KeyEvent) -> Option<Self> {
+        match key.code {
+            KeyCode::Char(c) => Some(Self::Char(c)),
+            KeyCode::Left => Some(Self::Left),
+            KeyCode::Right => Some(Self::Right),
+            KeyCode::Backspace => Some(Self::Backspace),
+            KeyCode::Home => Some(Self::Home),
+            KeyCode::End => Some(Self::End),
+            _ => None,
+        }
+    }
+
+    fn key_event(self) -> KeyEvent {
+        KeyEvent::new(
+            match self {
+                Self::Char(c) => KeyCode::Char(c),
+                Self::Left => KeyCode::Left,
+                Self::Right => KeyCode::Right,
+                Self::Backspace => KeyCode::Backspace,
+                Self::Home => KeyCode::Home,
+                Self::End => KeyCode::End,
+            },
+            KeyModifiers::empty(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepeatCommand {
+    Direct {
+        command: char,
+        count: usize,
+    },
+    Replace {
+        count: usize,
+        replacement: char,
+    },
+    OpMotion {
+        op: Op,
+        motion: RepeatKey,
+        count: usize,
+    },
+    OpFind {
+        op: Op,
+        kind: FindKind,
+        target: char,
+        count: usize,
+    },
+    Linewise {
+        op: Op,
+        count: usize,
+    },
+    TextObject {
+        op: Op,
+        inner: bool,
+        object: char,
+        count: usize,
+    },
+    DeleteSurround {
+        target: char,
+    },
+    ChangeSurround {
+        target: char,
+        replacement: char,
+    },
+}
+
 // ── Vim state ───────────────────────────────────────────────────────────────
 
 /// Per-Window vim state: persistent slots (`visual_anchor`, `last_find`) and
@@ -243,6 +321,10 @@ pub struct VimWindowState {
     pub(crate) visual_anchor: usize,
     /// Last `f`/`t`/`F`/`T` target for `;`/`,` replay.
     pub(crate) last_find: Option<(FindKind, char)>,
+    /// Last mutating Normal-mode command for `.` repeat.
+    last_change: Option<RepeatCommand>,
+    /// Guard used while replaying `.` so the repeated command does not replace itself.
+    replaying_change: bool,
     /// In-flight sub-state for multi-key sequences.
     pub(crate) sub: SubState,
     /// Count before the operator (or standalone motion).
@@ -285,6 +367,16 @@ impl VimWindowState {
             self.visual_anchor = source.len();
         }
         self.visual_anchor = smelt_buffer::text::snap(source, self.visual_anchor);
+    }
+
+    fn record_change(&mut self, command: RepeatCommand) {
+        if !self.replaying_change {
+            self.last_change = Some(command);
+        }
+    }
+
+    fn repeat_count(&mut self, stored: usize) -> usize {
+        self.count1.take().unwrap_or(stored.max(1))
     }
 
     /// Pop count1 (default 1), clearing both accumulators.
@@ -740,7 +832,14 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                     return Action::Consumed;
                 }
                 if c == op.char() {
-                    return execute_linewise_op(op, ctx);
+                    let count =
+                        ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
+                    let action = execute_linewise_op(op, ctx);
+                    if op != Op::Yank {
+                        ctx.vim_state
+                            .record_change(RepeatCommand::Linewise { op, count });
+                    }
+                    return action;
                 }
                 if c == 's' {
                     ctx.vim_state.sub = match op {
@@ -755,7 +854,20 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                     return Action::Consumed;
                 }
             }
+            let repeat_key = RepeatKey::from_key(key);
+            let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
             let result = execute_op_motion(key, op, ctx);
+            if op != Op::Yank
+                && !matches!(
+                    ctx.vim_state.sub,
+                    SubState::WaitingOpFind(_, _) | SubState::WaitingOpG(_)
+                )
+            {
+                if let Some(motion) = repeat_key {
+                    ctx.vim_state
+                        .record_change(RepeatCommand::OpMotion { op, motion, count });
+                }
+            }
             // Don't reset if a new substate was set (e.g. WaitingOpFind for df/dt).
             if matches!(ctx.vim_state.sub, SubState::WaitingOp(_)) {
                 ctx.vim_state.reset_pending();
@@ -803,6 +915,73 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     }
 }
 
+fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
+    let Some(command) = ctx.vim_state.last_change else {
+        ctx.vim_state.reset_pending();
+        return Action::Consumed;
+    };
+
+    let was_replaying = ctx.vim_state.replaying_change;
+    ctx.vim_state.replaying_change = true;
+    let action = match command {
+        RepeatCommand::Direct { command, count } => {
+            let n = ctx.vim_state.repeat_count(count);
+            ctx.vim_state.count1 = Some(n);
+            handle_normal_char(command, ctx)
+        }
+        RepeatCommand::Replace { count, replacement } => {
+            let n = ctx.vim_state.repeat_count(count);
+            ctx.vim_state.count1 = Some(n);
+            handle_waiting_r(RepeatKey::Char(replacement).key_event(), ctx)
+        }
+        RepeatCommand::OpMotion { op, motion, count } => {
+            let n = ctx.vim_state.repeat_count(count);
+            ctx.vim_state.count1 = Some(n);
+            execute_op_motion(motion.key_event(), op, ctx)
+        }
+        RepeatCommand::OpFind {
+            op,
+            kind,
+            target,
+            count,
+        } => {
+            let n = ctx.vim_state.repeat_count(count);
+            ctx.vim_state.count1 = Some(n);
+            handle_waiting_op_find(RepeatKey::Char(target).key_event(), op, kind, ctx)
+        }
+        RepeatCommand::Linewise { op, count } => {
+            let n = ctx.vim_state.repeat_count(count);
+            ctx.vim_state.count1 = Some(n);
+            execute_linewise_op(op, ctx)
+        }
+        RepeatCommand::TextObject {
+            op,
+            inner,
+            object,
+            count,
+        } => {
+            let n = ctx.vim_state.repeat_count(count);
+            ctx.vim_state.count1 = Some(n);
+            handle_waiting_textobj(RepeatKey::Char(object).key_event(), op, inner, ctx)
+        }
+        RepeatCommand::DeleteSurround { target } => {
+            delete_surround(ctx, target);
+            ctx.vim_state.reset_pending();
+            Action::Consumed
+        }
+        RepeatCommand::ChangeSurround {
+            target,
+            replacement,
+        } => {
+            change_surround(ctx, target, replacement);
+            ctx.vim_state.reset_pending();
+            Action::Consumed
+        }
+    };
+    ctx.vim_state.replaying_change = was_replaying;
+    action
+}
+
 fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
     if c != 'j' && c != 'k' && !c.is_ascii_digit() {
         *ctx.curswant = None;
@@ -815,6 +994,9 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
     }
 
     match c {
+        // ── Repeat last change ───────────────────────────────────────
+        '.' => repeat_last_change(ctx),
+
         // ── Operators ───────────────────────────────────────────────
         'd' => {
             ctx.vim_state.sub = SubState::WaitingOp(Op::Delete);
@@ -836,6 +1018,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.yank_range(*ctx.cpos, end, false);
             ctx.delete_range(*ctx.cpos, end);
             clamp_normal(ctx.buf.as_str(), ctx.cpos);
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'D',
+                count: 1,
+            });
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
@@ -844,6 +1030,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let end = line_end(ctx.buf.as_str(), *ctx.cpos);
             ctx.yank_range(*ctx.cpos, end, false);
             ctx.delete_range(*ctx.cpos, end);
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'C',
+                count: 1,
+            });
             enter_insert_mode(ctx);
             Action::Consumed
         }
@@ -865,6 +1055,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.delete_range(*ctx.cpos, end);
                 clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'x',
+                count: n,
+            });
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
@@ -878,6 +1072,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 *ctx.cpos = start;
                 clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'X',
+                count: n,
+            });
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
@@ -889,6 +1087,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.yank_range(*ctx.cpos, end, false);
                 ctx.delete_range(*ctx.cpos, end);
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 's',
+                count: n,
+            });
             enter_insert_mode(ctx);
             Action::Consumed
         }
@@ -898,6 +1100,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.yank_range(start, end, false);
             ctx.delete_range(start, end);
             *ctx.cpos = start;
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'S',
+                count: 1,
+            });
             enter_insert_mode(ctx);
             Action::Consumed
         }
@@ -925,6 +1131,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 }
                 clamp_normal(ctx.buf.as_str(), ctx.cpos);
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: '~',
+                count: n,
+            });
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
@@ -954,6 +1164,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     clamp_normal(ctx.buf.as_str(), ctx.cpos);
                 }
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'p',
+                count: 1,
+            });
             Action::Consumed
         }
         'P' => {
@@ -983,6 +1197,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                     }
                 }
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'P',
+                count: 1,
+            });
             Action::Consumed
         }
 
@@ -1266,6 +1484,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 }
                 *ctx.cpos = join_pos;
             }
+            ctx.vim_state.record_change(RepeatCommand::Direct {
+                command: 'J',
+                count,
+            });
             Action::Consumed
         }
 
@@ -1763,6 +1985,10 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     if let Some(c) = replacement_char {
         if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
             let n = ctx.vim_state.take_count();
+            ctx.vim_state.record_change(RepeatCommand::Replace {
+                count: n,
+                replacement: c,
+            });
             ctx.save_undo();
             let mut pos = *ctx.cpos;
             for _ in 0..n {
@@ -1808,6 +2034,7 @@ fn handle_waiting_op_find(
 ) -> Action {
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(ch) = key.code {
+        let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
         let n = ctx.vim_state.effective_count();
         ctx.vim_state.last_find = Some((kind, ch));
         let origin = *ctx.cpos;
@@ -1830,6 +2057,14 @@ fn handle_waiting_op_find(
                 FindKind::BackwardTill => (advance_chars(ctx.buf.as_str(), pos, 1), *ctx.cpos),
             };
             if start < end {
+                if op != Op::Yank {
+                    ctx.vim_state.record_change(RepeatCommand::OpFind {
+                        op,
+                        kind,
+                        target: ch,
+                        count,
+                    });
+                }
                 return apply_charwise_op(op, ctx, start, end);
             }
         }
@@ -1885,8 +2120,17 @@ fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimConte
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(c) = key.code {
         if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
+            let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
             let n = ctx.vim_state.effective_count();
             let _ = n;
+            if op != Op::Yank {
+                ctx.vim_state.record_change(RepeatCommand::TextObject {
+                    op,
+                    inner,
+                    object: c,
+                    count,
+                });
+            }
             return apply_charwise_op(op, ctx, start, end);
         }
     }
@@ -1951,7 +2195,10 @@ fn handle_waiting_surround_char(
 fn handle_waiting_delete_surround(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(c) = key.code {
-        delete_surround(ctx, c);
+        if delete_surround(ctx, c) {
+            ctx.vim_state
+                .record_change(RepeatCommand::DeleteSurround { target: c });
+        }
     }
     ctx.vim_state.reset_pending();
     Action::Consumed
@@ -1975,7 +2222,12 @@ fn handle_waiting_change_surround_replacement(
 ) -> Action {
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(replacement) = key.code {
-        change_surround(ctx, target, replacement);
+        if change_surround(ctx, target, replacement) {
+            ctx.vim_state.record_change(RepeatCommand::ChangeSurround {
+                target,
+                replacement,
+            });
+        }
     }
     ctx.vim_state.reset_pending();
     Action::Consumed
@@ -2012,29 +2264,31 @@ fn add_surround(ctx: &mut VimContext<'_>, start: usize, end: usize, open: &str, 
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
 
-fn delete_surround(ctx: &mut VimContext<'_>, kind: char) {
+fn delete_surround(ctx: &mut VimContext<'_>, kind: char) -> bool {
     let Some(delims) = surrounding_delimiters(ctx.buf.as_str(), *ctx.cpos, kind) else {
-        return;
+        return false;
     };
     ctx.save_undo();
     ctx.delete_range(delims.close_start, delims.close_end);
     ctx.delete_range(delims.open_start, delims.open_end);
     *ctx.cpos = delims.open_start.min(ctx.buf.len());
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    true
 }
 
-fn change_surround(ctx: &mut VimContext<'_>, target: char, replacement: char) {
+fn change_surround(ctx: &mut VimContext<'_>, target: char, replacement: char) -> bool {
     let Some((open, close)) = surround_pair(replacement) else {
-        return;
+        return false;
     };
     let Some(delims) = surrounding_delimiters(ctx.buf.as_str(), *ctx.cpos, target) else {
-        return;
+        return false;
     };
     ctx.save_undo();
     ctx.replace_range(delims.close_start, delims.close_end, close);
     ctx.replace_range(delims.open_start, delims.open_end, open);
     *ctx.cpos = delims.open_start + open.len();
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    true
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2577,6 +2831,172 @@ mod tests {
         h.handle(key('w'));
         assert_eq!(h.buf, "world");
         assert_eq!(h.cpos, 0);
+    }
+
+    #[test]
+    fn dot_repeats_delete_word_operator() {
+        let mut h = TestHarness::new("one two three");
+        h.handle(key('d'));
+        h.handle(key('w'));
+        assert_eq!(h.buf, "two three");
+
+        h.handle(key('.'));
+        assert_eq!(h.buf, "three");
+        assert_eq!(h.cpos, 0);
+    }
+
+    #[test]
+    fn dot_count_overrides_repeated_operator_count() {
+        let mut h = TestHarness::new("one two three four");
+        h.handle(key('d'));
+        h.handle(key('w'));
+        assert_eq!(h.buf, "two three four");
+
+        h.handle(key('2'));
+        h.handle(key('.'));
+        assert_eq!(h.buf, "four");
+    }
+
+    #[test]
+    fn dot_repeats_find_operator() {
+        let mut h = TestHarness::new("abc def ghi");
+        h.handle(key('d'));
+        h.handle(key('f'));
+        h.handle(key(' '));
+        assert_eq!(h.buf, "def ghi");
+
+        h.handle(key('.'));
+        assert_eq!(h.buf, "ghi");
+    }
+
+    #[test]
+    fn dot_repeats_replace_char() {
+        let mut h = TestHarness::new("abc");
+        h.handle(key('r'));
+        h.handle(key('x'));
+        assert_eq!(h.buf, "xbc");
+
+        h.handle(key('l'));
+        h.handle(key('.'));
+        assert_eq!(h.buf, "xxc");
+    }
+
+    #[test]
+    fn dot_repeats_linewise_delete() {
+        let mut h = TestHarness::new("one\ntwo\nthree");
+        h.handle(key('d'));
+        h.handle(key('d'));
+        assert_eq!(h.buf, "two\nthree");
+
+        h.handle(key('.'));
+        assert_eq!(h.buf, "three");
+    }
+
+    #[test]
+    fn dot_repeats_direct_delete_and_toggle() {
+        let mut h = TestHarness::new("abCD");
+        h.handle(key('x'));
+        assert_eq!(h.buf, "bCD");
+        h.handle(key('.'));
+        assert_eq!(h.buf, "CD");
+
+        h.handle(key('~'));
+        assert_eq!(h.buf, "cD");
+        h.handle(key('.'));
+        assert_eq!(h.buf, "cd");
+    }
+
+    #[test]
+    fn dot_repeats_end_of_line_delete() {
+        let mut h = TestHarness::new("one two\nthree four");
+        h.handle(key('w'));
+        h.handle(key('D'));
+        assert_eq!(h.buf, "one \nthree four");
+
+        h.handle(key('j'));
+        h.handle(key('w'));
+        h.handle(key('.'));
+        assert_eq!(h.buf, "one \nthree ");
+    }
+
+    #[test]
+    fn dot_repeats_substitute_without_inserted_text() {
+        let mut h = TestHarness::new("abc");
+        h.handle(key('s'));
+        assert_eq!(h.buf, "bc");
+        assert_eq!(h.mode, VimMode::Insert);
+        h.handle(KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        });
+
+        h.handle(key('.'));
+        assert_eq!(h.buf, "c");
+    }
+
+    #[test]
+    fn dot_repeats_join_lines() {
+        let mut h = TestHarness::new("one\ntwo\nthree");
+        h.handle(key('J'));
+        assert_eq!(h.buf, "one two\nthree");
+
+        h.handle(key('.'));
+        assert_eq!(h.buf, "one two three");
+    }
+
+    #[test]
+    fn dot_repeats_paste() {
+        let mut h = TestHarness::new("ab");
+        h.clipboard
+            .kill_ring
+            .set_with_linewise("X".to_string(), false);
+        h.handle(key('p'));
+        assert_eq!(h.buf, "aXb");
+
+        h.handle(key('.'));
+        assert_eq!(h.buf, "aXXb");
+    }
+
+    #[test]
+    fn dot_repeats_text_object_operator() {
+        let mut h = TestHarness::new("one two three");
+        h.cpos = 4;
+        h.handle(key('d'));
+        h.handle(key('i'));
+        h.handle(key('w'));
+        assert_eq!(h.buf, "one  three");
+
+        h.cpos = 5;
+        h.handle(key('.'));
+        assert_eq!(h.buf, "one  ");
+    }
+
+    #[test]
+    fn dot_repeats_surround_delete_and_change() {
+        let mut h = TestHarness::new("(one) (two)");
+        h.cpos = 1;
+        h.handle(key('d'));
+        h.handle(key('s'));
+        h.handle(key(')'));
+        assert_eq!(h.buf, "one (two)");
+
+        h.cpos = 5;
+        h.handle(key('.'));
+        assert_eq!(h.buf, "one two");
+
+        let mut h = TestHarness::new("(one) (two)");
+        h.cpos = 1;
+        h.handle(key('c'));
+        h.handle(key('s'));
+        h.handle(key(')'));
+        h.handle(key(']'));
+        assert_eq!(h.buf, "[one] (two)");
+
+        h.cpos = 7;
+        h.handle(key('.'));
+        assert_eq!(h.buf, "[one] [two]");
     }
 
     #[test]
