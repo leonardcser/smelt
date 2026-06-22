@@ -15,6 +15,21 @@ pub(crate) mod transcript_search_text;
 
 pub(crate) use smelt_core::content::{display_safe_char, display_safe_text};
 
+pub(crate) fn estimate_text_rows(text: &str, width: u16) -> crate::smelt_edit::RowIndex {
+    let width = usize::from(width.max(1));
+    text.lines()
+        .map(|line| {
+            let cells = if line.is_ascii() {
+                line.len()
+            } else {
+                smelt_buffer::text::byte_to_cell(line, line.len())
+            };
+            cells.max(1).div_ceil(width) as crate::smelt_edit::RowIndex
+        })
+        .sum::<crate::smelt_edit::RowIndex>()
+        .max(1)
+}
+
 use crossterm::terminal;
 
 pub(crate) fn term_width() -> usize {

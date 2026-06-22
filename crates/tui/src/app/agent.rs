@@ -1193,7 +1193,7 @@ mod tests {
             "compat:session:load_full_fallback",
             "compat:session:preview_full_fallback",
             "compat:session:rebuild_transcript_full_fallback",
-            "compat:session:deferred_load_full",
+            "session:deferred_load_full",
             "transcript:build_from_session:history_items",
         ] {
             assert_perf_value_absent(snapshot, label);

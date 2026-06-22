@@ -3,9 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use serde_json::json;
 
-use crate::app::transcript::{
-    TranscriptDisplayDocument, TranscriptProjectionRestore, TranscriptRenderContext,
-};
+use crate::app::transcript::{TranscriptDisplayDocument, TranscriptProjectionRestore};
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::TuiApp;
 use crate::smelt_edit::{
@@ -35,13 +33,14 @@ impl DocumentRegistry {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum RenderCacheDocument {
+enum DocumentRenderCacheDocument {
     Buffer(crate::smelt_edit::BufId),
+    Registered(DocumentHandle),
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct RenderCacheKey {
-    document: RenderCacheDocument,
+struct DocumentRenderCacheKey {
+    document: DocumentRenderCacheDocument,
     generation: u64,
     width: u16,
     theme: u64,
@@ -51,13 +50,13 @@ struct RenderCacheKey {
     count: RowIndex,
 }
 
-pub(crate) struct RenderCache {
-    rows: HashMap<RenderCacheKey, DisplayRows>,
-    order: VecDeque<RenderCacheKey>,
+pub(crate) struct DocumentRenderCache {
+    rows: HashMap<DocumentRenderCacheKey, DisplayRows>,
+    order: VecDeque<DocumentRenderCacheKey>,
     limit: usize,
 }
 
-impl RenderCache {
+impl DocumentRenderCache {
     const DEFAULT_LIMIT: usize = 16;
 
     pub(crate) fn new() -> Self {
@@ -68,14 +67,14 @@ impl RenderCache {
         }
     }
 
-    fn get(&mut self, key: RenderCacheKey) -> Option<DisplayRows> {
+    fn get(&mut self, key: DocumentRenderCacheKey) -> Option<DisplayRows> {
         let rows = self.rows.get(&key)?.clone();
         self.order.retain(|existing| *existing != key);
         self.order.push_back(key);
         Some(rows)
     }
 
-    fn insert(&mut self, key: RenderCacheKey, rows: DisplayRows) {
+    fn insert(&mut self, key: DocumentRenderCacheKey, rows: DisplayRows) {
         self.order.retain(|existing| *existing != key);
         self.order.push_back(key);
         self.rows.insert(key, rows);
@@ -152,17 +151,35 @@ impl TuiApp {
         win: WinId,
         start: RowIndex,
         count: RowIndex,
-    ) -> Option<RenderCacheKey> {
+    ) -> Option<DocumentRenderCacheKey> {
         let handle = self.document_handle_for_win(win);
         let theme = theme_cache_key(self.ui.theme());
         match DocumentRegistry::resolve_optional(handle) {
-            Some(RegisteredDocument::Transcript) => None,
+            Some(RegisteredDocument::Transcript) => {
+                self.sync_transcript_renderer_generation();
+                let inline_options = self.inline_options();
+                let renderer_cache_key =
+                    crate::content::display_layout::transcript_renderer_cache_key(
+                        &self.lua,
+                        &inline_options,
+                    );
+                Some(DocumentRenderCacheKey {
+                    document: DocumentRenderCacheDocument::Registered(handle?),
+                    generation: self.transcript.projection_generation(),
+                    width: self.transcript_width() as u16,
+                    theme,
+                    renderer_generation: self.lua.transcript_renderer_generation(),
+                    renderer_cache_key,
+                    start,
+                    count,
+                })
+            }
             None if handle.is_some() => None,
             None => {
                 let win = self.ui.win(win)?;
                 let buf = self.ui.buf(win.buf)?;
-                Some(RenderCacheKey {
-                    document: RenderCacheDocument::Buffer(win.buf),
+                Some(DocumentRenderCacheKey {
+                    document: DocumentRenderCacheDocument::Buffer(win.buf),
                     generation: buf.changedtick(),
                     width: win
                         .viewport
@@ -184,34 +201,9 @@ impl TuiApp {
         start: RowIndex,
         count: RowIndex,
     ) -> Option<DisplayRows> {
-        if self.registered_document_for_win(win) == Some(RegisteredDocument::Transcript) {
-            self.sync_transcript_renderer_generation();
-            let width = self.transcript_width() as u16;
-            let theme = self.ui.theme().clone();
-            let theme_key = theme_cache_key(&theme);
-            let inline_options = self.inline_options();
-            let renderer_generation = self.lua.transcript_renderer_generation();
-            let renderer_cache_key = crate::content::display_layout::transcript_renderer_cache_key(
-                &self.lua,
-                &inline_options,
-            );
-            return Some(self.transcript.cached_exact_or_gap_display_rows_for_range(
-                &self.lua,
-                &theme,
-                TranscriptRenderContext {
-                    width,
-                    theme_key,
-                    renderer_generation,
-                    renderer_cache_key,
-                },
-                start,
-                count,
-            ));
-        }
-
         let key = self.render_cache_key_for_win(win, start, count);
         if let Some(key) = key {
-            if let Some(rows) = self.buffer_render_cache.get(key) {
+            if let Some(rows) = self.document_render_cache.get(key) {
                 return Some(rows);
             }
         }
@@ -219,7 +211,7 @@ impl TuiApp {
             document.materialize(start..start.saturating_add(count))
         })?;
         if let Some(key) = key {
-            self.buffer_render_cache.insert(key, rows.clone());
+            self.document_render_cache.insert(key, rows.clone());
         }
         Some(rows)
     }

@@ -2,6 +2,7 @@ use super::display_layout::{
     measure_block, render_block_into, render_block_range_into, CompileJob, DisplayModel,
     MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
+use crate::content::estimate_text_rows;
 use crate::content::render_plan::{
     NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
     TranscriptPresentationState,
@@ -893,21 +894,6 @@ fn base_layout_key(width: u16) -> LayoutKey {
         content_hash: 0,
         sidecar_hash: 0,
     }
-}
-
-fn estimate_text_rows(text: &str, width: u16) -> RowIndex {
-    let width = usize::from(width.max(1));
-    text.lines()
-        .map(|line| {
-            let cells = if line.is_ascii() {
-                line.len()
-            } else {
-                smelt_buffer::text::byte_to_cell(line, line.len())
-            };
-            cells.max(1).div_ceil(width) as RowIndex
-        })
-        .sum::<RowIndex>()
-        .max(1)
 }
 
 fn estimate_text_rows_with_prefix(prefix: &str, text: &str, width: u16) -> RowIndex {

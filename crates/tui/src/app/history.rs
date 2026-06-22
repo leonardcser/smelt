@@ -1004,24 +1004,15 @@ impl TuiApp {
         let Some(deferred) = self.deferred_session_load.take() else {
             return;
         };
-        // COMPAT(transcript-deferred-full-descriptor-bridge): semantic operations that need the full session still load it after display-only resume.
-        smelt_perf::perf::record_value("compat:session:deferred_load_full", 1);
+        smelt_perf::perf::record_value("session:deferred_load_full", 1);
         if let Some(loaded) = session::load_full(&deferred.id) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
-                if self
-                    .transcript
-                    .legacy_merge_full_descriptor_slice_for_deferred_load()
-                    && block_history_covers_history(self.transcript.history(), &self.core.session)
-                {
-                    self.transcript_descriptors_persisted = true;
-                } else {
-                    let transcript = build_transcript_from_session(&self.lua, &self.core.session);
-                    self.transcript.replace_transcript(transcript);
-                    self.transcript_descriptors_persisted = false;
-                    self.transcript.history_mut().mark_changed();
-                }
+                let transcript = build_transcript_from_session(&self.lua, &self.core.session);
+                self.transcript.replace_transcript(transcript);
+                self.transcript_descriptors_persisted = false;
+                self.transcript.history_mut().mark_changed();
             }
             self.sync_session_snapshot();
         } else {
@@ -1733,7 +1724,7 @@ mod checkpoint_tests {
             "compat:session:load_full_fallback",
             "compat:session:preview_full_fallback",
             "compat:session:rebuild_transcript_full_fallback",
-            "compat:session:deferred_load_full",
+            "session:deferred_load_full",
             "session:save:descriptor_sparse_full_rebuild",
             "transcript:build_from_session:history_items",
         ] {

@@ -1,10 +1,8 @@
-//! Code-facing transcript scroll contract and disabled-by-default trace schema.
+//! Debug-facing transcript scroll contract and disabled-by-default trace schema.
 //!
 //! The transcript scroll model treats user input as semantic intent over
-//! content, not as a durable assignment to `Window::scroll_top`. Until the
-//! full intent-owned viewport model lands, this module records the current
-//! row-based path in the same vocabulary as the target model so tests and
-//! local reproductions can explain each frame.
+//! content, not as a durable assignment to `Window::scroll_top`. The trace uses
+//! that vocabulary so tests and local reproductions can explain each frame.
 //!
 //! Contract:
 //!

@@ -69,14 +69,6 @@ with `COMPAT(<id>)`.
   - `crates/tui/src/lua/api/session.rs`: fallback in `smelt.session.render_preview_into`, counted by `compat:session:preview_full_fallback`
   - `crates/tui/src/app/history.rs`: fallback transcript rebuild in `rebuild_screen_from_history`, counted by `compat:session:rebuild_transcript_full_fallback`
 
-## transcript-deferred-full-descriptor-bridge
-
-- Remove after: normal session resume opens metadata and sparse transcript windows without `load_full` / `load_full_session_snapshot`
-- Why: deferred load currently validates the display transcript against a fully materialized semantic session, so it may need a full descriptor merge as a temporary repair bridge
-- Code:
-  - `crates/tui/src/app/transcript.rs`: `legacy_merge_full_descriptor_slice_for_deferred_load`
-  - `crates/tui/src/app/history.rs`: deferred session load fallback, counted by `compat:session:deferred_load_full`
-
 ## openai-reasoning-summary-shape
 
 - Remove after: sessions with object/string OpenAI reasoning summaries no longer
