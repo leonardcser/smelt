@@ -2187,6 +2187,20 @@ impl TuiApp {
         self.flush_lua_callbacks();
     }
 
+    fn warmup_workspace_files(&mut self) {
+        let _ = self
+            .core
+            .workspace_files
+            .warmup(std::path::Path::new(&self.cwd));
+    }
+
+    fn render_normal_after_startup_work(&mut self, workspace_warmup_pending: &mut bool) {
+        self.render_normal();
+        if std::mem::take(workspace_warmup_pending) {
+            self.warmup_workspace_files();
+        }
+    }
+
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<ContextWindowUpdate>();
         self.http_client = Some(http_client);
@@ -2248,6 +2262,7 @@ impl TuiApp {
         let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
         let mut auto_reload_setup_rx: Option<AutoReloadSetupRx> = None;
         let mut auto_reload_start_pending = self.core.config.settings.auto_reload;
+        let mut workspace_warmup_pending = true;
 
         let mut term_events = match crate::term_input::TerminalInput::spawn() {
             Ok(input) => input,
@@ -2280,9 +2295,9 @@ impl TuiApp {
             self.notify_error_sticky(format!("lua init: {err}"));
         }
 
-        // Auto-reload watcher setup is kicked off after the first frame so
-        // filesystem subscription and snapshot work can never leave the
-        // alternate screen blank during startup.
+        // Workspace indexing and auto-reload watcher setup are kicked off
+        // after the first frame so filesystem subscription and snapshot work
+        // can never leave the alternate screen blank during startup.
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
@@ -2337,7 +2352,7 @@ impl TuiApp {
             self.drain_host_calls();
 
             if self.drain_idle_work() {
-                self.render_normal();
+                self.render_normal_after_startup_work(&mut workspace_warmup_pending);
                 continue 'main;
             }
 
@@ -2370,7 +2385,7 @@ impl TuiApp {
             }
 
             if self.drain_idle_work() {
-                self.render_normal();
+                self.render_normal_after_startup_work(&mut workspace_warmup_pending);
                 continue 'main;
             }
 
@@ -2417,7 +2432,7 @@ impl TuiApp {
                 self.pending_dialog = !self.pending_dialogs.is_empty();
             }
 
-            self.render_normal();
+            self.render_normal_after_startup_work(&mut workspace_warmup_pending);
             if auto_reload_start_pending {
                 auto_reload_start_pending = false;
                 let cwd = self.cwd.clone();

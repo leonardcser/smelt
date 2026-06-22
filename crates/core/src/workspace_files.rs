@@ -74,7 +74,18 @@ struct ProjectSearch {
     root: PathBuf,
     state: SharedProjectState,
     worker_tx: mpsc::Sender<WorkerMsg>,
-    _watcher: Option<RecommendedWatcher>,
+    _watcher: Option<WorkspaceWatcher>,
+}
+
+#[derive(Debug)]
+struct WorkspaceWatcher {
+    tx: mpsc::Sender<WatcherCommand>,
+}
+
+#[derive(Debug)]
+enum WatcherCommand {
+    WatchDir(PathBuf),
+    Shutdown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +164,12 @@ impl fmt::Debug for SearchWorker {
 impl Drop for ProjectSearch {
     fn drop(&mut self) {
         let _ = self.worker_tx.send(WorkerMsg::Shutdown);
+    }
+}
+
+impl Drop for WorkspaceWatcher {
+    fn drop(&mut self) {
+        let _ = self.tx.send(WatcherCommand::Shutdown);
     }
 }
 
@@ -707,33 +724,119 @@ fn spawn_project_worker(
 
 fn start_watcher(
     root: &Path,
-    kind: ProjectKind,
+    _kind: ProjectKind,
     tx: mpsc::Sender<WorkerMsg>,
     state: SharedProjectState,
-) -> Option<RecommendedWatcher> {
-    let watch_root = root.to_path_buf();
+) -> Option<WorkspaceWatcher> {
+    let root = root.to_path_buf();
+    let (watch_tx, watch_rx) = mpsc::channel();
+    let manager_tx = watch_tx.clone();
+    std::thread::Builder::new()
+        .name("smelt-workspace-watcher".into())
+        .spawn(move || run_watcher(root, tx, state, manager_tx, watch_rx))
+        .ok()?;
+    Some(WorkspaceWatcher { tx: watch_tx })
+}
+
+fn run_watcher(
+    root: PathBuf,
+    worker_tx: mpsc::Sender<WorkerMsg>,
+    state: SharedProjectState,
+    watch_tx: mpsc::Sender<WatcherCommand>,
+    watch_rx: mpsc::Receiver<WatcherCommand>,
+) {
+    let watch_root = root.clone();
+    let callback_watch_tx = watch_tx.clone();
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
-            if relevant_event(&watch_root, kind, &event) {
-                let _ = tx.send(WorkerMsg::Rescan);
+            if relevant_event(&watch_root, &event) {
+                let _ = worker_tx.send(WorkerMsg::Rescan);
+                enqueue_new_directory_watches(&watch_root, &event, &callback_watch_tx);
             }
         },
         NotifyConfig::default(),
     ) {
         Ok(watcher) => watcher,
-        Err(_) => return None,
+        Err(_) => return,
     };
 
-    match watcher.watch(root, RecursiveMode::Recursive) {
-        Ok(()) => {
-            if let Ok(mut state) = state.write() {
-                state.watcher_ready = true;
-            }
-            Some(watcher)
+    if watch_workspace_tree(&mut watcher, &root).is_ok() {
+        if let Ok(mut state) = state.write() {
+            state.watcher_ready = true;
         }
-        Err(_) => None,
+    } else {
+        return;
     }
+
+    while let Ok(command) = watch_rx.recv() {
+        match command {
+            WatcherCommand::WatchDir(path) => watch_dir_tree(&mut watcher, &root, &path),
+            WatcherCommand::Shutdown => break,
+        }
+    }
+}
+
+fn enqueue_new_directory_watches(
+    root: &Path,
+    event: &notify::Event,
+    tx: &mpsc::Sender<WatcherCommand>,
+) {
+    if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+        return;
+    }
+    for path in &event.paths {
+        if path.is_dir() && should_watch_descendants(root, path) {
+            let _ = tx.send(WatcherCommand::WatchDir(path.clone()));
+        }
+    }
+}
+
+fn watch_workspace_tree(watcher: &mut RecommendedWatcher, root: &Path) -> notify::Result<()> {
+    watcher.watch(root, RecursiveMode::NonRecursive)?;
+    watch_descendant_dirs(watcher, root, root);
+    Ok(())
+}
+
+fn watch_dir_tree(watcher: &mut RecommendedWatcher, root: &Path, path: &Path) {
+    if should_watch_descendants(root, path) {
+        let _ = watcher.watch(path, RecursiveMode::NonRecursive);
+        watch_descendant_dirs(watcher, root, path);
+    }
+}
+
+fn watch_descendant_dirs(watcher: &mut RecommendedWatcher, root: &Path, start: &Path) {
+    let mut builder = WalkBuilder::new(start);
+    let watch_root = root.to_path_buf();
+    builder
+        .standard_filters(false)
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
+        .follow_links(false)
+        .filter_entry(move |entry| should_watch_descendants(&watch_root, entry.path()));
+
+    for result in builder.build() {
+        let Ok(entry) = result else { continue };
+        if entry.path() == start {
+            continue;
+        }
+        if entry.file_type().is_some_and(|ty| ty.is_dir()) {
+            let _ = watcher.watch(entry.path(), RecursiveMode::NonRecursive);
+        }
+    }
+}
+
+fn should_watch_descendants(root: &Path, path: &Path) -> bool {
+    if path == root {
+        return true;
+    }
+    relative_slash_path(root, path)
+        .map(|path| !is_noisy_relative_path(&path))
+        .unwrap_or(true)
 }
 
 fn scan_project(root: &Path, kind: ProjectKind, state: &SharedProjectState) {
@@ -813,7 +916,9 @@ fn scan_git_project(root: &Path) -> ScanResult {
     scan.error = error;
     let mut seen = HashSet::new();
     for path in tracked {
-        add_existing_file(root, &mut scan, &mut seen, path);
+        if !is_noisy_relative_path(&path) {
+            add_existing_file(root, &mut scan, &mut seen, path);
+        }
     }
     for path in untracked {
         if !has_noisy_parent(&path) {
@@ -1326,24 +1431,19 @@ fn kind_rank(kind: ItemKind) -> u8 {
     }
 }
 
-fn relevant_event(root: &Path, kind: ProjectKind, event: &notify::Event) -> bool {
+fn relevant_event(root: &Path, event: &notify::Event) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
     if let EventKind::Modify(notify::event::ModifyKind::Metadata(_)) = event.kind {
         return false;
     }
-    match kind {
-        ProjectKind::Git => true,
-        ProjectKind::Filesystem => {
-            event.paths.is_empty()
-                || event.paths.iter().any(|path| {
-                    relative_slash_path(root, path)
-                        .map(|path| !is_noisy_relative_path(&path))
-                        .unwrap_or(true)
-                })
-        }
-    }
+    event.paths.is_empty()
+        || event.paths.iter().any(|path| {
+            relative_slash_path(root, path)
+                .map(|path| !is_noisy_relative_path(&path))
+                .unwrap_or(true)
+        })
 }
 
 fn is_noisy_relative_path(path: &str) -> bool {
@@ -1452,29 +1552,36 @@ mod tests {
     }
 
     #[test]
-    fn watcher_filters_noisy_paths_only_for_filesystem_projects() {
+    fn watcher_filters_noisy_paths() {
         let root = PathBuf::from("/workspace");
         let noisy_event = notify::Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
             paths: vec![root.join("target/kept.txt")],
             attrs: Default::default(),
         };
-        assert!(relevant_event(&root, ProjectKind::Git, &noisy_event));
-        assert!(!relevant_event(
-            &root,
-            ProjectKind::Filesystem,
-            &noisy_event
-        ));
+        assert!(!relevant_event(&root, &noisy_event));
 
         let source_event = notify::Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
             paths: vec![root.join("src/main.rs")],
             attrs: Default::default(),
         };
-        assert!(relevant_event(
+        assert!(relevant_event(&root, &source_event));
+    }
+
+    #[test]
+    fn watcher_descend_filter_prunes_noisy_directories() {
+        let root = PathBuf::from("/workspace");
+        assert!(should_watch_descendants(&root, &root));
+        assert!(should_watch_descendants(&root, &root.join("src")));
+        assert!(!should_watch_descendants(&root, &root.join("target")));
+        assert!(!should_watch_descendants(
             &root,
-            ProjectKind::Filesystem,
-            &source_event
+            &root.join("web/node_modules")
+        ));
+        assert!(!should_watch_descendants(
+            &root,
+            &root.join("crates/app/bazel-smelt")
         ));
     }
 
@@ -1617,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn git_scan_prunes_untracked_noisy_dirs_but_keeps_tracked_files() {
+    fn git_scan_prunes_noisy_dirs() {
         let project = tempfile::tempdir().unwrap();
         if !init_git(project.path()) {
             return;
@@ -1650,13 +1757,7 @@ mod tests {
                 include_dirs: false,
             })
             .unwrap();
-        assert!(
-            tracked
-                .items
-                .iter()
-                .any(|item| item.path == "target/kept.txt"),
-            "response: {tracked:#?}"
-        );
+        assert!(tracked.items.is_empty(), "response: {tracked:#?}");
     }
 
     #[test]

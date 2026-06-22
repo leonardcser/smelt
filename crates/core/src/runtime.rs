@@ -81,11 +81,7 @@ impl Core {
         });
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
-        let mut workspace_files =
-            crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
-        if frontend.is_interactive() {
-            let _ = workspace_files.warmup(&env.cwd());
-        }
+        let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
         Self {
             config,
             session: Session::new(env.pid(), env.cwd()),
