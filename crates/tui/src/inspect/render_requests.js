@@ -29,7 +29,7 @@ export function renderRequestPanel(type, entry, index) {
   if (type === "messages") return renderMessages(entry);
   if (type === "response") return renderResponse(entry, index);
   if (type === "error") return renderError(entry.error);
-  if (type === "raw") return highlightedJson(entry);
+  if (type === "raw") return renderRaw(entry);
   return renderSummary(entry);
 }
 
@@ -142,14 +142,38 @@ function renderMessages(entry) {
       ${message.tool_call_id ? `<div class="muted mono">tool_call_id ${escapeHtml(message.tool_call_id)}</div>` : ""}
     </div>
   </article>`).join("");
-  const fallback = entry.body ? `<details class="tool-call"><summary>Raw request body</summary><div class="tool-inner">${highlightedJson(entry.body)}</div></details>` : `<div class="empty">No provider messages captured.</div>`;
+  const fallback = entry.body
+    ? `<details class="tool-call"><summary>Raw request body</summary><div class="tool-inner">${highlightedJson(entry.body)}</div></details>`
+    : payloadNotStored(entry, "body")
+      ? requestPayloadNotice("Provider messages were not stored for this attempt.")
+      : `<div class="empty">No provider messages captured.</div>`;
   return `<div class="timeline">${system}${messages || fallback}</div>`;
+}
+
+function renderRaw(entry) {
+  const notice = payloadNotStored(entry) ? requestPayloadNotice("Full request/response payloads were not stored for this attempt.") : "";
+  return `${notice}${highlightedJson(entry)}`;
+}
+
+function payloadNotStored(entry, part = "any") {
+  if (!entry?.payload_loaded) return false;
+  if (part === "body") return entry.raw_body_size > 0 && !entry.has_body && !entry.body;
+  if (part === "response") return Boolean(entry.response && !entry.has_response);
+  return Boolean((entry.raw_body_size > 0 && !entry.has_body && !entry.body)
+    || (entry.response && !entry.has_response)
+    || (entry.error && !entry.has_error));
+}
+
+function requestPayloadNotice(message) {
+  return `<div class="empty">${escapeHtml(message)} Set <code>smelt.settings.request_audit = "full"</code> or <code>SMELT_REQUEST_AUDIT=full</code> to capture full payloads for future sessions.</div>`;
 }
 
 function renderResponse(entry, index) {
   const response = entry.response;
   if (!response) return `<div class="empty">No parsed response captured.</div>`;
+  const notice = payloadNotStored(entry, "response") ? requestPayloadNotice("Only the parsed response summary was stored for this attempt.") : "";
   return `
+    ${notice}
     ${reasoningBlock(response.reasoning, "Response reasoning")}
     ${markdownBlock(response.content, `<div class="muted">No response content.</div>`)}
     ${(response.tool_calls || []).map(renderToolCall).join("")}
