@@ -460,6 +460,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | Plugin | Summary |
 | --- | --- |
 | `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
+| `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->
@@ -552,6 +553,13 @@ details (parameter shapes, return tables, type records), open the matching
 ### Host tier
 
 Available in every runtime, including headless mode.
+
+#### `smelt.agent`
+
+Agent-facing prompt customization for Lua plugins.
+
+- `smelt.agent.add_system_prompt` :: `fun(text: string): smelt.Reg`
+  Append concise guidance to the system prompt while this Lua runtime is active.
 
 #### `smelt.auth`
 
@@ -1131,6 +1139,8 @@ Register, unregister, and resolve plugin tools for the engine.
   Return the names of every registered plugin tool, sorted.
 - `smelt.tools.middleware` :: `fun(name: string, mw: table): smelt.Reg`
   Register middleware for tool `name`.
+- `smelt.tools.patch` :: `fun(name: string, patch: table): smelt.Reg`
+  Patch metadata for an already-registered tool without replacing its handler.
 - `smelt.tools.path_summary` :: `fun(path: string, ctx?: { final: boolean }, opts?: { prefix: string?, suffix: string? }): string`
   Format a path for a tool summary.
 - `smelt.tools.register` :: `fun(def: smelt.tools.ToolDef): smelt.Reg`
@@ -1193,7 +1203,7 @@ Bundled default transcript renderers.
 - `smelt.transcript.defaults.render_tool_output` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
   Render raw tool output using generic layout primitives: text, gutter, and a rendered-row cap.
 - `smelt.transcript.defaults.render_tool_output_tail` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
-  Render raw tool output without gutter using generic layout primitives: text and a rendered-row cap.
+  Render raw tool output without gutter using generic layout primitives: text/runs and a rendered-row cap.
 - `smelt.transcript.defaults.render_tool_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render a compact tool summary: header plus an optional detail line.
 - `smelt.transcript.defaults.render_unknown` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`

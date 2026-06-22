@@ -30,6 +30,10 @@ tools.list = nil
 ---@type fun(name: string, mw: table): smelt.Reg
 tools.middleware = nil
 
+--- Patch metadata for an already-registered tool without replacing its handler. Supports `description` and `parameters`. Returns a `Reg` whose `:remove()` restores the previous metadata.
+---@type fun(name: string, patch: table): smelt.Reg
+tools.patch = nil
+
 --- Format a path for a tool summary. During argument streaming, paths that may
 --- collapse to the current working directory or home directory return an empty
 --- string; once final, all paths use `smelt.path.display`.

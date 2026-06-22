@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Agent-facing prompt customization for Lua plugins.
 
 ## `smelt.agent.add_system_prompt`

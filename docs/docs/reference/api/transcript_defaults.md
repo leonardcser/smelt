@@ -261,7 +261,7 @@ fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: 
 
 Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render raw tool output without gutter using generic layout primitives: text and
+Render raw tool output without gutter using generic layout primitives: text/runs and
 a rendered-row cap. Body renderers use this for expanded/tail previews.
 
 ## `smelt.transcript.defaults.render_tool_summary`

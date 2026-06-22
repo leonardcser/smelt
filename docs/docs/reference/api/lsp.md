@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Generic stdio Language Server Protocol client. Used by the optional LSP tool plugin.
 
 ## `smelt.lsp.configure`

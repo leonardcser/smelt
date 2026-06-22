@@ -108,7 +108,7 @@ transcript_defaults.render_tool_header = nil
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
 transcript_defaults.render_tool_output = nil
 
---- Render raw tool output without gutter using generic layout primitives: text and
+--- Render raw tool output without gutter using generic layout primitives: text/runs and
 --- a rendered-row cap. Body renderers use this for expanded/tail previews.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
 transcript_defaults.render_tool_output_tail = nil

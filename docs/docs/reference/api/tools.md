@@ -48,6 +48,16 @@ Register middleware for tool `name`. Pass `""` (empty string) as `name` to match
 
 Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
 
+## `smelt.tools.patch`
+
+```lua
+fun(name: string, patch: table): smelt.Reg
+```
+
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Patch metadata for an already-registered tool without replacing its handler. Supports `description` and `parameters`. Returns a `Reg` whose `:remove()` restores the previous metadata.
+
 ## `smelt.tools.path_summary`
 
 ```lua
