@@ -51,6 +51,26 @@ impl From<&ContextCheckpoint> for ContextSnapshotKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTokenIdentity {
+    pub model: String,
+    pub api_base: String,
+    pub provider_type: String,
+}
+
+#[derive(Debug, Clone)]
+struct ContextTokenReading {
+    tokens: u32,
+    history_len: Option<usize>,
+    identity: Option<ContextTokenIdentity>,
+}
+
+impl ContextTokenReading {
+    fn matches(&self, identity: &ContextTokenIdentity) -> bool {
+        self.identity.as_ref() == Some(identity)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     /// Legacy spend reading from older `accounting_snapshots` entries. New
@@ -59,10 +79,14 @@ pub struct ContextSnapshot {
     legacy_cost_usd: f64,
     pub context_tokens: Option<u32>,
     pub context_tokens_history_len: Option<usize>,
+    #[serde(default)]
+    pub context_token_identity: Option<ContextTokenIdentity>,
     /// Sticky display reading at this history point. This can differ from the
     /// authoritative baseline after checkpointing clears the next-request estimate.
     #[serde(default)]
     pub display_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub display_context_token_identity: Option<ContextTokenIdentity>,
     pub checkpoint: Option<ContextSnapshotKey>,
 }
 
@@ -72,7 +96,9 @@ impl ContextSnapshot {
             legacy_cost_usd: 0.0,
             context_tokens: session.context_tokens,
             context_tokens_history_len: session.context_tokens_history_len,
+            context_token_identity: session.context_token_identity.clone(),
             display_context_tokens: session.display_context_tokens,
+            display_context_token_identity: session.display_context_token_identity.clone(),
             checkpoint: session.checkpoint_snapshot_key(),
         }
     }
@@ -148,9 +174,11 @@ pub struct Session {
     /// decide whether the provider baseline exactly covers the current
     /// history or needs a delta estimate for appended messages.
     pub context_tokens_history_len: Option<usize>,
+    pub context_token_identity: Option<ContextTokenIdentity>,
     /// Last non-background provider context-token reading surfaced to the UI.
     /// It may lag the current history while a new request is in flight.
     pub display_context_tokens: Option<u32>,
+    pub display_context_token_identity: Option<ContextTokenIdentity>,
     /// Per-turn metadata, keyed by `history.len()` at turn-complete time.
     pub turn_metas: HistorySnapshots<TurnMeta>,
     /// Context snapshots keyed by `history.len()` at turn-complete time.
@@ -214,7 +242,11 @@ struct SessionWire {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
+    pub context_token_identity: Option<ContextTokenIdentity>,
+    #[serde(default)]
     pub display_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub display_context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     pub cost_snapshots: Vec<(usize, f64)>,
     #[serde(default)]
@@ -262,7 +294,11 @@ struct SessionWireV2 {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
+    pub context_token_identity: Option<ContextTokenIdentity>,
+    #[serde(default)]
     pub display_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub display_context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     pub turn_metas: HistorySnapshots<TurnMeta>,
     #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
@@ -454,7 +490,9 @@ fn legacy_context_snapshots(
                         legacy_cost_usd: cost_usd,
                         context_tokens,
                         context_tokens_history_len,
+                        context_token_identity: None,
                         display_context_tokens,
+                        display_context_token_identity: None,
                         checkpoint: None,
                     },
                 )
@@ -511,7 +549,9 @@ impl From<SessionWire> for Session {
             checkpoint: w.checkpoint,
             context_tokens,
             context_tokens_history_len,
+            context_token_identity: None,
             display_context_tokens,
+            display_context_token_identity: None,
             session_cost_usd,
             session_usage: w.session_usage,
         }
@@ -549,7 +589,9 @@ impl From<SessionWireV2> for Session {
             checkpoint: w.checkpoint,
             context_tokens,
             context_tokens_history_len: w.context_tokens_history_len,
+            context_token_identity: w.context_token_identity,
             display_context_tokens,
+            display_context_token_identity: w.display_context_token_identity,
             turn_metas: w.turn_metas,
             context_snapshots,
             session_cost_usd,
@@ -578,7 +620,9 @@ impl From<&Session> for SessionWireV2 {
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
+            context_token_identity: s.context_token_identity.clone(),
             display_context_tokens: s.display_context_tokens,
+            display_context_token_identity: s.display_context_token_identity.clone(),
             turn_metas: s.turn_metas.clone(),
             context_snapshots: s.context_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
@@ -684,7 +728,11 @@ struct SessionJsonlMeta {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
+    pub context_token_identity: Option<ContextTokenIdentity>,
+    #[serde(default)]
     pub display_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub display_context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     pub turn_metas: HistorySnapshots<TurnMeta>,
     #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
@@ -716,7 +764,9 @@ impl From<&Session> for SessionJsonlMeta {
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
+            context_token_identity: s.context_token_identity.clone(),
             display_context_tokens: s.display_context_tokens,
+            display_context_token_identity: s.display_context_token_identity.clone(),
             turn_metas: s.turn_metas.clone(),
             context_snapshots: s.context_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
@@ -745,7 +795,9 @@ impl SessionJsonlMeta {
             checkpoint: self.checkpoint,
             context_tokens: self.context_tokens,
             context_tokens_history_len: self.context_tokens_history_len,
+            context_token_identity: self.context_token_identity,
             display_context_tokens: self.display_context_tokens.or(self.context_tokens),
+            display_context_token_identity: self.display_context_token_identity,
             turn_metas: self.turn_metas,
             context_snapshots: self.context_snapshots,
             session_cost_usd: self.session_cost_usd,
@@ -778,7 +830,9 @@ impl Session {
             checkpoint: None,
             context_tokens: None,
             context_tokens_history_len: None,
+            context_token_identity: None,
             display_context_tokens: None,
+            display_context_token_identity: None,
             turn_metas: HistorySnapshots::default(),
             context_snapshots: HistorySnapshots::default(),
             session_cost_usd: 0.0,
@@ -807,37 +861,98 @@ impl Session {
         }
     }
 
-    pub fn record_context_tokens(&mut self, tokens: u32) {
-        self.context_tokens = Some(tokens);
-        self.context_tokens_history_len = Some(self.history.len());
-        self.display_context_tokens = Some(tokens);
+    fn context_token_reading(&self) -> Option<ContextTokenReading> {
+        self.context_tokens.map(|tokens| ContextTokenReading {
+            tokens,
+            history_len: self.context_tokens_history_len,
+            identity: self.context_token_identity.clone(),
+        })
+    }
+
+    fn display_context_token_reading(&self) -> Option<ContextTokenReading> {
+        self.display_context_tokens
+            .map(|tokens| ContextTokenReading {
+                tokens,
+                history_len: None,
+                identity: self.display_context_token_identity.clone(),
+            })
+            .or_else(|| self.context_token_reading())
+    }
+
+    fn set_context_token_reading(&mut self, reading: ContextTokenReading) {
+        self.context_tokens = Some(reading.tokens);
+        self.context_tokens_history_len = reading.history_len;
+        self.context_token_identity = reading.identity.clone();
+    }
+
+    fn set_display_context_token_reading(&mut self, reading: ContextTokenReading) {
+        self.display_context_tokens = Some(reading.tokens);
+        self.display_context_token_identity = reading.identity;
+    }
+
+    pub fn record_context_tokens(&mut self, tokens: u32, identity: ContextTokenIdentity) {
+        let reading = ContextTokenReading {
+            tokens,
+            history_len: Some(self.history.len()),
+            identity: Some(identity),
+        };
+        self.set_context_token_reading(reading.clone());
+        self.set_display_context_token_reading(reading);
     }
 
     pub fn clear_context_tokens(&mut self) {
         self.context_tokens = None;
         self.context_tokens_history_len = None;
+        self.context_token_identity = None;
         self.display_context_tokens = None;
+        self.display_context_token_identity = None;
     }
 
     pub fn clear_context_tokens_baseline(&mut self) {
         self.context_tokens = None;
         self.context_tokens_history_len = None;
+        self.context_token_identity = None;
     }
 
     pub fn reset_context_tokens_for_checkpoint(&mut self) {
         self.context_tokens = None;
         self.context_tokens_history_len = None;
+        self.context_token_identity = None;
         self.display_context_tokens = Some(0);
+        self.display_context_token_identity = None;
     }
 
     pub fn current_context_tokens(&self) -> Option<u32> {
-        (self.context_tokens_history_len == Some(self.history.len()))
-            .then_some(self.context_tokens)
-            .flatten()
+        self.context_token_reading()
+            .filter(|reading| reading.history_len == Some(self.history.len()))
+            .map(|reading| reading.tokens)
+    }
+
+    pub fn context_tokens_for(&self, identity: &ContextTokenIdentity) -> Option<u32> {
+        self.context_token_reading()
+            .filter(|reading| reading.matches(identity))
+            .map(|reading| reading.tokens)
     }
 
     pub fn display_context_tokens(&self) -> Option<u32> {
-        self.display_context_tokens.or(self.context_tokens)
+        self.display_context_token_reading()
+            .map(|reading| reading.tokens)
+    }
+
+    pub fn display_context_tokens_stale(&self, identity: &ContextTokenIdentity) -> bool {
+        self.display_context_token_reading()
+            .filter(|reading| reading.tokens > 0)
+            .is_some_and(|reading| !reading.matches(identity))
+    }
+
+    pub fn clear_context_tokens_baseline_if_mismatched(&mut self, identity: &ContextTokenIdentity) {
+        if self
+            .context_token_identity
+            .as_ref()
+            .is_some_and(|current| current != identity)
+        {
+            self.clear_context_tokens_baseline();
+        }
     }
 
     pub fn checkpoint_snapshot_key(&self) -> Option<ContextSnapshotKey> {
@@ -954,13 +1069,17 @@ impl Session {
         if let Some(snapshot) = snapshot {
             self.context_tokens = snapshot.context_tokens;
             self.context_tokens_history_len = snapshot.context_tokens_history_len;
+            self.context_token_identity = snapshot.context_token_identity;
             self.display_context_tokens =
                 snapshot.display_context_tokens.or(snapshot.context_tokens);
+            self.display_context_token_identity = snapshot.display_context_token_identity;
         } else if let Some((tokens, Some(history_len))) = checkpoint_fallback {
             if history_len <= hist_idx {
                 self.context_tokens = tokens;
                 self.context_tokens_history_len = Some(history_len);
+                self.context_token_identity = None;
                 self.display_context_tokens = tokens;
+                self.display_context_token_identity = None;
             } else {
                 self.clear_context_tokens();
             }
@@ -1116,7 +1235,9 @@ impl Session {
                     Some(len) if len <= hist_idx => {
                         self.context_tokens = cp.pre_checkpoint_context_tokens;
                         self.context_tokens_history_len = Some(len);
+                        self.context_token_identity = None;
                         self.display_context_tokens = cp.pre_checkpoint_context_tokens;
+                        self.display_context_token_identity = None;
                     }
                     _ => self.clear_context_tokens(),
                 }
@@ -1143,7 +1264,9 @@ impl Session {
             checkpoint: self.checkpoint.clone(),
             context_tokens: self.context_tokens,
             context_tokens_history_len: self.context_tokens_history_len,
+            context_token_identity: self.context_token_identity.clone(),
             display_context_tokens: self.display_context_tokens,
+            display_context_token_identity: self.display_context_token_identity.clone(),
             turn_metas: self.turn_metas.clone(),
             context_snapshots: self.context_snapshots.clone(),
             session_cost_usd: self.session_cost_usd,
@@ -1485,10 +1608,12 @@ fn session_from_store_snapshot(
         context_tokens_history_len: state
             .context_tokens_history_len
             .and_then(|len| usize::try_from(len).ok()),
+        context_token_identity: None,
         display_context_tokens: state
             .display_context_tokens
             .and_then(|tokens| u32::try_from(tokens).ok())
             .or(context_tokens),
+        display_context_token_identity: None,
         turn_metas,
         context_snapshots,
         session_cost_usd: state.session_cost_usd,
@@ -2263,6 +2388,14 @@ mod tests {
         }
     }
 
+    fn test_context_identity() -> ContextTokenIdentity {
+        ContextTokenIdentity {
+            model: "test-model".into(),
+            api_base: "https://test.example".into(),
+            provider_type: "test-provider".into(),
+        }
+    }
+
     #[test]
     fn jsonl_session_round_trips_native_history() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -2270,7 +2403,7 @@ mod tests {
         s.title = Some("JSONL".into());
         s.history.push(user_item("hello jsonl"));
         s.history.push(assistant_text_item("assistant jsonl"));
-        s.record_context_tokens(42);
+        s.record_context_tokens(42, test_context_identity());
 
         let meta = encode_session_jsonl_meta(&s).expect("encode meta");
         let history = encode_history_jsonl(&s.history).expect("encode history");
@@ -2641,7 +2774,7 @@ mod tests {
         s.parent_id = Some("parent-session".into());
         s.session_cost_usd = 1.5;
         s.history.push(user_item("hello sqlite"));
-        s.record_context_tokens(42);
+        s.record_context_tokens(42, test_context_identity());
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
             .unwrap();
@@ -2840,7 +2973,7 @@ mod tests {
             user_item("recent"),
             assistant_text_item("recent reply"),
         ];
-        s.record_context_tokens(500);
+        s.record_context_tokens(500, test_context_identity());
 
         let installed =
             s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(500));
@@ -2888,12 +3021,12 @@ mod tests {
     fn restore_context_after_rewind_restores_display_context_snapshot() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
-        s.record_context_tokens(710);
+        s.record_context_tokens(710, test_context_identity());
         s.clear_context_tokens_baseline();
         s.snapshot_context();
 
         s.history.extend([user_item("c"), assistant_text_item("d")]);
-        s.record_context_tokens(700);
+        s.record_context_tokens(700, test_context_identity());
         s.snapshot_context();
 
         s.history.truncate(2);
@@ -3081,7 +3214,7 @@ mod tests {
     fn current_context_tokens_requires_exact_history_length() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
-        s.record_context_tokens(100);
+        s.record_context_tokens(100, test_context_identity());
         assert_eq!(s.current_context_tokens(), Some(100));
         assert_eq!(s.display_context_tokens, Some(100));
 
@@ -3094,7 +3227,7 @@ mod tests {
     fn clear_context_tokens_baseline_preserves_visible_reading() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
-        s.record_context_tokens(100);
+        s.record_context_tokens(100, test_context_identity());
 
         s.clear_context_tokens_baseline();
 
@@ -3104,12 +3237,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_unknown_context_tokens_are_stale_for_display() {
+        let mut s = fixture_session();
+        s.display_context_tokens = Some(100);
+        s.display_context_token_identity = None;
+
+        assert!(s.display_context_tokens_stale(&test_context_identity()));
+
+        s.display_context_tokens = Some(0);
+        assert!(!s.display_context_tokens_stale(&test_context_identity()));
+    }
+
+    #[test]
     fn fork_clones_history_and_links_parent_with_fresh_id() {
         let mut s = fixture_session();
         s.history.push(user_item("q1"));
         s.history.push(assistant_text_item("a1"));
         s.title = Some("kept".into());
-        s.record_context_tokens(500);
+        s.record_context_tokens(500, test_context_identity());
         s.session_cost_usd = 1.25;
 
         let forked = s.fork(4242);

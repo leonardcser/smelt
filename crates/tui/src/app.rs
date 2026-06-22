@@ -24,6 +24,7 @@ pub(crate) mod shell_panel;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
+pub(crate) mod transcript_scroll;
 pub(crate) mod transcript_scroll_trace;
 pub(crate) mod transcript_search;
 pub(crate) mod ui_host;
@@ -67,9 +68,9 @@ pub struct ShutdownContext {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DeferredSessionLoad {
-    pub(crate) id: String,
-    pub(crate) history_len: usize,
+pub(crate) struct DisplayOnlySessionState {
+    pub(crate) full_session_id: String,
+    pub(crate) persisted_history_len: usize,
     pub(crate) checkpoint: Option<smelt_core::ContextCheckpoint>,
 }
 
@@ -128,16 +129,20 @@ pub struct TuiApp {
     pub(crate) dirty_history_from: Option<usize>,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
-    pub(crate) deferred_session_load: Option<DeferredSessionLoad>,
+    pub(crate) display_only_session: Option<DisplayOnlySessionState>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
+    pub(crate) next_continuation_token: u64,
+    pub(crate) pending_continuation_token: Option<u64>,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
     process_completion_rx:
         tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     pub(crate) context_tokens_updated_this_turn: bool,
+    /// Reasoning effort that is known to be in effect for the active turn/request.
+    pub(crate) applied_reasoning_effort: protocol::ReasoningEffort,
     pub(crate) cancel_generation: u64,
     /// Set while routing an engine event whose `TurnState` has been moved
     /// out of `self.agent` to satisfy borrowing. Lua callbacks can still
@@ -507,6 +512,12 @@ pub(crate) enum TurnEnd {
     Errored,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandTurnStart {
+    Fresh,
+    ContinueFromLast,
+}
+
 pub(crate) struct PendingTool {
     pub(crate) call_id: String,
     pub(crate) name: String,
@@ -666,6 +677,39 @@ impl PendingHistoryAppend {
 }
 
 impl TuiApp {
+    pub(crate) fn active_context_token_identity(
+        &self,
+    ) -> smelt_core::session::ContextTokenIdentity {
+        smelt_core::session::ContextTokenIdentity {
+            model: self.core.config.model.clone(),
+            api_base: self.core.config.api_base.clone(),
+            provider_type: self.core.config.provider_type.clone(),
+        }
+    }
+
+    pub(crate) fn active_provider_supports_mid_turn_reasoning_changes(&self) -> bool {
+        engine::ProviderKind::from_config_and_url(
+            &self.core.config.provider_type,
+            &self.core.config.api_base,
+        )
+        .supports_mid_turn_reasoning_changes()
+    }
+
+    pub(crate) fn reasoning_effort_pending(&self) -> bool {
+        self.applied_reasoning_effort != self.core.config.reasoning_effort
+    }
+
+    pub(crate) fn mode_pending(&self) -> bool {
+        self.active_agent_turn_id().is_some()
+            && self.pending_history_appends.iter().any(|append| {
+                append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+            })
+    }
+
+    pub(crate) fn sync_reasoning_effort_applied(&mut self) {
+        self.applied_reasoning_effort = self.core.config.reasoning_effort;
+    }
+
     pub(crate) fn active_agent_turn_id(&self) -> Option<u64> {
         self.agent
             .as_ref()
@@ -715,7 +759,7 @@ impl TuiApp {
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
         !self.core.session.history.is_empty()
             || !self.transcript.is_empty()
-            || self.deferred_session_load.is_some()
+            || self.display_only_session.is_some()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
@@ -1008,7 +1052,12 @@ impl TuiApp {
                 match req.turn_options {
                     QueuedTurnOptions::CustomCommand { overrides } => {
                         let text = req.content.text_content().into_owned();
-                        let turn = self.begin_command_request_turn(req.display, text, *overrides);
+                        let turn = self.begin_command_request_turn(
+                            req.display,
+                            text,
+                            *overrides,
+                            CommandTurnStart::Fresh,
+                        );
                         self.agent = Some(turn);
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
@@ -1211,6 +1260,7 @@ impl TuiApp {
         resume_preview_cache.set_inline_options(inline_options);
 
         let working_clock = Arc::clone(&clock);
+        let initial_reasoning_effort = app_config.reasoning_effort;
         let core = smelt_core::Core::new(
             app_config,
             engine,
@@ -1266,15 +1316,18 @@ impl TuiApp {
             session_dirty: false,
             dirty_history_from: None,
             transient_render_requested: false,
-            deferred_session_load: None,
+            display_only_session: None,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,
+            next_continuation_token: 1,
+            pending_continuation_token: None,
             pending_turn_meta: None,
             pending_history_appends: Vec::new(),
             process_completion_rx,
             app_event_rx,
             context_tokens_updated_this_turn: false,
+            applied_reasoning_effort: initial_reasoning_effort,
             cancel_generation: 0,
             dispatching_turn_id: None,
             busy_stack: BusyStack::default(),
@@ -2153,6 +2206,20 @@ impl TuiApp {
         self.flush_lua_callbacks();
     }
 
+    fn warmup_workspace_files(&mut self) {
+        let _ = self
+            .core
+            .workspace_files
+            .warmup(std::path::Path::new(&self.cwd));
+    }
+
+    fn render_normal_after_startup_work(&mut self, workspace_warmup_pending: &mut bool) {
+        self.render_normal();
+        if std::mem::take(workspace_warmup_pending) {
+            self.warmup_workspace_files();
+        }
+    }
+
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<ContextWindowUpdate>();
         self.http_client = Some(http_client);
@@ -2214,6 +2281,7 @@ impl TuiApp {
         let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
         let mut auto_reload_setup_rx: Option<AutoReloadSetupRx> = None;
         let mut auto_reload_start_pending = self.core.config.settings.auto_reload;
+        let mut workspace_warmup_pending = true;
 
         let mut term_events = match crate::term_input::TerminalInput::spawn() {
             Ok(input) => input,
@@ -2246,9 +2314,9 @@ impl TuiApp {
             self.notify_error_sticky(format!("lua init: {err}"));
         }
 
-        // Auto-reload watcher setup is kicked off after the first frame so
-        // filesystem subscription and snapshot work can never leave the
-        // alternate screen blank during startup.
+        // Workspace indexing and auto-reload watcher setup are kicked off
+        // after the first frame so filesystem subscription and snapshot work
+        // can never leave the alternate screen blank during startup.
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
@@ -2303,7 +2371,7 @@ impl TuiApp {
             self.drain_host_calls();
 
             if self.drain_idle_work() {
-                self.render_normal();
+                self.render_normal_after_startup_work(&mut workspace_warmup_pending);
                 continue 'main;
             }
 
@@ -2336,7 +2404,7 @@ impl TuiApp {
             }
 
             if self.drain_idle_work() {
-                self.render_normal();
+                self.render_normal_after_startup_work(&mut workspace_warmup_pending);
                 continue 'main;
             }
 
@@ -2383,7 +2451,7 @@ impl TuiApp {
                 self.pending_dialog = !self.pending_dialogs.is_empty();
             }
 
-            self.render_normal();
+            self.render_normal_after_startup_work(&mut workspace_warmup_pending);
             if auto_reload_start_pending {
                 auto_reload_start_pending = false;
                 let cwd = self.cwd.clone();

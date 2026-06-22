@@ -113,9 +113,9 @@ fn display_only_resume_sets_resume_hint_state() {
     app.app.load_session_display_only(
         session,
         crate::app::transcript::LoadedTranscript::full(transcript),
-        crate::app::DeferredSessionLoad {
-            id: "full-session".into(),
-            history_len: 0,
+        crate::app::DisplayOnlySessionState {
+            full_session_id: "full-session".into(),
+            persisted_history_len: 0,
             checkpoint: None,
         },
     );
@@ -123,9 +123,9 @@ fn display_only_resume_sets_resume_hint_state() {
     assert!(app.app.core.session.history.is_empty());
     assert_eq!(
         app.app
-            .deferred_session_load
+            .display_only_session
             .as_ref()
-            .map(|deferred| deferred.id.as_str()),
+            .map(|display_only| display_only.full_session_id.as_str()),
         Some("full-session")
     );
     assert!(app.app.has_resume_hint_messages());
@@ -146,9 +146,9 @@ fn display_only_resume_sets_resume_hint_state() {
 #[test]
 fn shared_session_state_uses_resume_hint_message_state() {
     let mut app = TestApp::builder().build();
-    app.app.deferred_session_load = Some(crate::app::DeferredSessionLoad {
-        id: "saved-session".into(),
-        history_len: 0,
+    app.app.display_only_session = Some(crate::app::DisplayOnlySessionState {
+        full_session_id: "saved-session".into(),
+        persisted_history_len: 0,
         checkpoint: None,
     });
 

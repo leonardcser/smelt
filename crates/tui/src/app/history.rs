@@ -1,4 +1,4 @@
-use crate::app::{DeferredSessionLoad, TuiApp};
+use crate::app::{DisplayOnlySessionState, TuiApp};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::transcript_model::BlockHistory;
@@ -644,11 +644,10 @@ impl TuiApp {
             self.bump_epoch("history_epoch");
         }
         let count = self
-            .deferred_session_load
+            .display_only_session
             .as_ref()
-            .map_or(self.core.session.history.len(), |deferred| {
-                deferred.history_len
-            });
+            .map(|display_only| display_only.persisted_history_len)
+            .unwrap_or(self.core.session.history.len());
         self.core.signals.emit_dyn(
             "history",
             std::rc::Rc::new(smelt_core::signals::HistoryDelta {
@@ -758,16 +757,24 @@ impl TuiApp {
             .core
             .session
             .restore_rewindable_snapshots_after_rewind(hist_idx, keep_checkpoint_at_boundary);
+        let identity = self.active_context_token_identity();
+        self.core
+            .session
+            .clear_context_tokens_baseline_if_mismatched(&identity);
         self.apply_rewindable_session_state(turn_meta);
     }
 
     fn prune_rewindable_session_state(&mut self, hist_idx: usize) {
         let turn_meta = self.core.session.prune_rewindable_snapshots(hist_idx);
+        let identity = self.active_context_token_identity();
+        self.core
+            .session
+            .clear_context_tokens_baseline_if_mismatched(&identity);
         self.apply_rewindable_session_state(turn_meta);
     }
 
     pub(crate) fn fork_session(&mut self) {
-        self.ensure_deferred_session_loaded();
+        self.ensure_display_only_session_loaded();
         if self.core.session.history.is_empty() {
             self.notify_error("nothing to fork".into());
             return;
@@ -802,7 +809,7 @@ impl TuiApp {
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_perf::perf::begin("app:reset_session");
-        self.deferred_session_load = None;
+        self.display_only_session = None;
         // Reset is a hard session boundary: cancel in-flight engine work and all
         // Lua tasks before clearing state so stale events and child processes
         // don't restore old data into the new session.
@@ -867,7 +874,7 @@ impl TuiApp {
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
-        self.deferred_session_load = None;
+        self.display_only_session = None;
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
         if self.agent.is_some() {
             self.cancel_agent();
@@ -935,7 +942,7 @@ impl TuiApp {
         &mut self,
         loaded: session::Session,
         transcript: crate::app::transcript::LoadedTranscript,
-        deferred: DeferredSessionLoad,
+        display_only: DisplayOnlySessionState,
     ) {
         if self.agent.is_some() {
             self.cancel_agent();
@@ -965,8 +972,12 @@ impl TuiApp {
             }
         }
 
+        let display_only_checkpoint = display_only.checkpoint.clone();
         self.install_loaded_session(loaded);
-        self.deferred_session_load = Some(deferred);
+        if self.core.session.checkpoint.is_none() {
+            self.core.session.checkpoint = display_only_checkpoint;
+        }
+        self.display_only_session = Some(display_only);
         self.persisted_store_ready = false;
         self.transcript_descriptors_persisted = true;
         self.session_dirty = false;
@@ -992,12 +1003,12 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
-    pub(crate) fn ensure_deferred_session_loaded(&mut self) {
-        let Some(deferred) = self.deferred_session_load.take() else {
+    pub(crate) fn ensure_display_only_session_loaded(&mut self) {
+        let Some(display_only) = self.display_only_session.take() else {
             return;
         };
-        smelt_perf::perf::record_value("session:deferred_load_full", 1);
-        if let Some(loaded) = session::load_full(&deferred.id) {
+        smelt_perf::perf::record_value("session:display_only_load_full", 1);
+        if let Some(loaded) = session::load_full(&display_only.full_session_id) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
@@ -1008,7 +1019,7 @@ impl TuiApp {
             }
             self.sync_session_snapshot();
         } else {
-            self.deferred_session_load = Some(deferred);
+            self.display_only_session = Some(display_only);
         }
     }
 
@@ -1059,7 +1070,7 @@ impl TuiApp {
 
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
-        if self.deferred_session_load.is_some() {
+        if self.display_only_session.is_some() {
             self.session_save_pending = false;
             return;
         }
@@ -1304,9 +1315,13 @@ impl TuiApp {
     }
 
     pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
-        if let Some(deferred) = &self.deferred_session_load {
-            let Some(checkpoint) = deferred.checkpoint.as_ref() else {
-                return protocol::ModelHistorySource::store(Vec::new(), 0, deferred.history_len);
+        if let Some(display_only) = &self.display_only_session {
+            let Some(checkpoint) = self.core.session.checkpoint.as_ref() else {
+                return protocol::ModelHistorySource::store(
+                    Vec::new(),
+                    0,
+                    display_only.persisted_history_len,
+                );
             };
             let prefix = vec![HistoryItem::user(protocol::Content::text(format!(
                 "{}\n{}",
@@ -1316,7 +1331,7 @@ impl TuiApp {
             return protocol::ModelHistorySource::store(
                 prefix,
                 checkpoint.first_live_index,
-                deferred.history_len,
+                display_only.persisted_history_len,
             );
         }
         let (prefix, first_live_index, end_index) = self
@@ -1384,7 +1399,7 @@ impl TuiApp {
         &mut self,
         block_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
-        self.ensure_deferred_session_loaded();
+        self.ensure_display_only_session_loaded();
         let turns = self.user_turns();
         let turn_text = turns
             .iter()
@@ -1507,17 +1522,17 @@ impl TuiApp {
         true
     }
 
-    fn commit_deferred_request_history_item(
+    fn commit_display_only_request_history_item(
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
     ) -> protocol::ModelHistorySource {
         let history = self.model_history_source();
         let history_index = self
-            .deferred_session_load
+            .display_only_session
             .as_ref()
-            .map_or(self.core.session.history.len(), |deferred| {
-                deferred.history_len
+            .map_or(self.core.session.history.len(), |display_only| {
+                display_only.persisted_history_len
             });
         let descriptor_order_start = self.transcript.history().len();
         let descriptor_start_idx = self.transcript.descriptor_total_count().unwrap_or_else(|| {
@@ -1550,9 +1565,9 @@ impl TuiApp {
                     .note_persisted_descriptor_append(descriptor_count);
             }
             let checkpoint = self.core.session.checkpoint.clone();
-            if let Some(deferred) = self.deferred_session_load.as_mut() {
-                deferred.history_len = history_len;
-                deferred.checkpoint = checkpoint;
+            if let Some(display_only) = self.display_only_session.as_mut() {
+                display_only.persisted_history_len = history_len;
+                display_only.checkpoint = checkpoint;
             }
         }
         self.publish_history_delta("request");
@@ -1565,8 +1580,8 @@ impl TuiApp {
         item: HistoryItem,
         block: Option<Block>,
     ) -> protocol::ModelHistorySource {
-        if self.deferred_session_load.is_some() {
-            return self.commit_deferred_request_history_item(item, block);
+        if self.display_only_session.is_some() {
+            return self.commit_display_only_request_history_item(item, block);
         }
         let history = self.model_history_source();
         let history_index = self.core.session.history.len();
@@ -1716,7 +1731,7 @@ mod checkpoint_tests {
             "compat:session:load_full_fallback",
             "compat:session:preview_full_fallback",
             "compat:session:rebuild_transcript_full_fallback",
-            "session:deferred_load_full",
+            "session:display_only_load_full",
             "session:save:descriptor_sparse_full_rebuild",
             "transcript:build_from_session:history_items",
         ] {
@@ -1802,9 +1817,9 @@ mod checkpoint_tests {
         app.app.load_session_display_only(
             display_session,
             loaded_transcript,
-            crate::app::DeferredSessionLoad {
-                id: id.clone(),
-                history_len: 2,
+            crate::app::DisplayOnlySessionState {
+                full_session_id: id.clone(),
+                persisted_history_len: 2,
                 checkpoint: None,
             },
         );
@@ -1827,9 +1842,9 @@ mod checkpoint_tests {
         ));
         assert_eq!(
             app.app
-                .deferred_session_load
+                .display_only_session
                 .as_ref()
-                .map(|deferred| deferred.history_len),
+                .map(|display_only| display_only.persisted_history_len),
             Some(3)
         );
 
@@ -2215,7 +2230,7 @@ mod checkpoint_tests {
     #[test]
     fn restore_screen_rebuilds_process_status_notes_as_process_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = "Background process 123 completed successfully.";
+        let note = "background process 123 completed successfully";
         app.app.core.session.history = vec![user(&protocol::process_status_note(note))];
 
         app.app.restore_screen();
@@ -2930,6 +2945,40 @@ mod checkpoint_tests {
         assert_eq!(app.app.core.session.context_tokens, Some(50));
         assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));
         assert_eq!(app.app.core.session.context_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn app_rewind_marks_context_tokens_stale_for_different_model() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let old_identity = smelt_core::session::ContextTokenIdentity {
+            model: "old-model".into(),
+            api_base: "https://old.example".into(),
+            provider_type: "old-provider".into(),
+        };
+        app.app.core.session.history = vec![user("a"), assistant("b")];
+        app.app.core.session.context_tokens = Some(50);
+        app.app.core.session.context_tokens_history_len = Some(2);
+        app.app.core.session.context_token_identity = Some(old_identity.clone());
+        app.app.core.session.display_context_tokens = Some(50);
+        app.app.core.session.display_context_token_identity = Some(old_identity);
+        app.app.core.session.snapshot_context();
+        app.app
+            .core
+            .session
+            .history
+            .extend([user("c"), assistant("d")]);
+        app.app.restore_screen();
+
+        let restored = app.app.rewind_to(2).expect("second user turn");
+
+        assert_eq!(restored.0, "c");
+        assert_eq!(app.app.core.session.display_context_tokens(), Some(50));
+        assert!(app
+            .app
+            .core
+            .session
+            .display_context_tokens_stale(&app.app.active_context_token_identity()));
+        assert!(app.app.core.session.context_tokens.is_none());
     }
 
     #[test]

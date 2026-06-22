@@ -1,6 +1,6 @@
 use crate::app::{
-    DeferredDialog, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp, TurnState,
-    CONFIRM_DEFER_MS,
+    CommandTurnStart, DeferredDialog, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp,
+    TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -60,6 +60,7 @@ impl TuiApp {
     }
 
     fn prepare_user_visible_turn(&mut self) {
+        self.dismiss_notification();
         self.clear_prompt_prediction();
         self.sleep_inhibit.acquire();
         self.begin_turn();
@@ -171,6 +172,7 @@ impl TuiApp {
     }
 
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> TurnState {
+        self.pending_continuation_token = None;
         {
             self.working.begin(TurnPhase::Working);
         };
@@ -188,6 +190,7 @@ impl TuiApp {
         self.next_turn_id += 1;
 
         let permissions = turn.permissions.clone();
+        self.applied_reasoning_effort = turn.reasoning_effort;
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
@@ -255,21 +258,46 @@ impl TuiApp {
         })
     }
 
-    pub(crate) fn begin_custom_command_turn(
-        &mut self,
+    fn custom_command_parts(
+        &self,
         cmd: smelt_core::custom_commands::CustomCommand,
-    ) -> TurnState {
+    ) -> (
+        String,
+        String,
+        smelt_core::custom_commands::CommandOverrides,
+    ) {
         let evaluated = if self.core.config.settings.redact_secrets {
             engine::redact::redact(&cmd.body)
         } else {
-            cmd.body.clone()
+            cmd.body
         };
         let display = if self.core.config.settings.redact_secrets {
             engine::redact::redact(&format!("/{}", cmd.display))
         } else {
             format!("/{}", cmd.display)
         };
-        self.begin_command_request_turn(display, evaluated, cmd.overrides)
+        (display, evaluated, cmd.overrides)
+    }
+
+    pub(crate) fn begin_custom_command_turn(
+        &mut self,
+        cmd: smelt_core::custom_commands::CustomCommand,
+    ) -> TurnState {
+        let (display, evaluated, overrides) = self.custom_command_parts(cmd);
+        self.begin_command_request_turn(display, evaluated, overrides, CommandTurnStart::Fresh)
+    }
+
+    pub(crate) fn begin_custom_command_continuation(
+        &mut self,
+        cmd: smelt_core::custom_commands::CustomCommand,
+    ) -> TurnState {
+        let (display, evaluated, overrides) = self.custom_command_parts(cmd);
+        self.begin_command_request_turn(
+            display,
+            evaluated,
+            overrides,
+            CommandTurnStart::ContinueFromLast,
+        )
     }
 
     pub(crate) fn begin_command_request_turn(
@@ -277,6 +305,7 @@ impl TuiApp {
         display: String,
         evaluated: String,
         overrides: smelt_core::custom_commands::CommandOverrides,
+        start: CommandTurnStart,
     ) -> TurnState {
         let submitted = match evaluated.trim() {
             "" => None,
@@ -421,6 +450,10 @@ impl TuiApp {
             .map(|overrides| std::sync::Arc::new(self.core.permissions.with_overrides(overrides)))
             .unwrap_or_else(|| self.core.permissions.clone());
 
+        if matches!(start, CommandTurnStart::ContinueFromLast) {
+            self.working.continue_from_last(TurnPhase::Working);
+        }
+
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
             history,
@@ -455,6 +488,15 @@ impl TuiApp {
             self.working.finish(TurnOutcome::Interrupted);
         };
         self.queued_inputs.clear();
+    }
+
+    pub(crate) fn consume_continuation_token(&mut self, token: u64) -> bool {
+        if self.pending_continuation_token == Some(token) {
+            self.pending_continuation_token = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
@@ -496,10 +538,20 @@ impl TuiApp {
         }
 
         let interrupted = !matches!(end, TurnEnd::Complete);
+        let continuation_token = if interrupted {
+            self.pending_continuation_token = None;
+            None
+        } else {
+            let token = self.next_continuation_token;
+            self.next_continuation_token = self.next_continuation_token.wrapping_add(1).max(1);
+            self.pending_continuation_token = Some(token);
+            Some(token)
+        };
         self.core.signals.set_dyn(
             "turn_end",
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: interrupted,
+                continuation_token,
             }),
         );
         {
@@ -513,6 +565,7 @@ impl TuiApp {
             self.clear_tool_drafts();
             self.finish_transcript_turn();
         }
+        self.sync_reasoning_effort_applied();
 
         let (meta, start_queued) = {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:working_finish");
@@ -548,7 +601,16 @@ impl TuiApp {
             }
         };
 
-        let mut meta = self.pending_turn_meta.take().unwrap_or(meta);
+        let mut meta = match self.pending_turn_meta.take() {
+            Some(engine_meta) => protocol::TurnMeta {
+                elapsed_ms: meta.elapsed_ms,
+                avg_tps: engine_meta.avg_tps.or(meta.avg_tps),
+                display_tps: engine_meta.display_tps.or(meta.display_tps),
+                interrupted: engine_meta.interrupted,
+                tool_elapsed: engine_meta.tool_elapsed,
+            },
+            None => meta,
+        };
         if meta.display_tps.is_none() {
             meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
         }
@@ -1131,7 +1193,7 @@ mod tests {
             "compat:session:load_full_fallback",
             "compat:session:preview_full_fallback",
             "compat:session:rebuild_transcript_full_fallback",
-            "session:deferred_load_full",
+            "session:display_only_load_full",
             "transcript:build_from_session:history_items",
         ] {
             assert_perf_value_absent(snapshot, label);
@@ -1165,6 +1227,38 @@ mod tests {
         app.app.save_session();
         app.app.flush_persist();
         app
+    }
+
+    #[test]
+    fn starting_user_turn_dismisses_visible_notification() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .notify_error_sticky("rate limit exceeded".to_string());
+        assert!(app.app.notification_win().is_some());
+
+        let turn = app
+            .app
+            .begin_agent_turn("try again", Content::text("try again"));
+        app.app.agent = Some(turn);
+
+        assert!(app.app.notification_win().is_none());
+    }
+
+    #[test]
+    fn starting_command_continuation_dismisses_visible_notification() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.notify_error_sticky("quota exceeded".to_string());
+        assert!(app.app.notification_win().is_some());
+
+        let turn = app.app.begin_command_request_turn(
+            "continue".into(),
+            String::new(),
+            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::ContinueFromLast,
+        );
+        app.app.agent = Some(turn);
+
+        assert!(app.app.notification_win().is_none());
     }
 
     #[test]
@@ -1270,6 +1364,7 @@ mod tests {
             "/fix".into(),
             "fix it".into(),
             smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::Fresh,
         );
         app.app.agent = Some(turn);
 
@@ -1341,7 +1436,7 @@ mod tests {
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
             process_status_blocks(&app),
-            vec!["background process 1234 finished successfully."]
+            vec!["background process 1234 finished successfully"]
         );
     }
 
@@ -1412,7 +1507,7 @@ mod tests {
     #[test]
     fn queued_process_status_starts_process_status_turn() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = protocol::HistoryNote::process_status("Background process 77 exited.");
+        let note = protocol::HistoryNote::process_status("background process 77 exited");
         let text = note.text().to_string();
 
         app.app
@@ -1450,7 +1545,7 @@ mod tests {
         assert_eq!(current_note, expected_note);
         assert_eq!(
             start_content.text_content(),
-            protocol::process_status_note("background process 751225 exited with code 1.")
+            protocol::process_status_note("background process 751225 exited with code 1")
         );
 
         app.feed_one(crate::app::test_harness::SourceEvent::Engine(
@@ -1467,7 +1562,7 @@ mod tests {
         assert!(matches!(
             &app.app.core.session.history[1],
             HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event })
-                if text == "background process 751225 exited with code 1."
+                if text == "background process 751225 exited with code 1"
                     && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")
                     && event.as_ref().and_then(|event| event.exit_code()) == Some(1)
         ));

@@ -43,9 +43,9 @@ fn sparse_display_only_search_app(
     app.app.load_session_display_only(
         session,
         loaded,
-        crate::app::DeferredSessionLoad {
-            id: session_id.to_string(),
-            history_len: 200,
+        crate::app::DisplayOnlySessionState {
+            full_session_id: session_id.to_string(),
+            persisted_history_len: 200,
             checkpoint: None,
         },
     );

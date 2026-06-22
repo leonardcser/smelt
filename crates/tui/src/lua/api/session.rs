@@ -408,8 +408,51 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "status",
+        "Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let out = lua.create_table()?;
+            if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
+                let context_stale = app
+                    .core
+                    .session
+                    .display_context_tokens_stale(&app.active_context_token_identity());
+                out.set("model", app.core.config.model.as_str())?;
+                out.set("provider", app.core.config.provider_type.as_str())?;
+                out.set("api_base", app.core.config.api_base.as_str())?;
+                out.set("cost", app.core.session.session_cost_usd)?;
+
+                let pending_reasoning = app.reasoning_effort_pending();
+                let pending_mode = app.mode_pending();
+                let mode = lua.create_table()?;
+                mode.set("name", app.core.config.mode.as_str())?;
+                mode.set("pending", pending_mode)?;
+                mode.set("marker", if pending_mode { "*" } else { "" })?;
+                out.set("mode", mode)?;
+
+                let reasoning = lua.create_table()?;
+                reasoning.set("effort", app.core.config.reasoning_effort.label())?;
+                reasoning.set("pending", pending_reasoning)?;
+                reasoning.set("marker", if pending_reasoning { "*" } else { "" })?;
+                out.set("reasoning", reasoning)?;
+
+                let context = lua.create_table()?;
+                context.set("tokens", app.core.session.display_context_tokens())?;
+                context.set("window", app.core.config.context_window)?;
+                context.set("stale", context_stale)?;
+                context.set("marker", if context_stale { "?" } else { "" })?;
+                out.set("context", context)?;
+                Ok(())
+            }) {
+                result?;
+            }
+            Ok(out)
+        },
+    )?;
+    m.fn_(
         "context_tokens",
-        "Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update.",
+        "Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update. Use `status().context` for stale markers; stale counts are display-only and are not used as authoritative request baselines.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(crate::lua::try_with_app(|app| app.core.session.display_context_tokens())
@@ -456,6 +499,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set("mode", app.core.config.mode.as_str())?;
                 out.set("reasoning", app.core.config.reasoning_effort.label())?;
                 out.set("context_tokens", session.display_context_tokens())?;
+                out.set(
+                    "context_tokens_stale",
+                    session.display_context_tokens_stale(&app.active_context_token_identity()),
+                )?;
                 out.set("context_window", app.core.config.context_window)?;
                 out.set("cost", session.session_cost_usd)?;
                 out.set("history_count", session.history.len())?;

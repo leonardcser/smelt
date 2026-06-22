@@ -349,9 +349,9 @@ impl TuiApp {
             self.load_session_display_only(
                 session,
                 transcript,
-                crate::app::DeferredSessionLoad {
-                    id: meta.id,
-                    history_len,
+                crate::app::DisplayOnlySessionState {
+                    full_session_id: meta.id,
+                    persisted_history_len: history_len,
                     checkpoint: meta.checkpoint,
                 },
             );
