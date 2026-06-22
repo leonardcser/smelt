@@ -1,3 +1,4 @@
+use crate::app::transcript::TranscriptSearchBound;
 use crate::app::transcript_search::{
     previous_search_position, TranscriptSearchIndex, TranscriptSearchSession, TranscriptSearchStore,
 };
@@ -84,7 +85,7 @@ impl SearchSession {
             SearchBackend::Transcript(session) => session
                 .current
                 .and_then(|index| session.matches.get(index).copied())
-                .map(TextRange::Rows),
+                .map(|matched| TextRange::Rows(matched.range)),
         }
     }
 
@@ -164,8 +165,13 @@ impl TuiApp {
                 self.clear_search();
                 return;
             };
-            let current =
-                self.advance_transcript_search(&mut transcript_session, &query, origin, direction);
+            let current = self.advance_transcript_search(
+                &mut transcript_session,
+                &query,
+                origin,
+                direction,
+                None,
+            );
             self.search.session = Some(SearchSession {
                 target,
                 target_buf,
@@ -173,8 +179,8 @@ impl TuiApp {
                 direction,
                 backend: SearchBackend::Transcript(transcript_session),
             });
-            if let Some(range) = current {
-                self.jump_to_search_range(range);
+            if let Some(matched) = current {
+                self.jump_to_transcript_search_match(matched);
             }
             return;
         }
@@ -228,27 +234,21 @@ impl TuiApp {
         if matches!(session.backend, SearchBackend::Transcript(_)) {
             let mut session = self.search.session.take().expect("search session exists");
             let query = session.query.clone();
-            let range = match &mut session.backend {
+            let matched = match &mut session.backend {
                 SearchBackend::Transcript(transcript) => {
-                    let origin = match (
-                        transcript
-                            .current
-                            .and_then(|index| transcript.matches.get(index).copied()),
-                        direction,
-                    ) {
-                        (Some(range), SearchDirection::Forward) => range.end,
-                        (Some(range), SearchDirection::Backward)
-                            if range.start.row == 0 && range.start.byte_col == 0 =>
-                        {
-                            DocPosition {
-                                row: RowIndex::MAX,
-                                byte_col: usize::MAX,
-                            }
-                        }
-                        (Some(range), SearchDirection::Backward) => {
-                            previous_search_position(range.start)
-                        }
-                        (None, _) => self.search_origin(target).unwrap_or_default(),
+                    let current_match = transcript
+                        .current
+                        .and_then(|index| transcript.matches.get(index).copied());
+                    let (origin, mut origin_bound) = match (current_match, direction) {
+                        (Some(matched), SearchDirection::Forward) => (
+                            matched.range.end,
+                            Some(TranscriptSearchBound::inclusive(matched.end_key())),
+                        ),
+                        (Some(matched), SearchDirection::Backward) => (
+                            previous_search_position(matched.range.start),
+                            Some(TranscriptSearchBound::before(matched.start_key())),
+                        ),
+                        (None, _) => (self.search_origin(target).unwrap_or_default(), None),
                     };
                     if !self.sync_transcript_search_session(transcript, &query, origin, direction) {
                         let Some(new_session) =
@@ -258,17 +258,24 @@ impl TuiApp {
                             return false;
                         };
                         *transcript = new_session;
+                        origin_bound = None;
                     }
-                    self.advance_transcript_search(transcript, &query, origin, direction)
+                    self.advance_transcript_search(
+                        transcript,
+                        &query,
+                        origin,
+                        direction,
+                        origin_bound,
+                    )
                 }
                 SearchBackend::Full { .. } => None,
             };
-            let Some(range) = range else {
+            let Some(matched) = matched else {
                 self.search.session = Some(session);
                 return false;
             };
             self.search.session = Some(session);
-            self.jump_to_search_range(range);
+            self.jump_to_transcript_search_match(matched);
             return true;
         }
 
@@ -410,6 +417,59 @@ impl TuiApp {
         })
     }
 
+    pub(crate) fn update_current_transcript_search_range(
+        &mut self,
+        target: WinId,
+        range: DocRange,
+    ) {
+        let Some(session) = self.search.session.as_mut() else {
+            return;
+        };
+        if session.target != target {
+            return;
+        }
+        let SearchBackend::Transcript(transcript) = &mut session.backend else {
+            return;
+        };
+        let Some(current) = transcript.current else {
+            return;
+        };
+        let Some(matched) = transcript.matches.get_mut(current) else {
+            return;
+        };
+        matched.range = range;
+    }
+
+    fn jump_to_transcript_search_match(
+        &mut self,
+        matched: crate::app::transcript::TranscriptSearchMatch,
+    ) {
+        let Some(target) = self.search.session.as_ref().map(|session| session.target) else {
+            return;
+        };
+        let window_scroll_before = self.transcript_scroll_top();
+        self.reveal_position(
+            target,
+            matched.range.start,
+            crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
+        );
+        let target_screen_row = self
+            .ui
+            .win(target)
+            .map(|win| matched.range.start.row.saturating_sub(win.scroll_top()))
+            .unwrap_or_default();
+        self.record_transcript_scroll_intent(
+            "search_jump",
+            crate::app::transcript_scroll_trace::TranscriptScrollIntent::SearchJump {
+                anchor: matched.anchor,
+                target_screen_row,
+                match_start_byte_col: matched.start_byte_col(),
+                match_end_byte_col: matched.end_byte_col(),
+            },
+            window_scroll_before,
+        );
+    }
+
     fn jump_to_search_range(&mut self, range: DocRange) {
         let Some(target) = self.search.session.as_ref().map(|session| session.target) else {
             return;
@@ -417,7 +477,7 @@ impl TuiApp {
         self.reveal_position(
             target,
             range.start,
-            crate::app::reveal::RevealOptions::search_result(target),
+            crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
         );
     }
 }

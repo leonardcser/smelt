@@ -184,6 +184,7 @@ impl TuiApp {
             .session
             .as_ref()
             .map(crate::app::search::SearchRenderSession::from);
+        let mut transcript_search_range_after_projection = None;
         let ui = &mut self.ui;
         let _ = ui.render_with_paints_prepared_and_after_layout(
             out,
@@ -215,6 +216,7 @@ impl TuiApp {
                     .win(request.win)
                     .and_then(|win| win.cursor_screen_row(viewport_rows));
                 let transcript_follow_tail;
+                let transcript_cursor_range;
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
                     let width = request.content_width.max(1);
@@ -240,6 +242,7 @@ impl TuiApp {
                     };
                     let applied = transcript.project_applied_viewport(lua, buf, &theme, plan);
                     transcript_follow_tail = applied.follow_tail;
+                    transcript_cursor_range = applied.cursor_range;
                     let tdata = applied.materialized_rows;
                     debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
                     debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
@@ -274,6 +277,11 @@ impl TuiApp {
                             crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
                     }
                     win.restore_document_view_screen_rows(buf, restore);
+                    if let Some(range) = transcript_cursor_range {
+                        if win.set_row_cursor(buf, range.start) {
+                            transcript_search_range_after_projection = Some(range);
+                        }
+                    }
                     if win.has_materialized_rows() {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
                         if transcript_follow_tail {
@@ -318,6 +326,9 @@ impl TuiApp {
                 }
             },
         );
+        if let Some(range) = transcript_search_range_after_projection {
+            self.update_current_transcript_search_range(crate::app::TRANSCRIPT_WIN, range);
+        }
     }
 
     /// Compute which pane owns the cursor this frame.

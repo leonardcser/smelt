@@ -1,8 +1,11 @@
 use crate::app::search::SearchDirection;
+use crate::app::transcript::{
+    TranscriptSearchBound, TranscriptSearchMatch, TranscriptSearchPositionKey,
+};
 use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::content::transcript_search_text::descriptor_search_text;
-use crate::smelt_edit::{DocPosition, DocRange, RowIndex};
+use crate::smelt_edit::{DocPosition, RowIndex};
 use std::collections::{HashMap, HashSet};
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
@@ -17,7 +20,7 @@ pub(crate) struct TranscriptSearchSession {
     pub(super) candidates: Vec<usize>,
     pub(super) scanned: Vec<bool>,
     pub(super) scanned_blocks: HashSet<u64>,
-    pub(super) matches: Vec<DocRange>,
+    pub(super) matches: Vec<TranscriptSearchMatch>,
     pub(super) current: Option<usize>,
 }
 
@@ -457,8 +460,9 @@ impl TuiApp {
         if session.key.width != self.transcript_width() as u16 {
             return false;
         }
+        let origin_bound = self.transcript_search_bound_for_origin(session, origin, direction);
         if self
-            .cached_transcript_match(session, origin, direction)
+            .cached_transcript_match(session, origin_bound, direction)
             .is_some()
         {
             return true;
@@ -514,7 +518,8 @@ impl TuiApp {
         query: &str,
         origin: DocPosition,
         direction: SearchDirection,
-    ) -> Option<DocRange> {
+        origin_bound: Option<TranscriptSearchBound>,
+    ) -> Option<TranscriptSearchMatch> {
         let _perf = smelt_perf::perf::begin("search:transcript:advance");
         if query.is_empty() || session.total_rows == 0 {
             return None;
@@ -527,10 +532,19 @@ impl TuiApp {
             },
         };
 
+        let origin_bound = origin_bound
+            .unwrap_or_else(|| self.transcript_search_bound_for_origin(session, origin, direction));
+
         let current = self
-            .cached_transcript_match(session, origin, direction)
+            .cached_transcript_match(session, origin_bound, direction)
             .or_else(|| {
-                self.scan_transcript_candidates_until_match(session, query, origin, direction)
+                self.scan_transcript_candidates_until_match(
+                    session,
+                    query,
+                    origin,
+                    origin_bound,
+                    direction,
+                )
             });
         let current = match current {
             Some(index) => Some(index),
@@ -550,34 +564,70 @@ impl TuiApp {
                     }
                     _ => None,
                 }?;
-                self.scan_transcript_candidates_until_match(session, query, wrap_origin, direction)
-                    .or_else(|| self.cached_transcript_match(session, wrap_origin, direction))
+                let wrap_bound =
+                    self.transcript_search_bound_for_origin(session, wrap_origin, direction);
+                self.scan_transcript_candidates_until_match(
+                    session,
+                    query,
+                    wrap_origin,
+                    wrap_bound,
+                    direction,
+                )
+                .or_else(|| self.cached_transcript_match(session, wrap_bound, direction))
             }
         }?;
         session.current = Some(current);
-        let range = session.matches.get(current).copied()?;
-        self.prefetch_transcript_matches(session, query, current, range, direction);
+        let matched = session.matches.get(current).copied()?;
+        self.prefetch_transcript_matches(session, query, current, matched, direction);
         session.current = session
             .matches
             .iter()
-            .position(|candidate| *candidate == range)
+            .position(|candidate| candidate.same_position(&matched))
             .or(Some(current));
-        Some(range)
+        Some(matched)
+    }
+
+    pub(super) fn transcript_search_bound_for_origin(
+        &mut self,
+        session: &TranscriptSearchSession,
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) -> TranscriptSearchBound {
+        if matches!(direction, SearchDirection::Backward) && origin.row == RowIndex::MAX {
+            return TranscriptSearchBound::inclusive(TranscriptSearchPositionKey::max());
+        }
+        let row = origin.row.min(session.total_rows.saturating_sub(1));
+        let width = self.transcript_width() as u16;
+        let anchor = self.transcript.search_anchor_at_row(&self.lua, width, row);
+        let key = match (anchor, direction) {
+            (
+                crate::app::transcript::TranscriptSearchAnchor::EstimatedRow(_),
+                SearchDirection::Forward,
+            ) => TranscriptSearchPositionKey::min(),
+            (
+                crate::app::transcript::TranscriptSearchAnchor::EstimatedRow(_),
+                SearchDirection::Backward,
+            ) => TranscriptSearchPositionKey::max(),
+            _ => anchor.position_key(origin.byte_col),
+        };
+        TranscriptSearchBound::inclusive(key)
     }
 
     fn cached_transcript_match(
         &self,
         session: &TranscriptSearchSession,
-        origin: DocPosition,
+        origin_bound: TranscriptSearchBound,
         direction: SearchDirection,
     ) -> Option<usize> {
         match direction {
-            SearchDirection::Forward => session.matches.iter().position(|range| {
-                (range.start.row, range.start.byte_col) >= (origin.row, origin.byte_col)
-            }),
-            SearchDirection::Backward => session.matches.iter().rposition(|range| {
-                (range.start.row, range.start.byte_col) <= (origin.row, origin.byte_col)
-            }),
+            SearchDirection::Forward => session
+                .matches
+                .iter()
+                .position(|matched| origin_bound.contains_forward(matched.start_key())),
+            SearchDirection::Backward => session
+                .matches
+                .iter()
+                .rposition(|matched| origin_bound.contains_backward(matched.start_key())),
         }
     }
 
@@ -586,17 +636,23 @@ impl TuiApp {
         session: &mut TranscriptSearchSession,
         query: &str,
         origin: DocPosition,
+        origin_bound: TranscriptSearchBound,
         direction: SearchDirection,
     ) -> Option<usize> {
         if session.candidate_backed {
-            return self
-                .scan_transcript_candidate_blocks_until_match(session, query, origin, direction);
+            return self.scan_transcript_candidate_blocks_until_match(
+                session,
+                query,
+                origin,
+                origin_bound,
+                direction,
+            );
         }
         loop {
             let entry_index =
                 self.next_unscanned_transcript_candidate(session, origin, direction)?;
             self.scan_transcript_candidate(session, query, entry_index);
-            if let Some(index) = self.cached_transcript_match(session, origin, direction) {
+            if let Some(index) = self.cached_transcript_match(session, origin_bound, direction) {
                 return Some(index);
             }
         }
@@ -607,13 +663,14 @@ impl TuiApp {
         session: &mut TranscriptSearchSession,
         query: &str,
         origin: DocPosition,
+        origin_bound: TranscriptSearchBound,
         direction: SearchDirection,
     ) -> Option<usize> {
         loop {
             let block_idx =
                 self.next_unscanned_transcript_candidate_block(session, origin, direction)?;
             self.scan_transcript_candidate_block(session, query, block_idx);
-            if let Some(index) = self.cached_transcript_match(session, origin, direction) {
+            if let Some(index) = self.cached_transcript_match(session, origin_bound, direction) {
                 return Some(index);
             }
         }
@@ -624,7 +681,7 @@ impl TuiApp {
         session: &mut TranscriptSearchSession,
         query: &str,
         current: usize,
-        range: DocRange,
+        matched: TranscriptSearchMatch,
         direction: SearchDirection,
     ) {
         if session.candidate_backed {
@@ -637,8 +694,8 @@ impl TuiApp {
             transcript_prefetch_target_len(session.matches.len(), current, direction);
         let mut scanned_entries = 0usize;
         let origin = match direction {
-            SearchDirection::Forward => range.end,
-            SearchDirection::Backward => previous_search_position(range.start),
+            SearchDirection::Forward => matched.range.end,
+            SearchDirection::Backward => previous_search_position(matched.range.start),
         };
         while session.matches.len() < target_matches
             && scanned_entries < SEARCH_TRANSCRIPT_PREFETCH_ENTRIES
@@ -791,7 +848,7 @@ impl TuiApp {
                 entry.rows,
                 query,
             );
-            merge_doc_ranges(&mut session.matches, found);
+            merge_transcript_matches(&mut session.matches, found);
         }
         smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
         smelt_perf::perf::record_value("search:transcript:scanned_rows", scanned_rows);
@@ -832,7 +889,7 @@ impl TuiApp {
         let found = self
             .transcript
             .search_matches_for_row_range(&self.lua, width, &theme, first_row, rows, query);
-        merge_doc_ranges(&mut session.matches, found);
+        merge_transcript_matches(&mut session.matches, found);
         smelt_perf::perf::record_value(
             "search:transcript:cached_matches",
             session.matches.len() as u64,
@@ -877,10 +934,13 @@ fn transcript_search_activation_block(
     }
 }
 
-fn merge_doc_ranges(matches: &mut Vec<DocRange>, ranges: impl IntoIterator<Item = DocRange>) {
+fn merge_transcript_matches(
+    matches: &mut Vec<TranscriptSearchMatch>,
+    ranges: impl IntoIterator<Item = TranscriptSearchMatch>,
+) {
     matches.extend(ranges);
-    matches.sort_by_key(|range| (range.start.row, range.start.byte_col, range.end.byte_col));
-    matches.dedup();
+    matches.sort_by_key(TranscriptSearchMatch::sort_key);
+    matches.dedup_by(|a, b| a.same_position(b));
 }
 
 fn transcript_prefetch_target_len(

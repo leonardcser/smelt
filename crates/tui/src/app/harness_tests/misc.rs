@@ -2467,9 +2467,10 @@ fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
     assert!(
         matches!(
             frame.scroll_intent,
-            TranscriptScrollIntent::SearchJump(
-                crate::app::transcript_scroll_trace::TranscriptTraceAnchor::Content { .. }
-            )
+            TranscriptScrollIntent::SearchJump {
+                anchor: crate::app::transcript::TranscriptSearchAnchor::Content { .. },
+                ..
+            }
         ),
         "search jumps must preserve a semantic content anchor instead of collapsing to {:?}",
         frame.scroll_intent
@@ -2488,6 +2489,48 @@ fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
             .any(|line| line.contains("record-0150")),
         "search reveal did not place the matched record in the viewport: {:?}",
         transcript_viewport_lines(&app)
+    );
+}
+
+#[test]
+fn transcript_search_jump_keeps_cursor_on_heterogeneous_match_start_after_render() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(180, 78, 18);
+
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        SearchDirection::Forward,
+        "assistant paragraph".to_string(),
+    );
+    app.render_silent();
+
+    let range = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("heterogeneous search match");
+    let cursor = app
+        .app
+        .transcript_win()
+        .row_cursor()
+        .expect("transcript cursor");
+    let cursor_row = app
+        .app
+        .transcript_rows_and_breaks_range(cursor.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert_eq!(
+        cursor,
+        range.start,
+        "cursor_row={cursor_row:?}, viewport={:?}",
+        transcript_viewport_lines(&app)
+    );
+    assert_eq!(
+        smelt_buffer::text::slice(&cursor_row, cursor.byte_col..range.end.byte_col),
+        "assistant paragraph"
     );
 }
 

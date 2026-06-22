@@ -315,7 +315,7 @@ impl mlua::UserData for LuaWin {
                         return;
                     }
                     let transcript_scroll_intent = (this.id == crate::app::TRANSCRIPT_WIN)
-                        .then_some(crate::app::reveal::RevealScrollIntent::SearchJump);
+                        .then_some(crate::app::reveal::RevealScrollIntent::Position);
                     app.reveal_position(
                         this.id,
                         crate::smelt_edit::DocPosition { row, byte_col: 0 },

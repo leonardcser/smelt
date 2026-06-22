@@ -10,9 +10,10 @@ use crate::app::TuiApp;
 use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
 };
+use crate::content::transcript_buf::TranscriptRowAnchor;
 use crate::smelt_edit::{
-    Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocRange, RowIndex,
-    TextRange, Theme,
+    Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
+    RowIndex, TextRange, Theme,
 };
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
@@ -843,6 +844,178 @@ pub(crate) struct TranscriptViewportProjectionInput {
     pub(crate) previous_width: Option<u16>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptSearchAnchor {
+    Content {
+        descriptor_index: usize,
+        block_id: BlockId,
+        node_index: usize,
+        row_anchor: TranscriptRowAnchor,
+    },
+    EstimatedRow(RowIndex),
+}
+
+impl TranscriptSearchAnchor {
+    pub(crate) fn position_key(self, byte_col: usize) -> TranscriptSearchPositionKey {
+        match self {
+            Self::Content {
+                descriptor_index,
+                node_index,
+                row_anchor,
+                ..
+            } => TranscriptSearchPositionKey {
+                kind: 0,
+                major: descriptor_index as u64,
+                node_index: node_index as u64,
+                row_offset: row_anchor.row_offset,
+                byte_col,
+            },
+            Self::EstimatedRow(row) => TranscriptSearchPositionKey {
+                kind: 1,
+                major: row,
+                node_index: 0,
+                row_offset: 0,
+                byte_col,
+            },
+        }
+    }
+
+    fn same_position(self, other: Self) -> bool {
+        match (self, other) {
+            (
+                Self::Content {
+                    descriptor_index: left_descriptor,
+                    block_id: left_block,
+                    node_index: left_node,
+                    row_anchor: left_anchor,
+                    ..
+                },
+                Self::Content {
+                    descriptor_index: right_descriptor,
+                    block_id: right_block,
+                    node_index: right_node,
+                    row_anchor: right_anchor,
+                    ..
+                },
+            ) => {
+                left_descriptor == right_descriptor
+                    && left_block == right_block
+                    && left_node == right_node
+                    && left_anchor == right_anchor
+            }
+            (Self::EstimatedRow(left), Self::EstimatedRow(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TranscriptSearchPositionKey {
+    kind: u8,
+    major: u64,
+    node_index: u64,
+    row_offset: RowIndex,
+    byte_col: usize,
+}
+
+impl TranscriptSearchPositionKey {
+    pub(crate) fn min() -> Self {
+        Self {
+            kind: u8::MIN,
+            major: u64::MIN,
+            node_index: u64::MIN,
+            row_offset: RowIndex::MIN,
+            byte_col: usize::MIN,
+        }
+    }
+
+    pub(crate) fn max() -> Self {
+        Self {
+            kind: u8::MAX,
+            major: u64::MAX,
+            node_index: u64::MAX,
+            row_offset: RowIndex::MAX,
+            byte_col: usize::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptSearchBound {
+    key: TranscriptSearchPositionKey,
+    inclusive: bool,
+}
+
+impl TranscriptSearchBound {
+    pub(crate) fn inclusive(key: TranscriptSearchPositionKey) -> Self {
+        Self {
+            key,
+            inclusive: true,
+        }
+    }
+
+    pub(crate) fn before(key: TranscriptSearchPositionKey) -> Self {
+        Self {
+            key,
+            inclusive: false,
+        }
+    }
+
+    pub(crate) fn contains_forward(self, key: TranscriptSearchPositionKey) -> bool {
+        if self.inclusive {
+            key >= self.key
+        } else {
+            key > self.key
+        }
+    }
+
+    pub(crate) fn contains_backward(self, key: TranscriptSearchPositionKey) -> bool {
+        if self.inclusive {
+            key <= self.key
+        } else {
+            key < self.key
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptSearchMatch {
+    pub(crate) range: DocRange,
+    pub(crate) anchor: TranscriptSearchAnchor,
+}
+
+impl TranscriptSearchMatch {
+    pub(crate) fn new(range: DocRange, anchor: TranscriptSearchAnchor) -> Self {
+        Self { range, anchor }
+    }
+
+    pub(crate) fn start_byte_col(&self) -> usize {
+        self.range.start.byte_col
+    }
+
+    pub(crate) fn end_byte_col(&self) -> usize {
+        self.range.end.byte_col
+    }
+
+    pub(crate) fn start_key(&self) -> TranscriptSearchPositionKey {
+        self.anchor.position_key(self.start_byte_col())
+    }
+
+    pub(crate) fn end_key(&self) -> TranscriptSearchPositionKey {
+        self.anchor.position_key(self.end_byte_col())
+    }
+
+    pub(crate) fn sort_key(&self) -> (TranscriptSearchPositionKey, usize) {
+        (self.start_key(), self.end_byte_col())
+    }
+
+    pub(crate) fn same_position(&self, other: &Self) -> bool {
+        self.anchor.same_position(other.anchor)
+            && self.start_byte_col() == other.start_byte_col()
+            && self.end_byte_col() == other.end_byte_col()
+    }
+}
+
 pub(crate) struct AppliedTranscriptViewport {
     pub(crate) materialized_rows: crate::smelt_edit::MaterializedRows,
     pub(crate) top_anchor: Option<TranscriptTraceAnchor>,
@@ -850,6 +1023,14 @@ pub(crate) struct AppliedTranscriptViewport {
     pub(crate) exact_visible_range: Range<RowIndex>,
     pub(crate) placeholder_rows_visible: bool,
     pub(crate) follow_tail: bool,
+    pub(crate) cursor_range: Option<DocRange>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TranscriptCursorTarget {
+    anchor: TranscriptSearchAnchor,
+    start_byte_col: usize,
+    end_byte_col: usize,
 }
 
 enum TranscriptMaterializationPlan {
@@ -871,6 +1052,7 @@ pub(crate) struct TranscriptProjectionPlan {
     row_offset: RowIndex,
     total_rows: RowIndex,
     requested_scroll: Option<RowIndex>,
+    cursor_target: Option<TranscriptCursorTarget>,
     scroll_anchor: TranscriptScrollAnchor,
     width: u16,
     viewport_rows: u16,
@@ -1207,7 +1389,7 @@ impl TranscriptDocument {
             | TranscriptScrollIntent::UserDelta { .. }
             | TranscriptScrollIntent::PageDelta { .. }
             | TranscriptScrollIntent::ExactContentAnchor(_)
-            | TranscriptScrollIntent::SearchJump(_)
+            | TranscriptScrollIntent::SearchJump { .. }
             | TranscriptScrollIntent::RevealBlock { .. }
             | TranscriptScrollIntent::ResizeReflow { .. } => TranscriptViewportMode::Anchored,
         }
@@ -1667,6 +1849,39 @@ impl TranscriptDocument {
             row_anchor,
             fallback_row: row,
         })
+    }
+
+    pub(crate) fn search_anchor_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: RowIndex,
+    ) -> TranscriptSearchAnchor {
+        let Some(node) = self.node_metadata_at_row(lua, width, row) else {
+            return TranscriptSearchAnchor::EstimatedRow(row);
+        };
+        let Some(block_id) = self
+            .projection
+            .block_ids_for_node_index(node.index)
+            .and_then(|ids| ids.first().copied())
+        else {
+            return TranscriptSearchAnchor::EstimatedRow(row);
+        };
+        let Some(descriptor_index) = self
+            .descriptor_index_for_block_id(block_id)
+            .or_else(|| self.stored_descriptor_index_for_block_idx(block_id.get()))
+        else {
+            return TranscriptSearchAnchor::EstimatedRow(row);
+        };
+        TranscriptSearchAnchor::Content {
+            descriptor_index,
+            block_id,
+            node_index: node.index,
+            row_anchor: TranscriptRowAnchor {
+                id: node.id,
+                row_offset: node.row_offset,
+            },
+        }
     }
 
     fn row_for_content_anchor(
@@ -2325,7 +2540,7 @@ impl TranscriptDocument {
             TranscriptTraceAnchor::EstimatedRow(row) => Some(row),
             TranscriptTraceAnchor::Content {
                 descriptor_index,
-                block_id,
+                node_id,
                 row_offset,
                 ..
             } => {
@@ -2341,12 +2556,40 @@ impl TranscriptDocument {
                 self.row_for_anchor(
                     lua,
                     width,
-                    crate::content::transcript_buf::TranscriptRowAnchor {
-                        id: crate::content::render_plan::RenderNodeId::Block(block_id),
+                    TranscriptRowAnchor {
+                        id: node_id,
                         row_offset,
                     },
                 )
             }
+        }
+    }
+
+    fn row_for_search_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        viewport_rows: u16,
+        anchor: TranscriptSearchAnchor,
+    ) -> Option<RowIndex> {
+        match anchor {
+            TranscriptSearchAnchor::Content {
+                descriptor_index,
+                row_anchor,
+                ..
+            } => {
+                if self.sparse_descriptors.total_count().is_some() {
+                    let range = self.descriptor_window_range_around_center(
+                        width,
+                        descriptor_index,
+                        viewport_rows,
+                        true,
+                    )?;
+                    let _ = self.activate_descriptor_window_range(range);
+                }
+                self.row_for_anchor(lua, width, row_anchor)
+            }
+            TranscriptSearchAnchor::EstimatedRow(row) => Some(row),
         }
     }
 
@@ -2496,38 +2739,63 @@ impl TranscriptDocument {
         viewport_rows: u16,
         fallback_scroll_top: RowIndex,
         intent: &TranscriptScrollIntent,
-    ) -> crate::content::transcript_buf::ScrollTarget {
+    ) -> (
+        crate::content::transcript_buf::ScrollTarget,
+        Option<TranscriptCursorTarget>,
+    ) {
         match intent {
-            TranscriptScrollIntent::Tail => {
-                crate::content::transcript_buf::ScrollTarget::visible_tail()
-            }
+            TranscriptScrollIntent::Tail => (
+                crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                None,
+            ),
             TranscriptScrollIntent::PreserveViewport => {
-                match self.row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top) {
+                let target = match self.row_for_viewport_anchor(
+                    lua,
+                    width,
+                    viewport_rows,
+                    fallback_scroll_top,
+                ) {
                     Some(row) => crate::content::transcript_buf::ScrollTarget::visible_row(row),
                     None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
-                }
+                };
+                (target, None)
             }
-            TranscriptScrollIntent::ResizeReflow { .. } => {
+            TranscriptScrollIntent::ResizeReflow { .. } => (
                 crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
                     fallback_scroll_top,
-                )
-            }
-            TranscriptScrollIntent::UserDelta { rows } => self.local_delta_scroll_target(
-                lua,
-                width,
-                viewport_rows,
-                fallback_scroll_top,
-                *rows,
+                ),
+                None,
+            ),
+            TranscriptScrollIntent::UserDelta { rows } => (
+                self.local_delta_scroll_target(
+                    lua,
+                    width,
+                    viewport_rows,
+                    fallback_scroll_top,
+                    *rows,
+                ),
+                None,
             ),
             TranscriptScrollIntent::PageDelta { pages } => {
                 let rows = pages.saturating_mul(viewport_rows.max(1) as isize);
-                self.local_delta_scroll_target(lua, width, viewport_rows, fallback_scroll_top, rows)
+                (
+                    self.local_delta_scroll_target(
+                        lua,
+                        width,
+                        viewport_rows,
+                        fallback_scroll_top,
+                        rows,
+                    ),
+                    None,
+                )
             }
-            TranscriptScrollIntent::ExactContentAnchor(anchor)
-            | TranscriptScrollIntent::SearchJump(anchor) => {
+            TranscriptScrollIntent::ExactContentAnchor(anchor) => {
                 let Some(row) = self.row_for_trace_anchor(lua, width, viewport_rows, *anchor)
                 else {
-                    return crate::content::transcript_buf::ScrollTarget::visible_tail();
+                    return (
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        None,
+                    );
                 };
                 if matches!(*anchor, TranscriptTraceAnchor::EstimatedRow(_)) {
                     self.activate_descriptor_window_covering_approximate_display_row(
@@ -2537,7 +2805,44 @@ impl TranscriptDocument {
                         viewport_rows,
                     );
                 }
-                crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row)
+                (
+                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row),
+                    None,
+                )
+            }
+            TranscriptScrollIntent::SearchJump {
+                anchor,
+                target_screen_row,
+                match_start_byte_col,
+                match_end_byte_col,
+            } => {
+                let Some(row) = self.row_for_search_anchor(lua, width, viewport_rows, *anchor)
+                else {
+                    return (
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        None,
+                    );
+                };
+                if matches!(*anchor, TranscriptSearchAnchor::EstimatedRow(_)) {
+                    self.activate_descriptor_window_covering_approximate_display_row(
+                        lua,
+                        width,
+                        row,
+                        viewport_rows,
+                    );
+                }
+                let target_screen_row =
+                    (*target_screen_row).min(viewport_rows.saturating_sub(1) as RowIndex);
+                (
+                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                        row.saturating_sub(target_screen_row),
+                    ),
+                    Some(TranscriptCursorTarget {
+                        anchor: *anchor,
+                        start_byte_col: *match_start_byte_col,
+                        end_byte_col: *match_end_byte_col,
+                    }),
+                )
             }
             TranscriptScrollIntent::RevealBlock {
                 descriptor_index,
@@ -2553,13 +2858,22 @@ impl TranscriptDocument {
                     *screen_padding_top,
                     viewport_rows,
                 ) else {
-                    return crate::content::transcript_buf::ScrollTarget::visible_tail();
+                    return (
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        None,
+                    );
                 };
                 if reveal.block_id != *block_id {
-                    return crate::content::transcript_buf::ScrollTarget::visible_tail();
+                    return (
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        None,
+                    );
                 }
-                crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
-                    reveal.scroll_top,
+                (
+                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                        reveal.scroll_top,
+                    ),
+                    None,
                 )
             }
             TranscriptScrollIntent::ScrollbarFraction {
@@ -2574,12 +2888,41 @@ impl TranscriptDocument {
                     .checked_div(denominator as u128)
                     .unwrap_or(0)
                     .min(RowIndex::MAX as u128) as RowIndex;
-                crate::content::transcript_buf::ScrollTarget::visible_row(row)
+                (
+                    crate::content::transcript_buf::ScrollTarget::visible_row(row),
+                    None,
+                )
             }
-            TranscriptScrollIntent::ApproximateRowSeek(row) => {
-                crate::content::transcript_buf::ScrollTarget::visible_row(*row)
-            }
+            TranscriptScrollIntent::ApproximateRowSeek(row) => (
+                crate::content::transcript_buf::ScrollTarget::visible_row(*row),
+                None,
+            ),
         }
+    }
+
+    fn resolve_cursor_target(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        target: TranscriptCursorTarget,
+    ) -> Option<DocRange> {
+        if target.start_byte_col > target.end_byte_col {
+            return None;
+        }
+        let TranscriptSearchAnchor::Content { row_anchor, .. } = target.anchor else {
+            return None;
+        };
+        let row = self.row_for_anchor(lua, width, row_anchor)?;
+        Some(DocRange {
+            start: DocPosition {
+                row,
+                byte_col: target.start_byte_col,
+            },
+            end: DocPosition {
+                row,
+                byte_col: target.end_byte_col,
+            },
+        })
     }
 
     pub(crate) fn plan_viewport_projection_measured(
@@ -2592,7 +2935,7 @@ impl TranscriptDocument {
     ) -> TranscriptProjectionPlan {
         let intent = self.take_viewport_intent(input);
         let allow_sparse_placeholders = Self::intent_is_approximate_row_seek(&intent);
-        let scroll_target = self.scroll_target_for_intent(
+        let (scroll_target, cursor_target) = self.scroll_target_for_intent(
             lua,
             width,
             viewport_rows,
@@ -2609,14 +2952,16 @@ impl TranscriptDocument {
                 window_scroll_after_input: input.fallback_scroll_top,
             });
         }
-        self.plan_projection_measured_with_sparse_placeholders(
+        let mut plan = self.plan_projection_measured_with_sparse_placeholders(
             lua,
             width,
             theme,
             scroll_target,
             viewport_rows,
             allow_sparse_placeholders,
-        )
+        );
+        plan.cursor_target = cursor_target;
+        plan
     }
 
     pub(crate) fn plan_projection_measured(
@@ -2756,6 +3101,7 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             requested_scroll,
+            cursor_target: None,
             scroll_anchor,
             width,
             viewport_rows,
@@ -2796,6 +3142,7 @@ impl TranscriptDocument {
         rows: crate::smelt_edit::MaterializedRows,
         viewport_rows: u16,
         placeholder_rows_visible: bool,
+        cursor_range: Option<DocRange>,
     ) -> AppliedTranscriptViewport {
         let viewport_rows = RowIndex::from(viewport_rows.max(1));
         AppliedTranscriptViewport {
@@ -2809,6 +3156,7 @@ impl TranscriptDocument {
                     .min(rows.total_rows),
             placeholder_rows_visible,
             follow_tail: self.viewport_state.mode == TranscriptViewportMode::Tail,
+            cursor_range,
         }
     }
 
@@ -2824,6 +3172,7 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             requested_scroll,
+            cursor_target,
             scroll_anchor,
             width,
             viewport_rows,
@@ -2841,7 +3190,7 @@ impl TranscriptDocument {
             TranscriptMaterializationPlan::UnloadedGap(gap) => {
                 let rows = self.project_unloaded_sparse_gap(buf, total_rows, viewport_rows, gap);
                 self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, true);
-                return self.applied_viewport(rows, viewport_rows, true);
+                return self.applied_viewport(rows, viewport_rows, true, None);
             }
             TranscriptMaterializationPlan::Loaded(inner) => self.projection.project_planned(
                 lua,
@@ -2852,6 +3201,8 @@ impl TranscriptDocument {
             ),
         };
         self.observe_exact_loaded_descriptor_rows();
+        let cursor_range =
+            cursor_target.and_then(|target| self.resolve_cursor_target(lua, width, target));
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
         rows.row_base = rows.row_base.saturating_add(row_offset);
         rows.total_rows = total_rows;
@@ -2875,7 +3226,7 @@ impl TranscriptDocument {
         self.viewport_state.resolved_scroll_top = Some(rows.clamped_scroll);
         self.viewport_state.pending_projection = None;
         self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
-        self.applied_viewport(rows, viewport_rows, false)
+        self.applied_viewport(rows, viewport_rows, false, cursor_range)
     }
 
     pub(crate) fn project_planned(
@@ -2943,7 +3294,7 @@ impl TranscriptDocument {
         start: RowIndex,
         count: RowIndex,
         query: &str,
-    ) -> Vec<DocRange> {
+    ) -> Vec<TranscriptSearchMatch> {
         if query.is_empty() || count == 0 {
             return Vec::new();
         }
@@ -2951,9 +3302,12 @@ impl TranscriptDocument {
         let mut matches = Vec::new();
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = start.saturating_add(offset as RowIndex);
-            matches.extend(crate::smelt_edit::display_row_matches(
-                row, row_index, query,
-            ));
+            for range in crate::smelt_edit::display_row_matches(row, row_index, query) {
+                matches.push(TranscriptSearchMatch::new(
+                    range,
+                    self.search_anchor_at_row(lua, width, row_index),
+                ));
+            }
         }
         matches
     }
@@ -3032,18 +3386,6 @@ impl TranscriptDocument {
         }
     }
 
-    fn range_anchor(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        range: crate::smelt_edit::DocRange,
-    ) -> TranscriptRangeAnchor {
-        TranscriptRangeAnchor {
-            start: self.position_anchor(lua, width, range.start),
-            end: self.position_anchor(lua, width, range.end),
-        }
-    }
-
     fn resolve_position_anchor(
         &mut self,
         lua: &LuaRuntime,
@@ -3060,16 +3402,38 @@ impl TranscriptDocument {
         }
     }
 
-    fn resolve_range_anchor(
+    fn search_range_anchor(
+        &mut self,
+        matched: TranscriptSearchMatch,
+    ) -> TranscriptSearchRangeAnchor {
+        TranscriptSearchRangeAnchor {
+            anchor: matched.anchor,
+            start_byte_col: matched.start_byte_col(),
+            end_byte_col: matched.end_byte_col(),
+            fallback_range: matched.range,
+        }
+    }
+
+    fn resolve_search_range_anchor(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        anchor: TranscriptRangeAnchor,
-    ) -> crate::smelt_edit::DocRange {
-        crate::smelt_edit::DocRange {
-            start: self.resolve_position_anchor(lua, width, anchor.start),
-            end: self.resolve_position_anchor(lua, width, anchor.end),
-        }
+        anchor: TranscriptSearchRangeAnchor,
+    ) -> TranscriptSearchMatch {
+        let row = self
+            .row_for_search_anchor(lua, width, 20, anchor.anchor)
+            .unwrap_or(anchor.fallback_range.start.row);
+        let range = crate::smelt_edit::DocRange {
+            start: crate::smelt_edit::DocPosition {
+                row,
+                byte_col: anchor.start_byte_col,
+            },
+            end: crate::smelt_edit::DocPosition {
+                row,
+                byte_col: anchor.end_byte_col,
+            },
+        };
+        TranscriptSearchMatch::new(range, anchor.anchor)
     }
 
     fn loaded_block_node_before_or_at_virtual_row(
@@ -5857,9 +6221,11 @@ struct TranscriptPositionAnchor {
 }
 
 #[derive(Clone, Copy)]
-struct TranscriptRangeAnchor {
-    start: TranscriptPositionAnchor,
-    end: TranscriptPositionAnchor,
+struct TranscriptSearchRangeAnchor {
+    anchor: TranscriptSearchAnchor,
+    start_byte_col: usize,
+    end_byte_col: usize,
+    fallback_range: crate::smelt_edit::DocRange,
 }
 
 struct TranscriptViewAnchors {
@@ -5868,7 +6234,7 @@ struct TranscriptViewAnchors {
     cursor: Option<TranscriptPositionAnchor>,
     selection_anchor: Option<TranscriptPositionAnchor>,
     drag_endpoint: Option<TranscriptPositionAnchor>,
-    search_current: Option<TranscriptRangeAnchor>,
+    search_current: Option<TranscriptSearchRangeAnchor>,
 }
 
 impl TuiApp {
@@ -6039,7 +6405,7 @@ impl TuiApp {
                     .and_then(|index| transcript.matches.get(index).copied()),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
-            .map(|range| self.transcript.range_anchor(&self.lua, width, range));
+            .map(|matched| self.transcript.search_range_anchor(matched));
         TranscriptViewAnchors {
             following_tail,
             scroll_top: (!following_tail).then(|| {
@@ -6081,7 +6447,7 @@ impl TuiApp {
         });
         let search_current = anchors.search_current.map(|anchor| {
             self.transcript
-                .resolve_range_anchor(&self.lua, width, anchor)
+                .resolve_search_range_anchor(&self.lua, width, anchor)
         });
 
         if let Some(win) = self.ui.win_mut(self.well_known.transcript) {
@@ -6099,14 +6465,14 @@ impl TuiApp {
             win.set_document_view_state(state);
         }
 
-        if let Some(range) = search_current {
+        if let Some(matched) = search_current {
             if let Some(session) = self.search.session.as_mut() {
                 if let crate::app::search::SearchBackend::Transcript(transcript) =
                     &mut session.backend
                 {
                     if let Some(index) = transcript.current {
                         if let Some(current) = transcript.matches.get_mut(index) {
-                            *current = range;
+                            *current = matched;
                         }
                     }
                 }

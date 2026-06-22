@@ -6,18 +6,7 @@ use crate::smelt_edit::{DocPosition, RowIndex, WinId};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RevealScrollIntent {
-    SearchJump,
-}
-
-impl RevealScrollIntent {
-    fn trace_intent(
-        self,
-        anchor: crate::app::transcript_scroll_trace::TranscriptTraceAnchor,
-    ) -> TranscriptScrollIntent {
-        match self {
-            Self::SearchJump => TranscriptScrollIntent::SearchJump(anchor),
-        }
-    }
+    Position,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,12 +36,6 @@ impl RevealOptions {
             bottom_padding: edge_padding,
             ..Self::default()
         }
-    }
-
-    pub(crate) fn search_result(leaf: WinId) -> Self {
-        let mut opts = Self::avoid_edge_chrome(leaf);
-        opts.transcript_scroll_intent = Some(RevealScrollIntent::SearchJump);
-        opts
     }
 }
 
@@ -154,14 +137,17 @@ impl TuiApp {
         }
 
         if let Some((intent, window_scroll_before)) = trace_before {
-            let anchor =
-                self.transcript
-                    .trace_anchor_at_row(&self.lua, viewport_width, position.row);
-            self.record_transcript_scroll_intent(
-                "search_jump",
-                intent.trace_intent(anchor),
-                window_scroll_before,
-            );
+            let (label, scroll_intent) = match intent {
+                RevealScrollIntent::Position => {
+                    let anchor = self.transcript.trace_anchor_at_row(
+                        &self.lua,
+                        viewport_width,
+                        position.row,
+                    );
+                    ("reveal", TranscriptScrollIntent::ExactContentAnchor(anchor))
+                }
+            };
+            self.record_transcript_scroll_intent(label, scroll_intent, window_scroll_before);
         }
 
         if trace_reveal {

@@ -40,6 +40,7 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
+use crate::app::transcript::TranscriptSearchAnchor;
 use crate::content::render_plan::RenderNodeId;
 use crate::smelt_edit::RowIndex;
 use smelt_core::transcript_model::BlockId;
@@ -56,7 +57,12 @@ pub(crate) enum TranscriptScrollIntent {
         pages: isize,
     },
     ExactContentAnchor(TranscriptTraceAnchor),
-    SearchJump(TranscriptTraceAnchor),
+    SearchJump {
+        anchor: TranscriptSearchAnchor,
+        target_screen_row: RowIndex,
+        match_start_byte_col: usize,
+        match_end_byte_col: usize,
+    },
     RevealBlock {
         descriptor_index: usize,
         block_id: BlockId,

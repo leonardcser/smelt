@@ -347,6 +347,26 @@ impl Window {
             .then_some(self.document_view_state_ref().cursor)
     }
 
+    pub fn set_row_cursor(&mut self, buf: &Buffer, position: DocPosition) -> bool {
+        if !self.document_view_state_ref().active {
+            return false;
+        }
+        let mut state = *self.document_view_state_ref();
+        if !state.materialized.contains_abs_row(position.row) {
+            return false;
+        }
+        state.cursor = DocPosition {
+            row: position
+                .row
+                .min(state.materialized.total_rows.saturating_sub(1)),
+            byte_col: position.byte_col,
+        };
+        state.preferred_cell_col = None;
+        let projected = self.project_row_cursor_to_local(state, buf);
+        *self.document_view_state_mut() = state;
+        projected
+    }
+
     pub fn viewer_doc_cursor(&self, buf: &Buffer) -> Option<DocPosition> {
         if let Some(cursor) = self.row_cursor() {
             return Some(cursor);

@@ -134,6 +134,7 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     app.type_char('/');
     app.type_text("needle");
     app.press(KeyCode::Enter);
+    app.render_silent();
 
     let tail_match = app
         .app
@@ -190,6 +191,7 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     app.type_char('/');
     app.type_text("needle");
     app.press(KeyCode::Enter);
+    app.render_silent();
     let tail_match = app
         .app
         .search
@@ -223,6 +225,68 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     assert!(
         early_row.contains("early needle"),
         "matched row after reverse repeat: {early_row:?}"
+    );
+}
+
+#[test]
+fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
+    let guard = test_home_guard();
+    let mut app = sparse_display_only_search_app("sparse-search-cached-reverse", &guard);
+    app.type_char('g');
+    app.type_char('g');
+
+    app.type_char('/');
+    app.type_text("needle");
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let early_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    let early_row = app
+        .app
+        .transcript_rows_and_breaks_range(early_match.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(
+        early_row.contains("early needle"),
+        "matched row: {early_row:?}"
+    );
+
+    app.type_char('n');
+    app.render_silent();
+    let tail_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    assert!(tail_match.start.row > early_match.start.row);
+    assert_eq!(transcript_row_cursor_row(&app), tail_match.start.row);
+
+    app.type_char('N');
+    app.render_silent();
+    assert_eq!(transcript_row_cursor_row(&app), early_match.start.row);
+    let row = app
+        .app
+        .transcript_rows_and_breaks_range(early_match.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(
+        row.contains("early needle"),
+        "cached reverse repeat did not reveal early match: {row:?}"
     );
 }
 
@@ -266,6 +330,10 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
         .row;
     assert_eq!(transcript_row_cursor_row(&app), match_row);
     assert_eq!(app.app.transcript_win().scroll_top(), match_row - 1);
+
+    app.render_silent();
+    assert_eq!(transcript_row_cursor_row(&app), match_row);
+    assert_eq!(app.app.transcript_win().scroll_top(), match_row - 1);
 }
 
 #[test]
@@ -296,6 +364,13 @@ fn transcript_search_jump_keeps_match_above_bottom_overlay() {
         .viewport
         .map(|v| v.rect.height as crate::smelt_edit::RowIndex)
         .unwrap_or(1);
+    assert_eq!(transcript_row_cursor_row(&app), match_row);
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        match_row.saturating_sub(viewport_rows.saturating_sub(2))
+    );
+
+    app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), match_row);
     assert_eq!(
         app.app.transcript_win().scroll_top(),

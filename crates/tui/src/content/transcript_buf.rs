@@ -2092,6 +2092,10 @@ impl TranscriptProjection {
             })
     }
 
+    pub(crate) fn block_ids_for_node_index(&self, index: usize) -> Option<Vec<BlockId>> {
+        self.render_plan.block_ids_for_node(index)
+    }
+
     pub(crate) fn row_for_anchor(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
