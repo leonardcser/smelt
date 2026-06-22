@@ -343,6 +343,35 @@ impl TestApp {
         self.assert_prompt_typing_and_motion(variant);
     }
 
+    fn install_compaction_prepare_fixture(&mut self) {
+        let mut settings = self.app.core.config.settings.clone();
+        settings.auto_compact = true;
+        settings.compact_threshold = 0.8;
+        settings.compact_keep_recent_groups = 1.0;
+        self.app.set_settings(settings);
+
+        self.app.core.config.context_window = Some(100);
+        let session = &mut self.app.core.session;
+        session.context_tokens = None;
+        session.context_tokens_history_len = None;
+        session.context_token_identity = None;
+        session.display_context_tokens = None;
+        session.display_context_token_identity = None;
+        session.checkpoint = None;
+        session.context_snapshots.clear();
+        session.turn_metas.clear();
+        session.history.clear();
+        session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        self.push_assistant_text("a1");
+        self.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+    }
+
     /// Side-channel: exercise the real compaction prepare-request path through
     /// `HostCall::PrepareRequest`, pair the generated EngineAsk with a response,
     /// and assert the replacement arrives while active-turn state survives.
@@ -356,22 +385,20 @@ impl TestApp {
             self.app.flush_lua_callbacks();
             self.app.drive_lua_tasks();
         }
-        self.drain_cmd();
-
-        self.app.core.config.context_window = Some(100);
-        self.app.core.session.context_tokens = None;
-        self.app.core.session.context_tokens_history_len = None;
-        self.app
-            .core
-            .session
-            .history
-            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
-        self.push_assistant_text("a1");
-        self.app
-            .core
-            .session
-            .history
-            .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+        let drained = self.drain_engine_sends();
+        let drained_request = drained.iter().any(|cmd| {
+            matches!(
+                cmd,
+                protocol::UiCommand::StartTurn(_) | protocol::UiCommand::EngineAsk { .. }
+            )
+        });
+        let logged_request = self.actions().iter().rev().any(|action| {
+            matches!(
+                action,
+                Action::EngineSend(cmd)
+                    if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(_))
+            )
+        });
         // Prepare-request itself drains pending engine events before invoking
         // hooks. Do that before deciding whether the probe should preserve an
         // active turn so a queued completion from an earlier synthetic submit
@@ -381,10 +408,15 @@ impl TestApp {
         }
         // Prepare-request runs before a model request is dispatched. Keep the
         // probe on that lifecycle edge rather than injecting compaction while
-        // a synthetic tool call is already in flight.
-        if self.agent_running() && !self.pending_tool_call_ids().is_empty() {
+        // a synthetic tool call or already-submitted model request is in flight.
+        let in_flight = drained_request
+            || logged_request
+            || (self.agent_running() && !self.pending_tool_call_ids().is_empty());
+        if in_flight {
             return;
         }
+
+        self.install_compaction_prepare_fixture();
         if variant % 2 == 1 {
             self.start_turn(20_000 + u64::from(variant));
         }
@@ -402,15 +434,23 @@ impl TestApp {
                 });
         }
 
-        let ask_id = self
-            .drain_engine_sends()
+        let sends = self.drain_engine_sends();
+        let ask_id = match sends
             .into_iter()
             .filter_map(|cmd| match cmd {
                 protocol::UiCommand::EngineAsk { id, .. } => Some(id),
                 _ => None,
             })
             .next_back()
-            .expect("compaction prepare request should issue EngineAsk");
+        {
+            Some(id) => id,
+            None => match rx.try_recv() {
+                Ok(decision) => {
+                    panic!("expected compaction EngineAsk, got {decision:?}")
+                }
+                Err(err) => panic!("compaction prepare request produced no EngineAsk: {err}"),
+            },
+        };
 
         {
             let _g = crate::lua::install_app_ptr(&mut self.app);
