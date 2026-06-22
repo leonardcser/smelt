@@ -16,8 +16,8 @@ pub fn run(args: Vec<String>) {
     if !artifact.is_file() {
         die(&format!("artifact not found: {}", artifact.display()));
     }
-    let json_targets: Vec<&str> = targets_of(TargetKind::Json).collect();
-    if !json_targets.contains(&target.as_str()) {
+    let json_targets = targets_of(TargetKind::Json);
+    if !json_targets.contains(target) {
         die(&format!(
             "triage only handles {} (other targets have no scenario form)",
             json_targets.join(" / ")

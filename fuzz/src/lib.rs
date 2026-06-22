@@ -2428,7 +2428,8 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             let id = app.current_turn_id().unwrap_or(0);
             let ev = SourceEvent::Engine(EngineEvent::TurnComplete {
                 turn_id: id,
-                history: synth_history(count),
+                first_changed_index: 0,
+                history: Some(synth_history(count)),
                 meta: None,
             });
             (
@@ -2444,6 +2445,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
             let id = app.current_turn_id().unwrap_or(0);
             let ev = SourceEvent::Engine(EngineEvent::HistoryUpdated {
                 turn_id: id,
+                first_changed_index: 0,
                 history: synth_history(count),
             });
             (

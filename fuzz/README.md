@@ -1,6 +1,6 @@
 # smelt fuzz
 
-Fourteen targets covering distinct surfaces:
+Fifteen targets covering distinct surfaces:
 
 | target                    | what it fuzzes                                                               | how                                                                                             |
 | ------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -15,6 +15,7 @@ Fourteen targets covering distinct surfaces:
 | `ansi_parser`             | ANSI SGR parser + wrapped emission                                           | random bytes → lossy UTF-8 + `wrap_ansi` / `emit_ansi_row` UTF-8 boundary checks                |
 | `edit_ops`                | editor/window core (`smelt_edit::Ui`, buffer edits, vim keys, mouse, resize) | focused shell around edit primitives + cursor/selection UTF-8 invariants                        |
 | `transcript_render`       | transcript-producing engine events and renderer projection                   | focused `TestApp` shell: tool/text/thinking/process events + resize/render invariant checks     |
+| `transcript_scroll_ops`   | sparse transcript scrolling, cursor motion, selection drag, and autoscroll   | resumed heterogeneous transcript + semantic scroll trace oracles                                |
 | `provider_body`           | provider request-body construction                                           | low-dependency Anthropic/OpenAI body builders + serialization/schema/cache-key smoke invariants |
 | `provider_stream`         | provider SSE/response parsers                                                | pure SSE draining + Chat Completions/OpenAI/Anthropic stream and JSON parser summaries          |
 | `permissions_rules`       | permission rule compilation/evaluation                                       | random rule sets, shell-aware subpatterns, mode behavior, workspace downgrade oracle            |

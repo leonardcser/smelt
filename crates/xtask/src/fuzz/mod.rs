@@ -49,12 +49,12 @@ pub fn print_usage() {
 }
 
 fn build(args: Vec<String>) {
-    let known: Vec<&str> = all_target_names().collect();
+    let known = all_target_names();
     let targets: Vec<String> = if args.is_empty() {
-        known.iter().map(|name| (*name).to_string()).collect()
+        known.clone()
     } else {
         for target in &args {
-            if !known.contains(&target.as_str()) {
+            if !known.contains(target) {
                 die(&format!(
                     "unknown target `{target}`. Known: {}",
                     known.join(", ")
@@ -120,26 +120,9 @@ pub(super) fn count_files(dir: &Path) -> usize {
     }
 }
 
-/// Every fuzz target this crate knows about. `Json` targets accept the
-/// `Scenario` JSON form (replay + triage); `Bytes` targets take raw
-/// libFuzzer input. Add a new target here once; every subcommand picks
-/// it up automatically.
-pub(super) const TARGETS: &[(&str, TargetKind)] = &[
-    ("smelt_loop", TargetKind::Json),
-    ("lua_loop", TargetKind::Json),
-    ("text_ops", TargetKind::Bytes),
-    ("attached_ops", TargetKind::Bytes),
-    ("cache_invariance", TargetKind::Bytes),
-    ("openai_cache_invariance", TargetKind::Bytes),
-    ("snapshot_roundtrip", TargetKind::Bytes),
-    ("grid_invariants", TargetKind::Bytes),
-    ("ansi_parser", TargetKind::Bytes),
-    ("edit_ops", TargetKind::Bytes),
-    ("provider_body", TargetKind::Bytes),
-    ("transcript_render", TargetKind::Bytes),
-    ("provider_stream", TargetKind::Bytes),
-    ("permissions_rules", TargetKind::Bytes),
-];
+/// Fuzz targets with JSON scenario support. Byte targets are discovered from
+/// `fuzz/Cargo.toml` by selecting bins whose path is under `fuzz_targets/`.
+pub(super) const JSON_TARGETS: &[&str] = &["smelt_loop", "lua_loop"];
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) enum TargetKind {
@@ -147,15 +130,94 @@ pub(super) enum TargetKind {
     Bytes,
 }
 
-pub(super) fn all_target_names() -> impl Iterator<Item = &'static str> {
-    TARGETS.iter().map(|(name, _)| *name)
+pub(super) fn all_target_names() -> Vec<String> {
+    fuzz_manifest_targets()
 }
 
-pub(super) fn targets_of(kind: TargetKind) -> impl Iterator<Item = &'static str> {
-    TARGETS
+pub(super) fn targets_of(kind: TargetKind) -> Vec<String> {
+    all_target_names()
+        .into_iter()
+        .filter(|name| {
+            let is_json = JSON_TARGETS.contains(&name.as_str());
+            match kind {
+                TargetKind::Json => is_json,
+                TargetKind::Bytes => !is_json,
+            }
+        })
+        .collect()
+}
+
+fn fuzz_manifest_targets() -> Vec<String> {
+    let manifest = repo_root().join("fuzz/Cargo.toml");
+    let output = Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+        .unwrap_or_else(|e| {
+            die(&format!(
+                "spawn cargo metadata for {}: {e}",
+                manifest.display()
+            ))
+        });
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        die(&format!(
+            "cargo metadata failed for {}: {stderr}",
+            manifest.display()
+        ));
+    }
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| die(&format!("parse cargo metadata: {e}")));
+    let packages = metadata
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| die("cargo metadata missing packages"));
+    let package = packages
         .iter()
-        .filter(move |(_, k)| *k == kind)
-        .map(|(name, _)| *name)
+        .find(|package| package.get("name").and_then(|v| v.as_str()) == Some("smelt-fuzz"))
+        .unwrap_or_else(|| die("cargo metadata missing smelt-fuzz package"));
+    let targets = package
+        .get("targets")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| die("cargo metadata missing targets"));
+
+    let names: Vec<String> = targets
+        .iter()
+        .filter(|target| metadata_target_is_fuzz_bin(target))
+        .filter_map(|target| {
+            target
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    if names.is_empty() {
+        die("no fuzz targets found in cargo metadata");
+    }
+    names
+}
+
+fn metadata_target_is_fuzz_bin(target: &serde_json::Value) -> bool {
+    let is_bin = target
+        .get("kind")
+        .and_then(|v| v.as_array())
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+    if !is_bin {
+        return false;
+    }
+    target
+        .get("src_path")
+        .and_then(|v| v.as_str())
+        .map(|path| path.replace('\\', "/").contains("/fuzz_targets/"))
+        .unwrap_or(false)
 }
 
 /// `YYYYMMDD-HHMMSS` UTC stamp without pulling chrono into xtask.

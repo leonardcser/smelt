@@ -33,7 +33,7 @@ pub fn run(_args: Vec<String>) {
     let mut fail = false;
 
     for target in targets_of(TargetKind::Json) {
-        let dir = seeds.join(target).join("regression");
+        let dir = seeds.join(&target).join("regression");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -49,7 +49,7 @@ pub fn run(_args: Vec<String>) {
         for seed in &files {
             let name = seed.file_name().and_then(|s| s.to_str()).unwrap_or("<?>");
             let status = Command::new(&replay)
-                .args(["--target", target])
+                .args(["--target", &target])
                 .arg(seed)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -65,7 +65,7 @@ pub fn run(_args: Vec<String>) {
     }
 
     for target in targets_of(TargetKind::Bytes) {
-        let dir = seeds.join(target).join("regression");
+        let dir = seeds.join(&target).join("regression");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -84,7 +84,7 @@ pub fn run(_args: Vec<String>) {
                 "fuzz",
                 "run",
                 "--sanitizer=none",
-                target,
+                &target,
                 dir.to_str().expect("seed dir utf-8"),
                 "--",
                 "-runs=0",

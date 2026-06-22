@@ -47,8 +47,8 @@ pub fn run(args: Vec<String>) {
         std::process::exit(2);
     };
 
-    let known: Vec<&str> = all_target_names().collect();
-    if !known.contains(&target.as_str()) {
+    let known = all_target_names();
+    if !known.contains(&target) {
         die(&format!(
             "unknown target `{target}`. Known: {}",
             known.join(", ")
@@ -133,7 +133,7 @@ fn preflight_corpus(root: &std::path::Path, target: &str) {
 }
 
 fn print_help() {
-    let names: Vec<&str> = all_target_names().collect();
+    let names = all_target_names();
     eprintln!("usage: cargo xtask fuzz run <target> [--fork N] [--cmin] [-- libfuzzer-flags...]");
     eprintln!();
     eprintln!("targets: {}", names.join(", "));

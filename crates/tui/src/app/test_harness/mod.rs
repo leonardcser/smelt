@@ -27,6 +27,9 @@ mod lua;
 mod probes;
 mod state;
 mod synthetic;
+mod transcript_scroll;
+
+pub use transcript_scroll::{TranscriptScrollProbeCommand, TranscriptScrollProbeEdge};
 
 /// One observed out-bound effect of a `SourceEvent`.
 #[derive(Debug, Clone)]
@@ -115,6 +118,7 @@ pub struct TestApp {
     /// Allocation delta for the most recent `feed_one`. `None` when no event
     /// has been fed yet.
     last_alloc: Option<AllocDelta>,
+    transcript_scroll_probe: transcript_scroll::TranscriptScrollProbeState,
 }
 
 pub struct TestAppBuilder {
@@ -302,6 +306,7 @@ impl TestAppBuilder {
             actions: Vec::new(),
             quit: false,
             last_alloc: None,
+            transcript_scroll_probe: transcript_scroll::TranscriptScrollProbeState::default(),
         }
     }
 }

@@ -264,7 +264,7 @@ fn write_blobs(
     Ok(url_to_blob)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "harness"))]
 pub(crate) fn write_transcript_descriptor_suffix(
     session_dir: &std::path::Path,
     start_descriptor_idx: usize,

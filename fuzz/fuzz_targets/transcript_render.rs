@@ -7,7 +7,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use protocol::{Content, EngineEvent, HistoryItem};
-use smelt_fuzz::TestApp;
+use smelt_fuzz::{runtime::with_current_thread_runtime, TestApp};
 use tui::app::test_harness::SourceEvent;
 
 #[derive(Arbitrary, Debug)]
@@ -37,11 +37,10 @@ enum Op {
 }
 
 fn run(input: Input) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build runtime");
-    let _guard = runtime.enter();
+    with_current_thread_runtime("transcript_render", || run_with_app(input));
+}
+
+fn run_with_app(input: Input) {
     let mut app = TestApp::builder().build();
 
     for op in input.ops.into_iter().take(96) {
@@ -71,7 +70,8 @@ fn run(input: Input) {
                 let turn_id = app.current_turn_id().unwrap_or(0);
                 app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
                     turn_id,
-                    history: history(count),
+                    first_changed_index: 0,
+                    history: Some(history(count)),
                     meta: None,
                 }));
             }

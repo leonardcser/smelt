@@ -115,6 +115,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "transcript_scroll_ops"
+path = "fuzz_targets/transcript_scroll_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "provider_stream"
 path = "fuzz_targets/provider_stream.rs"
 test = false

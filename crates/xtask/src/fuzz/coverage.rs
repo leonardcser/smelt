@@ -142,7 +142,7 @@ fn parse_args(args: Vec<String>) -> (Vec<String>, Duration) {
         }
     }
     if targets.is_empty() {
-        targets = all_target_names().map(String::from).collect();
+        targets = all_target_names();
     }
     (targets, timeout)
 }
