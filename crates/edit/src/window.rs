@@ -808,6 +808,23 @@ impl Window {
         }
     }
 
+    /// Apply a projected viewport row and return the scroll mode that took effect.
+    pub fn apply_projected_scroll(
+        &mut self,
+        row: RowIndex,
+        desired: VerticalScroll,
+    ) -> VerticalScroll {
+        let effective = match desired {
+            VerticalScroll::Tail if !self.selection_active() => VerticalScroll::Tail,
+            VerticalScroll::Tail | VerticalScroll::Pinned => VerticalScroll::Pinned,
+        };
+        match effective {
+            VerticalScroll::Tail => self.resolve_tail_scroll(row),
+            VerticalScroll::Pinned => self.pin_scroll(row),
+        }
+        effective
+    }
+
     pub fn resolve_tail_scroll(&mut self, row: RowIndex) {
         self.scroll_top = row;
         if let Some(viewport) = self.viewport.as_mut() {

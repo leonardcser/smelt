@@ -215,7 +215,7 @@ impl TuiApp {
                 let fallback_cursor_screen_row = ui
                     .win(request.win)
                     .and_then(|win| win.cursor_screen_row(viewport_rows));
-                let transcript_follow_tail;
+                let transcript_scroll_state;
                 let transcript_cursor_range;
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
@@ -241,7 +241,7 @@ impl TuiApp {
                         return;
                     };
                     let applied = transcript.project_applied_viewport(lua, buf, &theme, plan);
-                    transcript_follow_tail = applied.follow_tail;
+                    let desired_scroll_state = applied.scroll_state;
                     transcript_cursor_range = applied.cursor_range;
                     let tdata = applied.materialized_rows;
                     debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
@@ -260,7 +260,10 @@ impl TuiApp {
                                 <= tdata.total_rows.saturating_sub(viewport_rows as _)
                         );
                         win.apply_materialized_rows(tdata);
-                        win.set_resolved_scroll(tdata.clamped_scroll);
+                        transcript_scroll_state =
+                            win.apply_projected_scroll(tdata.clamped_scroll, desired_scroll_state);
+                    } else {
+                        transcript_scroll_state = desired_scroll_state;
                     }
                 }
                 let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
@@ -284,7 +287,10 @@ impl TuiApp {
                     }
                     if win.has_materialized_rows() {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
-                        if transcript_follow_tail {
+                        if matches!(
+                            transcript_scroll_state,
+                            crate::smelt_edit::VerticalScroll::Tail
+                        ) {
                             win.reveal_row_cursor(buf, viewport_rows);
                         }
                         win.scroll_left = 0;

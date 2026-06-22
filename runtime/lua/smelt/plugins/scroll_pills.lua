@@ -49,9 +49,7 @@ local function should_show_bottom(scroll)
   return scroll
     and scroll.viewport
     and scroll.viewport > 0
-    and scroll.overflow
-    and not scroll.follow
-    and not scroll.at_bottom
+    and scroll.needs_tail_repin
 end
 
 local function can_show_top(scroll)
@@ -85,7 +83,7 @@ local function open_bottom()
   win:on("press", function()
     if state.transcript_win then
       state.transcript_win:scroll("tail")
-      close_all()
+      close_bottom()
     end
   end)
   state.bottom_buf = buf
@@ -240,6 +238,8 @@ end)
 smelt.events.on("input_submit", function()
   if state.transcript_win then
     state.transcript_win:scroll("tail")
+    close_bottom()
+  else
+    close_all()
   end
-  close_all()
 end)

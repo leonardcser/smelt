@@ -737,7 +737,7 @@
 ---@field clear_placeholder fun(): nil Clear the window's placeholder text and opts. Idempotent.
 ---@field placeholder_text fun(): string? Return the current placeholder text, or `nil` if none is set.
 ---@field link_scroll fun(others: smelt.win.Win): smelt.win.Win Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.
----@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
+---@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the window is not following tail, even when `at_bottom` is true). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
 
 --- Where a virtual-text chunk is rendered relative to the line.
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"

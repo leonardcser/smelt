@@ -1534,6 +1534,114 @@ mod tests {
     }
 
     #[test]
+    fn transcript_wheel_down_to_bottom_reengages_tail_follow() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        let tail_top = app.transcript_win().scroll_top();
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            row: vp.rect.top,
+            column: vp.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        app.render_normal_to(&mut std::io::sink());
+        assert!(
+            app.transcript_win().scroll_top() < tail_top,
+            "wheel up should move off tail"
+        );
+        assert!(!app.transcript_win().is_following_tail());
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            row: vp.rect.top,
+            column: vp.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        app.render_normal_to(&mut std::io::sink());
+
+        let win = app.transcript_win();
+        assert_eq!(win.scroll_top(), tail_top);
+        assert!(win.is_following_tail());
+    }
+
+    #[test]
+    fn transcript_page_down_to_bottom_reengages_tail_follow() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        let tail_top = app.transcript_win().scroll_top();
+        let viewport_rows = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport")
+            .rect
+            .height;
+        let start_top = tail_top.saturating_sub(viewport_rows as crate::smelt_edit::RowIndex);
+        app.transcript_win_mut().pin_scroll(start_top);
+        assert!(!app.transcript_win().is_following_tail());
+
+        app.record_transcript_scroll_intent(
+            "page_down",
+            TranscriptScrollIntent::PageDelta { pages: 1 },
+            start_top,
+        );
+        app.render_normal_to(&mut std::io::sink());
+
+        let win = app.transcript_win();
+        assert_eq!(win.scroll_top(), tail_top);
+        assert!(win.is_following_tail());
+    }
+
+    #[test]
+    fn transcript_scrollbar_click_bottom_reengages_tail_follow() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        let tail_top = app.transcript_win().scroll_top();
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        let bar = vp.scrollbar.expect("transcript scrollbar");
+        let start_top = tail_top.saturating_sub(vp.rect.height as crate::smelt_edit::RowIndex);
+        app.transcript_win_mut().pin_scroll(start_top);
+        assert!(!app.transcript_win().is_following_tail());
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: vp.rect.bottom().saturating_sub(1),
+            column: bar.col,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        app.render_normal_to(&mut std::io::sink());
+
+        let win = app.transcript_win();
+        assert_eq!(win.scroll_top(), tail_top);
+        assert!(win.is_following_tail());
+    }
+
+    #[test]
     fn transcript_pinned_scroll_does_not_tail_follow_after_growth() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {

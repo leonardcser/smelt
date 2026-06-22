@@ -611,6 +611,10 @@ fn scroll_pills_source_uses_only_semantic_transcript_navigation() {
         !SCROLL_PILLS_LUA.contains(":reveal("),
         "top scroll pill must not use generic row reveal for transcript navigation"
     );
+    assert!(
+        SCROLL_PILLS_LUA.contains("scroll.needs_tail_repin"),
+        "bottom scroll pill should use the derived tail-repin scroll state"
+    );
 }
 
 #[test]
@@ -621,6 +625,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         local active = {}
         local cells = {}
         local handlers = {}
+        local win_handlers = {}
         local focus = "transcript"
         local cursor = 14
         local blocks = {}
@@ -637,12 +642,29 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
           follow = false,
           at_top = false,
           at_bottom = false,
+          needs_tail_repin = true,
         }
         local rect = { row = 0, col = 0, width = 30, height = 5 }
         local transcript_win = {}
         function transcript_win:cursor() return cursor end
         function transcript_win:rect() return rect end
-        function transcript_win:scroll() return scroll end
+        function transcript_win:scroll(arg)
+          if arg == "tail" then
+            scroll = {
+              top = scroll.max,
+              viewport = scroll.viewport,
+              total = scroll.total,
+              max = scroll.max,
+              overflow = scroll.overflow,
+              follow = true,
+              at_top = scroll.max == 0,
+              at_bottom = true,
+              needs_tail_repin = false,
+            }
+            return transcript_win
+          end
+          return scroll
+        end
         function transcript_win:on(event, fn) handlers[event] = fn end
         function transcript_win:reveal()
           error("scroll pill should reveal transcript blocks semantically")
@@ -665,8 +687,15 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
             end,
           },
           win = {
-            new = function()
-              return { on = function(_, event, fn) handlers[event] = fn end }
+            new = function(_, opts)
+              local name = opts and opts.name or "win"
+              return {
+                on = function(_, event, fn)
+                  win_handlers[name] = win_handlers[name] or {}
+                  win_handlers[name][event] = fn
+                  handlers[event] = fn
+                end
+              }
             end,
             transcript = function() return transcript_win end,
           },
@@ -720,11 +749,13 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         function __set_cursor(row) cursor = row end
         function __set_focus(value) focus = value end
         function __set_blocks(value) blocks = value end
+        function __set_scroll(value) scroll = value end
         function __previous_block_calls() return previous_block_calls end
         function __previous_block_role() return previous_block_role end
         function __row_lookup_calls() return row_lookup_calls end
         function __revealed_block() return revealed_block end
         function __event(name) assert(handlers[name], name)() end
+        function __win_event(win, event) assert(win_handlers[win] and win_handlers[win][event], win .. ":" .. event)() end
         function __publish(name) assert(cells[name], name)() end
         "#,
     )
@@ -799,4 +830,48 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         .expect("drive bottom pill focus refresh");
     assert!(bottom_after_blur);
     assert!(!bottom_after_focus);
+
+    let bottom_at_bottom_without_follow: bool = lua
+        .load(
+            r#"
+            __set_focus("prompt")
+            __set_cursor(12)
+            __set_scroll({
+              top = 25,
+              viewport = 5,
+              total = 30,
+              max = 25,
+              overflow = true,
+              follow = false,
+              at_top = false,
+              at_bottom = true,
+              needs_tail_repin = true,
+            })
+            __event("scrolled")
+            return __active("smelt.scroll_pills.bottom")
+            "#,
+        )
+        .eval()
+        .expect("drive at-bottom pinned bottom pill refresh");
+    assert!(bottom_at_bottom_without_follow);
+
+    let (top_before_bottom_press, bottom_after_bottom_press, top_after_bottom_press): (
+        bool,
+        bool,
+        bool,
+    ) = lua
+        .load(
+            r#"
+            local top_before = __active("smelt.scroll_pills.top")
+            __win_event("smelt.scroll_pills.bottom.win", "press")
+            return top_before,
+              __active("smelt.scroll_pills.bottom"),
+              __active("smelt.scroll_pills.top")
+            "#,
+        )
+        .eval()
+        .expect("press bottom pill");
+    assert!(top_before_bottom_press);
+    assert!(!bottom_after_bottom_press);
+    assert!(top_after_bottom_press);
 }

@@ -3,10 +3,75 @@ use crate::app::transcript_scroll_trace::{
     TranscriptScrollIntent, TranscriptScrollTraceRenderInput,
 };
 use crate::app::TuiApp;
-use crate::smelt_edit::RowIndex;
+use crate::smelt_edit::{RowIndex, WinId};
 use serde_json::json;
 
+pub(crate) enum WindowScrollCommand {
+    Pin(RowIndex),
+    Tail,
+}
+
 impl TuiApp {
+    pub(crate) fn scroll_window(&mut self, win_id: WinId, scroll: WindowScrollCommand) {
+        let Some(win) = self.ui.win(win_id) else {
+            return;
+        };
+        let is_transcript = win_id == crate::app::TRANSCRIPT_WIN;
+        let window_scroll_before = is_transcript.then(|| self.transcript_scroll_top());
+        let buf_id = win.buf;
+
+        match scroll {
+            WindowScrollCommand::Pin(target) => {
+                let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0);
+                let resolved_scroll = {
+                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                    if let (Some(win), Some(buf)) = (win, buf) {
+                        win.scroll_to_preserving_cursor_screen_row(target, buf, viewport_rows);
+                        win.pin_current_scroll();
+                        Some(win.scroll_top())
+                    } else {
+                        None
+                    }
+                };
+                if let (true, Some(scroll_top), Some(window_scroll_before)) =
+                    (is_transcript, resolved_scroll, window_scroll_before)
+                {
+                    self.record_transcript_scroll_intent(
+                        "lua_scroll",
+                        TranscriptScrollIntent::ExactContentAnchor(
+                            crate::app::transcript_scroll_trace::TranscriptTraceAnchor::EstimatedRow(
+                                scroll_top,
+                            ),
+                        ),
+                        window_scroll_before,
+                    );
+                    self.request_transient_render();
+                }
+            }
+            WindowScrollCommand::Tail => {
+                let jumped = {
+                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                    if let (Some(win), Some(buf)) = (win, buf) {
+                        win.jump_to_bottom(buf);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if let (true, true, Some(window_scroll_before)) =
+                    (is_transcript, jumped, window_scroll_before)
+                {
+                    self.record_transcript_scroll_intent(
+                        "lua_scroll_tail",
+                        TranscriptScrollIntent::Tail,
+                        window_scroll_before,
+                    );
+                    self.request_transient_render();
+                }
+            }
+        }
+    }
+
     pub(crate) fn record_transcript_scroll_intent(
         &mut self,
         label: impl Into<String>,
