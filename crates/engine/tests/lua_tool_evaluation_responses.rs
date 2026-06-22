@@ -145,25 +145,22 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
     let server = tokio::spawn(run_server(listener));
 
     let config = EngineConfig {
-        api: ApiConfig {
-            base: format!("http://{addr}"),
-            key: "test-key".into(),
-            key_env: "TEST_KEY".into(),
-            provider_type: "anthropic-compatible".into(),
-            model_config: ModelConfig {
-                max_tokens: Some(4096),
-                ..ModelConfig::default()
-            },
-        },
-        model: "test-model".into(),
-        instructions: None,
         system_prompt_override: Some("test system".into()),
-        system_prompt_behavior: engine::SystemPromptBehavior::Interactive,
-        cwd: PathBuf::from("/tmp"),
-        skill_section: None,
-        redact_secrets: false,
-        cache_ttl_long: false,
-        clock: Arc::new(engine::clock::RealClock),
+        ..EngineConfig::new(
+            ApiConfig {
+                base: format!("http://{addr}"),
+                key: "test-key".into(),
+                key_env: "TEST_KEY".into(),
+                provider_type: "anthropic-compatible".into(),
+                model_config: ModelConfig {
+                    max_tokens: Some(4096),
+                    ..ModelConfig::default()
+                },
+            },
+            "test-model",
+            PathBuf::from("/tmp"),
+            Arc::new(engine::clock::RealClock),
+        )
     };
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));

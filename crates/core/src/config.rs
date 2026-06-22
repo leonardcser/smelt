@@ -224,6 +224,10 @@ settings! {
     /// compaction. A group is a user message, a plain assistant message,
     /// or an assistant tool-use step together with its tool outputs.
     compact_keep_recent_groups: Number = 1.0;
+    /// Request audit storage mode. `summary` keeps timing, token, cost, and size
+    /// metadata only; `full` stores reconstructable provider payloads; `off`
+    /// disables request audit writes.
+    request_audit:         String = "summary", choices: ["off", "summary", "full"];
     /// Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral
     /// TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.

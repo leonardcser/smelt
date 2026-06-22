@@ -596,16 +596,18 @@ async fn main() {
             Arc::clone(&permissions),
         ));
 
+    let request_audit_setting =
+        std::env::var("SMELT_REQUEST_AUDIT").unwrap_or_else(|_| settings.request_audit.clone());
+    let request_audit =
+        engine::RequestAuditMode::parse(&request_audit_setting).unwrap_or_else(|| {
+            eprintln!(
+                "warning: invalid request audit mode {request_audit_setting:?}, defaulting to summary"
+            );
+            engine::RequestAuditMode::Summary
+        });
+
     let engine_handle = engine::start(
         engine::EngineConfig {
-            api: engine::ApiConfig {
-                base: api_base,
-                key: api_key,
-                key_env: api_key_env.clone(),
-                provider_type,
-                model_config: (&model_config).into(),
-            },
-            model: model.clone(),
             instructions: prompt_inputs.instructions.clone(),
             system_prompt_override: prompt_inputs.system_prompt_override.clone(),
             system_prompt_behavior: if args.headless {
@@ -613,11 +615,22 @@ async fn main() {
             } else {
                 engine::SystemPromptBehavior::Interactive
             },
-            cwd: cwd.clone(),
             skill_section: prompt_inputs.skill_section.clone(),
             redact_secrets: settings.redact_secrets,
             cache_ttl_long: settings.cache_ttl_long,
-            clock: Arc::clone(&clock),
+            request_audit,
+            ..engine::EngineConfig::new(
+                engine::ApiConfig {
+                    base: api_base,
+                    key: api_key,
+                    key_env: api_key_env.clone(),
+                    provider_type,
+                    model_config: (&model_config).into(),
+                },
+                model.clone(),
+                cwd.clone(),
+                Arc::clone(&clock),
+            )
         },
         dispatcher,
     );

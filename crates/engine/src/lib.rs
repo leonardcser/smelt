@@ -224,6 +224,32 @@ pub struct RequestModelConfig {
     pub api: ApiConfig,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestAuditMode {
+    Off,
+    Summary,
+    Full,
+}
+
+impl RequestAuditMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "disabled" => Some(Self::Off),
+            "summary" | "summaries" => Some(Self::Summary),
+            "full" | "trace" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    fn payload_mode(self) -> Option<smelt_store::RequestAuditPayloadMode> {
+        match self {
+            Self::Off => None,
+            Self::Summary => Some(smelt_store::RequestAuditPayloadMode::Summary),
+            Self::Full => Some(smelt_store::RequestAuditPayloadMode::Full),
+        }
+    }
+}
+
 pub struct EngineConfig {
     pub api: ApiConfig,
     pub model: String,
@@ -241,10 +267,34 @@ pub struct EngineConfig {
     /// Use the Anthropic 1-hour cache TTL instead of the default 5-minute
     /// one when emitting `cache_control` markers.
     pub cache_ttl_long: bool,
+    pub request_audit: RequestAuditMode,
     /// Source of monotonic + wall-clock time. Production uses
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
     /// [`clock::VirtualClock`] so scenarios can replay against advanced time.
     pub clock: Arc<dyn clock::Clock>,
+}
+
+impl EngineConfig {
+    pub fn new(
+        api: ApiConfig,
+        model: impl Into<String>,
+        cwd: PathBuf,
+        clock: Arc<dyn clock::Clock>,
+    ) -> Self {
+        Self {
+            api,
+            model: model.into(),
+            instructions: None,
+            system_prompt_override: None,
+            system_prompt_behavior: SystemPromptBehavior::Interactive,
+            cwd,
+            skill_section: None,
+            redact_secrets: false,
+            cache_ttl_long: false,
+            request_audit: RequestAuditMode::Summary,
+            clock,
+        }
+    }
 }
 
 pub struct EngineHandle {

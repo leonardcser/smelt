@@ -372,6 +372,7 @@ fn spawn_engine_ask(
     let pricing = PricingContext::from_api(&api);
     let tx = event_tx.clone();
     let cache_ttl_long = config.cache_ttl_long;
+    let audit_mode = config.request_audit;
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
         let log_session_dir = session_dir.clone();
@@ -441,7 +442,7 @@ fn spawn_engine_ask(
                     background: true,
                 };
                 if let Err(err) =
-                    crate::request_log::append(&log_session_dir, ctx, &info, &resolved)
+                    crate::request_log::append(&log_session_dir, ctx, &info, &resolved, audit_mode)
                 {
                     let _ = audit_tx.send(EngineEvent::RequestAuditError {
                         message: format!("request audit write failed: {err}"),
@@ -2416,6 +2417,7 @@ impl<'a> Turn<'a> {
             let event_tx = self.event_tx.clone();
             let turn_id = self.turn_id;
             let history_len = self.history.len();
+            let audit_mode = self.config.request_audit;
             // Convert the engine's `Vec<HistoryItem>` to the wire-format
             // `Vec<Message>` the provider speaks. Pairing is invariant-safe
             // by construction (every `AssistantStep` carries its
@@ -2431,7 +2433,9 @@ impl<'a> Turn<'a> {
                     history_len: Some(history_len),
                     background: false,
                 };
-                if let Err(err) = crate::request_log::append(&session_dir, ctx, &info, &pricing) {
+                if let Err(err) =
+                    crate::request_log::append(&session_dir, ctx, &info, &pricing, audit_mode)
+                {
                     let _ = event_tx.send(EngineEvent::RequestAuditError {
                         message: format!("request audit write failed: {err}"),
                     });
@@ -2746,6 +2750,13 @@ mod tests {
         }
     }
 
+    fn test_engine_config(clock: std::sync::Arc<dyn crate::clock::Clock>) -> EngineConfig {
+        EngineConfig {
+            system_prompt_override: Some("sys".into()),
+            ..EngineConfig::new(api_cfg(), "m", std::path::PathBuf::from("/tmp"), clock)
+        }
+    }
+
     #[test]
     fn current_turn_content_classifies_internal_notes() {
         let client = reqwest::Client::new();
@@ -2755,18 +2766,7 @@ mod tests {
         let (host_tx, _host_rx) = mpsc::unbounded_channel();
         let clock: std::sync::Arc<dyn crate::clock::Clock> =
             std::sync::Arc::new(crate::clock::RealClock);
-        let config = EngineConfig {
-            api: api_cfg(),
-            model: "m".into(),
-            instructions: None,
-            system_prompt_override: Some("sys".into()),
-            system_prompt_behavior: crate::SystemPromptBehavior::Interactive,
-            cwd: std::path::PathBuf::from("/tmp"),
-            skill_section: None,
-            redact_secrets: false,
-            cache_ttl_long: false,
-            clock: clock.clone(),
-        };
+        let config = test_engine_config(clock.clone());
         let provider = Provider::new(
             "https://x".into(),
             "k".into(),
@@ -2839,18 +2839,7 @@ mod tests {
         let note = protocol::HistoryNote::process_status_event(
             protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
         );
-        let config = EngineConfig {
-            api: api_cfg(),
-            model: "m".into(),
-            instructions: None,
-            system_prompt_override: Some("sys".into()),
-            system_prompt_behavior: crate::SystemPromptBehavior::Interactive,
-            cwd: std::path::PathBuf::from("/tmp"),
-            skill_section: None,
-            redact_secrets: false,
-            cache_ttl_long: false,
-            clock: std::sync::Arc::new(crate::clock::RealClock),
-        };
+        let config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
         let mut handle = crate::start(config, Box::new(crate::tools::EmptyDispatcher::new()));
         drop(handle.take_host_rx());
 

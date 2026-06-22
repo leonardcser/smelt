@@ -9,10 +9,14 @@ pub fn append(
     ctx: RequestContext,
     info: &crate::provider::RequestAttemptInfo<'_>,
     pricing: &crate::pricing::ResolvedPricing,
-) -> Result<i64, smelt_store::StoreError> {
+    mode: crate::RequestAuditMode,
+) -> Result<Option<i64>, smelt_store::StoreError> {
+    let Some(payload_mode) = mode.payload_mode() else {
+        return Ok(None);
+    };
     let entry = build_entry(ctx, info, pricing);
     let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
-    db.append_request_attempt(&entry)
+    db.append_request_attempt(&entry, payload_mode).map(Some)
 }
 
 /// Static context for a logical request.
@@ -194,6 +198,53 @@ mod tests {
     }
 
     #[test]
+    fn request_log_off_skips_database_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_dir = tmp.path();
+        let body = serde_json::json!({"model": "gpt-test", "messages": []});
+        let resp = LLMResponse {
+            content: Some("hello".into()),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: Vec::new(),
+            usage: sample_usage(),
+            tokens_per_sec: None,
+        };
+        let info = RequestAttemptInfo {
+            url: "https://api.example.com/v1/chat/completions",
+            provider_kind: ProviderKind::OpenAiCompatible,
+            model: "gpt-test",
+            body: &body,
+            attempt: 1,
+            elapsed_ms: 42,
+            result: Ok(&resp),
+            raw_response: None,
+            http_status: Some(200),
+            error_body: None,
+        };
+        let ctx = RequestContext {
+            request_id: 7,
+            kind: "turn".into(),
+            turn_id: Some(7),
+            ask_id: None,
+            history_len: Some(3),
+            background: false,
+        };
+
+        let id = append(
+            session_dir,
+            ctx,
+            &info,
+            &zero_pricing(),
+            crate::RequestAuditMode::Off,
+        )
+        .unwrap();
+
+        assert!(id.is_none());
+        assert!(!session_dir.join("session.db").exists());
+    }
+
+    #[test]
     fn request_log_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let session_dir = tmp.path();
@@ -228,7 +279,14 @@ mod tests {
             history_len: Some(3),
             background: false,
         };
-        append(session_dir, ctx, &info, &zero_pricing()).unwrap();
+        append(
+            session_dir,
+            ctx,
+            &info,
+            &zero_pricing(),
+            crate::RequestAuditMode::Full,
+        )
+        .unwrap();
 
         let err = ProviderError::Network("timeout".into());
         let info_err = RequestAttemptInfo {
@@ -251,7 +309,14 @@ mod tests {
             history_len: Some(3),
             background: false,
         };
-        append(session_dir, ctx_err, &info_err, &zero_pricing()).unwrap();
+        append(
+            session_dir,
+            ctx_err,
+            &info_err,
+            &zero_pricing(),
+            crate::RequestAuditMode::Full,
+        )
+        .unwrap();
 
         let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let attempts = db

@@ -252,8 +252,14 @@ impl SessionDb {
     pub fn append_request_attempt(
         &self,
         entry: &protocol::request_log::RequestLogEntry,
+        payload_mode: request_audit::RequestAuditPayloadMode,
     ) -> Result<i64> {
-        request_audit::append_request_attempt(&self.conn, entry, self.object_compression)
+        request_audit::append_request_attempt(
+            &self.conn,
+            entry,
+            self.object_compression,
+            payload_mode,
+        )
     }
 
     pub fn query_request_attempts(
@@ -608,8 +614,8 @@ mod tests {
     use super::*;
     use crate::session_snapshot::SessionSideTableSuffixes;
     use crate::{
-        benchmark_zstd_compression, ObjectCodec, RequestAuditOrder, DEFAULT_ZSTD_LEVEL,
-        DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
+        benchmark_zstd_compression, ObjectCodec, RequestAuditOrder, RequestAuditPayloadMode,
+        DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
     };
 
     #[test]
@@ -1729,7 +1735,9 @@ mod tests {
             background: false,
         };
 
-        let id = db.append_request_attempt(&entry).unwrap();
+        let id = db
+            .append_request_attempt(&entry, RequestAuditPayloadMode::Full)
+            .unwrap();
         let attempts = db
             .query_request_attempts(&RequestAuditQuery {
                 request_id: Some("9".into()),
@@ -1757,7 +1765,193 @@ mod tests {
             .connection()
             .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(object_count, 2);
+        assert!(object_count >= 4);
+        let manifest_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM objects WHERE kind = 'request_body_manifest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(manifest_count, 1);
+    }
+
+    #[test]
+    fn request_audit_summary_mode_omits_payload_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let body = serde_json::json!({
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let entry = protocol::request_log::RequestLogEntry {
+            request_id: 10,
+            kind: "turn".into(),
+            turn_id: Some(10),
+            ask_id: None,
+            history_len: Some(1),
+            timestamp_ms: 1000,
+            provider_kind: "openai".into(),
+            api_base: "https://api.example.test".into(),
+            model: "model-a".into(),
+            url: "https://api.example.test/v1/chat/completions".into(),
+            http_status: Some(200),
+            body: body.clone(),
+            prompt_cache_key: None,
+            stream: true,
+            system_prompt: None,
+            messages: None,
+            tools: None,
+            response: Some(protocol::request_log::RequestResponse {
+                content: Some("hello".into()),
+                reasoning: None,
+                tool_calls: None,
+                raw: Some(serde_json::json!({"id": "resp-1"})),
+            }),
+            usage: None,
+            cost_usd: None,
+            tokens_per_sec: None,
+            elapsed_ms: Some(250),
+            attempt: 1,
+            error: None,
+            background: false,
+        };
+
+        let id = db
+            .append_request_attempt(&entry, RequestAuditPayloadMode::Summary)
+            .unwrap();
+        let attempts = db
+            .query_request_attempts(&RequestAuditQuery::default())
+            .unwrap();
+        assert_eq!(attempts[0].id, id);
+        assert_eq!(
+            attempts[0].raw_body_size,
+            serde_json::to_vec(&body).unwrap().len() as u64
+        );
+        assert!(attempts[0].body_hash.is_none());
+        assert!(attempts[0].response_hash.is_none());
+        let payloads = db.request_payloads(id).unwrap().unwrap();
+        assert!(payloads.body.is_none());
+        assert!(payloads.response.is_none());
+        let object_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(object_count, 0);
+    }
+
+    #[test]
+    fn request_audit_full_mode_dedupes_repeated_prefix_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = serde_json::json!({
+            "model": "model-a",
+            "input": [
+                {"role": "user", "content": "one"},
+                {"type": "function_call_output", "call_id": "c1", "output": "same"}
+            ],
+        });
+        let second = serde_json::json!({
+            "model": "model-a",
+            "input": [
+                {"role": "user", "content": "one"},
+                {"type": "function_call_output", "call_id": "c1", "output": "same"},
+                {"role": "assistant", "content": "two"}
+            ],
+        });
+        let mut entry = protocol::request_log::RequestLogEntry {
+            request_id: 11,
+            kind: "turn".into(),
+            turn_id: Some(11),
+            ask_id: None,
+            history_len: Some(1),
+            timestamp_ms: 1000,
+            provider_kind: "openai".into(),
+            api_base: "https://api.example.test".into(),
+            model: "model-a".into(),
+            url: "https://api.example.test/v1/responses".into(),
+            http_status: Some(200),
+            body: first.clone(),
+            prompt_cache_key: None,
+            stream: true,
+            system_prompt: None,
+            messages: None,
+            tools: None,
+            response: None,
+            usage: None,
+            cost_usd: None,
+            tokens_per_sec: None,
+            elapsed_ms: Some(250),
+            attempt: 1,
+            error: None,
+            background: false,
+        };
+        let first_id = db
+            .append_request_attempt(&entry, RequestAuditPayloadMode::Full)
+            .unwrap();
+        entry.timestamp_ms = 2000;
+        entry.body = second.clone();
+        let second_id = db
+            .append_request_attempt(&entry, RequestAuditPayloadMode::Full)
+            .unwrap();
+
+        assert_eq!(
+            db.request_payloads(first_id)
+                .unwrap()
+                .unwrap()
+                .body
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            db.request_payloads(second_id)
+                .unwrap()
+                .unwrap()
+                .body
+                .unwrap(),
+            second
+        );
+        let item_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM objects WHERE kind = 'request_body_item'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(item_count, 3);
+        let second_item_ref_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM request_object_refs WHERE request_attempt_id = ?1 AND role = 'body_item'",
+                [second_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(second_item_ref_count, 3);
+        let second_parent_ref_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM request_object_refs WHERE request_attempt_id = ?1 AND role = 'body_parent'",
+                [second_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(second_parent_ref_count, 1);
+        let second_manifest_hash: String = db
+            .connection()
+            .query_row(
+                "SELECT body_hash FROM request_attempts WHERE id = ?1",
+                [second_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let second_manifest: serde_json::Value =
+            serde_json::from_slice(&db.object_bytes(&second_manifest_hash).unwrap().unwrap())
+                .unwrap();
+        assert!(second_manifest["parent_hash"].is_string());
+        assert_eq!(second_manifest["item_hashes"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -1899,7 +2093,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(request_ref_count, 2);
+        assert!(request_ref_count >= 4);
         let duplicate_request_object_count: i64 = db
             .connection()
             .query_row(
