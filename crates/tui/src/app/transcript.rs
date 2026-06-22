@@ -34,6 +34,9 @@ use std::time::{Duration, Instant};
 const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
 const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
 const TRANSCRIPT_ACTIVE_DESCRIPTOR_WINDOW_MAX_MULTIPLIER: usize = 3;
+const TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS: usize = 512;
+const TRANSCRIPT_DESCRIPTOR_PAGE_SIZE: usize = 128;
+const TRANSCRIPT_DESCRIPTOR_CACHE_GUARD_PAGES: usize = 2;
 const TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS: RowIndex = 2;
 const TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE: usize = 1024;
 
@@ -186,6 +189,13 @@ impl SqliteTranscriptStore {
             .read_transcript_descriptor_tail_slice_with_total(total, total)
     }
 
+    fn read_descriptor_slice(
+        &self,
+        range: smelt_store::TranscriptDescriptorRange,
+    ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
+        self.db.read_transcript_descriptor_slice(range)
+    }
+
     fn estimated_descriptor_rows(
         &self,
         width: u16,
@@ -193,6 +203,39 @@ impl SqliteTranscriptStore {
     ) -> smelt_store::Result<u64> {
         self.db
             .transcript_descriptor_estimated_rows(range.into(), width)
+    }
+}
+
+#[derive(Default)]
+struct TranscriptStoreCache {
+    store: Option<(PathBuf, SqliteTranscriptStore)>,
+}
+
+impl TranscriptStoreCache {
+    fn store_for_session(
+        &mut self,
+        session_dir: Option<&PathBuf>,
+    ) -> Option<&SqliteTranscriptStore> {
+        let session_dir = session_dir?.clone();
+        let needs_open = self
+            .store
+            .as_ref()
+            .is_none_or(|(open_dir, _)| open_dir != &session_dir);
+        if needs_open {
+            let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
+            self.store = Some((session_dir, store));
+        }
+        self.store.as_ref().map(|(_, store)| store)
+    }
+
+    fn read_descriptor_slice(
+        &mut self,
+        session_dir: Option<&PathBuf>,
+        range: smelt_store::TranscriptDescriptorRange,
+    ) -> Option<smelt_store::TranscriptDescriptorSlice> {
+        self.store_for_session(session_dir)?
+            .read_descriptor_slice(range)
+            .ok()
     }
 }
 
@@ -366,6 +409,78 @@ impl SparseTranscriptDescriptors {
                 .any(|loaded| loaded.start <= range.start && loaded.end >= range.end)
     }
 
+    fn missing_ranges(
+        &self,
+        range: &Range<smelt_store::TranscriptDescriptorIndex>,
+    ) -> Vec<Range<smelt_store::TranscriptDescriptorIndex>> {
+        if range.start >= range.end {
+            return Vec::new();
+        }
+        let mut missing = Vec::new();
+        let mut cursor = range.start;
+        for loaded in &self.loaded_ranges {
+            if loaded.end <= cursor {
+                continue;
+            }
+            if loaded.start >= range.end {
+                break;
+            }
+            if loaded.start > cursor {
+                missing.push(cursor..loaded.start.min(range.end));
+            }
+            cursor = cursor.max(loaded.end);
+            if cursor >= range.end {
+                break;
+            }
+        }
+        if cursor < range.end {
+            missing.push(cursor..range.end);
+        }
+        missing
+    }
+
+    fn cache_range_around(
+        &self,
+        range: &Range<smelt_store::TranscriptDescriptorIndex>,
+    ) -> Range<smelt_store::TranscriptDescriptorIndex> {
+        let Some(total) = self.total_count else {
+            return range.clone();
+        };
+        let guard =
+            TRANSCRIPT_DESCRIPTOR_PAGE_SIZE.saturating_mul(TRANSCRIPT_DESCRIPTOR_CACHE_GUARD_PAGES);
+        let mut start = range.start.get().saturating_sub(guard);
+        let mut end = range.end.get().saturating_add(guard).min(total);
+        if end.saturating_sub(start) >= TRANSCRIPT_DESCRIPTOR_PAGE_SIZE {
+            start = start / TRANSCRIPT_DESCRIPTOR_PAGE_SIZE * TRANSCRIPT_DESCRIPTOR_PAGE_SIZE;
+            end = end
+                .saturating_add(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE - 1)
+                .saturating_div(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .saturating_mul(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .min(total);
+        }
+        smelt_store::TranscriptDescriptorIndex::new(start)
+            ..smelt_store::TranscriptDescriptorIndex::new(end)
+    }
+
+    fn retain_range(&mut self, retain: &Range<smelt_store::TranscriptDescriptorIndex>) {
+        self.records
+            .retain(|index, _| retain.start <= *index && *index < retain.end);
+        self.loaded_ranges = self
+            .loaded_ranges
+            .iter()
+            .filter_map(|loaded| {
+                let start = loaded.start.max(retain.start);
+                let end = loaded.end.min(retain.end);
+                (start < end).then_some(start..end)
+            })
+            .collect();
+    }
+
+    fn retain_around_range(&mut self, range: &Range<smelt_store::TranscriptDescriptorIndex>) {
+        let retain = self.cache_range_around(range);
+        self.retain_range(&retain);
+    }
+
     fn record(
         &self,
         index: smelt_store::TranscriptDescriptorIndex,
@@ -434,7 +549,7 @@ struct DescriptorRowsEstimateKey {
 
 struct TranscriptDescriptorExtentModel<'a> {
     descriptors: &'a SparseTranscriptDescriptors,
-    session_dir: Option<&'a PathBuf>,
+    store: Option<&'a SqliteTranscriptStore>,
     width: u16,
     active_range: Option<Range<usize>>,
     total_count: Option<usize>,
@@ -505,7 +620,6 @@ struct ExactDescriptorRowsKey {
 struct TranscriptExtentIndex {
     descriptor_rows_estimate_cache: HashMap<DescriptorRowsEstimateKey, RowIndex>,
     descriptor_prefix_estimate: Option<DescriptorPrefixEstimateIndex>,
-    estimate_store: Option<(PathBuf, SqliteTranscriptStore)>,
     exact_descriptor_rows: HashMap<ExactDescriptorRowsKey, RowIndex>,
     latest_exact_descriptor_rows: BTreeMap<(u16, usize), ExactDescriptorRowsKey>,
 }
@@ -519,7 +633,6 @@ impl TranscriptExtentIndex {
     fn clear_persisted_descriptor_estimates(&mut self) {
         self.descriptor_rows_estimate_cache.clear();
         self.descriptor_prefix_estimate = None;
-        self.estimate_store = None;
     }
 
     fn exact_observation_count(&self) -> usize {
@@ -620,22 +733,9 @@ impl TranscriptExtentIndex {
             .max(1)
     }
 
-    fn store_for_session(&mut self, session_dir: &PathBuf) -> Option<&SqliteTranscriptStore> {
-        let needs_open = self
-            .estimate_store
-            .as_ref()
-            .is_none_or(|(open_dir, _)| open_dir != session_dir);
-        if needs_open {
-            self.clear_persisted_descriptor_estimates();
-            let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
-            self.estimate_store = Some((session_dir.clone(), store));
-        }
-        self.estimate_store.as_ref().map(|(_, store)| store)
-    }
-
     fn approximate_rows_for_unloaded_descriptor_range(
         &mut self,
-        session_dir: Option<&PathBuf>,
+        store: Option<&SqliteTranscriptStore>,
         width: u16,
         range: Range<usize>,
     ) -> Option<RowIndex> {
@@ -650,9 +750,7 @@ impl TranscriptExtentIndex {
         if let Some(rows) = self.descriptor_rows_estimate_cache.get(&key).copied() {
             return Some(rows);
         }
-        let session_dir = session_dir?;
-        let store = self.store_for_session(session_dir)?;
-        let rows = store.estimated_descriptor_rows(key.width, range).ok()? as RowIndex;
+        let rows = store?.estimated_descriptor_rows(key.width, range).ok()? as RowIndex;
         self.descriptor_rows_estimate_cache.insert(key, rows);
         Some(rows)
     }
@@ -661,13 +759,13 @@ impl TranscriptExtentIndex {
         &self,
         descriptors: &'a SparseTranscriptDescriptors,
         active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-        session_dir: Option<&'a PathBuf>,
+        store: Option<&'a SqliteTranscriptStore>,
         width: u16,
     ) -> TranscriptDescriptorExtentModel<'a> {
         let width = width.max(1);
         TranscriptDescriptorExtentModel {
             descriptors,
-            session_dir,
+            store,
             width,
             active_range: active_descriptor_range.map(|range| range.start.get()..range.end.get()),
             total_count: descriptors.total_count(),
@@ -682,7 +780,7 @@ impl TranscriptExtentIndex {
         range: Range<usize>,
     ) -> RowIndex {
         let count = range.end.saturating_sub(range.start) as RowIndex;
-        self.approximate_rows_for_unloaded_descriptor_range(model.session_dir, model.width, range)
+        self.approximate_rows_for_unloaded_descriptor_range(model.store, model.width, range)
             .unwrap_or_else(|| count.saturating_mul(model.fallback_rows_per_descriptor))
     }
 
@@ -830,11 +928,11 @@ impl TranscriptExtentIndex {
         &mut self,
         descriptors: &SparseTranscriptDescriptors,
         active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-        session_dir: Option<&PathBuf>,
+        store: Option<&SqliteTranscriptStore>,
         width: u16,
     ) -> RowIndex {
         let model =
-            self.descriptor_extent_model(descriptors, active_descriptor_range, session_dir, width);
+            self.descriptor_extent_model(descriptors, active_descriptor_range, store, width);
         self.estimated_sparse_prefix_rows(&model)
     }
 
@@ -842,11 +940,11 @@ impl TranscriptExtentIndex {
         &mut self,
         descriptors: &SparseTranscriptDescriptors,
         active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-        session_dir: Option<&PathBuf>,
+        store: Option<&SqliteTranscriptStore>,
         width: u16,
     ) -> RowIndex {
         let model =
-            self.descriptor_extent_model(descriptors, active_descriptor_range, session_dir, width);
+            self.descriptor_extent_model(descriptors, active_descriptor_range, store, width);
         self.estimated_sparse_suffix_rows(&model)
     }
 
@@ -854,12 +952,12 @@ impl TranscriptExtentIndex {
         &mut self,
         descriptors: &SparseTranscriptDescriptors,
         active_descriptor_range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-        session_dir: Option<&PathBuf>,
+        store: Option<&SqliteTranscriptStore>,
         width: u16,
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
         let model =
-            self.descriptor_extent_model(descriptors, active_descriptor_range, session_dir, width);
+            self.descriptor_extent_model(descriptors, active_descriptor_range, store, width);
         self.mixed_scrollbar_total_rows(&model, exact_loaded_rows)
     }
 }
@@ -867,6 +965,7 @@ impl TranscriptExtentIndex {
 pub(crate) struct TranscriptDocument {
     content: TranscriptContentState,
     descriptors: TranscriptDescriptorState,
+    store_cache: TranscriptStoreCache,
     extent_index: TranscriptExtentIndex,
     viewport: TranscriptViewportRuntime,
 }
@@ -905,15 +1004,6 @@ impl TranscriptDescriptorState {
 
     fn total_count(&self) -> Option<usize> {
         self.sparse.total_count()
-    }
-
-    fn merge_window(&mut self, window: &LoadedDescriptorWindow) -> bool {
-        let active_range = window.start..window.end();
-        if !self.sparse.merge(window) {
-            return false;
-        }
-        self.active_range = Some(active_range);
-        true
     }
 
     fn records_for_active_range(&self) -> Vec<TranscriptBlockRecordWithId> {
@@ -1352,6 +1442,7 @@ impl TranscriptDocument {
                 compaction_preview_id: None,
             },
             descriptors,
+            store_cache: TranscriptStoreCache::default(),
             extent_index: TranscriptExtentIndex::default(),
             viewport: TranscriptViewportRuntime::default(),
         };
@@ -1374,24 +1465,34 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn load_descriptor_window(
-        &self,
+        &mut self,
         range: smelt_store::TranscriptDescriptorRange,
     ) -> Option<LoadedDescriptorWindow> {
-        let session_dir = self.descriptors.session_dir()?.clone();
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
-        let slice = db.read_transcript_descriptor_slice(range).ok()?;
+        let slice = self
+            .store_cache
+            .read_descriptor_slice(self.descriptors.session_dir(), range)?;
         LoadedDescriptorWindow::from_slice(slice)
     }
 
-    pub(crate) fn merge_descriptor_window(&mut self, window: LoadedDescriptorWindow) -> bool {
+    fn merge_descriptor_cache_window(&mut self, window: &LoadedDescriptorWindow) -> bool {
         let previous_total = self.descriptors.total_count();
-        if !self.descriptors.merge_window(&window) {
+        if !self.descriptors.sparse.merge(window) {
             return false;
         }
         if previous_total != self.descriptors.total_count() {
             self.extent_index.clear_persisted_descriptor_estimates();
         }
-        record_descriptor_window_metrics(&window);
+        record_descriptor_window_metrics(window);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn merge_descriptor_window(&mut self, window: LoadedDescriptorWindow) -> bool {
+        let active_range = window.start..window.end();
+        if !self.merge_descriptor_cache_window(&window) {
+            return false;
+        }
+        self.descriptors.active_range = Some(active_range);
         self.install_active_descriptor_projection();
         true
     }
@@ -1873,19 +1974,25 @@ impl TranscriptDocument {
     }
 
     fn approximate_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
+        let store = self
+            .store_cache
+            .store_for_session(self.descriptors.session_dir());
         self.extent_index.approximate_sparse_prefix_rows(
             &self.descriptors.sparse,
             self.descriptors.active_range(),
-            self.descriptors.session_dir(),
+            store,
             width,
         )
     }
 
     fn approximate_sparse_suffix_rows(&mut self, width: u16) -> RowIndex {
+        let store = self
+            .store_cache
+            .store_for_session(self.descriptors.session_dir());
         self.extent_index.approximate_sparse_suffix_rows(
             &self.descriptors.sparse,
             self.descriptors.active_range(),
-            self.descriptors.session_dir(),
+            store,
             width,
         )
     }
@@ -1901,10 +2008,13 @@ impl TranscriptDocument {
         width: u16,
         exact_loaded_rows: RowIndex,
     ) -> RowIndex {
+        let store = self
+            .store_cache
+            .store_for_session(self.descriptors.session_dir());
         self.extent_index.approximate_mixed_scrollbar_total_rows(
             &self.descriptors.sparse,
             self.descriptors.active_range(),
-            self.descriptors.session_dir(),
+            store,
             width,
             exact_loaded_rows,
         )
@@ -2522,7 +2632,45 @@ impl TranscriptDocument {
         let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
         let visible_descriptors =
             (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
-        visible_descriptors.saturating_mul(4).max(32).min(total)
+        let count = visible_descriptors.saturating_mul(4).max(32);
+        let count = if total > TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS {
+            count.max(TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS)
+        } else {
+            count
+        }
+        .min(total);
+        if count >= TRANSCRIPT_DESCRIPTOR_PAGE_SIZE {
+            count
+                .saturating_add(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE - 1)
+                .saturating_div(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .saturating_mul(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .min(total)
+                .max(1)
+        } else {
+            count.max(1)
+        }
+    }
+
+    fn descriptor_window_range_for_center(
+        &self,
+        width: u16,
+        center: usize,
+        viewport_rows: u16,
+        total: usize,
+    ) -> Range<smelt_store::TranscriptDescriptorIndex> {
+        let count = self.descriptor_window_count(width, viewport_rows, total);
+        let mut start = center
+            .saturating_sub(count / 2)
+            .min(total.saturating_sub(count));
+        if count >= TRANSCRIPT_DESCRIPTOR_PAGE_SIZE {
+            start = start / TRANSCRIPT_DESCRIPTOR_PAGE_SIZE * TRANSCRIPT_DESCRIPTOR_PAGE_SIZE;
+            if start.saturating_add(count) > total {
+                start = total.saturating_sub(count);
+            }
+        }
+        let end = start.saturating_add(count).min(total);
+        smelt_store::TranscriptDescriptorIndex::new(start)
+            ..smelt_store::TranscriptDescriptorIndex::new(end)
     }
 
     fn descriptor_window_range_around_center(
@@ -2544,15 +2692,7 @@ impl TranscriptDocument {
                 }
             }
         }
-        let count = self.descriptor_window_count(width, viewport_rows, total);
-        let start = center
-            .saturating_sub(count / 2)
-            .min(total.saturating_sub(count));
-        let end = start.saturating_add(count).min(total);
-        Some(
-            smelt_store::TranscriptDescriptorIndex::new(start)
-                ..smelt_store::TranscriptDescriptorIndex::new(end),
-        )
+        Some(self.descriptor_window_range_for_center(width, center, viewport_rows, total))
     }
 
     fn estimated_descriptor_for_display_row(
@@ -2560,10 +2700,13 @@ impl TranscriptDocument {
         width: u16,
         row: RowIndex,
     ) -> Option<(usize, RowIndex)> {
+        let store = self
+            .store_cache
+            .store_for_session(self.descriptors.session_dir());
         let model = self.extent_index.descriptor_extent_model(
             &self.descriptors.sparse,
             self.descriptors.active_range(),
-            self.descriptors.session_dir(),
+            store,
             width,
         );
         self.extent_index.estimated_descriptor_for_row(&model, row)
@@ -2609,19 +2752,48 @@ impl TranscriptDocument {
         &mut self,
         range: Range<smelt_store::TranscriptDescriptorIndex>,
     ) -> bool {
-        if self.descriptors.active_range() == Some(&range) {
+        if self.descriptors.active_range() == Some(&range)
+            && self.descriptors.sparse.range_is_loaded(&range)
+        {
             return false;
         }
-        if self.descriptors.sparse.range_is_loaded(&range) {
-            self.descriptors.active_range = Some(range);
-            self.install_active_descriptor_projection();
-            return true;
-        }
-        let Some(window) = self.load_descriptor_window((range.start.get()..range.end.get()).into())
-        else {
-            return false;
+        let mut projection_range = if self
+            .descriptors
+            .total_count()
+            .is_some_and(|total| total > TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS)
+        {
+            self.descriptors.sparse.cache_range_around(&range)
+        } else {
+            range.clone()
         };
-        self.merge_descriptor_window(window)
+        if self.descriptors.session_dir().is_none()
+            && !self.descriptors.sparse.range_is_loaded(&projection_range)
+        {
+            projection_range = range;
+        }
+        let missing_ranges = self.descriptors.sparse.missing_ranges(&projection_range);
+        let mut loaded_any = false;
+        for missing in missing_ranges {
+            let Some(window) =
+                self.load_descriptor_window((missing.start.get()..missing.end.get()).into())
+            else {
+                return false;
+            };
+            loaded_any |= self.merge_descriptor_cache_window(&window);
+        }
+        if !self.descriptors.sparse.range_is_loaded(&projection_range) {
+            return false;
+        }
+        let active_changed = self.descriptors.active_range() != Some(&projection_range);
+        if !active_changed && !loaded_any {
+            return false;
+        }
+        self.descriptors.active_range = Some(projection_range.clone());
+        self.descriptors
+            .sparse
+            .retain_around_range(&projection_range);
+        self.install_active_descriptor_projection();
+        true
     }
 
     fn activate_descriptor_window_for_approximate_display_row(
@@ -2679,7 +2851,8 @@ impl TranscriptDocument {
         let missing_descriptors = missing_rows
             .saturating_add(avg_rows.saturating_sub(1))
             .saturating_div(avg_rows)
-            .max(1) as usize;
+            .max(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE as RowIndex)
+            as usize;
         let max_descriptors = self
             .descriptor_window_count(width, viewport_rows, total)
             .saturating_mul(TRANSCRIPT_ACTIVE_DESCRIPTOR_WINDOW_MAX_MULTIPLIER)
@@ -2699,6 +2872,15 @@ impl TranscriptDocument {
                     .min(total),
             )
         };
+        if row < loaded_start {
+            start = start / TRANSCRIPT_DESCRIPTOR_PAGE_SIZE * TRANSCRIPT_DESCRIPTOR_PAGE_SIZE;
+        } else {
+            end = end
+                .saturating_add(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE - 1)
+                .saturating_div(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .saturating_mul(TRANSCRIPT_DESCRIPTOR_PAGE_SIZE)
+                .min(total);
+        }
         if end.saturating_sub(start) > max_descriptors {
             if row < loaded_start {
                 end = start.saturating_add(max_descriptors).min(total);
@@ -7406,7 +7588,7 @@ mod tests {
 
         let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
             .expect("loaded tail");
-        let document = super::TranscriptDocument::from_loaded_transcript(loaded);
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
 
         let window = document
             .load_descriptor_window((1..3).into())

@@ -46,12 +46,16 @@ fn elapsed_ms(elapsed: std::time::Duration) -> f64 {
     elapsed.as_secs_f64() * 1_000.0
 }
 
-fn navigation_bench_runs() -> usize {
-    std::env::var("SMELT_TRANSCRIPT_BENCH_RUNS")
+fn env_positive_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .filter(|runs| *runs > 0)
-        .unwrap_or(3)
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn navigation_bench_runs() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_BENCH_RUNS", 3)
 }
 
 fn transcript_navigation_bench_app() -> TestApp {
@@ -136,11 +140,7 @@ fn run_navigation_sample() -> NavSample {
 }
 
 fn search_bench_bytes() -> usize {
-    std::env::var("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|bytes| *bytes > 0)
-        .unwrap_or(50 * 1024 * 1024)
+    env_positive_usize("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", 50 * 1024 * 1024)
 }
 
 fn transcript_bench_warmup_enabled() -> bool {
@@ -768,6 +768,90 @@ fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f6
     (rare_ms, common_submit_ms, next100_ms)
 }
 
+fn resumed_wheel_bench_bytes() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES", 5 * 1024 * 1024)
+}
+
+fn resumed_wheel_bench_frames() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_RESUMED_WHEEL_FRAMES", 240)
+}
+
+fn resumed_wheel_bench_ticks_per_frame() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_RESUMED_WHEEL_TICKS", 24)
+}
+
+fn run_resumed_wheel_scroll_bench_sample(
+    target_bytes: usize,
+    frames: usize,
+    ticks_per_frame: usize,
+) {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(100, 32);
+    let bytes = push_search_bench_transcript(&mut app, target_bytes);
+    app.render_silent();
+    app.app.save_session();
+    app.app.flush_persist();
+
+    install_sparse_resume_bench_transcript(&mut app);
+    app.type_char('G');
+    app.render_silent();
+    app.app.transcript.set_scroll_trace_timings_enabled(true);
+    app.app.transcript.take_scroll_trace_frames();
+
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    let start = std::time::Instant::now();
+    for _ in 0..frames {
+        for _ in 0..ticks_per_frame {
+            app.transcript_scroll_probe_wheel(false, 1);
+        }
+        app.render_silent();
+    }
+    let ms = elapsed_ms(start.elapsed());
+    let snapshot = smelt_perf::perf::snapshot();
+    smelt_perf::perf::set_enabled(false);
+    let trace_frames = app.app.transcript.take_scroll_trace_frames();
+    let descriptor_loads = perf_duration_count(&snapshot, "store:transcript:read_descriptor_slice");
+    let descriptor_load_us = duration_total_us(&snapshot, "store:transcript:read_descriptor_slice");
+    let row_rebuilds = perf_duration_count(&snapshot, "transcript:prepare_row_index:rebuild_index");
+    let row_rebuild_us = duration_total_us(&snapshot, "transcript:prepare_row_index:rebuild_index");
+    search_perf_snapshot("resumed_wheel_scroll", &snapshot);
+    eprintln!(
+        "TRANSCRIPT_RESUMED_WHEEL_SAMPLE bytes={} frames={} ticks_per_frame={} trace_frames={} wall_ms={:.3} descriptor_loads={} descriptor_load_ms={:.3} row_rebuilds={} row_rebuild_ms={:.3}",
+        bytes,
+        frames,
+        ticks_per_frame,
+        trace_frames.len(),
+        ms,
+        descriptor_loads,
+        descriptor_load_us as f64 / 1000.0,
+        row_rebuilds,
+        row_rebuild_us as f64 / 1000.0,
+    );
+    eprintln!(
+        "TRANSCRIPT_RESUMED_WHEEL_JSON {{\"type\":\"resumed_wheel_summary\",\"bytes\":{},\"frames\":{},\"ticks_per_frame\":{},\"trace_frames\":{},\"wall_ms\":{:.3},\"descriptor_loads\":{},\"descriptor_load_ms\":{:.3},\"row_rebuilds\":{},\"row_rebuild_ms\":{:.3}}}",
+        bytes,
+        frames,
+        ticks_per_frame,
+        trace_frames.len(),
+        ms,
+        descriptor_loads,
+        descriptor_load_us as f64 / 1000.0,
+        row_rebuilds,
+        row_rebuild_us as f64 / 1000.0,
+    );
+}
+
+#[test]
+#[ignore = "manual sparse resumed-session wheel-scroll benchmark; run via `cargo xtask bench-transcript-layout --resumed-wheel`"]
+fn transcript_resumed_wheel_scroll_benchmark_suite() {
+    run_resumed_wheel_scroll_bench_sample(
+        resumed_wheel_bench_bytes(),
+        resumed_wheel_bench_frames(),
+        resumed_wheel_bench_ticks_per_frame(),
+    );
+}
+
 fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenchSample {
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
@@ -1094,19 +1178,11 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
 }
 
 fn resume_bench_session_count() -> usize {
-    std::env::var("SMELT_RESUME_BENCH_SESSIONS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|count| *count > 0)
-        .unwrap_or(1024)
+    env_positive_usize("SMELT_RESUME_BENCH_SESSIONS", 1024)
 }
 
 fn resume_bench_preview_bytes() -> usize {
-    std::env::var("SMELT_RESUME_BENCH_PREVIEW_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|bytes| *bytes > 0)
-        .unwrap_or(5 * 1024 * 1024)
+    env_positive_usize("SMELT_RESUME_BENCH_PREVIEW_BYTES", 5 * 1024 * 1024)
 }
 
 fn stale_resume_meta(id: &str) {

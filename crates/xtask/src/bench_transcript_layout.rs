@@ -1,5 +1,30 @@
 use std::process::Command;
 
+fn take_required_arg(iter: &mut impl Iterator<Item = String>, name: &str) -> String {
+    iter.next().unwrap_or_else(|| {
+        eprintln!("bench-transcript-layout: {name} requires a value");
+        std::process::exit(2);
+    })
+}
+
+fn take_positive_usize_arg(iter: &mut impl Iterator<Item = String>, name: &str) -> String {
+    let value = take_required_arg(iter, name);
+    if value.parse::<usize>().ok().filter(|n| *n > 0).is_none() {
+        eprintln!("bench-transcript-layout: {name} must be a positive integer");
+        std::process::exit(2);
+    }
+    value
+}
+
+fn cargo_tui_test(release: bool) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["test", "-p", "smelt-tui", "--features", "harness"]);
+    if release {
+        cmd.arg("--release");
+    }
+    cmd
+}
+
 pub fn run(args: Vec<String>) {
     let mut runs = String::from("5");
     let mut workloads: Option<String> = None;
@@ -9,6 +34,9 @@ pub fn run(args: Vec<String>) {
     let mut search_bytes: Option<String> = None;
     let mut resume = false;
     let mut resume_bytes: Option<String> = None;
+    let mut resumed_wheel = false;
+    let mut resumed_wheel_frames: Option<String> = None;
+    let mut resumed_wheel_ticks: Option<String> = None;
     let mut hot_path = false;
     let mut hot_path_history: Option<String> = None;
     let mut no_warmup = false;
@@ -17,40 +45,34 @@ pub fn run(args: Vec<String>) {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--runs" => {
-                runs = iter.next().unwrap_or_else(|| {
-                    eprintln!("bench-transcript-layout: --runs requires a value");
-                    std::process::exit(2);
-                });
-                if runs.parse::<usize>().ok().filter(|n| *n > 0).is_none() {
-                    eprintln!("bench-transcript-layout: --runs must be a positive integer");
-                    std::process::exit(2);
-                }
+                runs = take_positive_usize_arg(&mut iter, "--runs");
             }
             "--workloads" => {
-                workloads = Some(iter.next().unwrap_or_else(|| {
-                    eprintln!(
-                        "bench-transcript-layout: --workloads requires a comma-separated value"
-                    );
-                    std::process::exit(2);
-                }));
+                workloads = Some(take_required_arg(&mut iter, "--workloads"));
             }
             "--skip-nav" => skip_nav = true,
             "--search" => search = true,
             "--search-bytes" => {
-                search_bytes = Some(iter.next().unwrap_or_else(|| {
-                    eprintln!("bench-transcript-layout: --search-bytes requires a value");
-                    std::process::exit(2);
-                }));
+                search_bytes = Some(take_required_arg(&mut iter, "--search-bytes"));
             }
             "--resume" => resume = true,
             "--resume-bytes" => {
-                resume_bytes = Some(iter.next().unwrap_or_else(|| {
-                    eprintln!("bench-transcript-layout: --resume-bytes requires a value");
-                    std::process::exit(2);
-                }));
+                resume_bytes = Some(take_required_arg(&mut iter, "--resume-bytes"));
+            }
+            "--resumed-wheel" => resumed_wheel = true,
+            "--resumed-wheel-frames" => {
+                resumed_wheel = true;
+                resumed_wheel_frames =
+                    Some(take_positive_usize_arg(&mut iter, "--resumed-wheel-frames"));
+            }
+            "--resumed-wheel-ticks" => {
+                resumed_wheel = true;
+                resumed_wheel_ticks =
+                    Some(take_positive_usize_arg(&mut iter, "--resumed-wheel-ticks"));
             }
             "--save-request" => hot_path = true,
             "--scale-500mb" => {
+                resumed_wheel = true;
                 search = true;
                 resume = true;
                 no_warmup = true;
@@ -85,11 +107,7 @@ pub fn run(args: Vec<String>) {
         }
     }
 
-    let mut cmd = Command::new("cargo");
-    cmd.args(["test", "-p", "smelt-tui"]);
-    if release {
-        cmd.arg("--release");
-    }
+    let mut cmd = cargo_tui_test(release);
     cmd.args([
         "transcript_layout_",
         "--",
@@ -107,7 +125,7 @@ pub fn run(args: Vec<String>) {
     if search {
         cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH", "1");
     }
-    if let Some(bytes) = search_bytes {
+    if let Some(bytes) = &search_bytes {
         cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes);
     }
     if no_warmup {
@@ -134,11 +152,7 @@ pub fn run(args: Vec<String>) {
     }
 
     if resume {
-        let mut cmd = Command::new("cargo");
-        cmd.args(["test", "-p", "smelt-tui"]);
-        if release {
-            cmd.arg("--release");
-        }
+        let mut cmd = cargo_tui_test(release);
         cmd.args([
             "transcript_true_resume_benchmark_suite",
             "--",
@@ -146,7 +160,7 @@ pub fn run(args: Vec<String>) {
             "--nocapture",
             "--test-threads=1",
         ]);
-        if let Some(bytes) = resume_bytes {
+        if let Some(bytes) = &resume_bytes {
             cmd.env("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES", bytes);
         }
         eprintln!(
@@ -161,10 +175,41 @@ pub fn run(args: Vec<String>) {
             std::process::exit(status.code().unwrap_or(1));
         }
     }
+    if resumed_wheel {
+        let mut cmd = cargo_tui_test(release);
+        cmd.args([
+            "transcript_resumed_wheel_scroll_benchmark_suite",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        let wheel_bytes = resume_bytes.clone().or(search_bytes.clone());
+        if let Some(bytes) = wheel_bytes {
+            cmd.env("SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES", bytes);
+        }
+        if let Some(frames) = resumed_wheel_frames {
+            cmd.env("SMELT_TRANSCRIPT_RESUMED_WHEEL_FRAMES", frames);
+        }
+        if let Some(ticks) = resumed_wheel_ticks {
+            cmd.env("SMELT_TRANSCRIPT_RESUMED_WHEEL_TICKS", ticks);
+        }
+        eprintln!(
+            "running transcript resumed wheel benchmark: profile={}",
+            if release { "release" } else { "test/debug" },
+        );
+        let status = cmd.status().unwrap_or_else(|e| {
+            eprintln!("bench-transcript-layout: failed to run resumed wheel cargo test: {e}");
+            std::process::exit(1);
+        });
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--save-request] [--save-request-history N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--save-request] [--save-request-history N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -175,6 +220,11 @@ fn print_usage() {
     eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
     eprintln!("--resume runs the true session resume benchmark after layout/search.");
     eprintln!("--resume-bytes N sets its generated resume session size; default is 10 MiB.");
+    eprintln!("--resumed-wheel runs a sparse resumed-session wheel-scroll benchmark.");
+    eprintln!("--resumed-wheel-frames N sets rendered wheel frames; default is 240.");
+    eprintln!(
+        "--resumed-wheel-ticks N sets wheel events queued per rendered frame; default is 24."
+    );
     eprintln!("--save-request enables no-op save, append, HistoryUpdated, rewind, and provider-history wall-time samples.");
     eprintln!(
         "--save-request-history N sets its generated hot-path history length; default is 1024."
