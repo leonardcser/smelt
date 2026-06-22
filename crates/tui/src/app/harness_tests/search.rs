@@ -609,6 +609,7 @@ fn backward_search_starts_from_previous_match() {
     assert!(app.state().cmdline_open);
     app.type_text("alpha");
     app.press(KeyCode::Enter);
+    app.render_silent();
     let current_row = app
         .app
         .search
@@ -624,8 +625,10 @@ fn backward_search_starts_from_previous_match() {
     assert_eq!(transcript_row_cursor_row(&app), current_row);
 
     app.type_char('n');
+    app.render_silent();
     assert!(transcript_row_cursor_row(&app) < current_row);
     app.type_char('N');
+    app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), current_row);
 }
 
