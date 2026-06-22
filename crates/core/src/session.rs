@@ -1511,7 +1511,7 @@ pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
 }
 
 pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
-    load_meta_for_dir(dir)
+    load_meta_for_dir(dir, MetaLoadMode::Full)
 }
 
 fn load_full_exact(id: &str) -> Option<Session> {
@@ -1994,30 +1994,35 @@ pub fn list_sessions() -> Vec<SessionMeta> {
             p.is_dir().then_some(p)
         })
         .collect();
-    let mut out = crate::utils::parallel_filter_map(paths, load_meta_for_dir);
+    let mut out = crate::utils::parallel_filter_map(paths, |path| {
+        load_meta_for_dir(path, MetaLoadMode::List)
+    });
     out.sort_by_key(|b| std::cmp::Reverse(session_updated_at(b)));
     out
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MetaLoadMode {
+    /// Build the resume/listing row from sidecars only. Listing must stay cheap
+    /// even when many legacy sidecars are missing exact-load-only fields.
+    List,
+    /// Exact load path. Fill fields required to resume display-only sessions.
+    Full,
 }
 
 /// COMPAT(session-search-sidecar-missing): uses `meta.json` when present,
 /// reads canonical SQLite metadata when available, and surfaces pending/failed
 /// migration status without reading legacy session payloads.
-fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
+fn load_meta_for_dir(path: PathBuf, mode: MetaLoadMode) -> Option<SessionMeta> {
     let meta = if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
-        if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
-            if meta.text_bytes.is_none() {
-                backfill_text_bytes(&path, &mut meta);
-            }
-            Some(meta)
-        } else {
-            None
-        }
+        load_meta_sidecar(&path, &contents, mode)
     } else {
         None
     };
-    let meta = if let Some(mut meta) = meta {
-        enrich_meta_from_db(&path, &mut meta);
+    let meta = if let Some(meta) = meta {
         meta
+    } else if mode == MetaLoadMode::List {
+        load_list_meta_without_db(&path)?
     } else if let Some(meta) = load_meta_from_db(&path) {
         write_meta(&path, &meta);
         meta
@@ -2027,25 +2032,89 @@ fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     Some(with_migration_status(&path, meta))
 }
 
-fn enrich_meta_from_db(path: &Path, meta: &mut SessionMeta) {
-    if meta.history_len.is_some() && meta.checkpoint.is_some() {
-        return;
+fn load_list_meta_without_db(path: &Path) -> Option<SessionMeta> {
+    if let Some(meta) = migration_meta_for_dir(path) {
+        return Some(meta);
+    }
+    let id = path.file_name().and_then(|name| name.to_str())?.to_string();
+    let updated_at_ms = file_modified_ms(&path.join("session.db"))?;
+    Some(SessionMeta {
+        id,
+        title: None,
+        slug: None,
+        first_user_message: None,
+        created_at_ms: updated_at_ms,
+        updated_at_ms,
+        mode: None,
+        reasoning_effort: None,
+        model: None,
+        cwd: None,
+        parent_id: None,
+        context_tokens: None,
+        history_len: None,
+        checkpoint: None,
+        text_bytes: None,
+        migration: None,
+    })
+}
+
+fn file_modified_ms(path: &Path) -> Option<u64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+fn load_meta_sidecar(path: &Path, contents: &str, mode: MetaLoadMode) -> Option<SessionMeta> {
+    let mut meta = serde_json::from_str::<SessionMeta>(contents).ok()?;
+    if mode == MetaLoadMode::List {
+        return Some(meta);
+    }
+
+    let checkpoint_field_present = serde_json::from_str::<Value>(contents)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|object| object.contains_key("checkpoint"))
+        })
+        .unwrap_or(false);
+    if meta.text_bytes.is_none() {
+        backfill_text_bytes(path, &mut meta);
+    }
+    if enrich_meta_from_db(path, &mut meta, checkpoint_field_present) {
+        write_meta(path, &meta);
+    }
+    Some(meta)
+}
+
+fn enrich_meta_from_db(
+    path: &Path,
+    meta: &mut SessionMeta,
+    checkpoint_field_present: bool,
+) -> bool {
+    if meta.history_len.is_some() && checkpoint_field_present {
+        return false;
     }
     let db_path = path.join("session.db");
     let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
-        return;
+        return false;
     };
     let Ok(Some(state)) = db.session_state() else {
-        return;
+        return false;
     };
     if meta.history_len.is_none() {
         meta.history_len = Some(state.history_len as usize);
     }
-    if meta.checkpoint.is_none() {
+    if !checkpoint_field_present {
         meta.checkpoint = state
             .checkpoint_json
             .and_then(|value| serde_json::from_value(value).ok());
     }
+    true
 }
 
 fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
@@ -2446,6 +2515,83 @@ mod tests {
     }
 
     #[test]
+    fn list_sessions_uses_sidecar_metadata_without_db_backfill() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let mut s = fixture_session();
+            s.id = format!("stale-meta-{i}");
+            s.title = Some(format!("stale meta {i}"));
+            s.updated_at_ms = 1_700_000_000_000 + i as u64;
+            s.history.push(user_item(&format!("prompt {i}")));
+            save(&s, &crate::attachment::AttachmentStore::new());
+
+            let meta_path = dir_for(&s).join("meta.json");
+            let mut meta_json: Value =
+                serde_json::from_str(&fs::read_to_string(&meta_path).expect("read meta"))
+                    .expect("parse meta");
+            let object = meta_json.as_object_mut().expect("meta object");
+            object.remove("history_len");
+            object.remove("checkpoint");
+            object.remove("text_bytes");
+            if i == 2 {
+                fs::remove_file(&meta_path).expect("remove meta sidecar");
+            } else {
+                fs::write(
+                    &meta_path,
+                    serde_json::to_vec(&meta_json).expect("encode stale meta"),
+                )
+                .expect("write stale meta");
+            }
+            ids.push(s.id);
+        }
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let listed = list_sessions();
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+
+        for id in &ids {
+            let meta = listed
+                .iter()
+                .find(|meta| meta.id == *id)
+                .expect("listed meta");
+            assert_eq!(meta.history_len, None);
+            assert!(meta.checkpoint.is_none());
+            assert_eq!(meta.text_bytes, None);
+        }
+        for label in ["store:db:open_read_only", "store:db:open_read_write"] {
+            let count = snapshot
+                .durations
+                .iter()
+                .find(|row| row.label == label)
+                .map(|row| row.count)
+                .unwrap_or(0);
+            assert_eq!(
+                count, 0,
+                "list_sessions should not open databases for {label}"
+            );
+        }
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let loaded = load_meta(&ids[0]).expect("load exact meta");
+        let exact_snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        assert_eq!(loaded.history_len, Some(1));
+        assert!(loaded.text_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(
+            exact_snapshot
+                .durations
+                .iter()
+                .any(|row| row.label == "store:db:open_read_only" && row.count > 0),
+            "exact load should still enrich stale metadata from sqlite"
+        );
+    }
+
+    #[test]
     fn legacy_json_session_imports_agent_role_messages() {
         let dir = tempfile::tempdir().expect("temp dir");
         fs::write(
@@ -2666,7 +2812,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         fs::write(dir.path().join("session.json"), b"not json").expect("write invalid legacy");
 
-        let listed = load_meta_for_dir(dir.path().to_path_buf()).expect("pending meta");
+        let listed =
+            load_meta_for_dir(dir.path().to_path_buf(), MetaLoadMode::List).expect("pending meta");
 
         assert_eq!(listed.id, dir.path().file_name().unwrap().to_str().unwrap());
         assert_eq!(
@@ -2692,7 +2839,8 @@ mod tests {
         let failed =
             crate::session_migration::read_migration_status(dir.path()).expect("failure status");
         assert_eq!(failed.state, SessionMigrationState::Failed);
-        let listed = load_meta_for_dir(dir.path().to_path_buf()).expect("failure meta");
+        let listed =
+            load_meta_for_dir(dir.path().to_path_buf(), MetaLoadMode::List).expect("failure meta");
         assert_eq!(
             listed.migration.as_ref().unwrap().state,
             SessionMigrationState::Failed

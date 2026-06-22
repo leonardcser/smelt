@@ -1093,6 +1093,234 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     }
 }
 
+fn resume_bench_session_count() -> usize {
+    std::env::var("SMELT_RESUME_BENCH_SESSIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(1024)
+}
+
+fn resume_bench_preview_bytes() -> usize {
+    std::env::var("SMELT_RESUME_BENCH_PREVIEW_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(5 * 1024 * 1024)
+}
+
+fn stale_resume_meta(id: &str) {
+    let meta_path = smelt_core::session::dir_for_id(id).join("meta.json");
+    let mut meta_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&meta_path).expect("read resume bench meta"))
+            .expect("parse resume bench meta");
+    let object = meta_json.as_object_mut().expect("resume bench meta object");
+    object.remove("history_len");
+    object.remove("checkpoint");
+    object.remove("text_bytes");
+    std::fs::write(
+        &meta_path,
+        serde_json::to_vec(&meta_json).expect("encode stale resume bench meta"),
+    )
+    .expect("write stale resume bench meta");
+}
+
+fn remove_resume_meta(id: &str) {
+    std::fs::remove_file(smelt_core::session::dir_for_id(id).join("meta.json"))
+        .expect("remove resume bench meta");
+}
+
+fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: usize, cwd: &str) {
+    let mut session = smelt_core::session::Session::new(4242, std::path::PathBuf::from(cwd));
+    session.id = id.clone();
+    session.title = Some(format!("resume bench {id}"));
+    session.first_user_message = Some(format!("open resume dialog for {id}"));
+    session.created_at_ms = updated_at_ms;
+    session.updated_at_ms = updated_at_ms;
+    let mut bytes = 0usize;
+    let mut turn = 0usize;
+    while bytes < target_text_bytes {
+        let user = format!("resume bench prompt {turn}: {}", "preview seed ".repeat(8));
+        bytes += user.len();
+        session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text(user)));
+
+        let assistant = format!(
+            "# Resume bench reply {turn}\n\n{}\n\n```text\n{}\n```\n",
+            "large preview transcript body ".repeat(80),
+            "tail preview row ".repeat(80)
+        );
+        bytes += assistant.len();
+        session.history.push(protocol::HistoryItem::Assistant(
+            protocol::AssistantStep::terminal(
+                Some(protocol::Content::text(assistant)),
+                None,
+                Vec::new(),
+            ),
+        ));
+        turn += 1;
+    }
+    smelt_core::session::save(&session, &smelt_core::attachment::AttachmentStore::new());
+    remove_resume_meta(&id);
+}
+
+fn seed_resume_bench_sessions(count: usize) {
+    let base_time = 1_700_000_000_000u64;
+    for i in 0..count {
+        let id = format!("resume-bench-{i:04}");
+        seed_resume_bench_session(id, base_time + i as u64, 128, "/resume-bench-other");
+    }
+}
+
+fn seed_resume_bench_preview_session(
+    guard: &std::sync::MutexGuard<'static, ()>,
+    preview_bytes: usize,
+) -> (String, usize) {
+    let mut app = TestApp::builder()
+        .with_vim(true)
+        .build_with_test_home_guard(guard);
+    app.app.handle_resize(120, 32);
+    let bytes = push_search_bench_transcript(&mut app, preview_bytes);
+    app.render_silent();
+    app.app.save_session();
+    app.app.flush_persist();
+    let id = app.app.core.session.id.clone();
+    assert!(
+        crate::app::history::load_transcript_tail_from_sqlite_id(&id, 80, 12).is_some(),
+        "resume bench preview session should have sparse transcript descriptors"
+    );
+    stale_resume_meta(&id);
+    (id, bytes)
+}
+
+fn run_resume_command_to_dialog(app: &mut TestApp) -> f64 {
+    let start = std::time::Instant::now();
+    assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
+    drive_lua_tasks(app);
+    app.render_silent();
+    elapsed_ms(start.elapsed())
+}
+
+fn run_resume_preview_timer(app: &mut TestApp) -> f64 {
+    let start = std::time::Instant::now();
+    app.feed_one(SourceEvent::Tick(50));
+    app.app.tick_timers();
+    drive_lua_tasks(app);
+    app.render_silent();
+    elapsed_ms(start.elapsed())
+}
+
+fn duration_count(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> usize {
+    snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == label)
+        .map(|row| row.count)
+        .unwrap_or(0)
+}
+
+fn duration_total_us(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+    snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == label)
+        .map(|row| row.total_us)
+        .unwrap_or(0)
+}
+
+fn print_resume_perf(label: &str, snapshot: &smelt_perf::perf::Snapshot) {
+    for row in snapshot.durations.iter().filter(|row| {
+        row.label.starts_with("session:")
+            || row.label.starts_with("store:db:")
+            || row.label == "cmd:dispatch"
+            || row.label == "lua:cmd"
+            || row.label == "lua:timer"
+    }) {
+        eprintln!(
+            "RESUME_DIALOG_PERF_DURATION label={} metric={} count={} total_us={} p95_us={} max_us={}",
+            label, row.label, row.count, row.total_us, row.p95_us, row.max_us
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual resume dialog benchmark; run with SMELT_RESUME_BENCH=1"]
+fn resume_dialog_open_benchmark_suite() {
+    if std::env::var("SMELT_RESUME_BENCH").ok().as_deref() != Some("1") {
+        eprintln!("RESUME_DIALOG_BENCH_SKIPPED");
+        return;
+    }
+
+    let guard = test_home_guard();
+    let count = resume_bench_session_count();
+    let preview_bytes = resume_bench_preview_bytes();
+    let (latest_id, seeded_preview_bytes) =
+        seed_resume_bench_preview_session(&guard, preview_bytes);
+    seed_resume_bench_sessions(count.saturating_sub(1));
+    let mut app = TestApp::builder()
+        .with_vim(true)
+        .build_without_test_home_reset(&guard);
+    app.app.handle_resize(120, 32);
+
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    let open_ms = run_resume_command_to_dialog(&mut app);
+    let open_snapshot = smelt_perf::perf::snapshot();
+    print_resume_perf("open", &open_snapshot);
+    assert!(
+        app.state().focused_overlay.is_some(),
+        "resume command did not open a dialog"
+    );
+    let open_ro = duration_count(&open_snapshot, "store:db:open_read_only");
+    assert!(
+        open_ro <= 8,
+        "opening /resume opened {open_ro} read-only sqlite databases for {count} sessions; listing must not be proportional to session count"
+    );
+    let open_rw = duration_count(&open_snapshot, "store:db:open_read_write");
+    assert!(
+        open_rw <= 8,
+        "opening /resume opened {open_rw} read-write sqlite databases for {count} sessions; listing must not backfill sidecars on the foreground path"
+    );
+    assert_eq!(
+        duration_count(&open_snapshot, "session:load_full"),
+        0,
+        "resume preview must use sparse sqlite transcript records, not full session load"
+    );
+    assert_eq!(duration_count(&open_snapshot, "session:list"), 1);
+
+    smelt_perf::perf::clear();
+    let preview_ms = run_resume_preview_timer(&mut app);
+    let preview_snapshot = smelt_perf::perf::snapshot();
+    print_resume_perf("preview", &preview_snapshot);
+    smelt_perf::perf::set_enabled(false);
+    assert_eq!(
+        duration_count(&preview_snapshot, "session:load_full"),
+        0,
+        "delayed resume preview refresh must not full-load the selected session"
+    );
+    let preview_render_count = duration_count(&open_snapshot, "session:render_preview_into")
+        + duration_count(&preview_snapshot, "session:render_preview_into");
+    assert!(
+        preview_render_count > 0,
+        "resume dialog did not render the selected session preview"
+    );
+
+    eprintln!(
+        "RESUME_DIALOG_BENCH_SUMMARY sessions={} latest_id={} preview_bytes={} open_ms={:.3} preview_ms={:.3} open_db_ro={} open_db_rw={} open_session_list_us={} preview_render_us={}",
+        count,
+        latest_id,
+        seeded_preview_bytes,
+        open_ms,
+        preview_ms,
+        duration_count(&open_snapshot, "store:db:open_read_only"),
+        duration_count(&open_snapshot, "store:db:open_read_write"),
+        duration_total_us(&open_snapshot, "session:list"),
+        duration_total_us(&open_snapshot, "session:render_preview_into")
+            + duration_total_us(&preview_snapshot, "session:render_preview_into"),
+    );
+}
+
 #[test]
 #[ignore = "manual large transcript search benchmark; run via `cargo xtask bench-transcript-layout --search`"]
 fn transcript_layout_search_benchmark_suite() {
