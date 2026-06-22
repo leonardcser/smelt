@@ -728,6 +728,59 @@ struct TranscriptContentState {
     compaction_preview_id: Option<BlockId>,
 }
 
+impl TranscriptContentState {
+    fn new(transcript: Transcript) -> Self {
+        Self {
+            transcript,
+            projection: crate::content::transcript_buf::TranscriptProjection::new(),
+            compaction_preview_id: None,
+        }
+    }
+
+    fn replace_transcript_preserving_renderer_state(&mut self, transcript: Transcript) {
+        let inline_options = self.projection.inline_options().clone();
+        self.transcript = transcript;
+        self.projection = crate::content::transcript_buf::TranscriptProjection::new();
+        self.projection.set_inline_options(inline_options);
+        self.compaction_preview_id = None;
+    }
+
+    fn replace_with_descriptor_records(&mut self, records: Vec<TranscriptBlockRecordWithId>) {
+        self.replace_transcript_preserving_renderer_state(
+            Transcript::from_descriptor_records_with_ids(records),
+        );
+    }
+
+    fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return self.clear_compaction_preview();
+        }
+
+        if let Some(id) = self.compaction_preview_id {
+            if self.transcript.block(id).is_some() {
+                self.transcript.rewrite_compaction_preview(id, summary);
+                return Some(id);
+            }
+            self.compaction_preview_id = None;
+        }
+
+        let id = self.transcript.push_compaction_preview(summary)?;
+        self.compaction_preview_id = Some(id);
+        Some(id)
+    }
+
+    fn clear_compaction_preview(&mut self) -> Option<BlockId> {
+        let id = self.compaction_preview_id.take()?;
+        self.transcript.remove_compaction_preview(id);
+        Some(id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.transcript.history.is_empty()
+    }
+}
+
 struct TranscriptDescriptorState {
     sparse: SparseTranscriptDescriptors,
     active_range: Option<Range<smelt_store::TranscriptDescriptorIndex>>,
@@ -767,8 +820,50 @@ impl TranscriptDescriptorState {
         true
     }
 
+    fn active_range_cloned(&self) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
+        self.active_range.clone()
+    }
+
     fn records_for_active_range(&self) -> Vec<TranscriptBlockRecordWithId> {
         self.sparse.records_for_range(self.active_range())
+    }
+
+    fn descriptor_index_for_block_id(&self, block_id: BlockId) -> Option<usize> {
+        self.sparse
+            .descriptor_index_for_block_id(block_id)
+            .map(|index| index.get())
+    }
+
+    fn range_is_loaded(&self, range: &Range<smelt_store::TranscriptDescriptorIndex>) -> bool {
+        self.sparse.range_is_loaded(range)
+    }
+
+    fn set_active_range(&mut self, range: Range<smelt_store::TranscriptDescriptorIndex>) {
+        self.active_range = Some(range);
+    }
+
+    fn note_persisted_append(&mut self, count: usize, fallback_total: usize) {
+        if count == 0 {
+            return;
+        }
+        let total = self.sparse.total_count.unwrap_or(fallback_total);
+        if let Some(active) = self.active_range.as_mut() {
+            if active.end.get() == total {
+                active.end =
+                    smelt_store::TranscriptDescriptorIndex::new(total.saturating_add(count));
+            }
+        }
+        self.sparse.total_count = Some(total.saturating_add(count));
+    }
+
+    #[cfg(test)]
+    fn loaded_descriptor_count(&self) -> usize {
+        self.sparse.loaded_descriptor_count()
+    }
+
+    #[cfg(test)]
+    fn loaded_ranges(&self) -> &[Range<smelt_store::TranscriptDescriptorIndex>] {
+        self.sparse.loaded_ranges()
     }
 }
 
@@ -1138,11 +1233,7 @@ impl TranscriptDocument {
         }
         let descriptors = TranscriptDescriptorState::from_loaded(&loaded);
         let mut document = Self {
-            content: TranscriptContentState {
-                transcript: loaded.transcript,
-                projection: crate::content::transcript_buf::TranscriptProjection::new(),
-                compaction_preview_id: None,
-            },
+            content: TranscriptContentState::new(loaded.transcript),
             descriptors,
             extent_index: TranscriptExtentIndex::default(),
             viewport: TranscriptViewportRuntime::default(),
@@ -1590,10 +1681,7 @@ impl TranscriptDocument {
         if records.is_empty() {
             return;
         }
-        let inline_options = self.content.projection.inline_options().clone();
-        self.content.transcript = Transcript::from_descriptor_records_with_ids(records);
-        self.content.projection = crate::content::transcript_buf::TranscriptProjection::new();
-        self.content.projection.set_inline_options(inline_options);
+        self.content.replace_with_descriptor_records(records);
     }
 
     fn approximate_average_descriptor_rows(&self, width: u16) -> RowIndex {
@@ -1782,12 +1870,8 @@ impl TranscriptDocument {
     }
 
     fn descriptor_index_for_block_id(&self, block_id: BlockId) -> Option<usize> {
-        if let Some(index) = self
-            .descriptors
-            .sparse
-            .descriptor_index_for_block_id(block_id)
-        {
-            return Some(index.get());
+        if let Some(index) = self.descriptors.descriptor_index_for_block_id(block_id) {
+            return Some(index);
         }
         if self.descriptors.total_count().is_none() {
             return self.history().order.iter().position(|id| *id == block_id);
@@ -2318,8 +2402,8 @@ impl TranscriptDocument {
         if self.descriptors.active_range() == Some(&range) {
             return false;
         }
-        if self.descriptors.sparse.range_is_loaded(&range) {
-            self.descriptors.active_range = Some(range);
+        if self.descriptors.range_is_loaded(&range) {
+            self.descriptors.set_active_range(range);
             self.install_active_descriptor_projection();
             return true;
         }
@@ -2374,7 +2458,7 @@ impl TranscriptDocument {
         loaded_start: RowIndex,
         loaded_end: RowIndex,
     ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
-        let active = self.descriptors.active_range.clone()?;
+        let active = self.descriptors.active_range_cloned()?;
         let total = self.descriptors.total_count()?;
         let avg_rows = self.approximate_average_descriptor_rows(width).max(1);
         let missing_rows = if row < loaded_start {
@@ -3643,10 +3727,9 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.content.transcript.history.is_empty()
+        self.content.is_empty()
             && self
                 .descriptors
-                .sparse
                 .total_count()
                 .is_none_or(|total_count| total_count == 0)
     }
@@ -3656,31 +3739,19 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn note_persisted_descriptor_append(&mut self, count: usize) {
-        if count == 0 {
-            return;
-        }
-        let total = self
-            .descriptors
-            .sparse
-            .total_count
-            .unwrap_or_else(|| self.content.transcript.history.descriptor_records().len());
-        if let Some(active) = self.descriptors.active_range.as_mut() {
-            if active.end.get() == total {
-                active.end =
-                    smelt_store::TranscriptDescriptorIndex::new(total.saturating_add(count));
-            }
-        }
-        self.descriptors.sparse.total_count = Some(total.saturating_add(count));
+        let fallback_total = self.content.transcript.history.descriptor_records().len();
+        self.descriptors
+            .note_persisted_append(count, fallback_total);
     }
 
     #[cfg(test)]
     fn loaded_descriptor_count(&self) -> usize {
-        self.descriptors.sparse.loaded_descriptor_count()
+        self.descriptors.loaded_descriptor_count()
     }
 
     #[cfg(test)]
     fn loaded_descriptor_ranges(&self) -> &[Range<smelt_store::TranscriptDescriptorIndex>] {
-        self.descriptors.sparse.loaded_ranges()
+        self.descriptors.loaded_ranges()
     }
 
     #[cfg(test)]
@@ -3723,33 +3794,19 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
-        let summary = summary.trim().to_string();
-        if summary.is_empty() {
-            return self.clear_compaction_preview();
+        let id = self.content.set_compaction_preview(summary);
+        if id.is_some() {
+            self.extent_index.clear_exact_descriptor_rows();
         }
-
-        if let Some(id) = self.content.compaction_preview_id {
-            if self.content.transcript.block(id).is_some() {
-                self.content
-                    .transcript
-                    .rewrite_compaction_preview(id, summary);
-                self.extent_index.clear_exact_descriptor_rows();
-                return Some(id);
-            }
-            self.content.compaction_preview_id = None;
-        }
-
-        let id = self.content.transcript.push_compaction_preview(summary)?;
-        self.content.compaction_preview_id = Some(id);
-        self.extent_index.clear_exact_descriptor_rows();
-        Some(id)
+        id
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) -> Option<BlockId> {
-        let id = self.content.compaction_preview_id.take()?;
-        self.content.transcript.remove_compaction_preview(id);
-        self.extent_index.clear_exact_descriptor_rows();
-        Some(id)
+        let id = self.content.clear_compaction_preview();
+        if id.is_some() {
+            self.extent_index.clear_exact_descriptor_rows();
+        }
+        id
     }
 
     pub(crate) fn compaction_preview_id(&self) -> Option<BlockId> {

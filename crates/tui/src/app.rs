@@ -67,10 +67,9 @@ pub struct ShutdownContext {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DeferredSessionLoad {
-    pub(crate) id: String,
-    pub(crate) history_len: usize,
-    pub(crate) checkpoint: Option<smelt_core::ContextCheckpoint>,
+pub(crate) struct DisplayOnlySessionState {
+    pub(crate) full_session_id: String,
+    pub(crate) persisted_history_len: usize,
 }
 
 pub struct TuiApp {
@@ -128,7 +127,7 @@ pub struct TuiApp {
     pub(crate) dirty_history_from: Option<usize>,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
-    pub(crate) deferred_session_load: Option<DeferredSessionLoad>,
+    pub(crate) display_only_session: Option<DisplayOnlySessionState>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
@@ -758,7 +757,7 @@ impl TuiApp {
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
         !self.core.session.history.is_empty()
             || !self.transcript.is_empty()
-            || self.deferred_session_load.is_some()
+            || self.display_only_session.is_some()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
@@ -1315,7 +1314,7 @@ impl TuiApp {
             session_dirty: false,
             dirty_history_from: None,
             transient_render_requested: false,
-            deferred_session_load: None,
+            display_only_session: None,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,

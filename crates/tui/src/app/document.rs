@@ -17,6 +17,39 @@ pub(crate) enum RegisteredDocument {
     Transcript,
 }
 
+impl RegisteredDocument {
+    fn render_cache_key(
+        self,
+        app: &mut TuiApp,
+        handle: DocumentHandle,
+        theme: u64,
+        start: RowIndex,
+        count: RowIndex,
+    ) -> DocumentRenderCacheKey {
+        match self {
+            Self::Transcript => {
+                app.sync_transcript_renderer_generation();
+                let inline_options = app.inline_options();
+                let renderer_cache_key =
+                    crate::content::display_layout::transcript_renderer_cache_key(
+                        &app.lua,
+                        &inline_options,
+                    );
+                DocumentRenderCacheKey {
+                    document: DocumentRenderCacheDocument::Registered(handle),
+                    generation: app.transcript.projection_generation(),
+                    width: app.transcript_width() as u16,
+                    theme,
+                    renderer_generation: app.lua.transcript_renderer_generation(),
+                    renderer_cache_key,
+                    start,
+                    count,
+                }
+            }
+        }
+    }
+}
+
 pub(crate) struct DocumentRegistry;
 
 impl DocumentRegistry {
@@ -155,25 +188,7 @@ impl TuiApp {
         let handle = self.document_handle_for_win(win);
         let theme = theme_cache_key(self.ui.theme());
         match DocumentRegistry::resolve_optional(handle) {
-            Some(RegisteredDocument::Transcript) => {
-                self.sync_transcript_renderer_generation();
-                let inline_options = self.inline_options();
-                let renderer_cache_key =
-                    crate::content::display_layout::transcript_renderer_cache_key(
-                        &self.lua,
-                        &inline_options,
-                    );
-                Some(DocumentRenderCacheKey {
-                    document: DocumentRenderCacheDocument::Registered(handle?),
-                    generation: self.transcript.projection_generation(),
-                    width: self.transcript_width() as u16,
-                    theme,
-                    renderer_generation: self.lua.transcript_renderer_generation(),
-                    renderer_cache_key,
-                    start,
-                    count,
-                })
-            }
+            Some(document) => Some(document.render_cache_key(self, handle?, theme, start, count)),
             None if handle.is_some() => None,
             None => {
                 let win = self.ui.win(win)?;

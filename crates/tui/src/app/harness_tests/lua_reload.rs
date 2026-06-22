@@ -326,7 +326,7 @@ fn loading_session_restores_persisted_cwd() {
         app.app.core.signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
     );
-    assert!(app.app.deferred_session_load.is_none());
+    assert!(app.app.display_only_session.is_none());
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
         protocol::UiCommand::SetCwd { cwd } if cwd == expected
@@ -344,10 +344,9 @@ fn loading_session_restores_persisted_cwd() {
     app.app.load_session_display_only(
         display_session,
         crate::app::transcript::LoadedTranscript::full(transcript),
-        crate::app::DeferredSessionLoad {
-            id: "full-display-only-cwd-session".into(),
-            history_len: 0,
-            checkpoint: None,
+        crate::app::DisplayOnlySessionState {
+            full_session_id: "full-display-only-cwd-session".into(),
+            persisted_history_len: 0,
         },
     );
 
@@ -359,9 +358,9 @@ fn loading_session_restores_persisted_cwd() {
     assert_eq!(app.app.core.env.cwd(), display_target);
     assert_eq!(
         app.app
-            .deferred_session_load
+            .display_only_session
             .as_ref()
-            .map(|deferred| deferred.id.as_str()),
+            .map(|display_only| display_only.full_session_id.as_str()),
         Some("full-display-only-cwd-session")
     );
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
