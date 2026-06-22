@@ -61,7 +61,7 @@ pub fn render_markdown_table_with_options(
     let align_for = |c: usize| alignments.get(c).copied().unwrap_or_default();
 
     let start = out.line_count();
-    let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
+    let Some(col_widths) = fit_column_widths(rows, num_cols, max_table, options) else {
         let rendered = render_table_stacked(out, rows, max_table, dim, bctx, indent, options);
         out.stamp_chrome_delimited_block(start);
         return rendered;
@@ -129,7 +129,7 @@ pub fn measure_markdown_table_with_options(
     }
 
     let max_table = markdown_table_width(width, bctx, indent);
-    let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
+    let Some(col_widths) = fit_column_widths(rows, num_cols, max_table, options) else {
         return measure_table_stacked(rows, max_table, dim, options);
     };
 
@@ -176,7 +176,7 @@ fn measure_table_stacked(
     };
     let label_width = header
         .iter()
-        .map(|h| strip_markdown_markers(h).width())
+        .map(|h| inline_visual_width(h, options))
         .max()
         .unwrap_or(0);
     let content_width = max_table.max(1);
@@ -220,13 +220,14 @@ fn fit_column_widths(
     rows: &[Vec<String>],
     num_cols: usize,
     max_table: usize,
+    options: &InlineOptions,
 ) -> Option<Vec<usize>> {
     let mut natural = vec![0usize; num_cols];
     let mut min = vec![0usize; num_cols];
     for row in rows {
         for (c, cell) in row.iter().enumerate() {
-            natural[c] = natural[c].max(strip_markdown_markers(cell).width());
-            min[c] = min[c].max(min_visual_width(cell));
+            natural[c] = natural[c].max(inline_visual_width(cell, options));
+            min[c] = min[c].max(min_visual_width(cell, options));
         }
     }
     let overhead = 3 * num_cols + 1;
@@ -392,7 +393,7 @@ fn render_table_stacked(
 
     let label_width = header
         .iter()
-        .map(|h| strip_markdown_markers(h).width())
+        .map(|h| inline_visual_width(h, options))
         .max()
         .unwrap_or(0);
     let content_width = max_table.max(1);
@@ -414,7 +415,7 @@ fn render_table_stacked(
         for (c, cell) in row.iter().enumerate() {
             let label = header.get(c).map(|s| s.as_str()).unwrap_or("");
             if side_by_side {
-                let label_visual = strip_markdown_markers(label).width();
+                let label_visual = inline_visual_width(label, options);
                 let pad = label_width.saturating_sub(label_visual);
                 let wrapped = wrap_cell_spans(out, cell, value_width, dim, options);
                 for (li, spans) in wrapped.iter().enumerate() {
@@ -513,10 +514,16 @@ fn emit_table_label_spans(out: &mut LineBuilder, spans: &[InlineSpan], dim: bool
     }
 }
 
+/// Visual width of a cell after inline markdown lowering, including any file
+/// icon prefixes enabled through [`InlineOptions`].
+fn inline_visual_width(text: &str, options: &InlineOptions) -> usize {
+    inline_spans_width(&parse_inline_spans_with_options(text, false, options))
+}
+
 /// Visual width of the longest unwrappable segment; used for minimum column widths.
-fn min_visual_width(text: &str) -> usize {
+fn min_visual_width(text: &str, options: &InlineOptions) -> usize {
     let mut max_w = 0usize;
-    for span in parse_inline_spans(text, false) {
+    for span in parse_inline_spans_with_options(text, false, options) {
         let is_code = span.style.group == Some(intern("SmeltAccent"));
         if is_code {
             max_w = max_w.max(span.text.width());
@@ -533,6 +540,7 @@ fn min_visual_width(text: &str) -> usize {
     max_w
 }
 
+#[cfg(test)]
 fn strip_markdown_markers(text: &str) -> String {
     parse_inline_spans(text, false)
         .into_iter()
@@ -2276,6 +2284,43 @@ mod tests {
             .any(|s| s.style.italic);
         assert!(any_bold);
         assert!(any_italic);
+    }
+
+    #[test]
+    fn render_markdown_table_widths_include_file_icons() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let options = file_icon_options(true, Some(dir.path().to_path_buf()));
+        let rows = vec![vec!["File".to_string()], vec!["`main.rs`".to_string()]];
+
+        let block = render_test(80, |out| {
+            render_markdown_table_with_options(out, &rows, &[], 80, false, None, "", &options);
+        });
+        let top_width = block
+            .lines
+            .iter()
+            .find(|line| line.text.contains('┏'))
+            .expect("top border")
+            .text
+            .width();
+        let file_row = block
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .find(|line| line.contains("main.rs"))
+            .expect("file row");
+        let icon_text = expected_icon_text(Path::new("main.rs"), &options);
+
+        assert!(
+            file_row.contains(&icon_text),
+            "expected file icon {icon_text:?} in row {file_row:?}"
+        );
+        assert_eq!(
+            file_row.width(),
+            top_width,
+            "table border width should include the file icon: {file_row:?}"
+        );
     }
 
     #[test]
