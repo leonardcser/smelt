@@ -831,7 +831,7 @@ Style table for a single highlight group. Every field is optional - unset fields
 
 ### `smelt.theme.ThemeSpec`
 
-Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row fills, scrollbar colors, mode indicators) is just a group.
+Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is just a group.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

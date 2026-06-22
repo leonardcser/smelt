@@ -571,7 +571,7 @@
 ---@field crossedout? boolean Strikethrough.
 ---@field reverse? boolean Reverse video.
 
---- Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row fills, scrollbar colors, mode indicators) is just a group.
+--- Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is just a group.
 ---@class smelt.theme.ThemeSpec
 ---@field [string] string | smelt.theme.StyleDecl Style table or alias string for the group named by the key.
 
