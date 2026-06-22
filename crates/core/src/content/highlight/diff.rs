@@ -16,7 +16,10 @@ use smelt_buffer::buffer::SpanMeta;
 
 mod diff_inline;
 
-use diff_inline::{annotate_inline_highlights, full_line_highlight, inline_highlights_for_pair};
+use diff_inline::{
+    align_changed_lines, annotate_inline_highlights, full_line_highlight,
+    inline_highlights_for_pair, LineAlignment,
+};
 
 struct DiffChange {
     tag: ChangeTag,
@@ -981,10 +984,11 @@ pub struct SplitDiffPlan {
     pub rows: Vec<SplitDiffRow>,
 }
 
-/// Walk `old` vs `new` at line granularity and produce the aligned
-/// row plan. Consecutive delete/insert blocks are paired one-to-one
-/// (zip); whichever side has fewer rows in the block gets `None`
-/// padding to keep both sides on the same visual row.
+/// Walk `old` vs `new` at line granularity and produce an aligned row plan.
+/// Consecutive delete/insert blocks are paired by line similarity, preserving
+/// order, so intraline highlighting compares corresponding lines instead of
+/// blindly zipping unrelated rows. Unmatched rows get full-line highlights and
+/// `None` padding on the opposite side.
 pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
     let _perf = smelt_perf::perf::begin("render:compute_split_diff");
     let diff = TextDiff::from_lines(old, new);
@@ -997,27 +1001,42 @@ pub fn compute_split_diff(old: &str, new: &str) -> SplitDiffPlan {
     let flush = |rows: &mut Vec<SplitDiffRow>,
                  dels: &mut Vec<SplitDiffCell>,
                  ins: &mut Vec<SplitDiffCell>| {
-        let pairs = dels.len().min(ins.len());
-        for i in 0..pairs {
-            let (left_highlights, right_highlights) =
-                inline_highlights_for_pair(&dels[i].text, &ins[i].text);
-            dels[i].highlights = left_highlights;
-            ins[i].highlights = right_highlights;
-        }
-        for cell in dels.iter_mut().skip(pairs) {
-            cell.highlights = full_line_highlight(&cell.text);
-        }
-        for cell in ins.iter_mut().skip(pairs) {
-            cell.highlights = full_line_highlight(&cell.text);
+        let old_lines: Vec<&str> = dels.iter().map(|cell| cell.text.as_str()).collect();
+        let new_lines: Vec<&str> = ins.iter().map(|cell| cell.text.as_str()).collect();
+
+        for alignment in align_changed_lines(&old_lines, &new_lines) {
+            match alignment {
+                LineAlignment::Pair { old, new } => {
+                    let mut left = dels[old].clone();
+                    let mut right = ins[new].clone();
+                    let (left_highlights, right_highlights) =
+                        inline_highlights_for_pair(&left.text, &right.text);
+                    left.highlights = left_highlights;
+                    right.highlights = right_highlights;
+                    rows.push(SplitDiffRow {
+                        left: Some(left),
+                        right: Some(right),
+                    });
+                }
+                LineAlignment::OldOnly(old) => {
+                    let mut left = dels[old].clone();
+                    left.highlights = full_line_highlight(&left.text);
+                    rows.push(SplitDiffRow {
+                        left: Some(left),
+                        right: None,
+                    });
+                }
+                LineAlignment::NewOnly(new) => {
+                    let mut right = ins[new].clone();
+                    right.highlights = full_line_highlight(&right.text);
+                    rows.push(SplitDiffRow {
+                        left: None,
+                        right: Some(right),
+                    });
+                }
+            }
         }
 
-        let n = dels.len().max(ins.len());
-        for i in 0..n {
-            rows.push(SplitDiffRow {
-                left: dels.get(i).cloned(),
-                right: ins.get(i).cloned(),
-            });
-        }
         dels.clear();
         ins.clear();
     };
@@ -1219,6 +1238,47 @@ mod split_tests {
         let right = row.right.as_ref().unwrap();
         assert_eq!(highlighted_text(left), "1");
         assert_eq!(highlighted_text(right), "42");
+    }
+
+    #[test]
+    fn split_diff_aligns_similar_lines_inside_change_block() {
+        let plan = compute_split_diff(
+            "let name = user.name();\nlet age = user.age();\nrender(name, age);\n",
+            "let id = user.id();\nlet name = user.display_name();\nlet age = user.years();\nrender_user(name, age);\n",
+        );
+        let changed: Vec<(Option<String>, Option<String>)> = plan
+            .rows
+            .iter()
+            .filter(|row| {
+                row.left.as_ref().is_some_and(|cell| cell.changed)
+                    || row.right.as_ref().is_some_and(|cell| cell.changed)
+            })
+            .map(|row| {
+                (
+                    row.left.as_ref().map(|cell| cell.text.clone()),
+                    row.right.as_ref().map(|cell| cell.text.clone()),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            changed,
+            vec![
+                (None, Some("let id = user.id();".to_string())),
+                (
+                    Some("let name = user.name();".to_string()),
+                    Some("let name = user.display_name();".to_string()),
+                ),
+                (
+                    Some("let age = user.age();".to_string()),
+                    Some("let age = user.years();".to_string()),
+                ),
+                (
+                    Some("render(name, age);".to_string()),
+                    Some("render_user(name, age);".to_string()),
+                ),
+            ]
+        );
     }
 
     #[test]
