@@ -32,9 +32,7 @@
 //! Trace records intentionally use descriptor indices, row anchors, block ids,
 //! counts, and optional timings. They must not contain transcript text.
 
-use std::io::Write;
 use std::ops::Range;
-use std::path::PathBuf;
 
 use serde_json::json;
 
@@ -260,7 +258,6 @@ pub(crate) struct TranscriptScrollTrace {
     pending_input: Option<TranscriptScrollTraceRenderInput>,
     last_resolved_scroll_top: Option<RowIndex>,
     record_timings: bool,
-    jsonl_path: Option<PathBuf>,
     next_event_seq: u64,
 }
 
@@ -273,26 +270,6 @@ impl TranscriptScrollTrace {
         }
     }
 
-    pub(crate) fn with_jsonl_path(path: PathBuf, record_timings: bool) -> Self {
-        let trace = Self {
-            record_timings,
-            jsonl_path: Some(path),
-            ..Self::default()
-        };
-        trace.truncate_jsonl();
-        trace
-    }
-
-    fn truncate_jsonl(&self) {
-        let Some(path) = self.jsonl_path.as_ref() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::File::create(path);
-    }
-
     pub(crate) fn record_interaction(&mut self, kind: impl Into<String>, data: serde_json::Value) {
         let event = TranscriptInteractionTraceEvent {
             seq: self.next_event_seq,
@@ -300,33 +277,7 @@ impl TranscriptScrollTrace {
             data,
         };
         self.next_event_seq = self.next_event_seq.saturating_add(1);
-        self.append_jsonl(&event);
         self.interaction_events.push(event);
-    }
-
-    fn append_jsonl(&self, event: &TranscriptInteractionTraceEvent) {
-        let Some(path) = self.jsonl_path.as_ref() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        else {
-            return;
-        };
-        let _ = serde_json::to_writer(
-            &mut file,
-            &json!({
-                "seq": event.seq,
-                "kind": &event.kind,
-                "data": &event.data,
-            }),
-        );
-        let _ = file.write_all(b"\n");
     }
 
     #[allow(dead_code)]

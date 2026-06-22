@@ -1300,14 +1300,6 @@ impl TranscriptDocument {
         self.viewport.trace = Some(TranscriptScrollTrace::with_timings(enabled));
     }
 
-    pub(crate) fn enable_scroll_trace_jsonl(
-        &mut self,
-        path: std::path::PathBuf,
-        record_timings: bool,
-    ) {
-        self.viewport.trace = Some(TranscriptScrollTrace::with_jsonl_path(path, record_timings));
-    }
-
     pub(crate) fn record_scroll_trace_event(
         &mut self,
         kind: impl Into<String>,

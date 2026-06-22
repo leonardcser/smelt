@@ -1252,9 +1252,6 @@ impl TuiApp {
             ),
         };
         let mut transcript = crate::app::transcript::TranscriptDocument::new();
-        if let Some(path) = std::env::var_os("SMELT_TRANSCRIPT_INTERACTION_TRACE") {
-            transcript.enable_scroll_trace_jsonl(std::path::PathBuf::from(path), true);
-        }
         transcript.set_inline_options(inline_options.clone());
         let mut resume_preview_cache = crate::app::transcript::ResumePreviewCache::new(6);
         resume_preview_cache.set_inline_options(inline_options);
