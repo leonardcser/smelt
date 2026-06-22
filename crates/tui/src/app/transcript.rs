@@ -3254,7 +3254,8 @@ impl TranscriptDocument {
         let base = self
             .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
             .unwrap_or(fallback_scroll_top);
-        let mut row = Self::add_rows(base, rows);
+        let initial_row = Self::add_rows(base, rows);
+        let mut row = initial_row;
         for _ in 0..MAX_LOCAL_DELTA_REBASES {
             let expanded = self.activate_descriptor_window_covering_local_delta(
                 lua,
@@ -3270,7 +3271,14 @@ impl TranscriptDocument {
             let base = self
                 .row_for_viewport_anchor(lua, width, viewport_rows, fallback_scroll_top)
                 .unwrap_or(fallback_scroll_top);
-            row = Self::add_rows(base, rows);
+            let rebased = Self::add_rows(base, rows);
+            row = if rows < 0 {
+                rebased.min(initial_row)
+            } else if rows > 0 {
+                rebased.max(initial_row)
+            } else {
+                rebased
+            };
         }
 
         crate::content::transcript_buf::ScrollTarget::visible_row(row)
