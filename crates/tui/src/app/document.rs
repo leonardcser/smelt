@@ -110,6 +110,14 @@ impl TuiApp {
         DocumentRegistry::resolve_optional(self.document_handle_for_win(win))
     }
 
+    pub(crate) fn win_uses_document_view(&self, win: WinId) -> bool {
+        self.registered_document_for_win(win).is_some()
+            || self
+                .ui
+                .win(win)
+                .is_some_and(|win| win.has_materialized_rows())
+    }
+
     pub(crate) fn transcript_document_is_attached_to(&self, win: WinId) -> bool {
         self.registered_document_for_win(win) == Some(RegisteredDocument::Transcript)
     }

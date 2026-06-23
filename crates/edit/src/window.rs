@@ -586,6 +586,9 @@ impl Window {
 
     pub fn set_document_handle(&mut self, handle: Option<DocumentHandle>) {
         self.document_handle = handle;
+        if self.document_handle.is_none() {
+            self.clear_materialized_rows();
+        }
     }
 
     fn range_layer_slot(&self, layer: crate::RangeLayer) -> &Vec<SelectionRange> {

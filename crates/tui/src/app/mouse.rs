@@ -505,11 +505,7 @@ impl TuiApp {
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
                 // to follow keyboard focus, not just the first leaf the overlay opened.
                 // A non-focusable selectable leaf must not steal app_focus.
-                let use_document_mouse = self
-                    .ui
-                    .win(win)
-                    .is_some_and(|w| w.surface().is_readonly_text() || w.has_materialized_rows());
-                let (status, yank) = if use_document_mouse {
+                let (status, yank) = if self.win_uses_document_view(win) {
                     self.handle_document_view_mouse_for_win(win, me, count, now)
                 } else {
                     self.handle_selectable_leaf_mouse(win, me, count)

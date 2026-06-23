@@ -28,6 +28,98 @@ fn vim_readonly_dialog_arrows_use_viewer_navigation() {
         "Down should move within readonly viewer, before={before}, after={after}"
     );
 }
+
+#[test]
+fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha beta", "gamma" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+          keymaps = {
+            { key = "<Esc>", on_press = function(ctx) ctx.close() end },
+          },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    app.type_char('v');
+    app.type_char('e');
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::Visual
+    );
+    assert!(
+        app.app
+            .ui
+            .win(win_id)
+            .and_then(|win| app
+                .app
+                .ui
+                .buf(win.buf)
+                .and_then(|buf| win.selection_range(buf)))
+            .is_some(),
+        "visual-mode dialog viewer should have a selection range"
+    );
+
+    app.press(KeyCode::Esc);
+
+    assert!(
+        app.app.ui.focused_overlay().is_some(),
+        "Esc from Visual should not close the dialog"
+    );
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::Normal
+    );
+}
+
+#[test]
+fn vim_readonly_dialog_visual_selection_is_painted() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha beta", "gamma" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    app.type_char('v');
+    app.type_char('e');
+    assert!(
+        !app.app
+            .ui
+            .win(win_id)
+            .expect("window")
+            .has_materialized_rows(),
+        "dialog viewer should stay byte-backed after visual motions"
+    );
+    let frame = app.render_to_frame();
+    let win = app.app.ui.win(win_id).expect("window");
+    let rect = win.viewport.expect("dialog viewport").rect;
+    let selection_bg = app.app.ui.theme().get("Visual").bg;
+    let painted = (rect.top..rect.top + rect.height).any(|row| {
+        (rect.left..rect.left + rect.width)
+            .any(|col| frame.styles[row as usize][col as usize].bg == selection_bg)
+    });
+
+    assert!(painted, "visual selection should be painted inside dialog");
+}
 fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
     app.actions().iter().rev().find_map(|action| match action {
         Action::EngineSend(cmd) => match cmd.as_ref() {

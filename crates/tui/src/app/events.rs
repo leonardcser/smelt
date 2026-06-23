@@ -1180,14 +1180,15 @@ impl TuiApp {
     /// focused. Tiers fire in order; the first to return `Consumed` wins:
     ///
     /// - Tier 1: specific keymap on the focused leaf (`win_set_keymap`).
-    /// - Tier 1b: overlay-scoped keymap (`overlay_set_keymap`) on the overlay
+    /// - Tier 1b: vim-owned bare Esc on the focused overlay viewer.
+    /// - Tier 1c: overlay-scoped keymap (`overlay_set_keymap`) on the overlay
     ///   containing the focused leaf.
     /// - Tier 2: global Lua keymap (`smelt.keymap.set("", chord, fn)`).
-    /// - Tier 3: per-window catch-all fallback (`win_set_key_fallback`).
-    /// - Tier 4: vim viewer keys on the focused leaf.
+    /// - Tier 3: vim viewer keys on the focused leaf.
+    /// - Tier 4: per-window catch-all fallback (`win_set_key_fallback`).
     /// - Tier 5: modal dismiss for bare Esc / Ctrl-C.
     ///
-    /// Putting global keymaps between tiers 1b and 3 lets a site-wide chord
+    /// Putting global keymaps between tiers 1c and 3 lets a site-wide chord
     /// like `?` -> /help win over a dialog input's blanket printable-char
     /// fallback, without each leaf needing a bespoke carve-out. Overlay-scoped
     /// keymaps sit above global so an open dialog/picker's local intent
@@ -1212,7 +1213,14 @@ impl TuiApp {
             }
         }
 
-        // Tier 1b: overlay-scoped keymap on the overlay containing the
+        // Tier 1b: bare Esc that belongs to Vim (Visual mode or a pending
+        // Normal-mode sequence) must beat dialog-level <Esc> keymaps, which
+        // are otherwise allowed to close the overlay from idle Normal mode.
+        if self.overlay_viewer_vim_owns_escape(k) && self.dispatch_overlay_viewer_key(k) {
+            return Status::Consumed;
+        }
+
+        // Tier 1c: overlay-scoped keymap on the overlay containing the
         // focused leaf. Owned by the overlay, so any leaf inside it sees
         // the same bindings without per-leaf re-registration.
         {
@@ -1284,7 +1292,28 @@ impl TuiApp {
         self.ui.dispatch_paste_fallback(content, &mut lua_invoke)
     }
 
-    /// Overlay-focus key cascade tier 4. Wraps the shared
+    fn overlay_viewer_vim_owns_escape(&self, k: KeyEvent) -> bool {
+        if k.code != KeyCode::Esc || k.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        let Some(win_id) = self.ui.focus() else {
+            return false;
+        };
+        if self.ui.overlay_for_leaf(win_id).is_none() {
+            return false;
+        }
+        let Some(win) = self.ui.win(win_id) else {
+            return false;
+        };
+        win.vim_enabled()
+            && win.surface().is_readonly_text()
+            && (matches!(
+                win.vim_mode(),
+                crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine
+            ) || !win.vim_state().is_idle())
+    }
+
+    /// Overlay-focus key cascade tier 3. Wraps the shared
     /// [`Self::dispatch_window_viewer_key`] with two overlay-specific gates:
     ///   * Insert-mode skip - typing inside an editable overlay leaf must
     ///     not bubble nav keys here.
@@ -1413,11 +1442,7 @@ impl TuiApp {
         }
 
         let now = self.core.clock.instant_now();
-        let use_document_view = self
-            .ui
-            .win(win_id)
-            .is_some_and(|win| win.surface().is_readonly_text() || win.has_materialized_rows());
-        let copied = if use_document_view {
+        let copied = if self.win_uses_document_view(win_id) {
             self.execute_document_view_command_for_win(win_id, command, viewport_rows, now)
                 .map(crate::smelt_edit::DocumentCopy::Rows)
         } else {
