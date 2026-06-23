@@ -19,6 +19,16 @@ pub(crate) fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<pr
     out
 }
 
+const DEFAULT_LUA_SESSION_LIMIT: usize = 200;
+const DEFAULT_LUA_SESSION_MAX_BYTES: usize = 1024 * 1024;
+
+fn opt_field<T: mlua::FromLua>(table: &Option<mlua::Table>, key: &str) -> LuaResult<Option<T>> {
+    match table {
+        Some(table) => table.get::<Option<T>>(key),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
     let tbl = lua.create_table()?;
     for (i, msg) in msgs.iter().enumerate() {
@@ -501,8 +511,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 )?;
                 out.set("context_window", app.core.config.context_window)?;
                 out.set("cost", session.session_cost_usd)?;
-                out.set("history_count", session.history.len())?;
-                out.set("message_count", protocol::history_to_messages(&session.history).len())?;
+                let history_count = app.session_history_len();
+                out.set("history_count", history_count)?;
+                if app.live_session.is_some() {
+                    out.set("message_count", history_count)?;
+                    out.set("message_count_approximate", true)?;
+                } else {
+                    out.set("message_count", protocol::history_to_messages(&session.history).len())?;
+                    out.set("message_count_approximate", false)?;
+                }
                 out.set("turn_count", app.user_turns().len())?;
 
                 out.set("tokens", usage_to_lua(lua, &session.session_usage)?)?;
@@ -574,56 +591,56 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     let msgs = m.sub(
         "messages",
-        "Session messages. `smelt.session.messages.list(opts?)` returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
+        "Session messages. `smelt.session.messages.list(opts?)` returns transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; by default this reads a bounded tail. Pass `opts.limit`, `opts.since_index`, or `opts.all = true` for an explicit full read. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
     )?;
     msgs.fn_(
         "list",
-        "Return persisted transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit? }`.",
+        "Return transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit?, all? }`. Without `all = true`, reads at most a bounded tail.",
         &["opts"],
         |lua, arg: Option<mlua::Table>| -> LuaResult<mlua::Table> {
-            let messages = crate::lua::try_with_app(|app| {
-                protocol::history_to_messages(&app.core.session.history)
+            let roles = opt_field::<Vec<String>>(&arg, "roles")?;
+            let include_tool = opt_field::<bool>(&arg, "include_tool")?.unwrap_or(true);
+            let since_index = opt_field::<usize>(&arg, "since_index")?;
+            let limit = opt_field::<usize>(&arg, "limit")?;
+            let all = opt_field::<bool>(&arg, "all")?.unwrap_or(false);
+            let history = crate::lua::try_with_app(|app| {
+                let len = app.session_history_len();
+                if all {
+                    return app.session_history_range(0..len);
+                }
+                let limit = limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1);
+                if let Some(since_index) = since_index {
+                    let start = since_index.saturating_sub(1).min(len);
+                    let end = start.saturating_add(limit).min(len);
+                    app.session_history_range(start..end)
+                } else {
+                    app.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
+                }
             })
             .unwrap_or_default();
-            let filtered: Vec<protocol::Message> = match arg {
-                Some(arg) => {
-                    let roles = arg.get::<Option<Vec<String>>>("roles")?;
-                    let include_tool = arg.get::<Option<bool>>("include_tool")?.unwrap_or(true);
-                    let since_index = arg.get::<Option<usize>>("since_index")?;
-                    let limit = arg.get::<Option<usize>>("limit")?;
-                    let role_filter: Option<std::collections::HashSet<String>> =
-                        roles.map(|v| v.into_iter().collect());
-                    messages
-                        .into_iter()
-                        .enumerate()
-                        .filter(|(idx, m)| {
-                            if let Some(ref s) = since_index {
-                                if idx + 1 < *s {
-                                    return false;
-                                }
-                            }
-                            if !include_tool && matches!(m.role, protocol::Role::Tool) {
-                                return false;
-                            }
-                            if let Some(ref rf) = role_filter {
-                                let r = match m.role {
-                                    protocol::Role::System => "system",
-                                    protocol::Role::User => "user",
-                                    protocol::Role::Assistant => "assistant",
-                                    protocol::Role::Tool => "tool",
-                                };
-                                if !rf.contains(r) {
-                                    return false;
-                                }
-                            }
-                            true
-                        })
-                        .map(|(_, m)| m)
-                        .take(limit.unwrap_or(usize::MAX))
-                        .collect()
-                }
-                None => messages,
-            };
+            let messages = protocol::history_to_messages(&history);
+            let role_filter: Option<std::collections::HashSet<String>> =
+                roles.map(|v| v.into_iter().collect());
+            let filtered: Vec<protocol::Message> = messages
+                .into_iter()
+                .filter(|m| {
+                    if !include_tool && matches!(m.role, protocol::Role::Tool) {
+                        return false;
+                    }
+                    if let Some(ref rf) = role_filter {
+                        let r = match m.role {
+                            protocol::Role::System => "system",
+                            protocol::Role::User => "user",
+                            protocol::Role::Assistant => "assistant",
+                            protocol::Role::Tool => "tool",
+                        };
+                        if !rf.contains(r) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect();
             messages_to_lua(lua, &filtered)
         },
     )?;
@@ -639,24 +656,55 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "history",
-        "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only.",
-        &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let history = crate::lua::try_with_app(|app| app.core.session.history.clone())
-                .unwrap_or_default();
+        "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.",
+        &["opts"],
+        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
+            let all = opt_field::<bool>(&opts, "all")?.unwrap_or(false);
+            let since_index = opt_field::<usize>(&opts, "since_index")?;
+            let limit = opt_field::<usize>(&opts, "limit")?
+                .unwrap_or(DEFAULT_LUA_SESSION_LIMIT)
+                .max(1);
+            let history = crate::lua::try_with_app(|app| {
+                let len = app.session_history_len();
+                if all {
+                    return app.session_history_range(0..len);
+                }
+                if let Some(since_index) = since_index {
+                    let start = since_index.saturating_sub(1).min(len);
+                    let end = start.saturating_add(limit).min(len);
+                    app.session_history_range(start..end)
+                } else {
+                    app.session_history_tail(limit, Some(DEFAULT_LUA_SESSION_MAX_BYTES))
+                }
+            })
+            .unwrap_or_default();
             history_items_to_lua(lua, &history)
         },
     )?;
     m.fn_(
         "conversation",
-        "Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Pass `{ limit = n }` to read only the latest n conversation rows without materializing the full session. Read-only; intended for lightweight auxiliary prompts such as input prediction.",
+        "Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. By default reads the latest bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`, or `{ all = true }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
-            let limit = opts
-                .as_ref()
-                .and_then(|opts| opts.get::<Option<usize>>("limit").ok().flatten());
+            let all = opt_field::<bool>(&opts, "all")?.unwrap_or(false);
+            let since_index = opt_field::<usize>(&opts, "since_index")?;
+            let limit = opt_field::<usize>(&opts, "limit")?;
             match crate::lua::try_with_app(|app| {
-                conversation_to_lua(lua, &app.core.session.history, limit)
+                let len = app.session_history_len();
+                let history = if all {
+                    app.session_history_range(0..len)
+                } else if let Some(since_index) = since_index {
+                    let limit = limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1);
+                    let start = since_index.saturating_sub(1).min(len);
+                    let end = start.saturating_add(limit).min(len);
+                    app.session_history_range(start..end)
+                } else {
+                    app.session_history_tail(
+                        limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1),
+                        Some(DEFAULT_LUA_SESSION_MAX_BYTES),
+                    )
+                };
+                conversation_to_lua(lua, &history, limit)
             }) {
                 Some(result) => result,
                 None => lua.create_table(),

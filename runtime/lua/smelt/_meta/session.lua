@@ -25,7 +25,7 @@ session.context_tokens = nil
 ---@type fun(): integer?
 session.context_window = nil
 
---- Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Pass `{ limit = n }` to read only the latest n conversation rows without materializing the full session. Read-only; intended for lightweight auxiliary prompts such as input prediction.
+--- Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. By default reads the latest bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`, or `{ all = true }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
 ---@type fun(opts: table?): table
 session.conversation = nil
 
@@ -58,8 +58,8 @@ session.enter_worktree = nil
 ---@type fun(): nil
 session.fork = nil
 
---- Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only.
----@type fun(): table
+--- Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.
+---@type fun(opts: table?): table
 session.history = nil
 
 --- Stable session id (matches the on-disk session filename).

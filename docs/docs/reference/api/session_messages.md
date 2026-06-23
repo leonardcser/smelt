@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Session messages. `smelt.session.messages.list(opts?)` returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.
+Session messages. `smelt.session.messages.list(opts?)` returns transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; by default this reads a bounded tail. Pass `opts.limit`, `opts.since_index`, or `opts.all = true` for an explicit full read. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.
 
 ## `smelt.session.messages.list`
 
@@ -14,5 +14,5 @@ Session messages. `smelt.session.messages.list(opts?)` returns persisted transcr
 fun(opts: table?): table
 ```
 
-Return persisted transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit? }`.
+Return transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit?, all? }`. Without `all = true`, reads at most a bounded tail.
 

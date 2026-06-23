@@ -1528,7 +1528,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions.
 - `smelt.session.fork` :: `fun(): nil`
   Fork the current session: clone its messages into a new session id and switch to it.
-- `smelt.session.history` :: `fun(): table`
+- `smelt.session.history` :: `fun(opts: table?): table`
   Return the semantic session history as compaction-safe items.
 - `smelt.session.id` :: `fun(): string`
   Stable session id (matches the on-disk session filename).
@@ -1570,7 +1570,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 Session messages.
 
 - `smelt.session.messages.list` :: `fun(opts: table?): table`
-  Return persisted transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit? }`.
+  Return transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit?, all? }`.
 
 #### `smelt.session.slug`
 

@@ -46,7 +46,7 @@ Configured context-window size in tokens for the active model. `nil` when the mo
 fun(opts: table?): table
 ```
 
-Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Pass `{ limit = n }` to read only the latest n conversation rows without materializing the full session. Read-only; intended for lightweight auxiliary prompts such as input prediction.
+Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. By default reads the latest bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`, or `{ all = true }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
 
 ## `smelt.session.cost`
 
@@ -107,10 +107,10 @@ Fork the current session: clone its messages into a new session id and switch to
 ## `smelt.session.history`
 
 ```lua
-fun(): table
+fun(opts: table?): table
 ```
 
-Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only.
+Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. By default this returns a bounded tail; pass `{ all = true }` for an explicit full read.
 
 ## `smelt.session.id`
 
