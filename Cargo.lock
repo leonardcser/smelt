@@ -2549,7 +2549,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smelt-agent"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "clap",
  "crossterm",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-buffer"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "base64",
  "serde",
@@ -2590,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "dirs",
  "ego-tree",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-edit"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "crossterm",
  "smelt-buffer",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-engine"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "base64",
  "futures-util",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-lua-doc-derive"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2677,7 +2677,7 @@ version = "0.1.3"
 
 [[package]]
 name = "smelt-protocol"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-store"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "hostname",
  "rusqlite",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-tui"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "base64",
  "bincode",
@@ -3807,7 +3807,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.5.0-alpha.5"
+version = "0.5.0-alpha.6"
 dependencies = [
  "serde_json",
  "smelt-core",
