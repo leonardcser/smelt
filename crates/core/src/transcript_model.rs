@@ -223,6 +223,20 @@ impl Block {
         }
     }
 
+    /// Whether a viewport content anchor inside this block can be reused across
+    /// later projection frames. Live-rewritten blocks can shift their rendered
+    /// rows while preserving `BlockId`, so row-based viewport gestures should
+    /// fall back to the resolved row instead.
+    pub fn is_stable_scroll_anchor(&self) -> bool {
+        !matches!(
+            self,
+            Block::ToolDraft {
+                finished: false,
+                ..
+            }
+        )
+    }
+
     /// Stable content hash of this block. Two blocks with the same
     /// content hash produce identical `LayoutIr` for the same
     /// `LayoutKey` and `ToolState`. For `ToolCall`, `ToolState` (status

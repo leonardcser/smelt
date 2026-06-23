@@ -2973,6 +2973,12 @@ impl TranscriptDocument {
         }
     }
 
+    fn stable_viewport_anchor(&self, anchor: TranscriptContentAnchor) -> bool {
+        self.history()
+            .block(anchor.block_id)
+            .is_some_and(Block::is_stable_scroll_anchor)
+    }
+
     fn capture_viewport_anchor(
         &mut self,
         lua: &LuaRuntime,
@@ -2985,7 +2991,10 @@ impl TranscriptDocument {
             TranscriptScrollAnchor::Tail => (Some(TranscriptScrollAnchor::Tail), 0),
             TranscriptScrollAnchor::Content(_) | TranscriptScrollAnchor::EstimatedRow(_) => self
                 .content_anchor_at_or_after_row(lua, width, top_row, viewport_rows)
-                .map(|(anchor, offset)| (Some(TranscriptScrollAnchor::Content(anchor)), offset))
+                .and_then(|(anchor, offset)| {
+                    self.stable_viewport_anchor(anchor)
+                        .then_some((Some(TranscriptScrollAnchor::Content(anchor)), offset))
+                })
                 .unwrap_or((Some(fallback), 0)),
         };
         self.viewport.state.mode = match top_anchor {
@@ -4521,6 +4530,110 @@ mod document_tests {
         assert!(frame.first_visible_content_anchor.is_some());
         assert!(!frame.visible_record_or_block_ids.is_empty());
         assert_eq!(frame.render_or_projection_ms, None);
+    }
+
+    #[test]
+    fn unfinished_tool_draft_viewport_anchor_uses_stable_row() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 5;
+        let mut source = Transcript::new();
+        source.push(Block::ToolDraft {
+            stream_id: "plan-stream".into(),
+            call_id: Some("plan-call".into()),
+            name: "present_plan".into(),
+            summary: protocol::StyledLines::from_plain("drafting plan"),
+            args: HashMap::new(),
+            raw_arguments: "{}".into(),
+            finished: false,
+        });
+        let mut document = TranscriptDocument::from_transcript(source);
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(412), Default::default());
+
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(0),
+            viewport_rows,
+        );
+        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(applied.materialized_rows.clamped_scroll, 0);
+        assert!(matches!(
+            applied.top_anchor,
+            Some(TranscriptTraceAnchor::EstimatedRow(0))
+        ));
+    }
+
+    #[test]
+    fn unfinished_tool_draft_user_delta_uses_row_base_after_rewrite() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let width = 80;
+        let viewport_rows = 5;
+        let summary = (0..30)
+            .map(|i| format!("draft line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut source = Transcript::new();
+        source.push(Block::ToolDraft {
+            stream_id: "plan-stream".into(),
+            call_id: Some("plan-call".into()),
+            name: "present_plan".into(),
+            summary: protocol::StyledLines::from_plain(summary),
+            args: HashMap::new(),
+            raw_arguments: "{}".into(),
+            finished: false,
+        });
+        let mut document = TranscriptDocument::from_transcript(source);
+        let draft_id = *document.history().order.last().expect("draft block id");
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(414), Default::default());
+
+        let plan = document.plan_projection_measured(
+            &lua,
+            width,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(10),
+            viewport_rows,
+        );
+        let first = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        assert_eq!(first.materialized_rows.clamped_scroll, 10);
+
+        let rewritten_summary = (0..5)
+            .map(|i| format!("new draft prefix {i}"))
+            .chain((0..30).map(|i| format!("draft line {i}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        document.history_mut().rewrite(
+            draft_id,
+            Block::ToolDraft {
+                stream_id: "plan-stream".into(),
+                call_id: Some("plan-call".into()),
+                name: "present_plan".into(),
+                summary: protocol::StyledLines::from_plain(rewritten_summary),
+                args: HashMap::new(),
+                raw_arguments: "{}".into(),
+                finished: false,
+            },
+        );
+        document.set_pending_scroll_intent(TranscriptScrollIntent::UserDelta { rows: -3 });
+        let plan = document.plan_viewport_projection_measured(
+            &lua,
+            width,
+            &theme,
+            TranscriptViewportProjectionInput {
+                fallback_scroll_top: first.materialized_rows.clamped_scroll,
+                follow_tail: false,
+                width_changed: false,
+                previous_width: None,
+            },
+            viewport_rows,
+        );
+        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+
+        assert_eq!(applied.materialized_rows.clamped_scroll, 7);
     }
 
     #[test]
