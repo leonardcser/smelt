@@ -9,7 +9,7 @@
 
 local M = {}
 
-local state = smelt.state("debug_panel")
+local state = smelt.state.get("debug_panel")
 local NS_HL = smelt.ns("smelt.debug_panel")
 
 local PANEL_W = 52
@@ -55,7 +55,7 @@ local function add_kv(lines, spans, key, val, width)
 end
 
 local function compact_stats()
-	local compact = smelt.state("compact")
+	local compact = smelt.state.get("compact")
 	local total = compact.total or 0
 	local auto = compact.auto or 0
 	local manual = compact.manual or 0
@@ -75,26 +75,26 @@ local function compose_lines(win)
 		width = math.max(win:content_width() or width, KEY_W + 8)
 	end
 
-	local model = smelt.model() or ""
+	local model = smelt.model.current() or ""
 	local provider = smelt.config.provider_type()
 	local api_base = smelt.config.api_base()
-	local mode = smelt.mode() or ""
-	local reasoning = smelt.reasoning() or ""
+	local mode = smelt.mode.current() or ""
+	local reasoning = smelt.reasoning.current() or ""
 
 	local ctx = smelt.session.context_tokens()
 	local window = smelt.session.context_window()
 	local cost = smelt.session.cost()
 	local tokens = smelt.session.tokens()
 	local turns = smelt.session.turns()
-	local messages = smelt.session.messages()
+	local messages = smelt.session.messages.list()
 	local session_id = smelt.session.id()
-	local session_title = smelt.session.title()
+	local session_title = smelt.session.title.get()
 	local cwd = smelt.session.cwd()
-	local worktree_managed = smelt.signal("cwd_managed_worktree"):get()
-	local worktree_path = smelt.signal("cwd_worktree_path"):get()
-	local worktree_name = smelt.signal("cwd_worktree"):get()
-	local work_state = smelt.signal("work_state"):get() or "idle"
-	local compact = smelt.state("compact")
+	local worktree_managed = smelt.signal.get("cwd_managed_worktree")
+	local worktree_path = smelt.signal.get("cwd_worktree_path")
+	local worktree_name = smelt.signal.get("cwd_worktree")
+	local work_state = smelt.signal.get("work_state") or "idle"
+	local compact = smelt.state.get("compact")
 
 	local pricing = smelt.model.pricing()
 	local mcfg = smelt.config.model_config()

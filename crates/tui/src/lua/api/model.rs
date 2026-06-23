@@ -1,6 +1,6 @@
-//! `smelt.model` - callable selector for the configured provider/model.
-//! `smelt.model()` reads the active key, `smelt.model(v)` switches,
-//! `smelt.model.list()` returns the available models.
+//! `smelt.model` - selector for the configured provider/model.
+//! `smelt.model.current()` reads the active key, `smelt.model.set(v)` switches,
+//! and `smelt.model.list()` returns the available models.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -11,7 +11,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "model",
-        "Model selector. `smelt.model()` reads the active model key, `smelt.model(v)` switches, `smelt.model.list()` returns the available models.",
+        "Model selector. `smelt.model.current()` reads the active model key, `smelt.model.set(v)` switches, and `smelt.model.list()` returns the available models.",
         Tier::UiHost,
     )?;
     m.fn_(
@@ -91,20 +91,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // `__call(v?)`: read when no arg, switch when arg.
-    m.callable(
-        |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
-            match v {
-                Some(name) => {
-                    crate::lua::with_app(|app| app.apply_model(&name, true));
-                    Ok(mlua::Value::Nil)
-                }
-                None => {
-                    let cur = crate::lua::try_with_app(|app| app.core.config.model.clone())
-                        .unwrap_or_default();
-                    Ok(mlua::Value::String(lua.create_string(&cur)?))
-                }
-            }
+    m.fn_(
+        "current",
+        "Return the active model key.",
+        &[],
+        |_, ()| -> LuaResult<String> {
+            Ok(crate::lua::try_with_app(|app| app.core.config.model.clone()).unwrap_or_default())
+        },
+    )?;
+    m.fn_(
+        "set",
+        "Switch the active model by key.",
+        &["name"],
+        |_, name: String| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.apply_model(&name, true));
+            Ok(())
         },
     )?;
     Ok(())

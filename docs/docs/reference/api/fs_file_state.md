@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Cached file-state tracker used by tools to detect external modifications between reads and writes.
 
 ## `smelt.fs.file_state.get`

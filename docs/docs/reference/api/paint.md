@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Register Lua callbacks against custom paint regions. UiHost-only.
 
 ## `smelt.paint.register`

@@ -64,8 +64,8 @@ local function reset_sent_messages()
   sent_messages = {}
 end
 
-smelt.signal("session_epoch"):subscribe(reset_sent_messages)
-smelt.signal("history_epoch"):subscribe(reset_sent_messages)
+smelt.signal.subscribe("session_epoch", reset_sent_messages)
+smelt.signal.subscribe("history_epoch", reset_sent_messages)
 
 local function update_title(new_text)
 
@@ -75,7 +75,7 @@ local function update_title(new_text)
   end
 
   -- Gather all prior user messages from the session history.
-  local history = smelt.session.messages()
+  local history = smelt.session.messages.list()
   local target_history_len = #smelt.session.history()
   local user_msgs = {}
   for _, m in ipairs(history) do

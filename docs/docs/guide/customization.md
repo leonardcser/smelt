@@ -46,17 +46,17 @@ every key and default.
 
 Model, mode, and reasoning effort have two layers: a cold-start default and the
 last value you picked in the TUI. Pin the cold-start defaults with
-`smelt.defaults`, and opt out of last-used recall with `smelt.remember` when you
+`smelt.defaults.set`, and opt out of last-used recall with `smelt.remember.set` when you
 want a value to reset on every launch:
 
 ```lua
-smelt.defaults({
+smelt.defaults.set({
   model = "openai/gpt-5.5",
   mode = "plan",
   reasoning_effort = "high",
 })
 
-smelt.remember({
+smelt.remember.set({
   mode = false,
   reasoning_effort = false,
 })
@@ -142,7 +142,7 @@ every mode.
 ```lua
 smelt.keymap.set("n", "<C-s>", function()
   smelt.cmd.run("fork")
-  smelt.notify("session forked")
+  smelt.notify.info("session forked")
 end)
 ```
 
@@ -196,7 +196,7 @@ Register from `init.lua` with `smelt.cmd.register`:
 ```lua
 smelt.cmd.register("hello", function(arg)
   local name = (arg and arg ~= "") and arg or "world"
-  smelt.notify("hello, " .. name .. "!")
+  smelt.notify.info("hello, " .. name .. "!")
 end, { desc = "say hi" })
 ```
 

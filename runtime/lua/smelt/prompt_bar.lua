@@ -88,8 +88,8 @@ local function should_show_tip(queued)
   if #queued > 0 or smelt.prompt.has_stash() then return false end
   if (smelt.prompt.text() or "") ~= "" then return false end
   if smelt.prompt.is_modal and smelt.prompt.is_modal() then return false end
-  if smelt.signal("notification_visible"):get() then return false end
-  local work_state = smelt.signal("work_state"):get()
+  if smelt.signal.get("notification_visible") then return false end
+  local work_state = smelt.signal.get("work_state")
   return not work_state or work_state == "idle"
 end
 
@@ -144,13 +144,13 @@ end
 local function indicator_spans(opts)
   opts = opts or {}
   local bar_style = opts.bar_style or { fg = "SmeltBar" }
-  local state = smelt.signal("work_state"):get()
+  local state = smelt.signal.get("work_state")
   if not state or state == "idle" then return nil end
 
-  local label = smelt.signal("work_label"):get() or ""
-  local elapsed_ms = smelt.signal("work_elapsed_ms"):get() or 0
-  local retry_attempt = smelt.signal("work_retry_attempt"):get() or 0
-  local retry_remaining_ms = smelt.signal("work_retry_remaining_ms"):get() or 0
+  local label = smelt.signal.get("work_label") or ""
+  local elapsed_ms = smelt.signal.get("work_elapsed_ms") or 0
+  local retry_attempt = smelt.signal.get("work_retry_attempt") or 0
+  local retry_remaining_ms = smelt.signal.get("work_retry_remaining_ms") or 0
 
   if label == "" then
     if state == "done" then label = "done"
@@ -260,7 +260,7 @@ local function right_spans(opts)
   local bar_style = opts.bar_style or { fg = "SmeltBar" }
   local spans = {}
   local status = smelt.session.status and smelt.session.status() or {}
-  local model = status.model or smelt.model()
+  local model = status.model or smelt.model.current()
   if model and model ~= "" then
     spans[#spans + 1] = {
       text = " " .. model,
@@ -268,7 +268,7 @@ local function right_spans(opts)
       priority = SECONDARY_PRIORITY,
     }
     local reasoning = status.reasoning or {}
-    local effort = reasoning.effort or smelt.reasoning()
+    local effort = reasoning.effort or smelt.reasoning.current()
     if effort and effort ~= "off" then
       spans[#spans + 1] = {
         text = " " .. effort .. (reasoning.marker or ""),
@@ -330,8 +330,8 @@ local function right_spans(opts)
 end
 
 local function resize_bar_opts(position)
-  if not smelt.signal("prompt_resize_active"):get() then return nil end
-  local chrome = smelt.signal("prompt_resize_chrome"):get() or ""
+  if not smelt.signal.get("prompt_resize_active") then return nil end
+  local chrome = smelt.signal.get("prompt_resize_chrome") or ""
   if chrome == position or chrome == "both" then
     return { bar_style = { hl_group = "SmeltResizeHandle" } }
   end

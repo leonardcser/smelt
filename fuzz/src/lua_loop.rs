@@ -138,7 +138,7 @@ pub enum LuaOp {
         body_kind: u8,
     },
 
-    /// `smelt.state(slot).<key> = value`. `slot % POOL` picks one of
+    /// `smelt.state.get(slot).<key> = value`. `slot % POOL` picks one of
     /// ~8 named slots so the state-sweep code path sees both live and
     /// stale slots across reloads.
     StateSet {
@@ -147,7 +147,7 @@ pub enum LuaOp {
         value: ArbValue,
     },
 
-    /// `smelt.state(slot).<key>` read. Exercises lazy slot creation +
+    /// `smelt.state.get(slot).<key>` read. Exercises lazy slot creation +
     /// key-miss return path.
     StateGet { slot: u8, key: String },
 
@@ -635,7 +635,7 @@ fn emit_paint_register(out: &mut String, name_slot: Option<u8>, body_kind: u8) {
 fn emit_state_set(out: &mut String, slot: u8, key: &str, value: &ArbValue) {
     let s = (slot as usize) % STATE_POOL;
     out.push_str(&format!(
-        "(function()\n  local s = smelt.state(\"fuzz.state.{s}\")\n  local ok = pcall(function() s["
+        "(function()\n  local s = smelt.state.get(\"fuzz.state.{s}\")\n  local ok = pcall(function() s["
     ));
     emit_lua_string(out, key);
     out.push_str("] = ");
@@ -646,7 +646,7 @@ fn emit_state_set(out: &mut String, slot: u8, key: &str, value: &ArbValue) {
 fn emit_state_get(out: &mut String, slot: u8, key: &str) {
     let s = (slot as usize) % STATE_POOL;
     out.push_str(&format!(
-        "(function()\n  local s = smelt.state(\"fuzz.state.{s}\")\n  local _ = s["
+        "(function()\n  local s = smelt.state.get(\"fuzz.state.{s}\")\n  local _ = s["
     ));
     emit_lua_string(out, key);
     out.push_str("]\nend)()\n");
@@ -663,7 +663,7 @@ fn emit_cmd_register(out: &mut String, name_slot: u8, handler_kind: u8) {
     // stack depth + the host's command-dispatch reentry guard).
     let body = match handler_kind % 6 {
         0 => "function() end",
-        1 => "function() smelt.state(\"fuzz.cmd_count\").n = (smelt.state(\"fuzz.cmd_count\").n or 0) + 1 end",
+        1 => "function() smelt.state.get(\"fuzz.cmd_count\").n = (smelt.state.get(\"fuzz.cmd_count\").n or 0) + 1 end",
         2 => "function() error(\"fuzz cmd error\") end",
         // Re-entrant: create a buf from inside the handler. Stresses
         // the lifetime of any buf-registry lock the outer dispatch
@@ -674,7 +674,7 @@ fn emit_cmd_register(out: &mut String, name_slot: u8, handler_kind: u8) {
         // command may recursively invoke us back.
         4 => "function() pcall(smelt.cmd.run, \"fuzz.cmd.0\") end",
         // Re-entrant: read+write state, then invoke another command.
-        _ => "function() local s = smelt.state(\"fuzz.cmd_reentry\"); s.depth = (s.depth or 0) + 1; if (s.depth or 0) < 4 then pcall(smelt.cmd.run, \"fuzz.cmd.\" .. ((s.depth or 0) % 6)) end; s.depth = (s.depth or 1) - 1 end",
+        _ => "function() local s = smelt.state.get(\"fuzz.cmd_reentry\"); s.depth = (s.depth or 0) + 1; if (s.depth or 0) < 4 then pcall(smelt.cmd.run, \"fuzz.cmd.\" .. ((s.depth or 0) % 6)) end; s.depth = (s.depth or 1) - 1 end",
     };
     out.push_str(&format!(
         "pcall(smelt.cmd.register, \"fuzz.cmd.{n}\", {body})\n"
@@ -696,7 +696,7 @@ fn emit_keymap_set(out: &mut String, scope_kind: u8, chord_slot: u8, handler_kin
     let body = match handler_kind % 3 {
         0 => "function() end",
         1 => "function() return false end",
-        _ => "function() smelt.state(\"fuzz.km_fires\").n = (smelt.state(\"fuzz.km_fires\").n or 0) + 1 end",
+        _ => "function() smelt.state.get(\"fuzz.km_fires\").n = (smelt.state.get(\"fuzz.km_fires\").n or 0) + 1 end",
     };
     out.push_str(&format!(
         "pcall(smelt.keymap.set, \"{scope}\", \"{chord}\", {body})\n"
@@ -793,7 +793,7 @@ fn emit_api_recipe(out: &mut String, kind: u8) {
     name = "fuzz.recipe.overlay",
     anchor = "screen_at", corner = "nw", row = 1, col = 1, width = 12, height = 3,
     layout = smelt.ui.layout.leaf(w),
-    keymaps = { { key = "<C-r>", on_press = function() smelt.state("fuzz.recipe").hit = true end } },
+    keymaps = { { key = "<C-r>", on_press = function() smelt.state.get("fuzz.recipe").hit = true end } },
   })
   if p and p.rect then p:rect() end
   if w and w.content_width then w:content_width() end
@@ -821,7 +821,7 @@ end)
         2 => out.push_str(
             r#"pcall(function()
   smelt.cmd.register("fuzz.recipe.cmd", function()
-    local s = smelt.state("fuzz.recipe.cmd")
+    local s = smelt.state.get("fuzz.recipe.cmd")
     s.count = (s.count or 0) + 1
     smelt.text.fit("recipe", 4)
   end)

@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall.
 
 ## `smelt.fs.copy`

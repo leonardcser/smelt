@@ -13,11 +13,11 @@ fn signal_api_reads_sets_and_subscribes_to_values() {
 
     assert!(app.run_lua(
         r#"
-        _G.initial_work_state = smelt.signal("work_state"):get()
-        smelt.signal("work_state"):subscribe(function(value, previous)
+        _G.initial_work_state = smelt.signal.get("work_state")
+        smelt.signal.subscribe("work_state", function(value, previous)
             _G.signal_transition = previous .. "->" .. value
         end)
-        smelt.signal("work_state"):set("testing")
+        smelt.signal.set("work_state", "testing")
         "#
     ));
     app.app.drain_signals_pending();
@@ -79,12 +79,12 @@ fn events_emit_does_not_replace_signal_value() {
     assert!(app.run_lua(
         r#"
         smelt.events.new("plugin:tick")
-        _G.before_tick = smelt.signal("plugin:tick"):get()
+        _G.before_tick = smelt.signal.get("plugin:tick")
         smelt.events.on("plugin:tick", function(payload)
             _G.tick_payload = payload.value
         end)
         smelt.events.emit("plugin:tick", { value = 7 })
-        _G.after_tick = smelt.signal("plugin:tick"):get()
+        _G.after_tick = smelt.signal.get("plugin:tick")
         "#
     ));
     app.app.drain_signals_pending();

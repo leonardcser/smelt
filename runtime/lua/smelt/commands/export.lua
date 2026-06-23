@@ -28,7 +28,7 @@ end
 
 local function default_export_path()
   local dir  = smelt.session.cwd() or "."
-  local slug = slugify(smelt.session.title())
+  local slug = slugify(smelt.session.title.get())
   local stamp = file_stamp(smelt.session.created_at_ms())
   local base = string.format("%s/smelt-%s-%s.md", dir, slug, stamp)
   local path = base
@@ -45,13 +45,13 @@ end
 
 local function format_markdown()
   local parts = {}
-  local title = smelt.session.title()
+  local title = smelt.session.title.get()
   if title and title ~= "" then
     table.insert(parts, "# " .. title .. "\n")
   end
 
   local meta = {}
-  local model = smelt.model()
+  local model = smelt.model.current()
   if model and model ~= "" then
     table.insert(meta, "**Model:** " .. model)
   end
@@ -68,7 +68,7 @@ local function format_markdown()
     table.insert(parts, "---\n")
   end
 
-  local history = smelt.session.messages()
+  local history = smelt.session.messages.list()
   local tool_results = {}
   for _, msg in ipairs(history) do
     if msg.role == "tool" and msg.tool_call_id and msg.content then
@@ -111,7 +111,7 @@ local function format_markdown()
 end
 
 smelt.cmd.register("export", function()
-  if #smelt.session.messages() == 0 then
+  if #smelt.session.messages.list() == 0 then
     smelt.notify.error("nothing to export")
     return
   end
@@ -130,7 +130,7 @@ smelt.cmd.register("export", function()
     local markdown = format_markdown()
     if picked.index == 1 then
       smelt.clipboard.write(markdown)
-      smelt.notify("conversation copied to clipboard")
+      smelt.notify.info("conversation copied to clipboard")
     elseif picked.index == 2 then
       local path = default_export_path()
       local f, err = io.open(path, "w")
@@ -141,7 +141,7 @@ smelt.cmd.register("export", function()
       f:write(markdown)
       f:close()
       local name = path:match("([^/]+)$") or path
-      smelt.notify("exported to " .. name)
+      smelt.notify.info("exported to " .. name)
     end
   end)
 end, { desc = "copy conversation to clipboard" })

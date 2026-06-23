@@ -253,33 +253,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.",
         Tier::UiHost,
     )?;
-    // smelt.session.title() reads; title(t) writes title + derived slug;
-    // title(t, s) writes both. Returns the current title on read.
     let title = m.sub(
         "title",
-        "Session title. Callable: `title()` reads the current title, `title(t)` writes the title and derives a slug via `smelt.text.slugify`, `title(t, s)` writes both. Writes also update the task label and save the session.",
+        "Session title. Use `smelt.session.title.get()` to read the current title and `smelt.session.title.set(title, slug?)` to write it. Writes update the task label and save the session.",
     )?;
-    title.callable(
-        |lua,
-         (_tbl, t, s): (mlua::Table, Option<String>, Option<String>)|
-         -> LuaResult<mlua::Value> {
-            match (t, s) {
-                (Some(title), maybe_slug) => {
-                    crate::lua::with_app(|app| {
-                        let slug = maybe_slug.unwrap_or_else(|| engine::provider::slugify(&title));
-                        app.set_session_title(title, slug, None);
-                    });
-                    Ok(mlua::Value::Nil)
-                }
-                (None, _) => {
-                    let cur = crate::lua::try_with_app(|app| app.core.session.title.clone())
-                        .unwrap_or_default();
-                    match cur {
-                        Some(t) => Ok(mlua::Value::String(lua.create_string(&t)?)),
-                        None => Ok(mlua::Value::Nil),
-                    }
-                }
-            }
+    title.fn_(
+        "get",
+        "Return the current session title, or `nil` when it has not been set.",
+        &[],
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| app.core.session.title.clone()).unwrap_or_default())
+        },
+    )?;
+    title.fn_(
+        "set",
+        "Set the session title. When `slug` is omitted, one is derived from the title.",
+        &["title", "slug"],
+        |_, (title, slug): (String, Option<String>)| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                let slug = slug.unwrap_or_else(|| engine::provider::slugify(&title));
+                app.set_session_title(title, slug, None);
+            });
+            Ok(())
         },
     )?;
     m.fn_(
@@ -293,15 +288,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     let slug = m.sub(
         "slug",
-        "Session slug (read-only). Writing flows through `smelt.session.title(t, s)`.",
+        "Session slug. Use `smelt.session.slug.get()` to read it. Writing flows through `smelt.session.title.set(title, slug)`.",
     )?;
-    slug.callable(|lua, (_tbl,): (mlua::Table,)| -> LuaResult<mlua::Value> {
-        let cur = crate::lua::try_with_app(|app| app.core.session.slug.clone()).unwrap_or_default();
-        match cur {
-            Some(s) => Ok(mlua::Value::String(lua.create_string(&s)?)),
-            None => Ok(mlua::Value::Nil),
-        }
-    })?;
+    slug.fn_(
+        "get",
+        "Return the current session slug, or `nil` when it has not been set.",
+        &[],
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| app.core.session.slug.clone()).unwrap_or_default())
+        },
+    )?;
     m.fn_(
         "cwd",
         "Current working directory. Updated when Smelt enters a managed worktree.",
@@ -578,59 +574,57 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     let msgs = m.sub(
         "messages",
-        "Session messages. Callable: `messages()` (or `messages(opts)`) returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
+        "Session messages. `smelt.session.messages.list(opts?)` returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
     )?;
-    msgs.callable(
-        |lua, (_tbl, arg): (mlua::Table, Option<mlua::Table>)| -> LuaResult<mlua::Value> {
-            let Some(arg) = arg else {
-                let messages = crate::lua::try_with_app(|app| {
-                    protocol::history_to_messages(&app.core.session.history)
-                })
-                .unwrap_or_default();
-                let out = messages_to_lua(lua, &messages)?;
-                return Ok(mlua::Value::Table(out));
-            };
-            // Filter-opts path.
-            let roles = arg.get::<Option<Vec<String>>>("roles")?;
-            let include_tool = arg.get::<Option<bool>>("include_tool")?.unwrap_or(true);
-            let since_index = arg.get::<Option<usize>>("since_index")?;
-            let limit = arg.get::<Option<usize>>("limit")?;
+    msgs.fn_(
+        "list",
+        "Return persisted transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit? }`.",
+        &["opts"],
+        |lua, arg: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let messages = crate::lua::try_with_app(|app| {
                 protocol::history_to_messages(&app.core.session.history)
             })
             .unwrap_or_default();
-            let role_filter: Option<std::collections::HashSet<String>> =
-                roles.map(|v| v.into_iter().collect());
-            let filtered: Vec<protocol::Message> = messages
-                .into_iter()
-                .enumerate()
-                .filter(|(idx, m)| {
-                    if let Some(ref s) = since_index {
-                        if idx + 1 < *s {
-                            return false;
-                        }
-                    }
-                    if !include_tool && matches!(m.role, protocol::Role::Tool) {
-                        return false;
-                    }
-                    if let Some(ref rf) = role_filter {
-                        let r = match m.role {
-                            protocol::Role::System => "system",
-                            protocol::Role::User => "user",
-                            protocol::Role::Assistant => "assistant",
-                            protocol::Role::Tool => "tool",
-                        };
-                        if !rf.contains(r) {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .map(|(_, m)| m)
-                .take(limit.unwrap_or(usize::MAX))
-                .collect();
-            let out = messages_to_lua(lua, &filtered)?;
-            Ok(mlua::Value::Table(out))
+            let filtered: Vec<protocol::Message> = match arg {
+                Some(arg) => {
+                    let roles = arg.get::<Option<Vec<String>>>("roles")?;
+                    let include_tool = arg.get::<Option<bool>>("include_tool")?.unwrap_or(true);
+                    let since_index = arg.get::<Option<usize>>("since_index")?;
+                    let limit = arg.get::<Option<usize>>("limit")?;
+                    let role_filter: Option<std::collections::HashSet<String>> =
+                        roles.map(|v| v.into_iter().collect());
+                    messages
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(idx, m)| {
+                            if let Some(ref s) = since_index {
+                                if idx + 1 < *s {
+                                    return false;
+                                }
+                            }
+                            if !include_tool && matches!(m.role, protocol::Role::Tool) {
+                                return false;
+                            }
+                            if let Some(ref rf) = role_filter {
+                                let r = match m.role {
+                                    protocol::Role::System => "system",
+                                    protocol::Role::User => "user",
+                                    protocol::Role::Assistant => "assistant",
+                                    protocol::Role::Tool => "tool",
+                                };
+                                if !rf.contains(r) {
+                                    return false;
+                                }
+                            }
+                            true
+                        })
+                        .map(|(_, m)| m)
+                        .take(limit.unwrap_or(usize::MAX))
+                        .collect()
+                }
+                None => messages,
+            };
+            messages_to_lua(lua, &filtered)
         },
     )?;
     m.fn_(

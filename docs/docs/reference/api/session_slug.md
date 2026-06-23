@@ -4,5 +4,15 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Session slug (read-only). Writing flows through `smelt.session.title(t, s)`.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Session slug. Use `smelt.session.slug.get()` to read it. Writing flows through `smelt.session.title.set(title, slug)`.
+
+## `smelt.session.slug.get`
+
+```lua
+fun(): string?
+```
+
+Return the current session slug, or `nil` when it has not been set.
 

@@ -113,11 +113,12 @@ end
 -- through `smelt.confirm.__resolve`. Bails when no matching request is
 -- active (e.g. a newer prompt has superseded it). Called by the host;
 -- plugins should not invoke directly.
+---@internal
 ---@type fun(handle_id: string): nil
 function smelt.confirm.open(handle_id)
   -- Bail if the signal doesn't match this handle; a newer request may have
   -- replaced it before this dialog opened.
-  local req = smelt.signal("confirm_requested"):get()
+  local req = smelt.signal.get("confirm_requested")
   if not req or req.handle_id ~= handle_id then return end
 
   local header_buf  = smelt.buf.new()

@@ -25,6 +25,7 @@ notebook.is_notebook_path = nil
 ---@type fun(json: string): table?, string?
 notebook.parse = nil
 
+--- Visibility: Internal - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
 --- Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.
 ---@type fun(args: table): table?
 notebook.preview_data = nil

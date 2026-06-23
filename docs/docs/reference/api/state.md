@@ -4,7 +4,20 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Per-plugin state. `smelt.state.get(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.
+
+## `smelt.state.get`
+
+```lua
+fun(name?: string): table
+```
+
+Return an ephemeral state table. With an explicit name, returns the
+table for that name. With no arg, returns the current plugin's scoped
+table keyed by the current scope name. Raises if called with no arg
+outside a module body (no scope active).
 
 ## `smelt.state.persistent`
 

@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 List built-in model providers and register custom ones. Headless-safe.
 
 ## `smelt.provider.has_real_rows`

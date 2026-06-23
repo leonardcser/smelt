@@ -4,7 +4,17 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Model selector. `smelt.model()` reads the active model key, `smelt.model(v)` switches, `smelt.model.list()` returns the available models.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Model selector. `smelt.model.current()` reads the active model key, `smelt.model.set(v)` switches, and `smelt.model.list()` returns the available models.
+
+## `smelt.model.current`
+
+```lua
+fun(): string
+```
+
+Return the active model key.
 
 ## `smelt.model.list`
 
@@ -37,4 +47,12 @@ fun(): table
 ```
 
 Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `"config override"`, `"models.dev"`, or `"none"`. Prices are USD per 1M tokens.
+
+## `smelt.model.set`
+
+```lua
+fun(name: string): nil
+```
+
+Switch the active model by key.
 

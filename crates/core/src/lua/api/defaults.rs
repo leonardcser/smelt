@@ -1,6 +1,6 @@
 //! `smelt.defaults` - startup fallbacks for new sessions.
 //!
-//! `smelt.defaults({ model, mode, reasoning_effort })` sets the model /
+//! `smelt.defaults.set({ model, mode, reasoning_effort })` sets the model /
 //! mode / reasoning-effort that fresh sessions land on. Every field is
 //! a fallback: CLI flags (`--model`, `--mode`, `--reasoning-effort`)
 //! and resumed-session state win.
@@ -31,14 +31,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "defaults",
-        "Startup fallbacks for new sessions. `smelt.defaults({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.",
+        "Startup fallbacks for new sessions. `smelt.defaults.set({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.",
         Tier::Host,
     )?;
 
-    let shared_for_call = Arc::clone(shared);
-    m.callable(
-        move |_, (_tbl, cfg): (mlua::Table, LuaDefaults)| -> LuaResult<()> {
-            let mut d = shared_for_call
+    let shared_for_set = Arc::clone(shared);
+    m.fn_(
+        "set",
+        "Set startup defaults for fresh sessions. Accepts `{ model?, mode?, reasoning_effort? }`; CLI flags and resumed-session state still win.",
+        &["cfg"],
+        move |_, cfg: LuaDefaults| -> LuaResult<()> {
+            let mut d = shared_for_set
                 .defaults
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());

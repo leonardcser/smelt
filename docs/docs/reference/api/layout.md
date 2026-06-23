@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Declarative, width-independent content layout primitives for transcript/tool display.
 
 ## `smelt.layout.cap`

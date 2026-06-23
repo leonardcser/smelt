@@ -109,6 +109,16 @@ Options accepted by `smelt.cmd.register`.
 | `hidden` | `boolean` |  | If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`. |
 | `override` | `boolean` |  | If true, replace an existing command with the same name. Defaults to `false`. |
 
+### `smelt.defaults.Config`
+
+Spec accepted by `smelt.defaults`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `model` | `string` |  | Starting model reference (`"provider/model"` or bare model name). |
+| `mode` | `string` |  | Starting agent mode. Must name a registered mode. |
+| `reasoning_effort` | `string` |  | Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`. |
+
 ### `smelt.dialog.Keymap`
 
 One dialog-level keymap entry. `on_press(ctx)` receives the dialog
@@ -415,17 +425,15 @@ MCP server config accepted by `smelt.mcp.register`.
 
 ### `smelt.notify.Scoped`
 
-Source-bound notify handle returned by `smelt.notify.scoped`. Callable
-as `handle(msg)` for an info toast; `handle.error(msg)` and
-`handle.warn(msg)` raise error/warning toasts. Every call forwards to
-the underlying `smelt.notify*` with the source string pinned at
-factory time.
+Source-bound notify handle returned by `smelt.notify.scoped`.
+Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
+tag every toast with the bound source.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
+| `info` | `fun(msg: string)` | yes | Raise an informational toast tagged with the bound source. |
 | `error` | `fun(msg: string)` | yes | Raise an error toast tagged with the bound source. |
 | `warn` | `fun(msg: string)` | yes | Raise a warning toast tagged with the bound source. |
-| `[string]` | `any` | yes | Callable: `handle(msg)` -> info toast tagged with the bound source. |
 
 ### `smelt.overlay.DragConfig`
 
@@ -762,6 +770,16 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `result` | `table` |  | Original provider result when the input used the provider shape. |
 | `loading` | `boolean` | yes | True while the provider is still scanning or searching. |
 
+### `smelt.remember.Config`
+
+Spec accepted by `smelt.remember`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `model` | `boolean` |  | When true (default), restore the last-used model on launch. |
+| `mode` | `boolean` |  | When true (default), restore the last-used agent mode on launch. |
+| `reasoning_effort` | `boolean` |  | When true (default), restore the last-used reasoning effort on launch. |
+
 ### `smelt.render.DiffSplitOpts`
 
 Options for `smelt.render.diff_split`.
@@ -791,17 +809,6 @@ Options for `smelt.render.text`.
 | --- | --- | --- | --- |
 | `hl_group` | `string` |  | Highlight group applied to the whole block. When omitted, text renders dim. |
 | `width` | `integer` |  | Wrapping width in terminal cells. Defaults to the current terminal width. |
-
-### `smelt.signal.Signal`
-
-Sticky handle returned by `smelt.signal(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `get` | `fun(): any` | yes | Return the current signal value, or `nil` when the signal isn't declared. |
-| `set` | `fun(value: any): smelt.signal.Signal` | yes | Publish a new value. Returns the handle for chaining. |
-| `subscribe` | `fun(handler: fun(arg1: any, arg2: any)): smelt.Reg` | yes | Register `handler(value, previous)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect. |
-| `name` | `fun(): string` | yes | Return the signal name. |
 
 ### `smelt.theme.ColorDecl`
 

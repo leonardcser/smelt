@@ -14,7 +14,7 @@ arguments and no config file launches the interactive setup wizard.
 
 CLI flags always take precedence over config values. Runtime choices made inside
 the TUI, such as `/model`, are remembered for the next launch unless disabled
-with `smelt.remember(...)`.
+with `smelt.remember.set(...)`.
 
 ## Subcommands
 

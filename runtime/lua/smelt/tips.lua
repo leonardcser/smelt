@@ -115,7 +115,7 @@ function M.prompt_tip()
     end
   end
   if not have_source and smelt.signal then
-    local ok, value = pcall(function() return smelt.signal("now"):get() end)
+    local ok, value = pcall(function() return smelt.signal.get("now") end)
     if ok and type(value) == "number" then
       now = value
       have_source = true

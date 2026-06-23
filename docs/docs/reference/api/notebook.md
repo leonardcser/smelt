@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only.
 
 ## `smelt.notebook.apply_edit`
@@ -44,6 +46,8 @@ Parse a notebook JSON string. Returns `(notebook, nil)` with `{ nbformat, nbform
 ```lua
 fun(args: table): table?
 ```
+
+**Visibility:** `Internal` - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
 
 Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.
 

@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 This namespace mixes Host and UiHost functions; each function below lists its exact tier.
 
 Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.
@@ -40,10 +42,10 @@ Promote the current loader frame to plugin scope `name` and return a
 small handle exposing the plugin's per-cycle state slot:
 
   local M = smelt.plugin("banner")
-  M.state.fires = 0          -- M.state is smelt.state("banner")
+  M.state.fires = 0          -- M.state is smelt.state.get("banner")
   M.name == "banner"
 
-After this call, bare `smelt.state()` also resolves to the named
+After this call, bare `smelt.state.get()` also resolves to the named
 slot and unnamed resource constructors auto-name keyed by `name`.
 Idempotent within a single module body run: counters reset on every
 promotion so declaration order is what matters.

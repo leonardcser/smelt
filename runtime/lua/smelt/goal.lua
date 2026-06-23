@@ -178,10 +178,10 @@ end
 
 local function notify_status(goal)
   if not goal or not goal.objective or goal.objective == "" then
-    smelt.notify("no goal set; use /goal <objective> to start one", "goal")
+    smelt.notify.info("no goal set; use /goal <objective> to start one", "goal")
     return
   end
-  smelt.notify(M.describe(goal), "goal")
+  smelt.notify.info(M.describe(goal), "goal")
 end
 
 local function continuation_prompt(goal)
@@ -525,44 +525,44 @@ function M.command(arg)
 
   if sub == "clear" or sub == "stop" then
     M.clear()
-    smelt.notify("goal cleared", "goal")
+    smelt.notify.info("goal cleared", "goal")
     return
   end
   if sub == "done" then
     local goal, err = M.complete()
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal marked done", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal marked done", "goal") end
     return
   end
   if sub == "pause" then
     local goal, err = M.pause()
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal paused", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal paused", "goal") end
     return
   end
   if sub == "block" or sub == "blocked" then
     local goal, err = M.block(rest)
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal marked blocked", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal marked blocked", "goal") end
     return
   end
   if sub == "resume" then
     local goal, err = M.resume()
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal resumed", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal resumed", "goal") end
     M.schedule_auto_continue()
     return
   end
   if sub == "progress" then
     local goal, err = M.update_status({ progress = rest })
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal progress updated", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal progress updated", "goal") end
     return
   end
   if sub == "summary" then
     local goal, err = M.update_status({ summary = rest })
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal summary updated", "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal summary updated", "goal") end
     return
   end
   if sub == "auto" then
     local on = rest ~= "off" and rest ~= "false" and rest ~= "0"
     local goal, err = M.set_auto(on)
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("goal auto-continue " .. (on and "on" or "off"), "goal") end
+    if not goal then smelt.notify.warn(err, "goal") else smelt.notify.info("goal auto-continue " .. (on and "on" or "off"), "goal") end
     if on then M.schedule_auto_continue() end
     return
   end
@@ -684,7 +684,7 @@ function M.setup()
   register_headerline()
   sync_context_note()
 
-  smelt.signal("session_epoch"):subscribe(sync_context_note)
+  smelt.signal.subscribe("session_epoch", sync_context_note)
   smelt.events.on("turn_end", function(ev)
     if ev and ev.cancelled then return end
     M.schedule_auto_continue(ev and ev.continuation_token)

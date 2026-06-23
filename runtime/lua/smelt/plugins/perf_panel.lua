@@ -8,7 +8,7 @@
 
 local M = {}
 
-local state = smelt.state("perf_panel")
+local state = smelt.state.get("perf_panel")
 local NS_HL = smelt.ns("smelt.perf_panel")
 
 local PANEL_W = 44

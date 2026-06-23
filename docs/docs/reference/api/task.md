@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Yield-then-resume coroutine bridge: alloc and resume external tasks.
 
 ## `smelt.task.all`

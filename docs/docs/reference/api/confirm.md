@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. UiHost-only.
 
 ## `smelt.confirm.open`
@@ -11,6 +13,8 @@ Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resol
 ```lua
 fun(handle_id: string): nil
 ```
+
+**Visibility:** `Internal` - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
 
 Drive the bundled tool-permission confirm dialog for `handle_id`.
 Reads the matching request out of the `confirm_requested` signal, builds

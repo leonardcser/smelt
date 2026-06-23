@@ -15,7 +15,7 @@ smelt.cmd.register("project-test", function()
   smelt.spawn(function()
     local result = smelt.process.run("cargo", { "test" })
     if result and result.exit_code == 0 then
-      smelt.notify("cargo test passed")
+      smelt.notify.info("cargo test passed")
     else
       smelt.notify.warn("cargo test failed")
     end

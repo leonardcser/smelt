@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Query which frontend is active (TUI vs headless).
 
 ## `smelt.frontend.is_interactive`

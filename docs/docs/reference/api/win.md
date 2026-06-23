@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Window handle constructor. `smelt.win.new(buf, opts?)` opens a split window over `buf` and returns a `Win` userdata. `opts.name` opts the window into hot-reload survival. UiHost-only - windows are layout leaves that render a buffer onto the screen.
 
 ## `smelt.win.new`

@@ -4,13 +4,13 @@
 
 local M = {}
 
-local state = smelt.state("example_plugin")
+local state = smelt.state.get("example_plugin")
 state.pings = state.pings or 0
 
 local function ping(arg)
   state.pings = (state.pings or 0) + 1
   local target = (arg and arg ~= "") and arg or "smelt"
-  smelt.notify(string.format("ping %s (%d)", target, state.pings))
+  smelt.notify.info(string.format("ping %s (%d)", target, state.pings))
 end
 
 smelt.cmd.register("example-ping", ping, {
@@ -33,7 +33,7 @@ smelt.lifecycle.on_ready(function(ctx)
   end)
 
   if ctx.kind == "reload" then
-    smelt.notify("example plugin reloaded")
+    smelt.notify.info("example plugin reloaded")
   end
 end)
 

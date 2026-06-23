@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Resolved application configuration introspection. All fields are read-only snapshots of the active config. UiHost-only.
 
 ## `smelt.config.api_base`

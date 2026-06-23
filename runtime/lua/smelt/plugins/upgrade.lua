@@ -419,7 +419,7 @@ local function run_check(force, on_done, opts)
     local before = latest.has_update
     recompute()
     if latest.has_update and not before then
-      notify("update available: " .. latest.next ..
+      notify.info("update available: " .. latest.next ..
                    (settings_mode() == "auto"
                     and ", installing in background"
                     or  ", run /upgrade"))
@@ -521,7 +521,7 @@ local function install_stable_async(tag, on_done)
     )
     local tmp_tar = exe .. ".upgrade.tar.gz"
 
-    notify("downloading " .. tag .. "…")
+    notify.info("downloading " .. tag .. "…")
     local r = smelt.process.run("curl", { "-fLso", tmp_tar, url },
       { timeout_secs = 300 })
     smelt.fs.remove_file(tmp_tar)
@@ -552,14 +552,14 @@ local function install_stable_async(tag, on_done)
       if not ok2 then return fail("rename", { hint = mverr }) end
     end
 
-    notify("✓ upgraded to " .. tag .. ", restart smelt to use it")
+    notify.info("✓ upgraded to " .. tag .. ", restart smelt to use it")
     ok()
   end)
 end
 
 local function install_unstable_async(sha, on_done)
   run_install("unstable:" .. sha, on_done, function(fail, ok)
-    notify("building main@" .. sha:sub(1, 7) ..
+    notify.info("building main@" .. sha:sub(1, 7) ..
       " via cargo (this may take a few minutes)…")
     -- The workspace has multiple bin crates (`smelt-agent`, `xtask`), so
     -- cargo refuses an ambiguous `cargo install --git`. Pin the package so
@@ -574,7 +574,7 @@ local function install_unstable_async(sha, on_done)
         exit_code = r.exit_code, stderr = r.stderr, stdout = r.stdout,
       })
     end
-    notify("✓ upgraded to main@" .. sha:sub(1, 7) ..
+    notify.info("✓ upgraded to main@" .. sha:sub(1, 7) ..
       ", restart smelt to use it")
     ok()
   end)
@@ -602,15 +602,15 @@ end
 -- keystroke decision.
 
 local function notify_already_current()
-  notify("already up to date (" .. (latest.current or "?") .. ")")
+  notify.info("already up to date (" .. (latest.current or "?") .. ")")
 end
 
 local function notify_install_kickoff()
   local target = latest.next or "?"
   if settings_channel() == "stable" then
-    notify("upgrading to " .. target .. " in the background…")
+    notify.info("upgrading to " .. target .. " in the background…")
   else
-    notify("building " .. target .. " in the background (cargo install)…")
+    notify.info("building " .. target .. " in the background (cargo install)…")
   end
 end
 
@@ -622,21 +622,21 @@ local function notify_check_result(status)
   if status == "no_update" then
     notify_already_current()
   elseif status == "rate_limited" then
-    notify("rate limited by github, try again later")
+    notify.info("rate limited by github, try again later")
   elseif status == "busy" then
-    notify("a check is already running")
+    notify.info("a check is already running")
   end
 end
 
 smelt.cmd.register("upgrade", function(args)
   args = args or ""
   if args == "check" then
-    notify("checking for upgrades…")
+    notify.info("checking for upgrades…")
     run_check(true, notify_check_result)
     return
   end
   if should_check_now() then
-    notify("checking for upgrades, install will start automatically if one is found")
+    notify.info("checking for upgrades, install will start automatically if one is found")
     run_check(true, function(status)
       if status == "no_update" then
         notify_already_current()
@@ -694,7 +694,7 @@ local function open_changelog_dialog()
       { key = "r",     on_press = function(ctx)
           ctx.close()
           run_check(true)
-          notify("refreshing changelog…")
+          notify.info("refreshing changelog…")
       end },
     },
   })
@@ -704,7 +704,7 @@ smelt.cmd.register("changelog", function()
   if not latest.details then
     if should_check_now() or not channel_state(settings_channel()).latest then
       run_check(true)
-      notify("fetching changelog…")
+      notify.info("fetching changelog…")
       return
     end
   end

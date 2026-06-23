@@ -4,7 +4,7 @@
 smelt.cmd.register("trust", function()
   local status = smelt.trust.status()
   if status == "no_content" then
-    smelt.notify("no .smelt/ content under this project; nothing to trust")
+    smelt.notify.info("no .smelt/ content under this project; nothing to trust")
     return
   end
   local ok, hash = pcall(smelt.trust.mark)
@@ -12,7 +12,7 @@ smelt.cmd.register("trust", function()
     smelt.notify.error("trust: " .. tostring(hash))
     return
   end
-  smelt.notify("project trusted: " .. hash:sub(1, 12) .. "; restart to load .smelt/")
+  smelt.notify.info("project trusted: " .. hash:sub(1, 12) .. "; restart to load .smelt/")
 end, {
   desc       = "trust the current project's .smelt/ content",
   startup_ok = true,

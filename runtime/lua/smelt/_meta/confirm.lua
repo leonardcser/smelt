@@ -7,6 +7,7 @@
 ---@class smelt.confirm
 local confirm = {}
 
+--- Visibility: Internal - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
 --- Drive the bundled tool-permission confirm dialog for `handle_id`.
 --- Reads the matching request out of the `confirm_requested` signal, builds
 --- the header + preview + option leaves, dispatches the user's choice

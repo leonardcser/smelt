@@ -4,5 +4,17 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Per-key opt-in to last-used recall on launch. `smelt.remember({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Per-key opt-in to last-used recall on launch. `smelt.remember.set({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.
+
+## `smelt.remember.set`
+
+```lua
+fun(cfg: smelt.remember.Config): nil
+```
+
+Types: [`smelt.remember.Config`](types.md#smeltrememberconfig)
+
+Set which startup choices are remembered across launches. Accepts `{ model?, mode?, reasoning_effort? }`; omitted fields keep their current policy.
 

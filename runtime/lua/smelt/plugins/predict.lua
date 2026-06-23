@@ -23,14 +23,14 @@ end
 -- so only the messages array is compared between calls.
 local sent_messages = {}
 
-smelt.signal("input_epoch"):subscribe(clear_prediction)
+smelt.signal.subscribe("input_epoch", clear_prediction)
 
-smelt.signal("session_epoch"):subscribe(function()
+smelt.signal.subscribe("session_epoch", function()
   clear_prediction()
   sent_messages = {}
 end)
 
-smelt.signal("history_epoch"):subscribe(function()
+smelt.signal.subscribe("history_epoch", function()
   clear_prediction()
   sent_messages = {}
 end)

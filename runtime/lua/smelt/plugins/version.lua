@@ -21,5 +21,5 @@ smelt.cmd.register("version", function()
   if #extras > 0 then
     label = label .. " (" .. table.concat(extras, ", ") .. ")"
   end
-  notify("smelt " .. label)
+  notify.info("smelt " .. label)
 end, { desc = "show the running smelt build identity" })

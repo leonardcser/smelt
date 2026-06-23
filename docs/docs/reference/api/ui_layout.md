@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. `smelt.ui.layout.set(fn)` registers a composer invoked once per frame; the composer returns a tree built from these constructors describing how the transcript, prompt, statusline, and any plugin-added windows split the screen.
 
 ## `smelt.ui.layout.hbox`

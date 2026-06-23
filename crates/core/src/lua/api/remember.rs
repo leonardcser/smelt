@@ -1,6 +1,6 @@
 //! `smelt.remember` - per-key opt-in to last-used recall on launch.
 //!
-//! `smelt.remember({ model, mode, reasoning_effort })` flips whether
+//! `smelt.remember.set({ model, mode, reasoning_effort })` flips whether
 //! each pick survives across restarts. Every field defaults to `true`.
 //! Setting one to `false` makes that key always start from
 //! `smelt.defaults` (or the hardcoded fallback), ignoring whatever the
@@ -35,14 +35,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "remember",
-        "Per-key opt-in to last-used recall on launch. `smelt.remember({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.",
+        "Per-key opt-in to last-used recall on launch. `smelt.remember.set({ model = false })` makes that key always start from `smelt.defaults`, ignoring `recent.json`. Defaults to `true` for every key.",
         Tier::Host,
     )?;
 
-    let shared_for_call = Arc::clone(shared);
-    m.callable(
-        move |_, (_tbl, cfg): (mlua::Table, LuaRemember)| -> LuaResult<()> {
-            let mut r = shared_for_call
+    let shared_for_set = Arc::clone(shared);
+    m.fn_(
+        "set",
+        "Set which startup choices are remembered across launches. Accepts `{ model?, mode?, reasoning_effort? }`; omitted fields keep their current policy.",
+        &["cfg"],
+        move |_, cfg: LuaRemember| -> LuaResult<()> {
+            let mut r = shared_for_set
                 .remember
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());

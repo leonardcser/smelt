@@ -306,7 +306,7 @@ pub struct DefaultsConfig {
 }
 
 /// Per-key opt-in to last-used recall on startup. All true by default;
-/// flip any to `false` from init.lua via `smelt.remember({...})`
+/// flip any to `false` from init.lua via `smelt.remember.set({...})`
 /// to make that key always start from `smelt.defaults` regardless of
 /// what the user picked in the previous session.
 #[derive(Debug, Clone)]

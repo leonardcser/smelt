@@ -11,7 +11,7 @@
 
 use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MaybeSend};
 
-use super::doc::{record_module, register_fn_inner, Tier};
+use super::doc::{record_internal_module, record_module, register_fn_inner, Tier, Visibility};
 use super::lua_type::{LuaType, LuaTypeTuple};
 
 /// A live Lua module under construction. The `tbl` is already attached
@@ -37,6 +37,25 @@ impl<'a> LuaMod<'a> {
         let path: &'static str = leak(format!("smelt.{name}"));
         let tbl = lua.create_table()?;
         record_module(path, doc, Some(tier));
+        smelt.set(name, tbl.clone())?;
+        Ok(Self {
+            tbl,
+            lua,
+            path,
+            tier,
+        })
+    }
+
+    pub fn under_internal(
+        lua: &'a Lua,
+        smelt: &mlua::Table,
+        name: &'static str,
+        doc: &'static str,
+        tier: Tier,
+    ) -> mlua::Result<Self> {
+        let path: &'static str = leak(format!("smelt.{name}"));
+        let tbl = lua.create_table()?;
+        record_internal_module(path, doc, Some(tier));
         smelt.set(name, tbl.clone())?;
         Ok(Self {
             tbl,
@@ -94,6 +113,19 @@ impl<'a> LuaMod<'a> {
         })
     }
 
+    pub fn sub_internal(&self, name: &'static str, doc: &'static str) -> mlua::Result<LuaMod<'a>> {
+        let path: &'static str = leak(format!("{}.{name}", self.path));
+        let tbl = self.lua.create_table()?;
+        record_internal_module(path, doc, Some(self.tier));
+        self.tbl.set(name, tbl.clone())?;
+        Ok(LuaMod {
+            tbl,
+            lua: self.lua,
+            path,
+            tier: self.tier,
+        })
+    }
+
     /// Register a Lua function at `<self.path>.<name>` with the given
     /// doc and param names. Trait bounds derive the LuaCATS signature
     /// from the Rust types - drift becomes a compile error.
@@ -110,7 +142,40 @@ impl<'a> LuaMod<'a> {
         R: IntoLuaMulti + LuaType,
     {
         register_fn_inner(
-            &self.tbl, self.path, name, doc, params, self.lua, f, self.tier,
+            &self.tbl,
+            self.path,
+            name,
+            doc,
+            params,
+            self.lua,
+            f,
+            self.tier,
+            Visibility::Public,
+        )
+    }
+
+    pub fn internal_fn<F, A, R>(
+        &self,
+        name: &'static str,
+        doc: &'static str,
+        params: &[&'static str],
+        f: F,
+    ) -> mlua::Result<()>
+    where
+        F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
+        A: FromLuaMulti + LuaTypeTuple,
+        R: IntoLuaMulti + LuaType,
+    {
+        register_fn_inner(
+            &self.tbl,
+            self.path,
+            name,
+            doc,
+            params,
+            self.lua,
+            f,
+            self.tier,
+            Visibility::Internal,
         )
     }
 
@@ -138,24 +203,6 @@ impl<'a> LuaMod<'a> {
             name
         );
         self.tbl.set(name, self.lua.create_function(f)?)?;
-        Ok(())
-    }
-
-    /// Wire a `__call` metamethod on the module's table. Replaces any
-    /// existing `__call` so a higher tier can override a lower tier's
-    /// stub (e.g. TUI installing the live setter over the host-tier
-    /// read-only stub on `smelt.mode`). The closure receives the table
-    /// as its first arg (the Lua self) and the call args as the rest.
-    pub fn callable<F, A, R>(&self, f: F) -> mlua::Result<()>
-    where
-        F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
-        A: FromLuaMulti,
-        R: IntoLuaMulti,
-    {
-        let func = self.lua.create_function(f)?;
-        let mt = self.tbl.metatable().unwrap_or(self.lua.create_table()?);
-        mt.set("__call", func)?;
-        self.tbl.set_metatable(Some(mt))?;
         Ok(())
     }
 

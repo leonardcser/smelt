@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Image file detection and base64 data-URL loading.
 
 ## `smelt.image.data_url_from_bytes`

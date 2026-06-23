@@ -11,9 +11,42 @@ const TRANSCRIPT_DEFAULTS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
 const SCROLL_PILLS_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/scroll_pills.lua");
 
+fn install_explicit_api_fixtures(lua: &mlua::Lua) {
+    lua.load(
+        r#"
+        function __smelt_notify_stub(notices, errors)
+          return {
+            info = function(msg) if notices then notices[#notices + 1] = msg end end,
+            error = function(msg) if errors then errors[#errors + 1] = msg end end,
+            warn = function() end,
+            scoped = function(source)
+              return {
+                info = function(msg) if notices then notices[#notices + 1] = msg end end,
+                error = function(msg) if errors then errors[#errors + 1] = msg end end,
+                warn = function() end,
+              }
+            end,
+          }
+        end
+
+        function __smelt_signal_stub(cells, values)
+          values = values or {}
+          return {
+            get = function(name) return values[name] end,
+            set = function(name, value) values[name] = value end,
+            subscribe = function(name, fn) cells[name] = fn end,
+          }
+        end
+        "#,
+    )
+    .exec()
+    .expect("install explicit API fixtures");
+}
+
 #[test]
 fn copy_command_copies_recent_conversation_messages() {
     let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         local notices = {}
@@ -28,15 +61,7 @@ fn copy_command_copies_recent_conversation_messages() {
               smelt.__commands[name] = { fn = fn, opts = opts }
             end,
           },
-          notify = {
-            scoped = function()
-              return setmetatable({
-                error = function(msg) errors[#errors + 1] = msg end,
-              }, {
-                __call = function(_, msg) notices[#notices + 1] = msg end,
-              })
-            end,
-          },
+          notify = __smelt_notify_stub(notices, errors),
           clipboard = {
             write = function(text) smelt.__copied = text end,
           },
@@ -86,6 +111,7 @@ fn copy_command_copies_recent_conversation_messages() {
 #[test]
 fn copy_command_reports_invalid_arguments() {
     let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         local errors = {}
@@ -93,9 +119,7 @@ fn copy_command_reports_invalid_arguments() {
           __commands = {},
           __errors = errors,
           cmd = { register = function(name, fn) smelt.__commands[name] = fn end },
-          notify = setmetatable({
-            error = function(msg) errors[#errors + 1] = msg end,
-          }, { __call = function() end }),
+          notify = __smelt_notify_stub(nil, errors),
           clipboard = { write = function() end },
           session = { conversation = function() return {} end },
         }
@@ -121,6 +145,7 @@ fn copy_command_reports_invalid_arguments() {
 #[test]
 fn session_tree_orders_nested_forks_and_prefixes() {
     let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
     lua.load("smelt = { session = {} }")
         .exec()
         .expect("init smelt table");
@@ -166,6 +191,7 @@ fn session_tree_orders_nested_forks_and_prefixes() {
 #[test]
 fn web_fetch_renderer_uses_shared_llm_markdown() {
     let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         smelt = {
@@ -243,6 +269,7 @@ fn ps_details_dialog_uses_list_dialog_height() {
 
 fn prompt_bar_lua_fixture() -> mlua::Lua {
     let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         local next_buf_id = 0
@@ -252,11 +279,10 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           __wins = {},
           ns = function(name) return name end,
           settings = { show_tokens = true, show_cost = true },
-          model = function() return "model" end,
-          reasoning = function() return "off" end,
-          signal = function(name)
-            return {
-              get = function()
+          model = { current = function() return "model" end },
+          reasoning = { current = function() return "off" end },
+          signal = {
+            get = function(name)
                 if name == "prompt_resize_active" then return smelt.__resize end
                 if name == "prompt_resize_chrome" then return smelt.__resize_chrome end
                 if name == "work_state" then return "working" end
@@ -266,9 +292,8 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
                 if name == "work_retry_remaining_ms" then return 0 end
                 if name == "notification_visible" then return false end
                 return nil
-              end,
-            }
-          end,
+            end,
+          },
           text = {
             width = function(text)
               local n = 0
@@ -495,11 +520,12 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
     // The test inspects a Lua closure upvalue via the standard debug library.
     // It runs only trusted in-repo Lua fixtures in an isolated VM.
     let lua = unsafe { mlua::Lua::unsafe_new() };
+    install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         paint_handlers = {}
         smelt = {
-          notify = { error = function() end },
+          notify = __smelt_notify_stub(nil, nil),
           reg = { new = function(fn) return { remove = fn } end },
           build = { display = "test" },
           timer = { set = function() return { remove = function() end } end },
@@ -542,7 +568,7 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
           ns = function(name) return name end,
           transcript = { is_empty = function() return true end },
           events = { on = function() end },
-          signal = function() return { subscribe = function() end } end,
+          signal = __smelt_signal_stub({}, {}),
           lifecycle = {
             on_ready = function(fn) fn() end,
             on_shutdown = function() end,
@@ -620,6 +646,7 @@ fn scroll_pills_source_uses_only_semantic_transcript_navigation() {
 #[test]
 fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         local active = {}
@@ -735,11 +762,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
           events = {
             on = function(name, fn) cells[name] = fn end,
           },
-          signal = function(name)
-            return {
-              subscribe = function(_, fn) cells[name] = fn end,
-            }
-          end,
+          signal = __smelt_signal_stub(cells, {}),
           lifecycle = {
             on_ready = function(fn) fn() end,
           },

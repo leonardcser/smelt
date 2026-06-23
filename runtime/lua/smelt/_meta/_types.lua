@@ -78,6 +78,12 @@
 ---@field hidden? boolean If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
 ---@field override? boolean If true, replace an existing command with the same name. Defaults to `false`.
 
+--- Spec accepted by `smelt.defaults`.
+---@class smelt.defaults.Config
+---@field model? string Starting model reference (`"provider/model"` or bare model name).
+---@field mode? string Starting agent mode. Must name a registered mode.
+---@field reasoning_effort? string Starting reasoning effort: `"off"`, `"low"`, `"medium"`, `"high"`, `"max"`.
+
 --- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
 --- context exposing `ctx.close()` and `ctx.resolve(value)` so the
 --- handler can dismiss the dialog or resolve the blocking `open` call.
@@ -291,15 +297,13 @@
 ---@field timeout? integer Request timeout in milliseconds. Defaults to `30000`.
 ---@field enabled? boolean Whether the server is enabled. Defaults to `true`.
 
---- Source-bound notify handle returned by `smelt.notify.scoped`. Callable
---- as `handle(msg)` for an info toast; `handle.error(msg)` and
---- `handle.warn(msg)` raise error/warning toasts. Every call forwards to
---- the underlying `smelt.notify*` with the source string pinned at
---- factory time.
+--- Source-bound notify handle returned by `smelt.notify.scoped`.
+--- Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
+--- tag every toast with the bound source.
 ---@class smelt.notify.Scoped
+---@field info fun(msg: string) Raise an informational toast tagged with the bound source.
 ---@field error fun(msg: string) Raise an error toast tagged with the bound source.
 ---@field warn fun(msg: string) Raise a warning toast tagged with the bound source.
----@field [string] any Callable: `handle(msg)` -> info toast tagged with the bound source.
 
 --- Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.
 ---@class smelt.overlay.DragConfig
@@ -528,6 +532,12 @@
 ---@field result? table Original provider result when the input used the provider shape.
 ---@field loading boolean True while the provider is still scanning or searching.
 
+--- Spec accepted by `smelt.remember`.
+---@class smelt.remember.Config
+---@field model? boolean When true (default), restore the last-used model on launch.
+---@field mode? boolean When true (default), restore the last-used agent mode on launch.
+---@field reasoning_effort? boolean When true (default), restore the last-used reasoning effort on launch.
+
 --- Options for `smelt.render.diff_split`.
 ---@class smelt.render.DiffSplitOpts
 ---@field old? string Left/pre-edit text.
@@ -545,13 +555,6 @@
 ---@class smelt.render.TextOpts
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
-
---- Sticky handle returned by `smelt.signal(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
----@class smelt.signal.Signal
----@field get fun(): any Return the current signal value, or `nil` when the signal isn't declared.
----@field set fun(value: any): smelt.signal.Signal Publish a new value. Returns the handle for chaining.
----@field subscribe fun(handler: fun(arg1: any, arg2: any)): smelt.Reg Register `handler(value, previous)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect.
----@field name fun(): string Return the signal name.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl

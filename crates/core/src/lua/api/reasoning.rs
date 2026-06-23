@@ -1,6 +1,6 @@
-//! `smelt.reasoning` - callable selector for reasoning effort. Mirrors
-//! `smelt.mode`. `smelt.reasoning()` reads, `smelt.reasoning(v)` sets,
-//! `smelt.reasoning.cycle_list()` returns the configured cycle.
+//! `smelt.reasoning` - reasoning-effort selector. Mirrors `smelt.mode`.
+//! `smelt.reasoning.current()` reads, `smelt.reasoning.set(v)` sets in a TUI
+//! session, and `smelt.reasoning.cycle_list()` returns the configured cycle.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -23,7 +23,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "reasoning",
-        "Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.reasoning(v)` sets it (overridden by the TUI to apply the change). `smelt.reasoning.cycle_list()` lists the configured cycle.",
+        "Reasoning-effort selector. `smelt.reasoning.current()` reads the active effort, `smelt.reasoning.set(v)` sets it in a TUI session, and `smelt.reasoning.cycle_list()` lists the configured cycle.",
         Tier::Host,
     )?;
     m.fn_(
@@ -43,17 +43,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
-    // `__call`: get when no arg, no-op set stub here (TUI overrides).
-    m.callable(
-        |lua, (_tbl, v): (mlua::Table, Option<LuaReasoningEffort>)| -> LuaResult<mlua::Value> {
-            if v.is_some() {
-                return Ok(mlua::Value::Nil);
-            }
-            let cur = crate::host::try_with_core(|core| {
+    m.fn_(
+        "current",
+        "Return the active reasoning effort.",
+        &[],
+        |_, ()| -> LuaResult<LuaReasoningEffort> {
+            Ok(crate::host::try_with_core(|core| {
                 LuaReasoningEffort::from(core.config.reasoning_effort)
             })
-            .unwrap_or(LuaReasoningEffort::Medium);
-            cur.into_lua(lua)
+            .unwrap_or(LuaReasoningEffort::Medium))
         },
     )?;
 

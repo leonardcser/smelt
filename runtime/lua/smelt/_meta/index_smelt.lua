@@ -20,10 +20,10 @@ smelt.ns = nil
 --- small handle exposing the plugin's per-cycle state slot:
 --- 
 ---   local M = smelt.plugin("banner")
----   M.state.fires = 0          -- M.state is smelt.state("banner")
+---   M.state.fires = 0          -- M.state is smelt.state.get("banner")
 ---   M.name == "banner"
 --- 
---- After this call, bare `smelt.state()` also resolves to the named
+--- After this call, bare `smelt.state.get()` also resolves to the named
 --- slot and unnamed resource constructors auto-name keyed by `name`.
 --- Idempotent within a single module body run: counters reset on every
 --- promotion so declaration order is what matters.
@@ -36,6 +36,7 @@ smelt.ns = nil
 --- 
 --- Must be called from a module body (or init.lua). Outside a loader
 --- frame (e.g. from an event callback) it raises immediately.
+---@see smelt.state.get
 ---@type fun(name: any): any
 smelt.plugin = nil
 

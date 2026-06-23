@@ -3,7 +3,7 @@
 
 local M = {}
 
-local state = smelt.state("which_key")
+local state = smelt.state.get("which_key")
 local NS_HL = smelt.ns("smelt.which_key")
 
 local DEFAULTS = {
@@ -141,8 +141,8 @@ function M.setup(user_opts)
 	if state.subscription then
 		state.subscription:remove()
 	end
-	state.subscription = smelt.signal("keymap_pending"):subscribe(update)
-	update(smelt.signal("keymap_pending"):get())
+	state.subscription = smelt.signal.subscribe("keymap_pending", update)
+	update(smelt.signal.get("keymap_pending"))
 	return M
 end
 

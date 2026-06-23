@@ -363,14 +363,14 @@ local function register_present_plan()
       end
 
       if action == "approve" then
-        smelt.mode("normal")
+        smelt.mode.set("normal")
         return "wrote plan to " .. path
             .. "\nplan artifact directory: " .. artifact_dir
             .. "\nplan approved\n\nproceed with the implementation using normal-mode permissions and this saved plan as the reference"
       end
 
       if action == "apply" then
-        smelt.mode("apply")
+        smelt.mode.set("apply")
         return "wrote plan to " .. path
             .. "\nplan artifact directory: " .. artifact_dir
             .. "\nplan approved\n\nproceed with the implementation in apply mode, using this saved plan as the reference"

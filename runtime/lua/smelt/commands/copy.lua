@@ -8,15 +8,14 @@ local function get_notify()
     notify_handle = smelt.notify.scoped("copy")
     return notify_handle
   end
-  notify_handle = setmetatable({
+  notify_handle = {
+    info = function(msg)
+      if smelt.notify and smelt.notify.info then smelt.notify.info(msg, "copy") end
+    end,
     error = function(msg)
       if smelt.notify and smelt.notify.error then smelt.notify.error(msg, "copy") end
     end,
-  }, {
-    __call = function(_, msg)
-      if smelt.notify then smelt.notify(msg, "copy") end
-    end,
-  })
+  }
   return notify_handle
 end
 
@@ -137,7 +136,7 @@ local function copy_messages(arg)
   end
 
   local suffix = #rows == 1 and "message" or "messages"
-  get_notify()("copied " .. tostring(#rows) .. " " .. suffix)
+  get_notify().info("copied " .. tostring(#rows) .. " " .. suffix)
 end
 
 smelt.cmd.register("copy", copy_messages, {

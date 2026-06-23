@@ -30,14 +30,14 @@
 -- Startup defaults
 -- nil means no configured cold-start default. Startup falls back to
 -- CLI flags, recent choices, then the first registered provider/model.
-smelt.defaults({
+smelt.defaults.set({
   model = nil,             -- example: "openai/gpt-5.5"
   mode = nil,              -- possible: "normal", "plan", "apply", "yolo"
   reasoning_effort = nil,  -- possible: "off", "low", "medium", "high", "max"
 })
 
 -- Remember last-used startup choices from recent.json.
-smelt.remember({
+smelt.remember.set({
   model = true,
   mode = true,
   reasoning_effort = true,

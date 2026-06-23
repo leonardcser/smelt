@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Wall-clock time primitives. Host-tier so plugins can read absolute time in both TUI and headless contexts.
 
 ## `smelt.clock.unix_ms`

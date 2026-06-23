@@ -7,7 +7,7 @@ local DOCS_URL = "https://leonardcser.github.io/smelt/"
 local function copy_fallback(reason)
   local ok = pcall(smelt.clipboard.write, DOCS_URL)
   if ok then
-    smelt.notify(reason .. ": copied " .. DOCS_URL .. " to clipboard")
+    smelt.notify.info(reason .. ": copied " .. DOCS_URL .. " to clipboard")
   else
     smelt.notify.error(reason .. ": open " .. DOCS_URL .. " manually")
   end

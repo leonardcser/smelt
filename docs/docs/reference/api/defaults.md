@@ -4,5 +4,17 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Startup fallbacks for new sessions. `smelt.defaults({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Startup fallbacks for new sessions. `smelt.defaults.set({ model, mode, reasoning_effort })` sets each field; CLI flags and resumed-session state still win.
+
+## `smelt.defaults.set`
+
+```lua
+fun(cfg: smelt.defaults.Config): nil
+```
+
+Types: [`smelt.defaults.Config`](types.md#smeltdefaultsconfig)
+
+Set startup defaults for fresh sessions. Accepts `{ model?, mode?, reasoning_effort? }`; CLI flags and resumed-session state still win.
 

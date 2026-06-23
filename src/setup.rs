@@ -432,7 +432,7 @@ fn default_config_lua() -> String {
     lua.push_str("-- Startup defaults\n");
     lua.push_str("-- nil means no configured cold-start default. Startup falls back to\n");
     lua.push_str("-- CLI flags, recent choices, then the first registered provider/model.\n");
-    lua.push_str("smelt.defaults({\n");
+    lua.push_str("smelt.defaults.set({\n");
     lua.push_str("  model = nil,             -- example: \"openai/gpt-5.5\"\n");
     lua.push_str(
         "  mode = nil,              -- possible: \"normal\", \"plan\", \"apply\", \"yolo\"\n",
@@ -444,7 +444,7 @@ fn default_config_lua() -> String {
 
     let remember = RememberConfig::default();
     lua.push_str("-- Remember last-used startup choices from recent.json.\n");
-    lua.push_str("smelt.remember({\n");
+    lua.push_str("smelt.remember.set({\n");
     lua.push_str(&format!("  model = {},\n", lua_bool(remember.model)));
     lua.push_str(&format!("  mode = {},\n", lua_bool(remember.mode)));
     lua.push_str(&format!(

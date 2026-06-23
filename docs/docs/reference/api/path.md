@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Pure path arithmetic: normalize, join, relative, expand, display, etc.
 
 ## `smelt.path.basename`

@@ -19,7 +19,7 @@ that's where you wire your behaviour up.
 ```lua
 -- ~/.config/smelt/plugins/hello.lua
 smelt.cmd.register("hello", function(arg)
-  smelt.notify("hello, " .. ((arg and arg ~= "") and arg or "world"))
+  smelt.notify.info("hello, " .. ((arg and arg ~= "") and arg or "world"))
 end, { desc = "greet someone" })
 
 return {}
@@ -75,7 +75,7 @@ Module bodies run with the host pointer live on every Lua-context bring-up, both
 cold start and `/reload`. Three pieces compose into "my UI keeps the same
 position / focus / content when the user reloads my plugin":
 
-1. **`smelt.state(name)`** - JSON-shaped table that survives `/reload` (not
+1. **`smelt.state.get(name)`** - JSON-shaped table that survives `/reload` (not
    restart). Persist your `is_open` / cursor / variant index here.
 2. **`opts.name = "..."`** on `smelt.overlay.new`, `smelt.win.new`,
    `smelt.buf.new`, and `smelt.paint.register` - opts the resource into
@@ -109,7 +109,7 @@ through a buffer-backed window. The leaf that owned the `press` keeps receiving
 
 ```lua
 local paint = smelt.paint.register(draw_fn, { name = "myplugin.paint" })
-paint:on("press",   function(ev) smelt.notify("down @ "..ev.row..","..ev.col) end)
+paint:on("press",   function(ev) smelt.notify.info("down @ "..ev.row..","..ev.col) end)
 paint:on("drag",    function(ev) ... end)
 paint:on("release", function(ev) ... end)
 ```
@@ -189,7 +189,7 @@ path.
 
 `smelt.events.on(name, handler)` subscribes to runtime events: agent turns,
 session load, tool start/end, and so on. Events carry only future occurrences,
-so handlers receive the payload without a previous value. `smelt.signal(name)`
+so handlers receive the payload without a previous value. `smelt.signal.subscribe(name, handler)`
 subscribes to durable runtime state such as mode changes. Both return a `Reg`
 whose `:remove()` drops the subscription. The full lists are the
 `smelt.events.Name` and `smelt.signal.Name` aliases in
@@ -213,14 +213,14 @@ smelt.events.on("turn_end", function(payload)
   -- ... e.g. kick off a prediction call
 end)
 
-smelt.signal("agent_mode"):subscribe(function(mode)
+smelt.signal.subscribe("agent_mode", function(mode)
   if mode == "plan" then activate() else deactivate() end
 end)
 ```
 
 You can declare your own durable signals with
 `smelt.signal.new("my_plugin:state", initial)` and broadcast updates with
-`smelt.signal("my_plugin:state"):set(value)`. For occurrence-shaped plugin
+`smelt.signal.set("my_plugin:state", value)`. For occurrence-shaped plugin
 hooks, use `smelt.events.on("my_plugin:event", handler)` and
 `smelt.events.emit("my_plugin:event", payload)`.
 
@@ -421,13 +421,13 @@ local results = smelt.task.all(
 
 ## Plugin state
 
-`smelt.state(name)` returns an ephemeral table scoped to `name`. Survives
+`smelt.state.get(name)` returns an ephemeral table scoped to `name`. Survives
 `/reload` but not a restart. Use it for live UI state, such as whether a panel
 is open, the current scroll position, or a cache that can be rebuilt. Plugins
 removed since the last load have their slots swept automatically.
 
 ```lua
-local s = smelt.state("my_plugin")
+local s = smelt.state.get("my_plugin")
 s.counter = (s.counter or 0) + 1
 ```
 
@@ -601,8 +601,8 @@ smelt.tools.register({
   summary  = function(args) return args.title or args.plan_path or "plan" end,
   execute  = function(args)
     local action = smelt.dialog.open({ ... }) -- yields, allowed inside execute
-    if action == "approve" then smelt.mode("normal") end
-    if action == "apply" then smelt.mode("apply") end
+    if action == "approve" then smelt.mode.set("normal") end
+    if action == "apply" then smelt.mode.set("apply") end
     return "ok"
   end,
 })

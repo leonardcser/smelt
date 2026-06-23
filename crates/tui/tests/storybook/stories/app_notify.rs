@@ -27,14 +27,14 @@ app_story!(notify_info_short_body_renders_verbatim, |ctx| {
     // (no ellipsis, no clipping). Catches accidental over-clipping if
     // someone tightens the width budget.
     ctx.set_viewport(40, 6);
-    ctx.run_lua(r#"smelt.notify("checking for upgrades…")"#);
+    ctx.run_lua(r#"smelt.notify.info("checking for upgrades…")"#);
     ctx.assert_snapshot();
 });
 
 app_story!(notify_refits_after_resize, |ctx| {
     ctx.set_viewport(32, 6);
     ctx.run_lua(
-        r#"smelt.notify("update available: v0.6.0 with detailed release notes", "upgrade")"#,
+        r#"smelt.notify.info("update available: v0.6.0 with detailed release notes", "upgrade")"#,
     );
     ctx.assert_snapshot();
 
@@ -54,7 +54,7 @@ app_story!(notify_logs_to_messages_with_source, |ctx| {
           "/upgrade: cargo install exited 101\nerror: multiple packages with binaries",
           "upgrade"
         )
-        smelt.notify("update available: v0.6.0", "upgrade")
+        smelt.notify.info("update available: v0.6.0", "upgrade")
         "#,
     );
     ctx.run_command("messages");

@@ -48,7 +48,7 @@ end
 -- ── Provider detection ─────────────────────────────────────────────────
 
 local function active_provider()
-  local active = smelt.model()
+  local active = smelt.model.current()
   for _, model in ipairs(smelt.model.list() or {}) do
     if model.key == active or model.name == active then
       return model.provider or "", model.key or active or "", model.api_base or ""

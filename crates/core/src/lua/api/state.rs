@@ -1,5 +1,5 @@
 //! `smelt.state` - JSON-backed per-plugin persistence. The ephemeral
-//! `smelt.state(name)` lookup (per-reload table) lives in bundled lua;
+//! `smelt.state.get(name)` lookup (per-reload table) lives in bundled lua;
 //! this module supplies the file I/O primitives that
 //! `smelt.state.persistent(name)` builds on.
 
@@ -20,7 +20,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "state",
-        "Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.",
+        "Per-plugin state. `smelt.state.get(name)` returns an ephemeral table that survives `/reload` only; `smelt.state.persistent(name)` returns a JSON-backed wrapper that survives restarts too.",
         Tier::Host,
     )?;
     m.private_fn(

@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Structured JSONL log entries written to the engine log file. Use for machine-readable telemetry events; pair with `smelt.notify` for user-visible toasts.
 
 ## `smelt.log.error`

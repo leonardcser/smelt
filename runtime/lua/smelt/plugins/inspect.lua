@@ -38,13 +38,13 @@ function M.setup()
 		if url then
 			local opened = smelt.inspect.open(url)
 			if opened.opened then
-				notify("Opened UI: " .. url)
+				notify.info("Opened UI: " .. url)
 			elseif opened.error then
 				notify.error("UI: " .. url .. " (could not open browser: " .. opened.error .. ")")
 			elseif opened.reason then
-				notify("UI: " .. url .. " (browser auto-open unavailable: " .. opened.reason .. ")")
+				notify.info("UI: " .. url .. " (browser auto-open unavailable: " .. opened.reason .. ")")
 			else
-				notify("UI: " .. url)
+				notify.info("UI: " .. url)
 			end
 		else
 			notify.error(err or "failed to start server")

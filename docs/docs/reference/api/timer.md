@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 One-shot and recurring timer callbacks. Each call returns a `Reg` whose `:remove()` cancels the timer.
 
 ## `smelt.timer.every`

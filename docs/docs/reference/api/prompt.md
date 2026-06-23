@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.
 
 ## `smelt.prompt.acquire`

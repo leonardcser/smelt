@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Apply, read, and override the active colorscheme. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). The full colorscheme is described by a `ThemeSpec` table whose `groups` map keys are highlight-group names and whose values are either a `StyleDecl` table or a string referencing another group in the spec. UiHost-only.
 
 ## `smelt.theme.apply`

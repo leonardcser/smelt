@@ -4,11 +4,11 @@
 -- /hello - greet with a notification.
 smelt.cmd.register("hello", function(arg)
   local name = (arg and arg ~= "") and arg or "world"
-  smelt.notify("hello, " .. name .. "!")
+  smelt.notify.info("hello, " .. name .. "!")
 end)
 
 -- Remap Ctrl-S in normal mode to run /fork.
 smelt.keymap.set("n", "<C-s>", function()
   smelt.cmd.run("fork")
-  smelt.notify("session forked")
+  smelt.notify.info("session forked")
 end)

@@ -4,5 +4,23 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Session title. Callable: `title()` reads the current title, `title(t)` writes the title and derives a slug via `smelt.text.slugify`, `title(t, s)` writes both. Writes also update the task label and save the session.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Session title. Use `smelt.session.title.get()` to read the current title and `smelt.session.title.set(title, slug?)` to write it. Writes update the task label and save the session.
+
+## `smelt.session.title.get`
+
+```lua
+fun(): string?
+```
+
+Return the current session title, or `nil` when it has not been set.
+
+## `smelt.session.title.set`
+
+```lua
+fun(title: string, slug: string?): nil
+```
+
+Set the session title. When `slug` is omitted, one is derived from the title.
 

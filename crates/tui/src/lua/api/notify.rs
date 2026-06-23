@@ -1,6 +1,6 @@
 //! `smelt.notify` - informational toasts in the status area.
 //!
-//! `smelt.notify("msg")`, `smelt.notify.warn("msg")`, and
+//! `smelt.notify.info("msg")`, `smelt.notify.warn("msg")`, and
 //! `smelt.notify.error("msg")` each show a one-line toast over the
 //! prompt-above region AND append the full body to the persistent
 //! message log (`smelt.messages`) so the user can recover the details
@@ -42,9 +42,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    // Callable: smelt.notify("msg", source?) -> info toast + log entry.
-    m.callable(
-        |_, (_tbl, msg, source): (mlua::Table, String, Option<String>)| -> LuaResult<()> {
+    m.fn_(
+        "info",
+        "Show an informational toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `\"lua\"`.",
+        &["msg", "source"],
+        |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
             record_from_lua(MessageKind::Info, source, msg);
             Ok(())
         },

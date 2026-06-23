@@ -197,7 +197,7 @@ leader value they were created with. The default leader is a single backslash
 smelt.keymap.set("n", "<C-y>", function()
   local text = smelt.transcript.loaded_text_expensive()
   smelt.clipboard.write(text)
-  smelt.notify("copied transcript")
+  smelt.notify.info("copied transcript")
 end)
 ```
 
@@ -265,7 +265,7 @@ Drop a file at `~/.config/smelt/commands/<name>.lua` (or inline in `init.lua`):
 
 ```lua
 smelt.cmd.register("greet", function(arg)
-  smelt.notify("hello " .. (arg or "world"))
+  smelt.notify.info("hello " .. (arg or "world"))
 end, {
   desc = "say hello",
   args = "[name]",          -- shown in /command help
@@ -281,7 +281,7 @@ surfaced as in-app notifications.
 
 Worked example: read `$XDG_DATA_HOME/smelt/builtins/lua/smelt/commands/docs.lua`
 to see how `/docs` uses `smelt.os.open_url`, `smelt.clipboard.write`, and
-`smelt.notify` for a graceful clipboard fallback.
+`smelt.notify.info` for a graceful clipboard fallback.
 
 ### Toggle/set a setting
 
@@ -324,7 +324,7 @@ what draws the built-in segments (vim mode, agent mode, tps, task label, etc.).
 ### Pin startup defaults (model / mode / reasoning)
 
 ```lua
-smelt.defaults({
+smelt.defaults.set({
   model = "openai/gpt-5.5",
   mode = "plan",
   reasoning_effort = "high",
@@ -597,6 +597,13 @@ Wall-clock time primitives.
 
 - `smelt.clock.unix_ms` :: `fun(): integer`
   Return the current Unix timestamp in milliseconds.
+
+#### `smelt.defaults`
+
+Startup fallbacks for new sessions.
+
+- `smelt.defaults.set` :: `fun(cfg: smelt.defaults.Config): nil`
+  Set startup defaults for fresh sessions.
 
 #### `smelt.events`
 
@@ -998,6 +1005,13 @@ Helpers for constructing `Reg` handles.
 - `smelt.reg.new` :: `fun(undo: fun()): smelt.Reg`
   Wrap `undo` as a `Reg`.
 
+#### `smelt.remember`
+
+Per-key opt-in to last-used recall on launch.
+
+- `smelt.remember.set` :: `fun(cfg: smelt.remember.Config): nil`
+  Set which startup choices are remembered across launches.
+
 #### `smelt.shell`
 
 Shell command splitting and interactive/background-operator validators.
@@ -1019,10 +1033,16 @@ Shell command splitting and interactive/background-operator validators.
 
 Named reactive values.
 
+- `smelt.signal.get` :: `fun(name: smelt.signal.Name): any`
+  Return the current value of signal `name`, or `nil` when the signal is not declared.
 - `smelt.signal.glob` :: `fun(pattern: string, handler: fun(arg1: string, arg2: any, arg3: any)): smelt.Reg`
   Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax).
 - `smelt.signal.new` :: `fun(name: smelt.signal.Name, initial: any): nil`
   Declare a signal named `name` with `initial` as its starting value.
+- `smelt.signal.set` :: `fun(name: smelt.signal.Name, value: any): nil`
+  Publish `value` for signal `name`.
+- `smelt.signal.subscribe` :: `fun(name: smelt.signal.Name, handler: fun(arg1: any, arg2: any)): smelt.Reg`
+  Register `handler(value, previous)` for signal `name`.
 
 #### `smelt.skills`
 
@@ -1039,6 +1059,8 @@ List and load skill content from the SkillLoader populated at startup.
 
 Per-plugin state.
 
+- `smelt.state.get` :: `fun(name?: string): table`
+  Return an ephemeral state table.
 - `smelt.state.persistent` :: `fun(name: string, opts: { debounce_ms: integer? }?): table`
 
 #### `smelt.task`
@@ -1216,8 +1238,6 @@ Resolved application configuration introspection.
 
 Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution.
 
-- `smelt.confirm.open` :: `fun(handle_id: string): nil`
-  Drive the bundled tool-permission confirm dialog for `handle_id`.
 
 #### `smelt.dialog`
 
@@ -1347,6 +1367,8 @@ Perf instrumentation toggle, clear, and snapshot.
 
 Model selector.
 
+- `smelt.model.current` :: `fun(): string`
+  Return the active model key.
 - `smelt.model.list` :: `fun(): table`
   Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
 - `smelt.model.max_tokens` :: `fun(): integer?`
@@ -1354,6 +1376,8 @@ Model selector.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
 - `smelt.model.pricing` :: `fun(): table`
   Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`.
+- `smelt.model.set` :: `fun(name: string): nil`
+  Switch the active model by key.
 
 #### `smelt.notebook`
 
@@ -1367,8 +1391,6 @@ Parse, read, and apply notebook cell edits, plus compute preview data for the ed
   Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).
 - `smelt.notebook.parse` :: `fun(json: string): table?, string?`
   Parse a notebook JSON string.
-- `smelt.notebook.preview_data` :: `fun(args: table): table?`
-  Compute the preview payload for an `edit_notebook` call.
 - `smelt.notebook.read` :: `fun(path: string, offset: integer, limit: integer): string?, string?`
   Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells.
 - `smelt.notebook.read_async` :: `fun(path: string, offset: integer, limit: integer): string?, string?, string?, integer?`
@@ -1380,8 +1402,10 @@ Status-area toasts.
 
 - `smelt.notify.error` :: `fun(msg: string, source: string?): nil`
   Show an error toast (highlighted with the error color) and append the body to the message log.
+- `smelt.notify.info` :: `fun(msg: string, source: string?): nil`
+  Show an informational toast and append the body to the message log.
 - `smelt.notify.scoped` :: `fun(source: string): smelt.notify.Scoped`
-  Bind `source` once and return a callable bag that forwards to `smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the source pinned.
+  Bind `source` once and return a small bag that forwards to `smelt.notify.info` / `smelt.notify.error` / `smelt.notify.warn` with the source pinned.
 - `smelt.notify.warn` :: `fun(msg: string, source: string?): nil`
   Show a warning toast and append the body to the message log.
 
@@ -1541,6 +1565,29 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.turns` :: `fun(): table`
   Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message.
 
+#### `smelt.session.messages`
+
+Session messages.
+
+- `smelt.session.messages.list` :: `fun(opts: table?): table`
+  Return persisted transcript messages, optionally filtered by `{ roles?, include_tool?, since_index?, limit? }`.
+
+#### `smelt.session.slug`
+
+Session slug.
+
+- `smelt.session.slug.get` :: `fun(): string?`
+  Return the current session slug, or `nil` when it has not been set.
+
+#### `smelt.session.title`
+
+Session title.
+
+- `smelt.session.title.get` :: `fun(): string?`
+  Return the current session title, or `nil` when it has not been set.
+- `smelt.session.title.set` :: `fun(title: string, slug: string?): nil`
+  Set the session title.
+
 #### `smelt.settings`
 
 Metatable-backed proxy table for preferences.
@@ -1681,6 +1728,8 @@ Register and list slash commands.
 
 Agent-mode selector.
 
+- `smelt.mode.current` (Host) :: `fun(): string`
+  Return the active agent mode name.
 - `smelt.mode.cycle` (UiHost) :: `fun(): nil`
   Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`, wrapping at the end.
 - `smelt.mode.cycle_list` (Host) :: `fun(): string[]`
@@ -1691,6 +1740,8 @@ Agent-mode selector.
 - `smelt.mode.note` (UiHost) :: `fun(name: string): string`
 - `smelt.mode.permission_behaviors` (UiHost) :: `fun(): table<string, table>`
 - `smelt.mode.register` (UiHost) :: `fun(spec: table): nil`
+- `smelt.mode.set` (UiHost) :: `fun(mode: string): nil`
+  Set the active agent mode.
 - `smelt.mode.set_icon` (UiHost) :: `fun(name: string, icon: string): nil`
 - `smelt.mode.style` (UiHost) :: `fun(name: string): table`
 
@@ -1698,10 +1749,14 @@ Agent-mode selector.
 
 Reasoning-effort selector.
 
+- `smelt.reasoning.current` (Host) :: `fun(): smelt.reasoning.Effort`
+  Return the active reasoning effort.
 - `smelt.reasoning.cycle` (UiHost) :: `fun(): nil`
   Advance the active reasoning effort to the next entry in `smelt.reasoning.cycle_list()`, wrapping at the end.
 - `smelt.reasoning.cycle_list` (Host) :: `fun(): smelt.reasoning.Effort[]`
   Return the configured reasoning-effort cycle.
+- `smelt.reasoning.set` (UiHost) :: `fun(effort: smelt.reasoning.Effort): nil`
+  Set the active reasoning effort.
 
 #### `smelt.transcript`
 

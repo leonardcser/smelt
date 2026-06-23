@@ -364,7 +364,7 @@ if smelt.lifecycle and smelt.signal then
   function smelt.lifecycle.guard(scopes)
     local snapshot = {}
     for _, signal_name in ipairs(normalize_guard_scopes(scopes)) do
-      snapshot[signal_name] = smelt.signal(signal_name):get()
+      snapshot[signal_name] = smelt.signal.get(signal_name)
     end
 
     local active = true
@@ -376,7 +376,7 @@ if smelt.lifecycle and smelt.signal then
       if not active then return false end
       if latest_key and __smelt_lifecycle_latest__[latest_key] ~= latest_token then return false end
       for signal_name, value in pairs(snapshot) do
-        if smelt.signal(signal_name):get() ~= value then return false end
+        if smelt.signal.get(signal_name) ~= value then return false end
       end
       return true
     end
@@ -675,7 +675,7 @@ function smelt.tick.every(secs, fn)
     error("smelt.tick.every: fn must be a function", 2)
   end
   local last = 0
-  return smelt.signal("now"):subscribe(function(now)
+  return smelt.signal.subscribe("now", function(now)
     if (now or 0) - last >= secs then
       last = now or 0
       smelt.spawn(function() fn() end)
@@ -765,7 +765,7 @@ if smelt.theme then
 end
 
 -- Per-name state. Two flavours:
---   smelt.state(name)             → ephemeral table; survives /reload only.
+--   smelt.state.get(name?)        → ephemeral table; survives /reload only.
 --   smelt.state.persistent(name)  → JSON-backed wrapper; survives restart.
 --
 -- Ephemeral storage lives in a Lua global so bootstrap re-runs preserve
@@ -846,7 +846,7 @@ end
 -- `__smelt_with_scope`. The frame stays unnamed (`false`) by default -
 -- the module body opts in to hot-reload survival by calling
 -- `smelt.plugin("name")`, which promotes its frame to that name.
--- While the frame is named, `smelt.state()` and the unnamed-resource
+-- While the frame is named, `smelt.state.get()` and the unnamed-resource
 -- constructors (`smelt.paint.register`, `smelt.overlay.new`,
 -- `smelt.win.new`, `smelt.buf.new`) auto-name on the plugin's behalf
 -- so survival is implicit for the rest of the body.
@@ -872,7 +872,7 @@ end
 
 -- Resolve the current scope name, if any. Returns nil when no plugin
 -- scope is active (no `smelt.plugin(...)` call, or running inside a
--- callback fired from the event loop). Used by `smelt.state()` and
+-- callback fired from the event loop). Used by `smelt.state.get()` and
 -- unnamed-resource auto-naming.
 function __smelt_current_scope()
   local top = __smelt_scope_stack[#__smelt_scope_stack]
@@ -901,10 +901,10 @@ end
 -- small handle exposing the plugin's per-cycle state slot:
 --
 --   local M = smelt.plugin("banner")
---   M.state.fires = 0          -- M.state is smelt.state("banner")
+--   M.state.fires = 0          -- M.state is smelt.state.get("banner")
 --   M.name == "banner"
 --
--- After this call, bare `smelt.state()` also resolves to the named
+-- After this call, bare `smelt.state.get()` also resolves to the named
 -- slot and unnamed resource constructors auto-name keyed by `name`.
 -- Idempotent within a single module body run: counters reset on every
 -- promotion so declaration order is what matters.
@@ -929,32 +929,31 @@ function smelt.plugin(name)
   __smelt_scope_counters[name] = { paint = 0, buf = 0, win = 0, overlay = 0 }
   return setmetatable({ name = name }, {
     __index = function(_, key)
-      if key == "state" then return smelt.state(name) end
+      if key == "state" then return smelt.state.get(name) end
     end,
   })
 end
 
--- Make `smelt.state` callable. With an explicit name: returns the
--- ephemeral table for that name. With no arg: returns the current
--- plugin's scoped table, keyed by the current scope name. Raises if
--- called with no arg outside a module body (no scope active).
-setmetatable(smelt.state, {
-  __call = function(_, name)
-    if name == nil then
-      name = __smelt_current_scope()
-      if not name then
-        error("smelt.state(): no plugin scope active - call with an explicit name from outside module body", 2)
-      end
+-- Return an ephemeral state table. With an explicit name, returns the
+-- table for that name. With no arg, returns the current plugin's scoped
+-- table keyed by the current scope name. Raises if called with no arg
+-- outside a module body (no scope active).
+---@type fun(name?: string): table
+function smelt.state.get(name)
+  if name == nil then
+    name = __smelt_current_scope()
+    if not name then
+      error("smelt.state.get(): no plugin scope active - pass an explicit name from outside module body", 2)
     end
-    __smelt_state_touched__[name] = true
-    local s = __smelt_state__[name]
-    if not s then
-      s = {}
-      __smelt_state__[name] = s
-    end
-    return s
-  end,
-})
+  end
+  __smelt_state_touched__[name] = true
+  local s = __smelt_state__[name]
+  if not s then
+    s = {}
+    __smelt_state__[name] = s
+  end
+  return s
+end
 
 function smelt.__sweep_state()
   for k in pairs(__smelt_state__) do
@@ -970,21 +969,19 @@ function smelt.__sweep_state()
 end
 
 if smelt and smelt.notify then
-  --- Source-bound notify handle returned by `smelt.notify.scoped`. Callable
-  --- as `handle(msg)` for an info toast; `handle.error(msg)` and
-  --- `handle.warn(msg)` raise error/warning toasts. Every call forwards to
-  --- the underlying `smelt.notify*` with the source string pinned at
-  --- factory time.
+  --- Source-bound notify handle returned by `smelt.notify.scoped`.
+  --- Use `handle.info(msg)`, `handle.error(msg)`, or `handle.warn(msg)` to
+  --- tag every toast with the bound source.
   ---@class smelt.notify.Scoped
+  ---@field info fun(msg: string) Raise an informational toast tagged with the bound source.
   ---@field error fun(msg: string) Raise an error toast tagged with the bound source.
   ---@field warn fun(msg: string) Raise a warning toast tagged with the bound source.
-  ---@field [string] any Callable: `handle(msg)` -> info toast tagged with the bound source.
 
-  -- Bind `source` once and return a callable bag that forwards to
-  -- `smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the
+  -- Bind `source` once and return a small bag that forwards to
+  -- `smelt.notify.info` / `smelt.notify.error` / `smelt.notify.warn` with the
   -- source pinned. A plugin opts in with one line at the top of the file:
   --   local notify = smelt.notify.scoped("upgrade")
-  --   notify("downloading …")
+  --   notify.info("downloading …")
   --   notify.error("/upgrade: spawn failed")
   -- so the per-call-site `, "upgrade"` repetition goes away. Same toast +
   -- `/messages` semantics as the underlying calls. Skipped on headless
@@ -994,10 +991,11 @@ if smelt and smelt.notify then
     if type(source) ~= "string" or source == "" then
       error("smelt.notify.scoped: source must be a non-empty string", 2)
     end
-    return setmetatable({
+    return {
+      info  = function(msg) smelt.notify.info(msg, source) end,
       error = function(msg) smelt.notify.error(msg, source) end,
       warn  = function(msg) smelt.notify.warn(msg, source) end,
-    }, { __call = function(_, msg) smelt.notify(msg, source) end })
+    }
   end
 end
 

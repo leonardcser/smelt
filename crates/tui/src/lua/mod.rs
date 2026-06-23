@@ -654,7 +654,7 @@ mod tests {
     use smelt_core::lua::api::lua_table_to_json;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
 
-    /// Stub `smelt.notify` / `smelt.notify.error` to push into `_G.test_log` / `_G.test_err`.
+    /// Stub `smelt.notify.info` / `smelt.notify.error` to push into `_G.test_log` / `_G.test_err`.
     fn install_test_notify(rt: &LuaRuntime) {
         rt.lua
             .load(
@@ -662,9 +662,7 @@ mod tests {
                     _G.test_log = {}
                     _G.test_err = {}
                     _G.test_warn = {}
-                    local mt = getmetatable(smelt.notify) or {}
-                    mt.__call = function(_, msg) table.insert(_G.test_log, msg) end
-                    setmetatable(smelt.notify, mt)
+                    smelt.notify.info = function(msg) table.insert(_G.test_log, msg) end
                     smelt.notify.error = function(msg) table.insert(_G.test_err, msg) end
                     smelt.notify.warn = function(msg) table.insert(_G.test_warn, msg) end
                 "#,
@@ -1575,7 +1573,7 @@ mod tests {
         let rt = LuaRuntime::new();
         install_test_notify(&rt);
         rt.lua
-            .load("smelt.notify('hello from lua')")
+            .load("smelt.notify.info('hello from lua')")
             .exec()
             .expect("exec");
         let msgs = drain_notifications(&rt);
@@ -1600,7 +1598,7 @@ mod tests {
             .load(
                 r#"
                     smelt.cmd.register("hello", function()
-                        smelt.notify("hello world")
+                        smelt.notify.info("hello world")
                     end)
                 "#,
             )
@@ -1744,7 +1742,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("n", "<C-g>", function()
-                        smelt.notify("ctrl-g")
+                        smelt.notify.info("ctrl-g")
                     end)
                 "#,
             )
@@ -1817,7 +1815,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("", "<C-h>", function()
-                        smelt.notify("any-mode")
+                        smelt.notify.info("any-mode")
                     end)
                 "#,
             )
@@ -1989,7 +1987,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set_leader("<space>")
-                    smelt.keymap.set("n", "<leader>r", function() smelt.notify("resume") end)
+                    smelt.keymap.set("n", "<leader>r", function() smelt.notify.info("resume") end)
                 "#,
             )
             .exec()
@@ -2138,7 +2136,7 @@ mod tests {
                 r#"
                     for _, mode in ipairs({ "normal", "insert", "visual" }) do
                         smelt.keymap.set(mode, "c-r", function()
-                            smelt.notify("history: " .. mode)
+                            smelt.notify.info("history: " .. mode)
                         end)
                     end
                 "#,
@@ -2170,8 +2168,8 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.notify("esc-esc") end)
-                    smelt.keymap.set("n", "gd", function() smelt.notify("go-def") end)
+                    smelt.keymap.set("", "<Esc><Esc>", function() smelt.notify.info("esc-esc") end)
+                    smelt.keymap.set("n", "gd", function() smelt.notify.info("go-def") end)
                 "#,
             )
             .exec()
@@ -2227,7 +2225,7 @@ mod tests {
             .load(
                 r#"
                     smelt.keymap.set("", "<Esc><Esc>", function(ctx)
-                        smelt.notify("mode=" .. tostring(ctx.vim_mode_at_chord_start))
+                        smelt.notify.info("mode=" .. tostring(ctx.vim_mode_at_chord_start))
                     end)
                 "#,
             )

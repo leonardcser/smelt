@@ -4,7 +4,19 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Named reactive values. `smelt.signal(name)` returns a sticky `Signal` handle with `:get`, `:set`, `:subscribe`, `:name`. `smelt.signal.new` declares a signal with an initial value. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
+Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.
+
+## `smelt.signal.get`
+
+```lua
+fun(name: smelt.signal.Name): any
+```
+
+Types: [`smelt.signal.Name`](types.md#smeltsignalname)
+
+Return the current value of signal `name`, or `nil` when the signal is not declared.
 
 ## `smelt.signal.glob`
 
@@ -25,4 +37,24 @@ fun(name: smelt.signal.Name, initial: any): nil
 Types: [`smelt.signal.Name`](types.md#smeltsignalname)
 
 Declare a signal named `name` with `initial` as its starting value. No-op if the signal already exists.
+
+## `smelt.signal.set`
+
+```lua
+fun(name: smelt.signal.Name, value: any): nil
+```
+
+Types: [`smelt.signal.Name`](types.md#smeltsignalname)
+
+Publish `value` for signal `name`.
+
+## `smelt.signal.subscribe`
+
+```lua
+fun(name: smelt.signal.Name, handler: fun(arg1: any, arg2: any)): smelt.Reg
+```
+
+Types: [`smelt.signal.Name`](types.md#smeltsignalname), [`smelt.Reg`](types.md#smeltreg)
+
+Register `handler(value, previous)` for signal `name`. Returns a `Reg` whose `:remove()` drops the subscription.
 

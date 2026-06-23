@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only.
 
 ## `smelt.permissions.check`

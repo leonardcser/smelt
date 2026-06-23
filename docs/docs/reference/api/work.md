@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Push background work-state tokens. Tokens drive the prompt top-bar indicator and the reactive `work_*` signals; plugins observe state by subscribing to those signals. UiHost-only.
 
 ## `smelt.work.busy`

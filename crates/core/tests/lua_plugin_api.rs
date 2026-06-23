@@ -967,9 +967,9 @@ fn smelt_state_returns_same_table_for_same_name() {
     rt.lua
         .load(
             r#"
-            local a = smelt.state("plugin_x")
+            local a = smelt.state.get("plugin_x")
             a.counter = 1
-            local b = smelt.state("plugin_x")
+            local b = smelt.state.get("plugin_x")
             SAME = rawequal(a, b)
             B_COUNTER = b.counter
             "#,

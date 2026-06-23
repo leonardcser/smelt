@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`. UiHost-only.
 
 ## `smelt.render.diff_split`

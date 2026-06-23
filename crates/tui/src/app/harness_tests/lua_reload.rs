@@ -40,10 +40,10 @@ fn lua_config_session_and_transcript_contracts_are_available() {
             assert(type(smelt.config.api_key_env()) == "string")
             assert(type(smelt.config.model_config()) == "table")
 
-            assert(smelt.session.title() == nil)
-            smelt.session.title("Lua Contract Title", "lua-contract-title")
-            assert(smelt.session.title() == "Lua Contract Title")
-            assert(smelt.session.slug() == "lua-contract-title")
+            assert(smelt.session.title.get() == nil)
+            smelt.session.title.set("Lua Contract Title", "lua-contract-title")
+            assert(smelt.session.title.get() == "Lua Contract Title")
+            assert(smelt.session.slug.get() == "lua-contract-title")
             assert(type(smelt.session.cwd()) == "string")
             assert(type(smelt.session.tokens()) == "table")
             local info = smelt.session.info()
@@ -470,7 +470,7 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
 
     assert!(app.run_lua(
         r##"
-            local model = smelt.model()
+            local model = smelt.model.current()
             assert(type(model) == "string")
             local models = smelt.model.list()
             assert(type(models) == "table")
@@ -740,7 +740,7 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
             assert(type(subcommand_decision) == "string" and #subcommand_decision > 0, "permission subcommand decision")
             smelt.permissions.set_rules({ default = { tools = { ask = { "*" } } } })
 
-            smelt.notify("hello from lua contract", "coverage")
+            smelt.notify.info("hello from lua contract", "coverage")
             smelt.notify.warn("careful from lua contract", "coverage")
             smelt.notify.error("error from lua contract", "coverage")
 
@@ -1203,9 +1203,9 @@ fn sweep_state_prunes_untouched_entries() {
     rt.lua
         .load(
             r#"
-                local s1 = smelt.state("alive")
+                local s1 = smelt.state.get("alive")
                 s1.open = true
-                local s2 = smelt.state("dead")
+                local s2 = smelt.state.get("dead")
                 s2.open = true
                 "#,
         )
@@ -1218,7 +1218,7 @@ fn sweep_state_prunes_untouched_entries() {
         .load(
             r#"
                 __smelt_state_touched__ = {}
-                smelt.state("alive")
+                smelt.state.get("alive")
                 smelt.__sweep_state()
                 "#,
         )
@@ -1286,7 +1286,7 @@ fn reload_lua_refreshes_overlay_title_from_disk() {
     let body = |title: &str| {
         format!(
             r#"
-                local state = smelt.state("plug")
+                local state = smelt.state.get("plug")
                 local function attach()
                     local buf = smelt.buf.new({{ name = "plug.buf" }})
                     local win = smelt.win.new(buf, {{ name = "plug.win" }})
@@ -1332,7 +1332,7 @@ fn reload_lua_preserves_nested_state_tables() {
     std::fs::write(
         &init,
         r#"
-            local s = smelt.state("nested")
+            local s = smelt.state.get("nested")
             s.cfg = s.cfg or { panel = { width = 80, history = { 1, 2, 3 } } }
             "#,
     )
@@ -1498,7 +1498,7 @@ fn reload_lua_reaps_anonymous_overlay_keeps_named() {
     std::fs::write(
         &init,
         r#"
-            local state = smelt.state("mix")
+            local state = smelt.state.get("mix")
             local function attach()
                 local b1 = smelt.buf.new({ name = "mix.buf" })
                 local w1 = smelt.win.new(b1, { name = "mix.win" })
@@ -1541,7 +1541,7 @@ fn reload_lua_reaps_anonymous_overlay_keeps_named() {
     std::fs::write(
         &init,
         r#"
-            local state = smelt.state("mix")
+            local state = smelt.state.get("mix")
             local function attach()
                 local b1 = smelt.buf.new({ name = "mix.buf" })
                 local w1 = smelt.win.new(b1, { name = "mix.win" })
@@ -1580,7 +1580,7 @@ fn reload_lua_preserves_named_paint_slot() {
     std::fs::write(
         &init,
         r#"
-            local state = smelt.state("paint_id_probe")
+            local state = smelt.state.get("paint_id_probe")
             local function painter(_slice, _ctx) end
             -- No `smelt.plugin(...)` call → init.lua's loader frame
             -- stays unnamed, so the unnamed register call below is
@@ -1638,7 +1638,7 @@ fn reload_lua_drains_ready_hooks_with_kind_reload() {
     std::fs::write(
         &init,
         r#"
-            local state = smelt.state("ready_kind_probe")
+            local state = smelt.state.get("ready_kind_probe")
             state.fires = (state.fires or 0)
             state.last_kind = nil
             smelt.lifecycle.on_ready(function(ctx)
@@ -1685,9 +1685,9 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
     std::fs::write(
         &init,
         r#"
-            local a = smelt.state("kept")
+            local a = smelt.state.get("kept")
             a.flag = true
-            local b = smelt.state("dropped")
+            local b = smelt.state.get("dropped")
             b.flag = true
             "#,
     )
@@ -1710,7 +1710,7 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
     std::fs::write(
         &init,
         r#"
-            local a = smelt.state("kept")
+            local a = smelt.state.get("kept")
             "#,
     )
     .unwrap();
@@ -1784,7 +1784,7 @@ fn reload_clears_every_lua_surface() {
             })
 
             -- smelt.state slot
-            local s = smelt.state("seed_plugin")
+            local s = smelt.state.get("seed_plugin")
             s.open = true
             "#,
     )
@@ -2034,7 +2034,7 @@ fn reload_lua_preserves_user_size_override() {
     std::fs::write(
         &init,
         r#"
-            local state = smelt.state("res")
+            local state = smelt.state.get("res")
             local function attach()
                 local b = smelt.buf.new({ name = "res.buf" })
                 local w = smelt.win.new(b, { name = "res.win" })

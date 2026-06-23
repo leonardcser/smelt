@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Modal overlay builders. Compose a dialog from one or more `panels` of `smelt.dialog.content(...)` leaves, then call `smelt.dialog.open(...)` to push it; convenience entry points (`smelt.dialog.input`, `.options`, `.list`, `.picker`, `.markdown`) wrap the common shapes. UiHost-only.
 
 ## `smelt.dialog.content`

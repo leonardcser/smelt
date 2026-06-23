@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Status-area toasts. Each call appends the body to `smelt.messages` and surfaces a one-line summary in the toast row above the prompt. The optional `source` arg tags the entry in `/messages` (defaults to `"lua"`). UiHost-only.
 
 ## `smelt.notify.error`
@@ -14,6 +16,14 @@ fun(msg: string, source: string?): nil
 
 Show an error toast (highlighted with the error color) and append the body to the message log. Pass `source` to tag the `/messages` entry (e.g. `"upgrade"`); defaults to `"lua"`.
 
+## `smelt.notify.info`
+
+```lua
+fun(msg: string, source: string?): nil
+```
+
+Show an informational toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `"lua"`.
+
 ## `smelt.notify.scoped`
 
 ```lua
@@ -22,11 +32,11 @@ fun(source: string): smelt.notify.Scoped
 
 Types: [`smelt.notify.Scoped`](types.md#smeltnotifyscoped)
 
-Bind `source` once and return a callable bag that forwards to
-`smelt.notify` / `smelt.notify.error` / `smelt.notify.warn` with the
+Bind `source` once and return a small bag that forwards to
+`smelt.notify.info` / `smelt.notify.error` / `smelt.notify.warn` with the
 source pinned. A plugin opts in with one line at the top of the file:
   local notify = smelt.notify.scoped("upgrade")
-  notify("downloading …")
+  notify.info("downloading …")
   notify.error("/upgrade: spawn failed")
 so the per-call-site `, "upgrade"` repetition goes away. Same toast +
 `/messages` semantics as the underlying calls. Skipped on headless

@@ -4,9 +4,23 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 This namespace mixes Host and UiHost functions; each function below lists its exact tier.
 
-Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.reasoning(v)` sets it (overridden by the TUI to apply the change). `smelt.reasoning.cycle_list()` lists the configured cycle.
+Reasoning-effort selector. `smelt.reasoning.current()` reads the active effort, `smelt.reasoning.set(v)` sets it in a TUI session, and `smelt.reasoning.cycle_list()` lists the configured cycle.
+
+## `smelt.reasoning.current`
+
+```lua
+fun(): smelt.reasoning.Effort
+```
+
+Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return the active reasoning effort.
 
 ## `smelt.reasoning.cycle`
 
@@ -31,4 +45,16 @@ Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return the configured reasoning-effort cycle.
+
+## `smelt.reasoning.set`
+
+```lua
+fun(effort: smelt.reasoning.Effort): nil
+```
+
+Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.
 

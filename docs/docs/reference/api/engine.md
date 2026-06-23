@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.
 
 ## `smelt.engine.ask`

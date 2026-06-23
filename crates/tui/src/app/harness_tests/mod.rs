@@ -480,7 +480,7 @@ fn find_anon_paint(app: &crate::app::TuiApp) -> crate::smelt_edit::layout::Paint
 // re-wire themselves on every Lua-context bring-up. The fire
 // passes `ctx = { kind = "launch" | "reload" }`.
 
-// A `smelt.state(...)` slot that the new init.lua no longer
+// A `smelt.state.get(...)` slot that the new init.lua no longer
 // references must be pruned by `smelt.__sweep_state` (called by
 // `reload()` at the end of the cycle).
 

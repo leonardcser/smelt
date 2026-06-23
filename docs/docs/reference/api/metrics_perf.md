@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Perf instrumentation toggle, clear, and snapshot. UiHost-only.
 
 ## `smelt.metrics.perf.clear`

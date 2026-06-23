@@ -47,7 +47,7 @@ local function vim_group(label)
   end
 end
 
-local function signal(name) return smelt.signal(name):get() end
+local function signal(name) return smelt.signal.get(name) end
 
 local function core_compose()
   local items = {}

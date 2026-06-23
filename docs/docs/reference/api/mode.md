@@ -4,9 +4,21 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 This namespace mixes Host and UiHost functions; each function below lists its exact tier.
 
-Agent-mode selector. `smelt.mode()` reads the active mode; `smelt.mode(v)` sets it (overridden by the TUI to apply the change). `smelt.mode.cycle_list()` lists the configured cycle.
+Agent-mode selector. `smelt.mode.current()` reads the active mode, `smelt.mode.set(v)` sets it in a TUI session, and `smelt.mode.cycle_list()` lists the configured cycle.
+
+## `smelt.mode.current`
+
+```lua
+fun(): string
+```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return the active agent mode name.
 
 ## `smelt.mode.cycle`
 
@@ -88,6 +100,16 @@ fun(spec: table): nil
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 
+
+## `smelt.mode.set`
+
+```lua
+fun(mode: string): nil
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Set the active agent mode. The change is applied immediately to the UI and persisted according to the active remember policy.
 
 ## `smelt.mode.set_icon`
 

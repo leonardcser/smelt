@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Register chord→callback bindings and inspect the layered help index. Chords and modes are canonicalized at registration; unknown values raise immediately. UiHost-only.
 
 ## `smelt.keymap.help_sections`

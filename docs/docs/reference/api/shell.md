@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Shell command splitting and interactive/background-operator validators.
 
 ## `smelt.shell.check_background_op`

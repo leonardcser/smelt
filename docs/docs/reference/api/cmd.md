@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 This namespace mixes Host and UiHost functions; each function below lists its exact tier.
 
 Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state.

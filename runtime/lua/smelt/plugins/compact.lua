@@ -68,7 +68,7 @@ local RECENT_USER_MESSAGE_MAX_BYTES = 6000
 -- plugin stops auto-firing for the rest of the session to avoid burning
 -- tokens in a loop. /compact still works (manual override).
 local MAX_CONSECUTIVE_FAILURES = 3
-local compact_state = smelt.state("compact")
+local compact_state = smelt.state.get("compact")
 local consecutive_failures = compact_state.consecutive_failures or 0
 
 local function set_consecutive_failures(n)

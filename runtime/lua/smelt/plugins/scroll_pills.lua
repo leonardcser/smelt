@@ -230,7 +230,7 @@ smelt.events.on("history", function(payload)
 end)
 smelt.events.on("session_started", close_all)
 
-smelt.signal("cursor_pos"):subscribe(function()
+smelt.signal.subscribe("cursor_pos", function()
   if smelt.focus() == "transcript" then refresh() end
 end)
 

@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Declare and read CLI flags from Lua. `register_flag` is intended to be called from `early.lua` so the flag is folded into the main binary's argument parser. `get(name)` returns the parsed value (or the declared default) after the binary has parsed argv.
 
 ## `smelt.cli.get`

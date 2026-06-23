@@ -136,20 +136,15 @@ impl LuaRuntime {
                 Ok(())
             },
         )?;
-        // Replace the host-tier `__call` no-op stub on `smelt.mode` /
-        // `smelt.reasoning` with the live setter, so `smelt.mode("plan")`
-        // and `smelt.reasoning("high")` actually take effect.
-        LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).callable(
-            |lua, (_tbl, v): (mlua::Table, Option<String>)| -> LuaResult<mlua::Value> {
-                if let Some(mode) = v {
-                    let mode = protocol::AgentMode::parse(&mode)
-                        .ok_or_else(|| LuaError::RuntimeError(format!("invalid mode `{mode}`")))?;
-                    crate::lua::with_app(|app| app.set_mode(mode, true));
-                    return Ok(mlua::Value::Nil);
-                }
-                let cur = crate::lua::try_with_app(|app| app.core.config.mode.as_str().to_string())
-                    .unwrap_or_else(|| protocol::AgentMode::normal().to_string());
-                cur.into_lua(lua)
+        LuaMod::extend(lua, smelt.get("mode")?, "smelt.mode", Tier::UiHost).fn_(
+            "set",
+            "Set the active agent mode. The change is applied immediately to the UI and persisted according to the active remember policy.",
+            &["mode"],
+            |_, mode: String| -> LuaResult<()> {
+                let mode = protocol::AgentMode::parse(&mode)
+                    .ok_or_else(|| LuaError::RuntimeError(format!("invalid mode `{mode}`")))?;
+                crate::lua::with_app(|app| app.set_mode(mode, true));
+                Ok(())
             },
         )?;
         LuaMod::extend(
@@ -158,17 +153,13 @@ impl LuaRuntime {
             "smelt.reasoning",
             Tier::UiHost,
         )
-        .callable(
-            |lua, (_tbl, v): (mlua::Table, Option<LuaReasoningEffort>)| -> LuaResult<mlua::Value> {
-                if let Some(effort) = v {
-                    crate::lua::with_app(|app| app.set_reasoning_effort(effort.into(), true));
-                    return Ok(mlua::Value::Nil);
-                }
-                let cur = crate::lua::try_with_app(|app| {
-                    LuaReasoningEffort::from(app.core.config.reasoning_effort)
-                })
-                .unwrap_or(LuaReasoningEffort::Medium);
-                cur.into_lua(lua)
+        .fn_(
+            "set",
+            "Set the active reasoning effort. The change is applied immediately to the UI and persisted according to the active remember policy.",
+            &["effort"],
+            |_, effort: LuaReasoningEffort| -> LuaResult<()> {
+                crate::lua::with_app(|app| app.set_reasoning_effort(effort.into(), true));
+                Ok(())
             },
         )?;
         let smelt_root = LuaMod::extend(lua, smelt.clone(), "smelt", Tier::UiHost);

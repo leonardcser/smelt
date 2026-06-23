@@ -121,13 +121,13 @@ Model resolution follows this precedence on a fresh launch:
 
 1. `--model` CLI flag
 2. Last explicitly chosen model (recalled from `recent.json`)
-3. `smelt.defaults{ model = "..." }` in `init.lua`
+3. `smelt.defaults.set{ model = "..." }` in `init.lua`
 4. First model in the providers list
 
 Switch models at runtime with `/model`. The choice is recorded in `recent.json`
 (in `$XDG_STATE_HOME/smelt/`) and restored on the next launch. To always start
 from `smelt.defaults` and ignore the last pick, set
-`smelt.remember({ model = false })` in `init.lua`.
+`smelt.remember.set({ model = false })` in `init.lua`.
 
 ## Modes and Reasoning
 
@@ -169,10 +169,10 @@ Precedence on a fresh launch is
 (`--resume`) takes the session's own saved model / mode / effort, ignoring
 `recent.json`.
 
-Pin a cold-start value with `smelt.defaults{...}`:
+Pin a cold-start value with `smelt.defaults.set{...}`:
 
 ```lua
-smelt.defaults({
+smelt.defaults.set({
   model = "openai/gpt-5.5",
   mode = "plan",
   reasoning_effort = "high",
@@ -180,10 +180,10 @@ smelt.defaults({
 ```
 
 To make a key always start from `smelt.defaults` and ignore the last pick, opt
-out per-key with `smelt.remember{...}`:
+out per-key with `smelt.remember.set{...}`:
 
 ```lua
-smelt.remember({
+smelt.remember.set({
   mode = false,             -- always start in the default mode
   reasoning_effort = false, -- always start at the default effort
   -- model = true (default), still recalls the last model

@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Read and write the vim mode of the focused vim-enabled surface. UiHost-only.
 
 ## `smelt.vim.mode`

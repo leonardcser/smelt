@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.ui.layout` userdata) and returns an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `"N%"`, `"fit"` (default; read the layout's natural size), `"fill"`, `"max:N"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `"fit"` to express "shrink to content, clamped between floor and cap". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `true` enables title drag plus inert-body drag. `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`; `true` enables floating-safe left/right/bottom handles without stealing the title row. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings. UiHost-only.
 
 ## `smelt.overlay.new`

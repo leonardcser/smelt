@@ -18,7 +18,7 @@ pub(super) fn register(
         "Parse, read, and apply notebook cell edits, plus compute preview data for the edit_notebook tool. UiHost-only.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    m.internal_fn(
         "preview_data",
         "Compute the preview payload for an `edit_notebook` call. Returns `nil` when the notebook can't be read/parsed or the target cell is out of range. The returned table has `{ edit_mode, path, title, old_source, new_source, syntax_ext }`.",
         &["args"],

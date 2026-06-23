@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Register, unregister, and resolve plugin tools for the engine.
 
 ## `smelt.tools.call`

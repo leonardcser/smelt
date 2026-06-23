@@ -68,7 +68,7 @@ local function add_kv(lines, plain, label, value, width)
 end
 
 local function compaction_summary()
-  local compact = smelt.state("compact")
+  local compact = smelt.state.get("compact")
   local total = compact.total or 0
   local auto = compact.auto or 0
   local manual = compact.manual or 0
@@ -160,14 +160,14 @@ smelt.cmd.register("session", function()
         key = "c",
         on_press = function()
           smelt.clipboard.write(info.id or "")
-          smelt.notify("session id copied")
+          smelt.notify.info("session id copied")
         end,
       },
       {
         key = "y",
         on_press = function()
           smelt.clipboard.write(plain)
-          smelt.notify("session metadata copied")
+          smelt.notify.info("session metadata copied")
         end,
       },
     },

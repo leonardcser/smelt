@@ -1,12 +1,13 @@
-//! `smelt.signal` - named reactive values. `smelt.signal(name)` returns a
-//! sticky `Signal` handle whose `:get` / `:set` / `:subscribe` methods observe
-//! and update the signal. `smelt.signal.new(name, initial)` declares a new
-//! signal. `smelt.signal.glob(pattern, handler)` subscribes across every signal
-//! name matching `pattern`; both subscriptions return a `Reg` userdata whose
+//! `smelt.signal` - named reactive values. `smelt.signal.get(name)` reads the
+//! current value, `smelt.signal.set(name, value)` publishes a new value,
+//! `smelt.signal.subscribe(name, handler)` observes changes, and
+//! `smelt.signal.new(name, initial)` declares a new signal.
+//! `smelt.signal.glob(pattern, handler)` subscribes across every signal name
+//! matching `pattern`; both subscriptions return a `Reg` userdata whose
 //! `:remove()` drops the subscription.
 
-use crate::lua::doc::{record_alias, record_class, Tier};
-use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaClassDecl, LuaType, LuaTypeTuple};
+use crate::lua::doc::{record_alias, Tier};
+use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaType, LuaTypeTuple};
 use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
 use crate::lua::LuaHandle;
@@ -65,25 +66,39 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     use crate::signals::{LuaSignalValue, SubscriberKind};
     use std::rc::Rc;
 
-    record_class(LuaClassDecl {
-        name: "smelt.signal.Signal",
-        doc: "Sticky handle returned by `smelt.signal(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.",
-        fields: crate::class_methods! {
-            "get" => fn() -> mlua::Value, "Return the current signal value, or `nil` when the signal isn't declared.",
-            "set" => fn(value: mlua::Value) -> LuaSignal, "Publish a new value. Returns the handle for chaining.",
-            "subscribe" => fn(handler: LuaCallback<(mlua::Value, mlua::Value), ()>) -> LuaReg, "Register `handler(value, previous)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect.",
-            "name" => fn() -> String, "Return the signal name.",
-        },
-    });
-
     let _ = shared;
 
     let m = LuaMod::under(
         lua,
         smelt,
         "signal",
-        "Named reactive values. `smelt.signal(name)` returns a sticky `Signal` handle with `:get`, `:set`, `:subscribe`, `:name`. `smelt.signal.new` declares a signal with an initial value. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.",
+        "Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.",
         Tier::Host,
+    )?;
+
+    m.fn_(
+        "get",
+        "Return the current value of signal `name`, or `nil` when the signal is not declared.",
+        &["name"],
+        |lua, name: LuaSignalName| -> LuaResult<mlua::Value> { signal_get(lua, &name.0) },
+    )?;
+
+    m.fn_(
+        "set",
+        "Publish `value` for signal `name`.",
+        &["name", "value"],
+        |lua, (name, value): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
+            signal_set(lua, &name.0, value)
+        },
+    )?;
+
+    m.fn_(
+        "subscribe",
+        "Register `handler(value, previous)` for signal `name`. Returns a `Reg` whose `:remove()` drops the subscription.",
+        &["name", "handler"],
+        |lua,
+         (name, handler): (LuaSignalName, LuaCallback<(mlua::Value, mlua::Value), ()>)|
+         -> LuaResult<LuaReg> { signal_subscribe(lua, name.0, handler.into_inner()) },
     )?;
 
     m.fn_(
@@ -120,14 +135,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    // Metatable __call so `smelt.signal(name)` returns a sticky handle.
-    let mt = lua.create_table()?;
-    mt.set(
-        "__call",
-        lua.create_function(|_, (_tbl, name): (mlua::Table, String)| Ok(LuaSignal { name }))?,
-    )?;
-    m.tbl.set_metatable(Some(mt))?;
-
     Ok(())
 }
 
@@ -155,58 +162,25 @@ pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle) -> LuaReg {
     subscribe_lua_signal(name, handle)
 }
 
-/// Sticky handle for a single signal. Returned by `smelt.signal(name)`.
-pub struct LuaSignal {
-    name: String,
+fn signal_get(lua: &Lua, name: &str) -> LuaResult<mlua::Value> {
+    Ok(
+        crate::host::try_with_core(|core| core.signals.get_lua(name, lua))
+            .unwrap_or(mlua::Value::Nil),
+    )
 }
 
-impl LuaType for LuaSignal {
-    fn lua_type() -> String {
-        "smelt.signal.Signal".into()
-    }
+fn signal_set(lua: &Lua, name: &str, value: mlua::Value) -> LuaResult<()> {
+    let key = lua.create_registry_value(value)?;
+    crate::host::try_with_core(|core| {
+        core.signals.set_dyn(
+            name,
+            std::rc::Rc::new(crate::signals::LuaSignalValue { key }),
+        )
+    });
+    Ok(())
 }
 
-impl mlua::UserData for LuaSignal {
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        use crate::signals::LuaSignalValue;
-        use std::rc::Rc;
-
-        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
-            Ok(format!("Signal({})", this.name))
-        });
-
-        methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {
-            Ok(
-                crate::host::try_with_core(|core| core.signals.get_lua(&this.name, lua))
-                    .unwrap_or(mlua::Value::Nil),
-            )
-        });
-
-        methods.add_function(
-            "set",
-            |lua,
-             (this_ud, value): (mlua::AnyUserData, mlua::Value)|
-             -> LuaResult<mlua::AnyUserData> {
-                let name = this_ud.borrow::<LuaSignal>()?.name.clone();
-                let key = lua.create_registry_value(value)?;
-                crate::host::try_with_core(|core| {
-                    core.signals.set_dyn(&name, Rc::new(LuaSignalValue { key }))
-                });
-                Ok(this_ud)
-            },
-        );
-
-        methods.add_method(
-            "subscribe",
-            |lua, this, handler: mlua::Function| -> LuaResult<LuaReg> {
-                let name = this.name.clone();
-                let handle = LuaHandle::from_func(lua, handler)?;
-                Ok(subscribe_lua_signal(name, handle))
-            },
-        );
-
-        methods.add_method("name", |_, this, _: ()| -> LuaResult<String> {
-            Ok(this.name.clone())
-        });
-    }
+fn signal_subscribe(lua: &Lua, name: String, handler: mlua::Function) -> LuaResult<LuaReg> {
+    let handle = LuaHandle::from_func(lua, handler)?;
+    Ok(subscribe_lua_signal(name, handle))
 }

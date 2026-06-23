@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Declarative transcript display grouping. Register adjacent-run group rules and group-node renderers while the host owns deterministic planning and cache invalidation.
 
 ## `smelt.transcript.groups.cache_key`

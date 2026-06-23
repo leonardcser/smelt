@@ -26,7 +26,7 @@ smelt.cmd.picker("model", {
   desc     = "switch model",
   args     = model_keys,
   items    = build_items,
-  apply    = function(arg) smelt.model(arg) end,
+  apply    = function(arg) smelt.model.set(arg) end,
   prepare  = function()
     if #models_list() == 0 then smelt.notify.error("no models available") end
   end,

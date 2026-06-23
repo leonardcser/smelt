@@ -382,8 +382,7 @@ local function transcript_fits_banner()
 end
 
 local function turn_active()
-	local signal = smelt.signal("work_state")
-	local work_state = signal and signal.get and signal:get() or nil
+	local work_state = smelt.signal.get("work_state")
 	return work_state == "working" or work_state == "retrying" or work_state == "paused"
 end
 

@@ -51,6 +51,28 @@ impl Tier {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Internal,
+}
+
+impl Visibility {
+    pub fn label(self) -> &'static str {
+        match self {
+            Visibility::Public => "Public",
+            Visibility::Internal => "Internal",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Visibility::Public => "Stable Lua API intended for user config and plugins.",
+            Visibility::Internal => "Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LuaFnMeta {
     pub module: &'static str,
@@ -58,6 +80,7 @@ pub struct LuaFnMeta {
     pub doc: &'static str,
     pub sig: String,
     pub tier: Tier,
+    pub visibility: Visibility,
 }
 
 /// Module-level documentation, attached by [`record_module_doc`].
@@ -70,6 +93,7 @@ pub struct LuaModuleMeta {
     pub module: &'static str,
     pub doc: &'static str,
     pub tier: Option<Tier>,
+    pub visibility: Visibility,
 }
 
 static REGISTRY: Mutex<Vec<LuaFnMeta>> = Mutex::new(Vec::new());
@@ -125,14 +149,37 @@ pub fn record_module_doc(module: &'static str, doc: &'static str) {
     record_module(module, doc, None);
 }
 
+/// Attach a one-shot internal description to a Lua module.
+pub fn record_internal_module_doc(module: &'static str, doc: &'static str) {
+    record_module_with_visibility(module, doc, None, Visibility::Internal);
+}
+
 /// Like [`record_module_doc`] but also pins the module's tier so the
 /// rendered page picks up the right label even when every fn is
 /// filtered out (private `__`-prefixed names). Called from
 /// [`super::module::LuaMod::under`] / `.sub`.
 pub fn record_module(module: &'static str, doc: &'static str, tier: Option<Tier>) {
+    record_module_with_visibility(module, doc, tier, Visibility::Public);
+}
+
+pub fn record_internal_module(module: &'static str, doc: &'static str, tier: Option<Tier>) {
+    record_module_with_visibility(module, doc, tier, Visibility::Internal);
+}
+
+fn record_module_with_visibility(
+    module: &'static str,
+    doc: &'static str,
+    tier: Option<Tier>,
+    visibility: Visibility,
+) {
     if let Ok(mut v) = MODULES.lock() {
         v.retain(|m| m.module != module);
-        v.push(LuaModuleMeta { module, doc, tier });
+        v.push(LuaModuleMeta {
+            module,
+            doc,
+            tier,
+            visibility,
+        });
     }
 }
 
@@ -150,6 +197,7 @@ pub(crate) fn register_fn_inner<F, A, R>(
     lua: &Lua,
     f: F,
     tier: Tier,
+    visibility: Visibility,
 ) -> mlua::Result<()>
 where
     F: Fn(&Lua, A) -> mlua::Result<R> + MaybeSend + 'static,
@@ -173,6 +221,7 @@ where
         doc,
         sig,
         tier,
+        visibility,
     });
     Ok(())
 }

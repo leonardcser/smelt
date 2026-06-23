@@ -452,7 +452,7 @@ impl AppStoryCtx {
     /// so the toast overlay is created before the next snapshot.
     pub fn notify(&mut self, body: &str, source: Option<&str>) {
         let source = source.unwrap_or("story");
-        let snippet = format!("smelt.notify({body:?}, {source:?})");
+        let snippet = format!("smelt.notify.info({body:?}, {source:?})");
         self.run_lua(&snippet);
         for _ in 0..2 {
             self.app

@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+**Visibility:** `Public` - Stable Lua API intended for user config and plugins.
+
 Authenticated provider helpers. Requests use smelt-managed credentials without exposing bearer tokens to Lua.
 
 ## `smelt.auth.managed_usage`
