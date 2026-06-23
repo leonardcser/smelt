@@ -34,6 +34,7 @@ pub struct SessionMigrationStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionMigrationOutcome {
     Migrated,
+    Repaired,
     Skipped,
 }
 
@@ -48,10 +49,13 @@ pub struct SessionMigrationBatchReport {
     pub scanned: usize,
     pub skipped: usize,
     pub migrated: usize,
+    pub repaired: usize,
     pub failed: usize,
     pub failures: Vec<SessionMigrationFailure>,
 }
 
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): directory shapes accepted
+// only while pre-SQLite sessions are imported to canonical SQLite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionDirKind {
     Empty,
@@ -62,6 +66,8 @@ pub(crate) enum SessionDirKind {
     LegacySidecars,
 }
 
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): detects pre-SQLite
+// sidecars and partially migrated directories during the migration window.
 pub(crate) fn classify_session_dir(dir_path: &Path) -> SessionDirKind {
     let has_db = dir_path.join("session.db").is_file();
     let has_meta = dir_path.join("meta.json").is_file();
@@ -142,7 +148,7 @@ pub fn migrate_session_dir_to_db(
 ) -> SessionMigrationResult<SessionMigrationOutcome> {
     let result = migrate_session_dir_to_db_inner(dir_path);
     match &result {
-        Ok(SessionMigrationOutcome::Migrated) => {
+        Ok(SessionMigrationOutcome::Migrated | SessionMigrationOutcome::Repaired) => {
             let _ = fs::remove_file(dir_path.join(MIGRATION_STATUS_FILE));
         }
         Ok(SessionMigrationOutcome::Skipped) => {}
@@ -163,22 +169,25 @@ fn migrate_session_dir_to_db_inner(
 ) -> SessionMigrationResult<SessionMigrationOutcome> {
     crate::session::cleanup_stale_import_temp_files(dir_path);
 
-    let db_path = dir_path.join("session.db");
     let kind = classify_session_dir(dir_path);
 
     match kind {
-        SessionDirKind::SqliteOnly => return Ok(SessionMigrationOutcome::Skipped),
-        SessionDirKind::SqliteWithMetadata | SessionDirKind::SqliteWithLegacySidecars => {
-            match smelt_store::SessionDb::open(&db_path) {
-                Ok(_) => {}
-                Err(err) => {
-                    return Err(SessionMigrationError::OpenDatabase {
-                        message: err.to_string(),
-                    });
+        SessionDirKind::SqliteOnly
+        | SessionDirKind::SqliteWithMetadata
+        | SessionDirKind::SqliteWithLegacySidecars => {
+            let repaired = crate::session::repair_sqlite_session_dir(dir_path).map_err(|err| {
+                SessionMigrationError::OpenDatabase {
+                    message: err.to_string(),
                 }
+            })?;
+            if matches!(kind, SessionDirKind::SqliteWithLegacySidecars) {
+                crate::session::cleanup_migrated_legacy_artifacts(dir_path);
             }
-            crate::session::cleanup_migrated_legacy_artifacts(dir_path);
-            return Ok(SessionMigrationOutcome::Skipped);
+            return Ok(if repaired {
+                SessionMigrationOutcome::Repaired
+            } else {
+                SessionMigrationOutcome::Skipped
+            });
         }
         SessionDirKind::LegacySidecars => {}
         SessionDirKind::Empty | SessionDirKind::MigrationStatus => {
@@ -268,6 +277,7 @@ pub(crate) fn migrate_all_sessions_in_dir(dir: &Path) -> SessionMigrationBatchRe
         report.scanned += 1;
         match migrate_session_dir_to_db(&path) {
             Ok(SessionMigrationOutcome::Migrated) => report.migrated += 1,
+            Ok(SessionMigrationOutcome::Repaired) => report.repaired += 1,
             Ok(SessionMigrationOutcome::Skipped) => report.skipped += 1,
             Err(err) => {
                 report.failed += 1;
@@ -332,7 +342,7 @@ pub fn spawn_background_migration_with_event(
 }
 
 fn log_migration_batch_report(report: &SessionMigrationBatchReport) {
-    if report.migrated == 0 && report.failed == 0 {
+    if report.migrated == 0 && report.repaired == 0 && report.failed == 0 {
         return;
     }
 
@@ -358,6 +368,7 @@ fn log_migration_batch_report(report: &SessionMigrationBatchReport) {
         &serde_json::json!({
             "scanned": report.scanned,
             "migrated": report.migrated,
+            "repaired": report.repaired,
             "skipped": report.skipped,
             "failed": report.failed,
             "failures": failures,
@@ -433,30 +444,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn existing_sqlite_session_migration_normalizes_pre_squash_schema_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("session.db");
-        let db = smelt_store::SessionDb::open(&db_path).unwrap();
-        db.connection()
-            .execute_batch(
-                "PRAGMA user_version = 6;
-                 UPDATE store_meta SET value = '6' WHERE key = 'schema_version';",
-            )
-            .unwrap();
-        drop(db);
-        fs::write(dir.path().join("meta.json"), b"{}").unwrap();
-
-        let outcome = migrate_session_dir_to_db(dir.path()).unwrap();
-        assert_eq!(outcome, SessionMigrationOutcome::Skipped);
-
-        let db = smelt_store::SessionDb::open_read_only(&db_path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), smelt_store::SCHEMA_VERSION);
-        let schema_version = db.meta("schema_version").unwrap();
-        let expected = smelt_store::SCHEMA_VERSION.to_string();
-        assert_eq!(schema_version.as_deref(), Some(expected.as_str()));
-    }
-
-    #[test]
     fn existing_invalid_db_with_legacy_sidecars_is_a_failure() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("session.db"), b"not sqlite").unwrap();
@@ -468,12 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn existing_invalid_db_without_legacy_sidecars_still_skips() {
+    fn existing_invalid_db_without_legacy_sidecars_is_a_failure() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("session.db"), b"not sqlite").unwrap();
 
-        let outcome = migrate_session_dir_to_db(dir.path()).unwrap();
-        assert_eq!(outcome, SessionMigrationOutcome::Skipped);
-        assert!(read_migration_status(dir.path()).is_none());
+        let err = migrate_session_dir_to_db(dir.path()).unwrap_err();
+        assert!(matches!(err, SessionMigrationError::OpenDatabase { .. }));
+        assert!(read_migration_status(dir.path()).is_some());
     }
 }

@@ -622,6 +622,8 @@ end
 --- Return child snapshots for a transcript group snapshot.
 ---@type fun(group: smelt.transcript.Group): smelt.transcript.Block[]
 function smelt.transcript.defaults.group_children(group)
+  -- COMPAT(transcript-group-blocks-alias): `blocks` was the original field
+  -- name for group children; custom renderers may still pass it during alpha.
   return group.children or group.blocks or {}
 end
 

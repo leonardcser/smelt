@@ -6,7 +6,7 @@
 //! fork, shutdown).
 
 use crate::content::transcript_search_text::descriptor_search_text;
-use smelt_core::{BlockOrigin, TranscriptBlockRecord};
+use smelt_core::TranscriptBlockRecord;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -283,51 +283,9 @@ fn transcript_descriptor_row(
     descriptor_idx: usize,
     record: &TranscriptBlockRecord,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
-    let descriptor_json = serde_json::to_string(&record.descriptor)?;
-    let origin_json = record
-        .origin
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
-    let tool_state_json = record
-        .tool_state
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
     let search_text = descriptor_search_text(
         &record.descriptor,
         record.tool_state.as_ref().map(|(_, state)| state),
     );
-    let history_idx = match record.origin {
-        Some(BlockOrigin::History(idx)) => Some(idx as u64),
-        _ => None,
-    };
-    Ok(smelt_store::TranscriptDescriptorRecord {
-        block_idx: descriptor_idx as u64,
-        history_idx,
-        kind: record.descriptor.kind().to_string(),
-        tool_call_id: record.descriptor.tool_call_id().map(str::to_string),
-        tool_name: record.descriptor.tool_name().map(str::to_string),
-        content_hash: record.content_hash.to_string(),
-        estimated_text_bytes: search_text.len() as u64,
-        preview_text: preview(&search_text, 512),
-        search_text,
-        descriptor_json,
-        origin_json,
-        tool_state_json,
-    })
-}
-
-fn preview(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let mut end = 0;
-    for (idx, _) in text.char_indices() {
-        if idx > max_bytes {
-            break;
-        }
-        end = idx;
-    }
-    text[..end].to_string()
+    smelt_core::transcript_model::transcript_descriptor_row(descriptor_idx, record, search_text)
 }

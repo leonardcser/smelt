@@ -226,6 +226,8 @@ impl SessionDb {
         object::object_bytes(&self.conn, &meta).map(Some)
     }
 
+    // COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): imports old session
+    // sidecars into a canonical SQLite database.
     pub fn import_legacy_session_dir(
         &self,
         session_dir: impl AsRef<Path>,
@@ -233,6 +235,8 @@ impl SessionDb {
         legacy::import_session_dir(&self.conn, session_dir.as_ref(), self.object_compression)
     }
 
+    // COMPAT(session-split-jsonl): imports old request audit sidecars during
+    // session migration.
     pub fn import_legacy_requests_jsonl(&self, session_dir: impl AsRef<Path>) -> Result<usize> {
         legacy::import_requests_jsonl(&self.conn, session_dir.as_ref(), self.object_compression)
     }

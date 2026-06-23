@@ -34,6 +34,8 @@ pub struct RequestAttemptSummary {
     pub background: bool,
 }
 
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): import pre-SQLite
+// session sidecars into canonical SQLite during the alpha migration window.
 pub(crate) fn import_session_dir(
     conn: &Connection,
     session_dir: &Path,
@@ -253,6 +255,8 @@ fn import_session_dir_inner(
     Ok(report)
 }
 
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): accept legacy metadata
+// sidecars as migration input for canonical SQLite storage.
 fn read_legacy_meta(session_dir: &Path) -> Result<Value> {
     let meta_path = session_dir.join("meta.json");
     if meta_path.is_file() && session_dir.join("history.jsonl").is_file() {
@@ -266,6 +270,8 @@ fn read_json_file(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): import old history rows
+// from split `history.jsonl`, monolithic native `history`, or provider `messages`.
 fn import_legacy_history(
     conn: &Connection,
     session_dir: &Path,
@@ -333,6 +339,8 @@ fn import_source(session_dir: &Path) -> &'static str {
     }
 }
 
+// COMPAT(session-v1-messages): old monolithic sessions used
+// `context_snapshots`; canonical metadata stores `accounting_snapshots`.
 fn canonical_meta_from_legacy(value: &Value, history_len: u64) -> Value {
     let mut meta = value.clone();
     if let Value::Object(map) = &mut meta {

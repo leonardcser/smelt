@@ -1943,18 +1943,18 @@ impl TuiApp {
         report: smelt_core::session::SessionMigrationBatchReport,
     ) {
         self.resume_preview_cache.clear();
-        if report.migrated == 0 && report.failed == 0 {
+        if report.migrated == 0 && report.repaired == 0 && report.failed == 0 {
             return;
         }
         if report.failed > 0 {
             self.notify_error_sticky(format!(
-                "session migration completed: {} migrated, {} failed",
-                report.migrated, report.failed
+                "session migration completed: {} migrated, {} repaired, {} failed",
+                report.migrated, report.repaired, report.failed
             ));
         } else {
             self.notify_sticky(format!(
-                "session migration completed: {} migrated",
-                report.migrated
+                "session migration completed: {} migrated, {} repaired",
+                report.migrated, report.repaired
             ));
         }
     }

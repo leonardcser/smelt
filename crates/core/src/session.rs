@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static SESSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static MIGRATION_IMPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextCheckpoint {
     #[serde(default = "default_checkpoint_kind")]
     pub kind: String,
@@ -251,6 +251,8 @@ struct SessionWire {
     pub cost_snapshots: Vec<(usize, f64)>,
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
+    // COMPAT(session-v1-messages): older session metadata used
+    // `context_snapshots`; current snapshots are accounting baselines.
     #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
     pub context_snapshots: Vec<(usize, ContextSnapshot)>,
     #[serde(default)]
@@ -301,6 +303,8 @@ struct SessionWireV2 {
     pub display_context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     pub turn_metas: HistorySnapshots<TurnMeta>,
+    // COMPAT(session-v1-messages): older session metadata used
+    // `context_snapshots`; current snapshots are accounting baselines.
     #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
     pub context_snapshots: HistorySnapshots<ContextSnapshot>,
     #[serde(default)]
@@ -658,7 +662,7 @@ impl<'de> Deserialize<'de> for Session {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     #[serde(default)]
@@ -735,6 +739,8 @@ struct SessionJsonlMeta {
     pub display_context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     pub turn_metas: HistorySnapshots<TurnMeta>,
+    // COMPAT(session-v1-messages): older session metadata used
+    // `context_snapshots`; current snapshots are accounting baselines.
     #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
     pub context_snapshots: HistorySnapshots<ContextSnapshot>,
     #[serde(default)]
@@ -1643,6 +1649,328 @@ pub(crate) fn write_generated_sidecars(dir_path: &Path, session: &Session) {
     );
 }
 
+// COMPAT(session-search-sidecar-missing): repair already-SQLite sessions that
+// predate generated sidecars or sparse transcript descriptors.
+pub(crate) fn repair_sqlite_session_dir(dir_path: &Path) -> Result<bool, smelt_store::StoreError> {
+    let db = smelt_store::SessionDb::open(dir_path.join("session.db"))?;
+    let Some(state) = db.session_state()? else {
+        return Ok(false);
+    };
+    let descriptor_count = db.transcript_descriptor_count()?;
+    let search_blob = db.search_blob().ok();
+    if sqlite_session_artifacts_look_current(
+        dir_path,
+        &state,
+        descriptor_count,
+        search_blob.as_deref(),
+    ) {
+        return Ok(false);
+    }
+
+    let Some(mut snapshot) = db.load_full_session_snapshot()? else {
+        return Ok(false);
+    };
+    let history = std::mem::take(&mut snapshot.history);
+    let session = session_from_store_snapshot(snapshot, history);
+    let mut repaired = false;
+
+    if meta_sidecar_needs_repair(dir_path, &session) {
+        write_meta(dir_path, &session.meta());
+        repaired = true;
+    }
+
+    let rows = transcript_descriptor_rows_from_session(&session)?;
+    if descriptor_count != rows.len() {
+        db.replace_transcript_descriptor_records(&rows)?;
+        repaired = true;
+    }
+
+    let search_blob = db
+        .search_blob()
+        .unwrap_or_else(|_| build_search_blob(&session.history));
+    if fs::read_to_string(dir_path.join("content.txt"))
+        .ok()
+        .as_deref()
+        != Some(search_blob.as_str())
+    {
+        atomic_write(
+            &dir_path.join("content.txt"),
+            search_blob.as_bytes(),
+            now_ms(),
+        );
+        repaired = true;
+    }
+
+    Ok(repaired)
+}
+
+fn sqlite_session_artifacts_look_current(
+    dir_path: &Path,
+    state: &smelt_store::SessionState,
+    descriptor_count: usize,
+    search_blob: Option<&str>,
+) -> bool {
+    let Some(search_blob) = search_blob else {
+        return false;
+    };
+    if fs::read_to_string(dir_path.join("content.txt"))
+        .ok()
+        .as_deref()
+        != Some(search_blob)
+    {
+        return false;
+    }
+    if descriptor_count < state.history_len as usize {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(dir_path.join("meta.json")) else {
+        return false;
+    };
+    let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) else {
+        return false;
+    };
+    meta.id == state.id
+        && meta.title == state.title
+        && meta.slug == state.slug
+        && meta.first_user_message == state.first_user_message
+        && meta.cwd == state.cwd
+        && meta.mode == state.mode
+        && meta
+            .reasoning_effort
+            .map(|effort| effort.label().to_string())
+            == state.reasoning_effort
+        && meta.model == state.model
+        && meta.parent_id == state.parent_id
+        && meta.context_tokens
+            == state
+                .display_context_tokens
+                .and_then(|tokens| u32::try_from(tokens).ok())
+        && meta.history_len == Some(state.history_len as usize)
+        && meta.text_bytes.is_some()
+}
+
+fn meta_sidecar_needs_repair(dir_path: &Path, session: &Session) -> bool {
+    let Ok(contents) = fs::read_to_string(dir_path.join("meta.json")) else {
+        return true;
+    };
+    let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) else {
+        return true;
+    };
+    meta != session.meta()
+}
+
+fn transcript_descriptor_rows_from_session(
+    session: &Session,
+) -> Result<Vec<smelt_store::TranscriptDescriptorRecord>, smelt_store::StoreError> {
+    let mut records = Vec::new();
+    let mut tool_elapsed = std::collections::HashMap::new();
+    for (_, meta) in &session.turn_metas {
+        tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+
+    for (history_idx, item) in session.history.iter().enumerate() {
+        if session
+            .checkpoint
+            .as_ref()
+            .is_some_and(|cp| cp.first_live_index == history_idx)
+        {
+            records.push(transcript_descriptor_record(
+                records.len(),
+                crate::transcript_model::TranscriptBlockDescriptor::Compacted {
+                    summary: session
+                        .checkpoint
+                        .as_ref()
+                        .map(|cp| cp.summary.clone())
+                        .unwrap_or_default(),
+                },
+                Some(crate::transcript_model::BlockOrigin::CheckpointMarker),
+                None,
+            )?);
+        }
+        push_history_item_descriptor_rows(&mut records, history_idx, item, &tool_elapsed)?;
+    }
+
+    if session
+        .checkpoint
+        .as_ref()
+        .is_some_and(|cp| cp.first_live_index >= session.history.len())
+    {
+        records.push(transcript_descriptor_record(
+            records.len(),
+            crate::transcript_model::TranscriptBlockDescriptor::Compacted {
+                summary: session
+                    .checkpoint
+                    .as_ref()
+                    .map(|cp| cp.summary.clone())
+                    .unwrap_or_default(),
+            },
+            Some(crate::transcript_model::BlockOrigin::CheckpointMarker),
+            None,
+        )?);
+    }
+
+    Ok(records)
+}
+
+fn push_history_item_descriptor_rows(
+    records: &mut Vec<smelt_store::TranscriptDescriptorRecord>,
+    history_idx: usize,
+    item: &HistoryItem,
+    tool_elapsed: &std::collections::HashMap<String, u64>,
+) -> Result<(), smelt_store::StoreError> {
+    let origin = Some(crate::transcript_model::BlockOrigin::History(history_idx));
+    match item {
+        HistoryItem::User { content, display } => {
+            let text = content.text_content();
+            let descriptor =
+                if let Some(rest) = text.strip_prefix(engine::SUMMARY_PREFIX.trim_end()) {
+                    crate::transcript_model::TranscriptBlockDescriptor::Compacted {
+                        summary: rest.trim_start_matches('\n').to_string(),
+                    }
+                } else if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
+                    crate::transcript_model::TranscriptBlockDescriptor::Mode {
+                        text: note.trim().to_string(),
+                        icon: String::new(),
+                        hl_group: "SmeltAccent".to_string(),
+                    }
+                } else if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
+                    crate::transcript_model::TranscriptBlockDescriptor::ProcessStatus {
+                        text: note.trim().to_string(),
+                        event: None,
+                    }
+                } else {
+                    let image_labels = content.image_labels();
+                    let display_source = display.as_deref().unwrap_or(&text);
+                    let display_text = if image_labels.is_empty() {
+                        display_source.to_string()
+                    } else {
+                        let suffix = image_labels.join(" ");
+                        if display_source.is_empty() {
+                            suffix
+                        } else {
+                            format!("{display_source} {suffix}")
+                        }
+                    };
+                    crate::transcript_model::TranscriptBlockDescriptor::User {
+                        text: display_text,
+                        image_labels,
+                    }
+                };
+            records.push(transcript_descriptor_record(
+                records.len(),
+                descriptor,
+                origin,
+                None,
+            )?);
+        }
+        HistoryItem::Assistant(turn) => {
+            if let Some(reasoning) = turn.reasoning.as_ref().filter(|text| !text.is_empty()) {
+                records.push(transcript_descriptor_record(
+                    records.len(),
+                    crate::transcript_model::TranscriptBlockDescriptor::Thinking {
+                        content: reasoning.clone(),
+                    },
+                    origin,
+                    None,
+                )?);
+            }
+            if let Some(content) = &turn.content {
+                records.push(transcript_descriptor_record(
+                    records.len(),
+                    crate::transcript_model::TranscriptBlockDescriptor::Text {
+                        content: content.text_content().into_owned(),
+                    },
+                    origin,
+                    None,
+                )?);
+            }
+            for inv in &turn.invocations {
+                let args: std::collections::HashMap<String, serde_json::Value> =
+                    serde_json::from_str(&inv.arguments).unwrap_or_default();
+                let status = if inv.result.content.contains("denied this tool call")
+                    || inv.result.content.contains("blocked this tool call")
+                {
+                    crate::transcript_model::ToolStatus::Denied
+                } else if inv.result.is_error {
+                    crate::transcript_model::ToolStatus::Err
+                } else {
+                    crate::transcript_model::ToolStatus::Ok
+                };
+                let elapsed_ms = inv
+                    .elapsed_ms
+                    .or_else(|| tool_elapsed.get(&inv.call_id).copied());
+                let tool_state = crate::transcript_model::ToolState {
+                    status,
+                    elapsed: elapsed_ms.map(std::time::Duration::from_millis),
+                    output: Some(Box::new(crate::transcript_model::ToolOutput {
+                        content: inv.result.content.clone(),
+                        is_error: inv.result.is_error,
+                        metadata: inv.result.metadata.clone(),
+                    })),
+                    user_message: None,
+                };
+                records.push(transcript_descriptor_record(
+                    records.len(),
+                    crate::transcript_model::TranscriptBlockDescriptor::ToolCall {
+                        call_id: inv.call_id.clone(),
+                        name: inv.name.clone(),
+                        summary: crate::mcp::args_summary(&args),
+                        args,
+                    },
+                    origin,
+                    Some((inv.call_id.clone(), tool_state)),
+                )?);
+            }
+        }
+        HistoryItem::Note(note) => match note.kind() {
+            protocol::HistoryNoteKind::Context => {}
+            protocol::HistoryNoteKind::ModeChange => records.push(transcript_descriptor_record(
+                records.len(),
+                crate::transcript_model::TranscriptBlockDescriptor::Mode {
+                    text: note.text().to_string(),
+                    icon: String::new(),
+                    hl_group: "SmeltAccent".to_string(),
+                },
+                origin,
+                None,
+            )?),
+            protocol::HistoryNoteKind::ProcessStatus => records.push(transcript_descriptor_record(
+                records.len(),
+                crate::transcript_model::TranscriptBlockDescriptor::ProcessStatus {
+                    text: note.text().to_string(),
+                    event: note.process_status_event_ref().cloned(),
+                },
+                origin,
+                None,
+            )?),
+        },
+        HistoryItem::System { .. } => {}
+    }
+    Ok(())
+}
+
+fn transcript_descriptor_record(
+    descriptor_idx: usize,
+    descriptor: crate::transcript_model::TranscriptBlockDescriptor,
+    origin: Option<crate::transcript_model::BlockOrigin>,
+    tool_state: Option<(String, crate::transcript_model::ToolState)>,
+) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
+    let content_hash = crate::utils::hash_serializable(&descriptor);
+    let search_text = crate::transcript_model::transcript_descriptor_search_text(
+        &descriptor,
+        tool_state.as_ref().map(|(_, state)| state),
+    );
+    let record = crate::transcript_model::TranscriptBlockRecord {
+        descriptor,
+        content_hash,
+        origin,
+        tool_state,
+    };
+    crate::transcript_model::transcript_descriptor_row(descriptor_idx, &record, search_text)
+}
+
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): remove old session
+// sidecars after a canonical SQLite database is readable.
 pub(crate) fn cleanup_migrated_legacy_artifacts(dir_path: &Path) -> usize {
     let db_path = dir_path.join("session.db");
     let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
@@ -1668,6 +1996,8 @@ pub(crate) fn cleanup_migrated_legacy_artifacts(dir_path: &Path) -> usize {
     removed
 }
 
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): build a canonical
+// SQLite database from pre-SQLite session sidecars during migration.
 pub(crate) fn import_legacy_session_to_db(
     dir_path: &Path,
     session: &Session,
@@ -1940,6 +2270,8 @@ pub(crate) fn migrate_legacy_json_session(dir_path: &Path, session: &Session) {
 }
 
 /// Returns `None` when no match or prefix is ambiguous.
+// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): exact ID and prefix
+// resolution still sees pre-SQLite sidecars as sessions until import support ends.
 pub(crate) fn resolve_prefix(prefix: &str) -> Option<String> {
     let dir = sessions_dir();
 
@@ -2688,6 +3020,92 @@ mod tests {
     }
 
     #[test]
+    fn migration_repairs_existing_sqlite_session_artifacts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "repair-sqlite".into();
+        s.history.push(user_item("repair prompt"));
+        s.history
+            .push(HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text("repair answer")),
+                Some("repair reasoning".into()),
+                Vec::new(),
+            )));
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
+            .unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        drop(db);
+
+        let outcome = migrate_session_dir_to_db(dir.path()).expect("repair sqlite");
+
+        assert_eq!(outcome, SessionMigrationOutcome::Repaired);
+        assert!(dir.path().join("meta.json").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("content.txt")).unwrap(),
+            "repair prompt\nrepair reasoning\nrepair answer\n"
+        );
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 3);
+    }
+
+    #[test]
+    fn migration_repairs_stale_meta_and_partial_descriptors() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "repair-partial".into();
+        s.title = Some("current title".into());
+        s.history.push(user_item("first"));
+        s.history.push(user_item("second"));
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
+            .unwrap();
+        let rows = transcript_descriptor_rows_from_session(&s).unwrap();
+        db.replace_transcript_descriptor_records(&rows[..1])
+            .unwrap();
+        drop(db);
+        let mut stale_meta = s.meta();
+        stale_meta.title = Some("stale title".into());
+        write_meta(dir.path(), &stale_meta);
+        fs::write(dir.path().join("content.txt"), b"stale search").unwrap();
+
+        let outcome = migrate_session_dir_to_db(dir.path()).expect("repair sqlite");
+
+        assert_eq!(outcome, SessionMigrationOutcome::Repaired);
+        let repaired_meta: SessionMeta =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(repaired_meta.title.as_deref(), Some("current title"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("content.txt")).unwrap(),
+            "first\nsecond\n"
+        );
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), rows.len());
+    }
+
+    #[test]
+    fn canonical_sqlite_session_skips_after_repair() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "canonical-sqlite".into();
+        s.history.push(user_item("canonical prompt"));
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
+            .unwrap();
+        drop(db);
+
+        assert_eq!(
+            migrate_session_dir_to_db(dir.path()).expect("initial repair"),
+            SessionMigrationOutcome::Repaired
+        );
+        assert_eq!(
+            migrate_session_dir_to_db(dir.path()).expect("second scan"),
+            SessionMigrationOutcome::Skipped
+        );
+    }
+
+    #[test]
     fn cleans_stale_import_temp_files_only() {
         let dir = tempfile::tempdir().expect("temp dir");
         let stale = dir.path().join("session.db.import-4294967295-1000-0.tmp");
@@ -2732,11 +3150,8 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         let session_dir = root.path().join("existing");
         fs::create_dir(&session_dir).expect("session dir");
-        fs::write(
-            session_dir.join("session.db"),
-            b"not checked by skipped migration",
-        )
-        .expect("write db marker");
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        drop(db);
         let stale = session_dir.join("session.db.import-4294967295-1000-0.tmp");
         fs::write(&stale, b"x").expect("write stale temp");
 
@@ -2771,7 +3186,7 @@ mod tests {
         let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
 
         assert_eq!(report.scanned, 1);
-        assert_eq!(report.skipped, 1);
+        assert_eq!(report.repaired, 1);
         for name in [
             "session.json",
             "history.jsonl",
@@ -2875,7 +3290,8 @@ mod tests {
 
         assert_eq!(report.scanned, 9);
         assert_eq!(report.migrated, 1);
-        assert_eq!(report.skipped, 1);
+        assert_eq!(report.repaired, 1);
+        assert_eq!(report.skipped, 0);
         assert_eq!(report.failed, 7);
         assert_eq!(
             report.failures.len(),

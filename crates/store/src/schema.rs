@@ -5,9 +5,6 @@ use crate::error::{Result, StoreError};
 
 pub const SCHEMA_VERSION: i32 = 1;
 
-const COMPAT_PRE_SQUASH_MIN_SCHEMA_VERSION: i32 = 2;
-const COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION: i32 = 6;
-
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = migrate_inner(conn, app_version);
@@ -41,12 +38,6 @@ pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
 fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
     if current > SCHEMA_VERSION {
-        if is_pre_squash_schema_version(current) {
-            ensure_schema_shape(conn)?;
-            set_user_version(conn, SCHEMA_VERSION)?;
-            write_store_meta(conn, SCHEMA_VERSION, app_version)?;
-            return Ok(());
-        }
         return Err(StoreError::UnsupportedSchema {
             found: current,
             expected: SCHEMA_VERSION,
@@ -59,15 +50,7 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
 }
 
 fn is_supported_schema_version(version: i32) -> bool {
-    version == SCHEMA_VERSION || is_pre_squash_schema_version(version)
-}
-
-// COMPAT(branch-sqlite-schema-shape-repair): versions 2-6 were used by
-// local databases before the transcript-storage revisions were squashed into
-// the version 1 branch baseline. Read-only open accepts them for previews;
-// writable migration normalizes them to the current baseline.
-fn is_pre_squash_schema_version(version: i32) -> bool {
-    (COMPAT_PRE_SQUASH_MIN_SCHEMA_VERSION..=COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION).contains(&version)
+    version == SCHEMA_VERSION
 }
 
 fn write_store_meta(conn: &Connection, schema_version: i32, app_version: &str) -> Result<()> {
@@ -81,41 +64,8 @@ fn write_store_meta(conn: &Connection, schema_version: i32, app_version: &str) -
 }
 
 fn ensure_schema_shape(conn: &Connection) -> Result<()> {
-    // COMPAT(branch-sqlite-schema-shape-repair): version 1 is the plan baseline,
-    // but local databases from earlier iterations of this unreleased branch may
-    // have the same user_version with older table shapes.
-    ensure_schema_columns(conn)?;
     conn.execute_batch(SCHEMA)?;
-    backfill_transcript_descriptor_indexes(conn)?;
-    Ok(())
-}
-
-fn ensure_schema_columns(conn: &Connection) -> Result<()> {
-    for column in SAME_VERSION_REPAIR_COLUMNS {
-        add_column_if_missing(conn, column.table, column.definition)?;
-    }
-    Ok(())
-}
-
-fn backfill_transcript_descriptor_indexes(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "transcript_blocks")?
-        || !column_exists(conn, "transcript_blocks", "descriptor_idx")?
-    {
-        return Ok(());
-    }
-    conn.execute(
-        "UPDATE transcript_blocks
-         SET descriptor_idx = (
-             SELECT COUNT(*)
-             FROM transcript_blocks AS previous
-             WHERE previous.descriptor_json IS NOT NULL
-               AND previous.block_idx < transcript_blocks.block_idx
-         )
-         WHERE descriptor_json IS NOT NULL
-           AND descriptor_idx IS NULL",
-        [],
-    )?;
-    Ok(())
+    validate_schema_shape(conn)
 }
 
 fn validate_schema_shape(conn: &Connection) -> Result<()> {
@@ -138,182 +88,10 @@ fn validate_schema_shape(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-struct RepairColumn {
-    table: &'static str,
-    definition: &'static str,
-}
-
 struct SchemaTable {
     name: String,
     columns: Vec<String>,
 }
-
-const SAME_VERSION_REPAIR_COLUMNS: &[RepairColumn] = &[
-    RepairColumn {
-        table: "session_state",
-        definition: "first_user_message TEXT",
-    },
-    RepairColumn {
-        table: "session_state",
-        definition: "reasoning_effort TEXT",
-    },
-    RepairColumn {
-        table: "session_state",
-        definition: "parent_id TEXT",
-    },
-    RepairColumn {
-        table: "session_state",
-        definition: "context_tokens INTEGER",
-    },
-    RepairColumn {
-        table: "session_state",
-        definition: "context_tokens_history_len INTEGER",
-    },
-    RepairColumn {
-        table: "session_state",
-        definition: "display_context_tokens INTEGER",
-    },
-    RepairColumn {
-        table: "session_state",
-        definition: "session_cost_usd REAL NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "history_items",
-        definition: "model_visible_hash TEXT",
-    },
-    RepairColumn {
-        table: "history_items",
-        definition: "search_text TEXT",
-    },
-    RepairColumn {
-        table: "history_items",
-        definition: "created_at INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "descriptor_idx INTEGER",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "content_hash TEXT",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "sidecar_hash TEXT",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "estimated_text_bytes INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "estimated_rows INTEGER",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "preview_text TEXT",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "search_text TEXT",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "descriptor_json TEXT",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "origin_json TEXT",
-    },
-    RepairColumn {
-        table: "transcript_blocks",
-        definition: "tool_state_json TEXT",
-    },
-    RepairColumn {
-        table: "objects",
-        definition: "kind TEXT NOT NULL DEFAULT 'unknown'",
-    },
-    RepairColumn {
-        table: "objects",
-        definition: "codec TEXT NOT NULL DEFAULT 'none'",
-    },
-    RepairColumn {
-        table: "objects",
-        definition: "raw_size INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "objects",
-        definition: "stored_size INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "objects",
-        definition: "created_at INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "background INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "raw_body_size INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "kind TEXT",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "api_base TEXT",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "url TEXT",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "http_status INTEGER",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "prompt_cache_key TEXT",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "stream INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "attempt INTEGER NOT NULL DEFAULT 1",
-    },
-    RepairColumn {
-        table: "request_attempts",
-        definition: "response_summary TEXT",
-    },
-    RepairColumn {
-        table: "request_stats",
-        definition: "context_tokens INTEGER",
-    },
-    RepairColumn {
-        table: "request_stats",
-        definition: "cache_write_tokens INTEGER",
-    },
-    RepairColumn {
-        table: "request_stats",
-        definition: "tokens_per_sec REAL",
-    },
-    RepairColumn {
-        table: "metadata_snapshots",
-        definition: "created_at INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "accounting_snapshots",
-        definition: "created_at INTEGER NOT NULL DEFAULT 0",
-    },
-    RepairColumn {
-        table: "transcript_search",
-        definition: "history_idx INTEGER",
-    },
-];
 
 fn canonical_schema_shape() -> Result<&'static [SchemaTable]> {
     static SHAPE: OnceLock<std::result::Result<Vec<SchemaTable>, String>> = OnceLock::new();
@@ -351,29 +129,6 @@ fn load_canonical_schema_shape() -> std::result::Result<Vec<SchemaTable>, String
         tables.push(SchemaTable { name, columns });
     }
     Ok(tables)
-}
-
-fn column_name(column_def: &str) -> Option<&str> {
-    column_def.split_whitespace().next()
-}
-
-fn add_column_if_missing(conn: &Connection, table: &str, column_def: &str) -> Result<()> {
-    let Some(column) = column_name(column_def) else {
-        return Ok(());
-    };
-    if !table_exists(conn, table)? || column_exists(conn, table, column)? {
-        return Ok(());
-    }
-    let column_def = alter_column_def(column_def);
-    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column_def}"), [])?;
-    Ok(())
-}
-
-fn alter_column_def(column_def: &str) -> std::borrow::Cow<'_, str> {
-    if column_def.contains("DEFAULT (unixepoch())") {
-        return std::borrow::Cow::Owned(column_def.replace("DEFAULT (unixepoch())", "DEFAULT 0"));
-    }
-    std::borrow::Cow::Borrowed(column_def)
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -589,89 +344,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrate_repairs_in_place_version_one_session_state_schema() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE store_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-            CREATE TABLE session_state (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                id TEXT NOT NULL UNIQUE,
-                title TEXT,
-                slug TEXT,
-                cwd TEXT,
-                mode TEXT,
-                model TEXT,
-                accounting_json TEXT,
-                checkpoint_json TEXT,
-                revision INTEGER NOT NULL DEFAULT 0,
-                history_len INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-            INSERT INTO session_state (
-                singleton, id, title, slug, cwd, mode, model,
-                accounting_json, checkpoint_json, revision, history_len,
-                created_at, updated_at
-            ) VALUES (
-                1, 'old-session', 'Old Session', 'old-session', '/tmp',
-                'normal', 'model', '{}', NULL, 7, 2, 1000, 2000
-            );
-            CREATE TABLE history_items (
-                idx INTEGER PRIMARY KEY,
-                kind TEXT NOT NULL,
-                json TEXT NOT NULL,
-                hash TEXT NOT NULL
-            );
-            INSERT INTO history_items (idx, kind, json, hash)
-            VALUES (0, 'user', '{}', 'hash');
-            PRAGMA user_version = 1;
-            "#,
-        )
-        .unwrap();
-
-        migrate(&mut conn, "test-version").unwrap();
-
-        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
-        for column in [
-            "first_user_message",
-            "reasoning_effort",
-            "parent_id",
-            "context_tokens",
-            "context_tokens_history_len",
-            "display_context_tokens",
-            "session_cost_usd",
-        ] {
-            assert!(
-                column_exists(&conn, "session_state", column).unwrap(),
-                "{column}"
-            );
-        }
-        let (id, cost): (String, f64) = conn
-            .query_row(
-                "SELECT id, session_cost_usd FROM session_state WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(id, "old-session");
-        assert_eq!(cost, 0.0);
-        let created_at: i64 = conn
-            .query_row(
-                "SELECT created_at FROM history_items WHERE idx = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(created_at, 0);
-        validate_read_only_schema(&conn).unwrap();
-    }
-
-    #[test]
     fn read_only_validation_rejects_same_version_wrong_shape() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -701,46 +373,14 @@ mod tests {
     }
 
     #[test]
-    fn read_only_validation_accepts_pre_squash_user_version_when_shape_matches() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        set_user_version(&conn, COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION).unwrap();
-
-        validate_read_only_schema(&conn).unwrap();
-        assert_eq!(
-            user_version(&conn).unwrap(),
-            COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn migrate_normalizes_pre_squash_user_version_to_current_baseline() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        set_user_version(&conn, COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION).unwrap();
-
-        migrate(&mut conn, "test-version").unwrap();
-
-        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
-        let schema_version: String = conn
-            .query_row(
-                "SELECT value FROM store_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(schema_version, SCHEMA_VERSION.to_string());
-    }
-
-    #[test]
     fn read_only_validation_rejects_unknown_future_version() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        set_user_version(&conn, COMPAT_PRE_SQUASH_MAX_SCHEMA_VERSION + 1).unwrap();
+        set_user_version(&conn, SCHEMA_VERSION + 1).unwrap();
 
         let err = validate_read_only_schema(&conn).unwrap_err();
         assert!(
-            err.to_string().contains("unsupported schema version 7"),
+            err.to_string().contains("unsupported schema version 2"),
             "{err}"
         );
     }
