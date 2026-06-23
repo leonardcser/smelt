@@ -1626,6 +1626,39 @@ impl TuiApp {
         }
     }
 
+    fn install_live_context_checkpoint(
+        &mut self,
+        kind: String,
+        summary: String,
+        first_live_message_index: usize,
+        tokens_before: Option<u32>,
+    ) -> bool {
+        let Some(live) = self.live_session.as_ref() else {
+            return false;
+        };
+        if summary.trim().is_empty() || live.is_empty() {
+            return false;
+        }
+        let first_live_index =
+            match live.first_live_history_index_for_model_message(first_live_message_index) {
+                Ok(Some(index)) => index,
+                Ok(None) => return false,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to install checkpoint: {err}"));
+                    return false;
+                }
+            };
+        self.core
+            .session
+            .install_context_checkpoint_at_history_index(
+                kind,
+                summary,
+                first_live_index,
+                tokens_before,
+                live.history_len(),
+            )
+    }
+
     pub(crate) fn install_context_checkpoint(
         &mut self,
         kind: String,
@@ -1633,12 +1666,21 @@ impl TuiApp {
         first_live_message_index: usize,
         tokens_before: Option<u32>,
     ) -> bool {
-        let installed = self.core.session.install_context_checkpoint(
-            kind,
-            summary,
-            first_live_message_index,
-            tokens_before,
-        );
+        let installed = if self.live_session.is_some() {
+            self.install_live_context_checkpoint(
+                kind,
+                summary,
+                first_live_message_index,
+                tokens_before,
+            )
+        } else {
+            self.core.session.install_context_checkpoint(
+                kind,
+                summary,
+                first_live_message_index,
+                tokens_before,
+            )
+        };
         self.session_set_checkpoint(self.core.session.checkpoint.clone());
         if !installed {
             self.clear_compaction_preview();
@@ -2387,6 +2429,46 @@ mod checkpoint_tests {
             descriptors.last().and_then(|row| row.history_idx),
             Some(OLD_HISTORY_LEN as u64)
         );
+    }
+
+    #[test]
+    fn live_session_checkpoint_uses_store_history_coordinates() {
+        let mut app = large_saved_session_app("live-checkpoint-store-coordinates", 32);
+        let id = app.app.core.session.id.clone();
+        app.app.load_session_by_id(&id);
+        assert!(app.app.live_session.is_some());
+        assert!(app.app.core.session.history.is_empty());
+
+        let installed = app.app.install_context_checkpoint(
+            "compaction".into(),
+            "store summary".into(),
+            4,
+            Some(100),
+        );
+
+        assert!(installed);
+        assert_eq!(app.app.core.session.history.len(), 0);
+        let checkpoint = app.app.core.session.checkpoint.as_ref().unwrap();
+        assert_eq!(checkpoint.first_live_index, 4);
+        assert_eq!(
+            app.app.live_session.as_ref().unwrap().checkpoint,
+            Some(checkpoint.clone())
+        );
+        match app.app.session_model_history_source() {
+            protocol::ModelHistorySource::Store {
+                prefix,
+                first_live_index,
+                end_index,
+                suffix,
+            } => {
+                assert_eq!(prefix.len(), 1);
+                assert_eq!(first_live_index, 4);
+                assert_eq!(end_index, 32);
+                assert!(suffix.is_empty());
+            }
+            protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
+        }
+        assert!(app.app.session_save_pending);
     }
 
     #[test]

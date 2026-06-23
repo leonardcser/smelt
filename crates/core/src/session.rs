@@ -966,8 +966,12 @@ impl Session {
     }
 
     pub fn snapshot_context(&mut self) {
+        self.snapshot_context_at(self.history.len());
+    }
+
+    pub fn snapshot_context_at(&mut self, hist_idx: usize) {
         let snapshot = ContextSnapshot::from_session(self);
-        self.context_snapshots.push((self.history.len(), snapshot));
+        self.context_snapshots.push((hist_idx, snapshot));
     }
 
     pub fn snapshot_metadata_at(&mut self, hist_idx: usize) {
@@ -1161,6 +1165,26 @@ impl Session {
         else {
             return false;
         };
+        self.install_context_checkpoint_at_history_index(
+            kind,
+            summary,
+            first_live_index,
+            tokens_before,
+            self.history.len(),
+        )
+    }
+
+    pub fn install_context_checkpoint_at_history_index(
+        &mut self,
+        kind: String,
+        summary: String,
+        first_live_index: usize,
+        tokens_before: Option<u32>,
+        context_snapshot_index: usize,
+    ) -> bool {
+        if summary.trim().is_empty() {
+            return false;
+        }
         self.checkpoint = Some(ContextCheckpoint {
             kind,
             summary,
@@ -1175,7 +1199,7 @@ impl Session {
         // token reading for checkpointed model history. Show zero until then
         // so the prompt bar reflects that the full old context was compacted.
         self.reset_context_tokens_for_checkpoint();
-        self.snapshot_context();
+        self.snapshot_context_at(context_snapshot_index);
         true
     }
 

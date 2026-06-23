@@ -1,5 +1,5 @@
 use crate::session::{ContextCheckpoint, Session, SessionHeader, SessionStoreRef};
-use protocol::HistoryItem;
+use protocol::{history_item_message_count, HistoryItem};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -186,6 +186,49 @@ impl LiveSession {
             store_end_index,
             suffix,
         )
+    }
+
+    pub fn first_live_history_index_for_model_message(
+        &self,
+        first_live_message_index: usize,
+    ) -> Result<Option<usize>, String> {
+        if first_live_message_index == 0 {
+            return Ok(None);
+        }
+
+        let mut message_index = 0usize;
+        let first_history_index = if let Some(checkpoint) = &self.checkpoint {
+            message_index = 1;
+            checkpoint.first_live_index
+        } else {
+            0
+        };
+
+        const SCAN_CHUNK_ITEMS: usize = 128;
+        let mut history_index = first_history_index;
+        while history_index < self.history_len() {
+            let chunk_end = history_index
+                .saturating_add(SCAN_CHUNK_ITEMS)
+                .min(self.history_len());
+            let rows = self.history_range(history_index..chunk_end)?;
+            for item in &rows {
+                if first_live_message_index == message_index {
+                    return Ok(Some(history_index));
+                }
+                let next_message_index =
+                    message_index.saturating_add(history_item_message_count(item));
+                if first_live_message_index < next_message_index {
+                    return Ok(None);
+                }
+                message_index = next_message_index;
+                history_index = history_index.saturating_add(1);
+            }
+            if rows.is_empty() {
+                break;
+            }
+        }
+
+        Ok((first_live_message_index == message_index).then_some(self.history_len()))
     }
 
     pub fn materialize_full_session(
