@@ -200,11 +200,53 @@ pub(crate) fn load_transcript_tail_from_sqlite_dir(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
+    if let Some(loaded) = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
+        session_dir.clone(),
+        width,
+        viewport_rows,
+    ) {
+        return Some(loaded);
+    }
+    backfill_descriptorless_transcript_tail(&session_dir, viewport_rows)?;
     crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
         session_dir,
         width,
         viewport_rows,
     )
+}
+
+fn backfill_descriptorless_transcript_tail(
+    session_dir: &std::path::Path,
+    viewport_rows: u16,
+) -> Option<()> {
+    let _perf = smelt_perf::perf::begin("transcript:resume_tail:backfill_descriptorless");
+    let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
+    if db.transcript_descriptor_count().ok()? != 0 {
+        return None;
+    }
+    let target_blocks = usize::from(viewport_rows.max(1).saturating_mul(4).max(80));
+    let metadata = db.read_transcript_block_metadata_tail(target_blocks).ok()?;
+    let first_history_row = metadata.iter().find(|row| row.history_idx.is_some())?;
+    let last_history_idx = metadata.iter().filter_map(|row| row.history_idx).max()? as usize;
+    let first_history_idx = first_history_row.history_idx? as usize;
+    let first_block_idx = first_history_row.block_idx;
+    drop(db);
+
+    let written = session::backfill_transcript_descriptor_records_from_history_range(
+        session_dir,
+        first_history_idx..last_history_idx.saturating_add(1),
+        0,
+        first_block_idx,
+    )
+    .ok()?;
+    smelt_perf::perf::record_value(
+        "transcript:resume_tail:descriptorless_backfilled",
+        written as u64,
+    );
+    if written == 0 {
+        return None;
+    }
+    Some(())
 }
 
 #[cfg(test)]
@@ -1986,6 +2028,49 @@ mod checkpoint_tests {
             offenders.is_empty(),
             "TUI full session materialization must use materialize_full_session with an explicit reason:\n{}",
             offenders.join("\n")
+        );
+    }
+
+    #[test]
+    fn descriptorless_store_resume_backfills_bounded_tail_without_full_load() {
+        let mut app = large_saved_session_app("descriptorless-store-resume", 256);
+        let id = app.app.core.session.id.clone();
+        let session_dir = session::dir_for_id(&id);
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks
+                 SET descriptor_idx = NULL,
+                     descriptor_json = NULL,
+                     origin_json = NULL,
+                     tool_state_json = NULL",
+                [],
+            )
+            .unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        drop(db);
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        app.app.load_session_by_id(&id);
+        smelt_perf::perf::set_enabled(false);
+
+        assert_eq!(app.app.session_history_len(), 256);
+        assert!(app.app.live_session.is_some());
+        assert!(app.app.core.session.history.is_empty());
+        assert_no_full_store_reads();
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let descriptor_count = db.transcript_descriptor_count().unwrap();
+        assert!(
+            (1..256).contains(&descriptor_count),
+            "resume should backfill a bounded descriptor tail, got {descriptor_count}"
+        );
+        assert_eq!(
+            app.app
+                .transcript
+                .descriptor_total_count()
+                .expect("descriptor total"),
+            descriptor_count
         );
     }
 

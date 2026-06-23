@@ -82,6 +82,14 @@ impl LoadedTranscript {
         }
     }
 
+    pub(crate) fn empty_store(session_dir: PathBuf) -> Self {
+        Self {
+            transcript: Transcript::new(),
+            descriptor_window: None,
+            session_dir: Some(session_dir),
+        }
+    }
+
     pub(crate) fn tail_from_sqlite_dir(
         session_dir: PathBuf,
         width: u16,

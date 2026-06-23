@@ -1857,6 +1857,32 @@ fn meta_sidecar_needs_repair(dir_path: &Path, session: &Session) -> bool {
     meta != session.meta()
 }
 
+pub fn backfill_transcript_descriptor_records_from_history_range(
+    session_dir: &Path,
+    history_range: std::ops::Range<usize>,
+    descriptor_start_idx: usize,
+    block_start_idx: u64,
+) -> Result<usize, smelt_store::StoreError> {
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
+    let history = db.read_history_items_range(history_range.clone())?;
+    let mut records = Vec::new();
+    let tool_elapsed = std::collections::HashMap::new();
+    for (offset, item) in history.iter().enumerate() {
+        push_history_item_descriptor_rows(
+            &mut records,
+            history_range.start + offset,
+            item,
+            &tool_elapsed,
+        )?;
+    }
+    for (offset, record) in records.iter_mut().enumerate() {
+        record.block_idx = block_start_idx.saturating_add(offset as u64);
+    }
+    let written = records.len();
+    db.replace_transcript_descriptor_suffix(descriptor_start_idx, &records)?;
+    Ok(written)
+}
+
 fn transcript_descriptor_rows_from_session(
     session: &Session,
 ) -> Result<Vec<smelt_store::TranscriptDescriptorRecord>, smelt_store::StoreError> {
