@@ -160,15 +160,32 @@ impl LiveSession {
     }
 
     pub fn model_history_source(&self, summary_prefix: &str) -> protocol::ModelHistorySource {
-        let Some(checkpoint) = self.checkpoint.as_ref() else {
-            return protocol::ModelHistorySource::store(Vec::new(), 0, self.history_len());
+        let (prefix, first_live_index) = if let Some(checkpoint) = self.checkpoint.as_ref() {
+            (
+                vec![HistoryItem::user(protocol::Content::text(format!(
+                    "{}\n{}",
+                    summary_prefix.trim_end(),
+                    checkpoint.summary
+                )))],
+                checkpoint.first_live_index,
+            )
+        } else {
+            (Vec::new(), 0)
         };
-        let prefix = vec![HistoryItem::user(protocol::Content::text(format!(
-            "{}\n{}",
-            summary_prefix.trim_end(),
-            checkpoint.summary
-        )))];
-        protocol::ModelHistorySource::store(prefix, checkpoint.first_live_index, self.history_len())
+        let store_end_index = self.live_start.min(self.persisted_history_len);
+        let store_start_index = first_live_index.min(store_end_index);
+        let suffix_start = first_live_index.saturating_sub(self.live_start);
+        let suffix = self
+            .live_history
+            .get(suffix_start..)
+            .unwrap_or(&[])
+            .to_vec();
+        protocol::ModelHistorySource::store_with_suffix(
+            prefix,
+            store_start_index,
+            store_end_index,
+            suffix,
+        )
     }
 
     pub fn materialize_full_session(
@@ -291,5 +308,19 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(live.history_len(), 3);
         assert_eq!(live.dirty.history_from, Some(2));
+        let source = live.model_history_source("summary:");
+        match source {
+            protocol::ModelHistorySource::Store {
+                first_live_index,
+                end_index,
+                suffix,
+                ..
+            } => {
+                assert_eq!(first_live_index, 0);
+                assert_eq!(end_index, 2);
+                assert_eq!(suffix.len(), 1);
+            }
+            protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
+        }
     }
 }

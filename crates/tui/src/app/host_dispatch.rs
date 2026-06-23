@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 
 type MessageReply = oneshot::Sender<HostRequestDecision>;
 type MessageReplySlot = Arc<Mutex<Option<MessageReply>>>;
+const PREPARE_CONTEXT_HISTORY_DELTA_MAX_ITEMS: usize = 256;
 
 fn restore_working_phase() {
     crate::lua::try_with_app(|app| {
@@ -184,13 +185,30 @@ impl TuiApp {
             return;
         };
         let identity = self.active_context_token_identity();
-        let context_estimate = PrepareContextEstimate::from_request(
-            self.core.session.context_tokens_for(&identity),
-            self.core.session.context_tokens_history_len,
-            &self.core.session.history,
-            &messages,
-            estimated_tokens,
-        );
+        let current_history_len = self.session_history_len();
+        let base_history_len = self
+            .core
+            .session
+            .context_tokens_history_len
+            .unwrap_or(current_history_len);
+        let history_delta_len = current_history_len.saturating_sub(base_history_len);
+        let context_estimate = if history_delta_len > PREPARE_CONTEXT_HISTORY_DELTA_MAX_ITEMS {
+            PrepareContextEstimate::full_request(estimated_tokens, current_history_len)
+        } else {
+            let history_delta = if base_history_len < current_history_len {
+                self.session_history_range(base_history_len..current_history_len)
+            } else {
+                Vec::new()
+            };
+            PrepareContextEstimate::from_history_delta(
+                self.core.session.context_tokens_for(&identity),
+                self.core.session.context_tokens_history_len,
+                current_history_len,
+                &history_delta,
+                &messages,
+                estimated_tokens,
+            )
+        };
         if self.agent_is_running() {
             self.working.begin(TurnPhase::Compacting);
         }
@@ -359,43 +377,68 @@ struct PrepareContextEstimate {
 }
 
 impl PrepareContextEstimate {
+    #[cfg(test)]
     fn from_request(
         current_context_tokens: Option<u32>,
         context_tokens_history_len: Option<usize>,
         current_history: &[protocol::HistoryItem],
+        request_messages: &[Message],
+        full_request_estimate: u32,
+    ) -> Self {
+        let base_history_len = context_tokens_history_len.unwrap_or(current_history.len());
+        let history_delta = if base_history_len < current_history.len() {
+            &current_history[base_history_len..]
+        } else {
+            &[]
+        };
+        Self::from_history_delta(
+            current_context_tokens,
+            context_tokens_history_len,
+            current_history.len(),
+            history_delta,
+            request_messages,
+            full_request_estimate,
+        )
+    }
+
+    fn from_history_delta(
+        current_context_tokens: Option<u32>,
+        context_tokens_history_len: Option<usize>,
+        current_history_len: usize,
+        history_delta: &[protocol::HistoryItem],
         _request_messages: &[Message],
         full_request_estimate: u32,
     ) -> Self {
         let Some(base) = current_context_tokens else {
-            return Self::full_request(full_request_estimate, current_history.len());
+            return Self::full_request(full_request_estimate, current_history_len);
         };
-        let base_history_len = context_tokens_history_len.unwrap_or(current_history.len());
+        let base_history_len = context_tokens_history_len.unwrap_or(current_history_len);
 
-        if base_history_len > current_history.len() {
-            return Self::full_request(full_request_estimate, current_history.len());
+        if base_history_len > current_history_len {
+            return Self::full_request(full_request_estimate, current_history_len);
         }
 
-        if base_history_len == current_history.len() {
+        if base_history_len == current_history_len {
             // Baseline exactly covers current history.
             return Self {
                 total_context_tokens: base,
                 provider_context_tokens: current_context_tokens,
                 estimated_delta_tokens: 0,
                 latest_snapshot_history_len: context_tokens_history_len,
-                current_history_len: current_history.len(),
+                current_history_len,
                 source: PrepareContextEstimateSource::ProviderSnapshot,
             };
         }
 
         // Baseline is stale; compute a delta for appended messages.
-        let added_messages = protocol::history_to_messages(&current_history[base_history_len..]);
+        let added_messages = protocol::history_to_messages(history_delta);
         let estimated_delta_tokens = smelt_core::session::estimate_message_tokens(&added_messages);
         Self {
             total_context_tokens: base.saturating_add(estimated_delta_tokens),
             provider_context_tokens: current_context_tokens,
             estimated_delta_tokens,
             latest_snapshot_history_len: context_tokens_history_len,
-            current_history_len: current_history.len(),
+            current_history_len,
             source: PrepareContextEstimateSource::ProviderSnapshotPlusHistoryDelta,
         }
     }

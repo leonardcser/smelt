@@ -440,6 +440,7 @@ pub enum ModelHistorySource {
         prefix: Vec<crate::history::HistoryItem>,
         first_live_index: usize,
         end_index: usize,
+        suffix: Vec<crate::history::HistoryItem>,
     },
 }
 
@@ -457,6 +458,21 @@ impl ModelHistorySource {
             prefix,
             first_live_index,
             end_index,
+            suffix: Vec::new(),
+        }
+    }
+
+    pub fn store_with_suffix(
+        prefix: Vec<crate::history::HistoryItem>,
+        first_live_index: usize,
+        end_index: usize,
+        suffix: Vec<crate::history::HistoryItem>,
+    ) -> Self {
+        Self::Store {
+            prefix,
+            first_live_index,
+            end_index,
+            suffix,
         }
     }
 
@@ -467,9 +483,11 @@ impl ModelHistorySource {
                 prefix,
                 first_live_index,
                 end_index,
+                suffix,
             } => end_index
                 .saturating_sub(*first_live_index)
-                .saturating_add(prefix.len()),
+                .saturating_add(prefix.len())
+                .saturating_add(suffix.len()),
         }
     }
 }

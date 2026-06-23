@@ -1666,12 +1666,14 @@ impl TuiApp {
             prefix,
             first_live_index,
             end_index,
+            suffix,
         } = self.model_history_source()
         else {
             return self.core.session.model_history(engine::SUMMARY_PREFIX);
         };
         let mut history = prefix;
         history.extend(self.session_history_range(first_live_index..end_index));
+        history.extend(suffix);
         history
     }
 
@@ -1704,6 +1706,7 @@ impl TuiApp {
             prefix,
             first_live_index,
             end_index,
+            suffix,
         } = self.model_history_source()
         else {
             return Ok(None);
@@ -1722,6 +1725,7 @@ impl TuiApp {
             );
             history.append(&mut rows);
         }
+        history.extend(suffix);
         Ok(Some(history))
     }
 

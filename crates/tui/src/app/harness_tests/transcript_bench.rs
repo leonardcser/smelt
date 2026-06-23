@@ -1778,6 +1778,7 @@ fn read_provider_history_source(
             prefix,
             first_live_index,
             end_index,
+            suffix,
         } => {
             smelt_perf::perf::record_value("engine:model_history:source_store", 1);
             smelt_perf::perf::record_value(
@@ -1785,6 +1786,10 @@ fn read_provider_history_source(
                 first_live_index as u64,
             );
             smelt_perf::perf::record_value("engine:model_history:end_index", end_index as u64);
+            smelt_perf::perf::record_value(
+                "engine:model_history:suffix_items",
+                suffix.len() as u64,
+            );
             let mut history = prefix;
             if end_index > first_live_index {
                 let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))
@@ -1795,6 +1800,7 @@ fn read_provider_history_source(
                 smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
                 history.append(&mut rows);
             }
+            history.extend(suffix);
             smelt_perf::perf::record_value("engine:model_history:items", history.len() as u64);
             history
         }
