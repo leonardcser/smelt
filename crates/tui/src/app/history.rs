@@ -40,12 +40,45 @@ impl<'a> ToolSummaryResolver<'a> {
     }
 }
 
-pub(crate) fn materialize_full_session_with_perf(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FullSessionMaterializationReason {
+    DisplayOnlyPromotion,
+    LegacyOpenFallback,
+    LegacyPreviewFallback,
+    InspectSessionDetail,
+    #[cfg(test)]
+    TestSavedSessionAssertion,
+}
+
+impl FullSessionMaterializationReason {
+    fn counter(self) -> &'static str {
+        match self {
+            FullSessionMaterializationReason::DisplayOnlyPromotion => {
+                "session:display_only_load_full"
+            }
+            FullSessionMaterializationReason::LegacyOpenFallback => {
+                "compat:session:load_full_fallback"
+            }
+            FullSessionMaterializationReason::LegacyPreviewFallback => {
+                "compat:session:preview_full_fallback"
+            }
+            FullSessionMaterializationReason::InspectSessionDetail => {
+                "inspect:session:detail_load_full"
+            }
+            #[cfg(test)]
+            FullSessionMaterializationReason::TestSavedSessionAssertion => {
+                "test:session:load_full_assertion"
+            }
+        }
+    }
+}
+
+pub(crate) fn materialize_full_session(
     id: &str,
-    counter: &'static str,
+    reason: FullSessionMaterializationReason,
 ) -> Option<session::Session> {
     smelt_perf::perf::record_value("compat:session:full_materialized", 1);
-    smelt_perf::perf::record_value(counter, 1);
+    smelt_perf::perf::record_value(reason.counter(), 1);
     session::load_full(id)
 }
 
@@ -1019,9 +1052,9 @@ impl TuiApp {
         let Some(display_only) = self.display_only_session.take() else {
             return;
         };
-        if let Some(loaded) = materialize_full_session_with_perf(
+        if let Some(loaded) = materialize_full_session(
             &display_only.full_session_id,
-            "session:display_only_load_full",
+            FullSessionMaterializationReason::DisplayOnlyPromotion,
         ) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
@@ -1750,6 +1783,7 @@ mod checkpoint_tests {
             "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
+            "compat:session:full_materialized",
             "compat:session:load_full_fallback",
             "compat:session:preview_full_fallback",
             "compat:session:rebuild_transcript_full_fallback",
@@ -1812,6 +1846,46 @@ mod checkpoint_tests {
             .processes
             .spawn(id.clone(), "sleep 30", child, std::time::Instant::now());
         id
+    }
+
+    #[test]
+    fn tui_full_session_materialization_is_centralized() {
+        fn visit(dir: &std::path::Path, offenders: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read source dir") {
+                let entry = entry.expect("read source entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust source");
+                let direct_core = ["smelt_core::session::", "load_full("].concat();
+                let direct_imported = ["session::", "load_full("].concat();
+                let wrapper_call = ["session::", "load_full(id)"].concat();
+                for (line_idx, line) in source.lines().enumerate() {
+                    let is_direct = line.contains(&direct_core) || line.contains(&direct_imported);
+                    let is_wrapper =
+                        path.ends_with("app/history.rs") && line.trim() == wrapper_call;
+                    if is_direct && !is_wrapper {
+                        offenders.push(format!("{}:{}:{line}", path.display(), line_idx + 1));
+                    }
+                }
+            }
+        }
+
+        let mut offenders = Vec::new();
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut offenders,
+        );
+        assert!(
+            offenders.is_empty(),
+            "TUI full session materialization must use materialize_full_session with an explicit reason:\n{}",
+            offenders.join("\n")
+        );
     }
 
     #[test]

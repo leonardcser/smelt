@@ -1292,8 +1292,11 @@ mod tests {
         );
 
         app.app.flush_persist();
-        let loaded =
-            smelt_core::session::load_full(&app.app.core.session.id).expect("session saved");
+        let loaded = crate::app::history::materialize_full_session(
+            &app.app.core.session.id,
+            crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
+        )
+        .expect("session saved");
         assert!(matches!(
             loaded.history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"

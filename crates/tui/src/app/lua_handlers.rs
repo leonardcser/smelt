@@ -325,9 +325,9 @@ impl TuiApp {
         if let Some((meta, transcript)) = display_only {
             let Some(history_len) = meta.history_len else {
                 // COMPAT(legacy-session-full-load-fallbacks): sessions without SQLite history metadata still need monolithic load until legacy session imports are retired.
-                if let Some(loaded) = crate::app::history::materialize_full_session_with_perf(
+                if let Some(loaded) = crate::app::history::materialize_full_session(
                     id,
-                    "compat:session:load_full_fallback",
+                    crate::app::history::FullSessionMaterializationReason::LegacyOpenFallback,
                 ) {
                     self.load_session(loaded);
                     self.restore_screen();
@@ -365,9 +365,9 @@ impl TuiApp {
             return;
         }
         // COMPAT(legacy-session-full-load-fallbacks): if the sparse SQLite transcript path is unavailable, fall back to legacy full session open.
-        if let Some(loaded) = crate::app::history::materialize_full_session_with_perf(
+        if let Some(loaded) = crate::app::history::materialize_full_session(
             id,
-            "compat:session:load_full_fallback",
+            crate::app::history::FullSessionMaterializationReason::LegacyOpenFallback,
         ) {
             self.load_session(loaded);
             self.restore_screen();

@@ -807,9 +807,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                             cached_view = Some(view);
                         } else {
                             // COMPAT(legacy-session-full-load-fallbacks): preview uses a full legacy load only when sparse SQLite transcript records are unavailable.
-                            if let Some(session) = crate::app::history::materialize_full_session_with_perf(
+                            if let Some(session) = crate::app::history::materialize_full_session(
                                 &id,
-                                "compat:session:preview_full_fallback",
+                                crate::app::history::FullSessionMaterializationReason::LegacyPreviewFallback,
                             ) {
                                 let cache_key = format!("{}:{}", session.id, session.updated_at_ms);
                                 if cached_key.as_deref() != Some(cache_key.as_str()) {
