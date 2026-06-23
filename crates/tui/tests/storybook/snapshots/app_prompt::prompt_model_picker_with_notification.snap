@@ -1,12 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 515
 expression: frame.text()
 ---
+
  gpt-4.1          copilot
  claude-sonnet-4  anthropic
  gpt-5            openai
-  info  model notice
 ──────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────

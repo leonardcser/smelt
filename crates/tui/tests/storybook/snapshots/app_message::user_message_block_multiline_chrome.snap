@@ -2,11 +2,11 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
+
  let's plan this out.
  step 1: parse
  step 2: render
  step 3: ship
-
 
   tip ctrl+enter / ctrl+q, steer the current re…
 ──────────────────────────────────────────────────

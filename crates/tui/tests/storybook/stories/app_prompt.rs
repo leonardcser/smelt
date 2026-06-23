@@ -24,8 +24,8 @@ app_story!(prompt_multiline_input, |ctx| {
 
 app_story!(prompt_slash_command_completion, |ctx| {
     // Typing `/` triggers the slash-command completion popup over
-    // the prompt. Pins the popup layout (registered commands in
-    // descending recency, dim descriptions, accent on `/`).
+    // the prompt. The aux tip row remains reserved but is covered by
+    // the prompt-docked picker.
     ctx.set_viewport(50, 14);
     ctx.type_prompt("/");
     ctx.assert_snapshot();
@@ -34,7 +34,8 @@ app_story!(prompt_slash_command_completion, |ctx| {
 app_story!(prompt_slash_command_refilter_keeps_best_on_bottom, |ctx| {
     // Slash command filtering resets to the best match instead of preserving
     // the previously selected command at its new ranked position. In the
-    // prompt-docked picker, logical best renders on the bottom row.
+    // prompt-docked picker, logical best renders on the bottom row and covers
+    // the reserved aux tip row.
     ctx.set_viewport(50, 10);
     ctx.run_lua(
         r#"
@@ -48,7 +49,8 @@ app_story!(prompt_slash_command_refilter_keeps_best_on_bottom, |ctx| {
 
 app_story!(prompt_slash_completion_shrinks_for_short_terminal, |ctx| {
     // When the terminal is very short the prompt-docked picker must
-    // shrink so it never overlaps the prompt input.
+    // shrink so it never overlaps the prompt input. The aux tip row stays
+    // reserved but is covered by the picker.
     ctx.set_viewport(50, 8);
     ctx.type_prompt("/");
     ctx.assert_snapshot();
@@ -56,14 +58,15 @@ app_story!(prompt_slash_completion_shrinks_for_short_terminal, |ctx| {
 
 app_story!(prompt_slash_completion_two_rows_when_cramped, |ctx| {
     // Extreme height: the picker collapses to just a couple of rows
-    // rather than painting over the prompt chrome.
+    // rather than painting over the prompt chrome. The bottom picker row
+    // covers the reserved aux tip row.
     ctx.set_viewport(50, 6);
     ctx.type_prompt("/");
     ctx.assert_snapshot();
 });
 
-app_story!(prompt_modal_picker_keeps_tip_visible, |ctx| {
-    // A modal prompt-docked picker opens above the visible tip row, so the
+app_story!(prompt_modal_picker_overlays_tip, |ctx| {
+    // A modal prompt-docked picker covers the reserved aux tip row, so the
     // transcript and prompt chrome do not shift.
     ctx.set_viewport(50, 10);
     ctx.run_lua(
@@ -154,9 +157,9 @@ app_story!(
 app_story!(
     prompt_queued_messages_with_notification_collapse_on_short_terminal,
     |ctx| {
-        // A notification hides the tip and reserves its own row above the
-        // prompt; the queue still collapses and the stash/indicator rows
-        // stay visible on a short terminal.
+        // A notification uses the stable aux row above the prompt; the queue
+        // still collapses and the stash/indicator rows stay visible on a short
+        // terminal.
         ctx.set_viewport(50, 10);
         ctx.notify("this is a notification", None);
         for i in 1..=10 {
@@ -169,8 +172,8 @@ app_story!(
 app_story!(
     prompt_slash_completion_with_notification_shrinks_for_short_terminal,
     |ctx| {
-        // A prompt-docked picker must still avoid overlapping the prompt
-        // when a notification is taking a row above the top bar.
+        // A prompt-docked picker covers a visible toast and anchors directly
+        // above the prompt chrome, so the layout does not shift.
         ctx.set_viewport(50, 8);
         ctx.notify("this is a notification", None);
         ctx.type_prompt("/");
@@ -179,7 +182,8 @@ app_story!(
 );
 
 app_story!(prompt_slash_completion_with_live_notification, |ctx| {
-    // A live toast sits below prompt-docked picker rows, not over them.
+    // A live toast is covered by prompt-docked picker rows; the picker
+    // stays anchored immediately above the prompt chrome.
     ctx.set_viewport(50, 8);
     ctx.type_prompt("/");
     ctx.notify("slash notice", None);
@@ -188,7 +192,7 @@ app_story!(prompt_slash_completion_with_live_notification, |ctx| {
 
 app_story!(prompt_file_completion_with_error_notification, |ctx| {
     // `@file` uses the same prompt-docked picker plane as slash completion.
-    // An error toast sits below the picker rows when they coincide.
+    // An error toast is covered by the picker rows when they coincide.
     ctx.set_viewport(50, 8);
     ctx.run_lua(
         r#"
@@ -211,7 +215,8 @@ app_story!(prompt_file_completion_with_error_notification, |ctx| {
 
 app_story!(prompt_history_picker_with_notification, |ctx| {
     // Reverse-history search is a secondary prompt-docked picker opened by
-    // `/history`; the notification should remain the top prompt-adjacent row.
+    // `/history`; the picker covers the notification and anchors directly
+    // above the prompt chrome.
     ctx.set_viewport(50, 8);
     ctx.push_history_entry("explain the renderer layering");
     ctx.push_history_entry("open the model picker next");
@@ -222,7 +227,8 @@ app_story!(prompt_history_picker_with_notification, |ctx| {
 
 app_story!(prompt_model_picker_with_notification, |ctx| {
     // `/model` opens a persistent prompt-docked picker after the slash command
-    // resolves. It should stack the same way as completions and history search.
+    // resolves. The picker covers the notification and anchors directly above
+    // the prompt chrome.
     ctx.set_viewport(50, 8);
     ctx.seed_models(&[
         ("openai", "gpt-5", "openai"),
@@ -235,8 +241,8 @@ app_story!(prompt_model_picker_with_notification, |ctx| {
 });
 
 app_story!(prompt_picker_with_queue_stash_and_notification, |ctx| {
-    // Picker rows stay above all prompt-adjacent chrome. Notification replaces
-    // the tip; queue and stash remain inside the prompt top bar.
+    // Picker rows anchor directly above the prompt chrome and cover the
+    // notification. Queue, stash, and the tip remain inside the prompt top bar.
     ctx.set_viewport(50, 12);
     ctx.type_prompt("draft note");
     ctx.stash_prompt();

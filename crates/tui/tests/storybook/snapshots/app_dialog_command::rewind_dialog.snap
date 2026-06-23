@@ -2,12 +2,12 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
+
  write the parser
 
 
 
  add the renderer
-
 
 ─ rewind ───────────────────────────────────────────────────
   1. write the parser

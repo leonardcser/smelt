@@ -1,14 +1,13 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 515
 expression: frame.text()
 ---
 
 
 
+
  beta   second
  alpha  first
-  tip ctrl+enter / ctrl+q, steer the current re…
 ──────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────

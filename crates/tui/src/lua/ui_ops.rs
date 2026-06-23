@@ -782,10 +782,13 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
         _ => crate::picker::PickerPlacement::ScreenCenter,
     };
     // prompt_docked is non-focusable (keys flow to the prompt); other placements own dispatch.
-    let (focusable, z) = match placement {
-        crate::picker::PickerPlacement::PromptDocked { .. } => (false, 30),
-        _ => (true, 50),
-    };
+    // All pickers use the dialog z-plane (50) so transient notifications
+    // (z=40) are covered instead of shifting the picker upward.
+    let focusable = !matches!(
+        placement,
+        crate::picker::PickerPlacement::PromptDocked { .. }
+    );
+    let z = 50;
 
     crate::picker::open(app, items, 0, placement, focusable, false, z)
         .ok_or_else(|| "picker.open: failed to create overlay".to_string())

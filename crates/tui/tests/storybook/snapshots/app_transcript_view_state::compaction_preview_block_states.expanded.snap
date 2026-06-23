@@ -2,6 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
+─────────────────────── compacting ────────────────────────
 # Goal
 Summarize earlier turns while preserving the active task.
 
@@ -12,7 +13,6 @@ Summarize earlier turns while preserving the active task.
 
 # Next steps
 Update stories and run focused tests.
-
   tip ctrl+enter / ctrl+q, steer the current response wit…
 ────────────────────────────────────────────────────────────
 

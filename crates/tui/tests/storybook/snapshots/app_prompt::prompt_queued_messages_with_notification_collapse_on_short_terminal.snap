@@ -3,11 +3,11 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 
+
   info  this is a notification
-  › follow-up 8
   › follow-up 9
   › follow-up 10
-  +7 more queued
+  +8 more queued
 ─ ✿ working… ─────────────────────────────────────
 
 ──────────────────────────────────────────────────

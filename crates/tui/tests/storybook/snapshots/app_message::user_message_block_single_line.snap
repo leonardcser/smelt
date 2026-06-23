@@ -2,8 +2,8 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- refactor the parser into its own module
 
+ refactor the parser into its own module
 
   tip ctrl+enter / ctrl+q, steer the current re…
 ──────────────────────────────────────────────────

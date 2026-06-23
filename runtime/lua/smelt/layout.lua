@@ -3,15 +3,16 @@
 -- Splits the screen vertically into:
 --   * headerline           (1 row when a header source is visible)
 --   * transcript           (fill)
---   * prompt block         (the four chrome+input rows, contiguous)
+--   * prompt auxiliary row (stable gap: empty, tip, or notification overlay)
+--   * prompt block         (chrome+input rows, contiguous)
 --       - top bar          (rows = queued + stash + 1 bar row)
 --       - prompt input     (rows = state.prompt_input_rows)
 --       - bottom bar       (1 row)
 --       - statusline       (1 row)
 --
--- A single gap row sits between the transcript and the prompt block,
--- matching the byte-for-byte output of the previous Rust composer. The
--- inner block has no gap, so its leaves are contiguous.
+-- A stable auxiliary row sits between the transcript and the prompt block,
+-- matching the old readability gap while giving tips and notification overlays
+-- a consistent home. The inner block has no gap, so its leaves are contiguous.
 --
 -- Plugins that want a different shape call `smelt.ui.layout.set(fn)`
 -- with their own composer; passing `nil` (or never calling `set`) means
@@ -33,8 +34,11 @@ smelt.ui.layout.set(function(state)
   local header_rows = headerline.rows()
 
   -- prompt block = top_bar + input_rows + bottom_bar(1) + statusline(1)
+  local aux_rows = 1
   local chrome_except_top = input_rows + 2
-  local max_top_rows = math.max(1, term_h - header_rows - MIN_TRANSCRIPT_ROWS - chrome_except_top)
+  local max_top_rows = math.max(
+    1,
+    term_h - header_rows - MIN_TRANSCRIPT_ROWS - aux_rows - chrome_except_top)
   local top_rows = prompt_bar.top_rows(max_top_rows)
   local block_height = top_rows + chrome_except_top
 
@@ -42,6 +46,10 @@ smelt.ui.layout.set(function(state)
     {
       height = "fill",
       smelt.ui.layout.leaf(smelt.win.TRANSCRIPT),
+    },
+    {
+      height = aux_rows,
+      smelt.ui.layout.leaf(prompt_bar.aux_win),
     },
     {
       height = block_height,
@@ -64,7 +72,7 @@ smelt.ui.layout.set(function(state)
         },
       }),
     },
-  }, { gap = 1 })
+  })
 
   if header_rows == 0 then return main end
   return smelt.ui.layout.vbox({

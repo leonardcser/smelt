@@ -1,20 +1,23 @@
--- Prompt top + bottom bar windows.
+-- Prompt auxiliary + top + bottom bar windows.
 --
--- Default `M.top_win` renders queued messages, a stash marker, and a
--- horizontal-rule bar with a left-aligned working indicator (traveling
--- wave) and a right-aligned model/tokens/cost group. `M.bottom_win`
--- renders a separator-only bar row.
+-- Default `M.aux_win` owns the stable one-row gap between transcript and
+-- prompt chrome. It renders either the discovery tip or a blank row;
+-- notification overlays use the same row with higher z. `M.top_win` renders
+-- queued messages, a stash marker, and a horizontal-rule bar with a
+-- left-aligned working indicator (traveling wave) and a right-aligned
+-- model/tokens/cost group. `M.bottom_win` renders a separator-only bar row.
 --
--- Plugins can replace either window's renderer via
--- `prompt_bar.top_win:set_renderer(fn)` / `bottom_win:set_renderer(fn)`,
--- or replace the windows entirely from a custom `smelt.ui.layout.set`
--- composer.
+-- Plugins can replace any window's renderer via
+-- `prompt_bar.aux_win:set_renderer(fn)`, `top_win:set_renderer(fn)` /
+-- `bottom_win:set_renderer(fn)`, or replace the windows entirely from a
+-- custom `smelt.ui.layout.set` composer.
 
 local bar = require("smelt._bar")
 local tips = require("smelt.tips")
 
 local M = {}
 
+local AUX_NS = smelt.ns("smelt.prompt_bar.aux")
 local TOP_NS = smelt.ns("smelt.prompt_bar.top")
 local BOT_NS = smelt.ns("smelt.prompt_bar.bottom")
 local TOKEN_PRIORITY = 0
@@ -83,13 +86,13 @@ local function more_row(hidden, width)
   }
 end
 
--- Baseline for whether the tip row is allowed: empty prompt, idle, no
--- stash/queue/notification, and tips enabled. A modal picker should not hide
--- the tip; the picker is positioned above the prompt chrome instead.
+-- Baseline for whether the aux row may show the tip: empty prompt unless a
+-- modal picker owns it, idle, no stash/queue/notification, and tips enabled.
+-- The row itself is always reserved by the layout so tips do not shift content.
 local function tip_eligible(queued)
   if not tips.enabled() then return false end
   if #queued > 0 or smelt.prompt.has_stash() then return false end
-  if (smelt.prompt.text() or "") ~= "" then return false end
+  if (smelt.prompt.text() or "") ~= "" and not smelt.prompt.is_modal() then return false end
   if smelt.signal.get("notification_visible") then return false end
   local work_state = smelt.signal.get("work_state")
   if work_state and work_state ~= "idle" then return false end
@@ -362,7 +365,6 @@ local function render_top(win)
   local natural_rows = M.top_rows()
   local reserved = 1 -- indicator bar row
   if smelt.prompt.has_stash() then reserved = reserved + 1 end
-  if should_show_tip(queued) then reserved = reserved + 1 end
   local queue_slots = math.max(0, (win_height or natural_rows) - reserved)
   local visible_queued = math.min(#queued, queue_slots)
   local hidden = #queued - visible_queued
@@ -384,13 +386,20 @@ local function render_top(win)
   if smelt.prompt.has_stash() then
     rows[#rows + 1] = stash_row(width)
   end
-  if should_show_tip(queued) then
-    local row = tip_row(width)
-    if row then rows[#rows + 1] = row end
-  end
   local bar_opts = resize_bar_opts("top")
   rows[#rows + 1] = bar.compose(width, indicator_spans(bar_opts), right_spans(bar_opts), bar_opts)
   bar.write_rows(buf, rows, TOP_NS)
+end
+
+local function render_aux(win)
+  local buf = win:buf()
+  if not buf then return end
+  local width = win:content_width() or 80
+  local queued = smelt.prompt.queued_rows()
+  local row = nil
+  if should_show_tip(queued) then row = tip_row(width) end
+  local blank = { text = string.rep(" ", math.max(width or 0, 0)), highlights = {} }
+  bar.write_rows(buf, { row or blank }, AUX_NS)
 end
 
 local function render_bottom(win)
@@ -402,6 +411,12 @@ end
 
 -- ── window allocation ───────────────────────────────────────────────
 
+M.aux_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.aux" }), {
+  name = "smelt.prompt_bar.aux",
+  scrollbar = false,
+  surface = "selectable_text",
+  region = "prompt_aux",
+})
 M.top_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.top" }), {
   name = "smelt.prompt_bar.top",
   scrollbar = false,
@@ -415,6 +430,9 @@ M.bottom_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.bottom" })
   region = "prompt_below",
 })
 
+if M.aux_win then
+  M.aux_win:set_renderer(render_aux)
+end
 if M.top_win then
   M.top_win:set_renderer(render_top)
 end
@@ -431,7 +449,6 @@ function M.top_rows(max_top_rows)
   local queued = smelt.prompt.queued()
   local rows = 1 + #queued
   if smelt.prompt.has_stash() then rows = rows + 1 end
-  if should_show_tip(queued) then rows = rows + 1 end
   if type(max_top_rows) == "number" then
     return math.min(rows, math.max(1, max_top_rows))
   end

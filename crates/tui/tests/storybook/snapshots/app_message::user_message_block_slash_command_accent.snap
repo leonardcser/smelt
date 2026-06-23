@@ -2,8 +2,8 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /permissions
 
+ /permissions
 
   tip ctrl+enter / ctrl+q, steer the …
 ────────────────────────────────────────

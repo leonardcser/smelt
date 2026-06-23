@@ -1,13 +1,12 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 515
 expression: frame.text()
 ---
+ /clear        start new conversation
  /changelog    show release notes for the latest s
  /btw          ask a side question
  /brief        summarize planned or completed chan
  /branch       fork current session
-  info  queued notice
   › first follow-up
   › second follow-up
   ◌ Stashed (ctrl+s to unstash)
