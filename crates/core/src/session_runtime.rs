@@ -159,6 +159,61 @@ impl LiveSession {
         Ok(rows)
     }
 
+    pub fn any_transcript_visible_before(&self, end: usize) -> Result<bool, String> {
+        const SCAN_CHUNK_ITEMS: usize = 128;
+        let end = end.min(self.history_len());
+        let mut start = 0usize;
+        while start < end {
+            let chunk_end = start.saturating_add(SCAN_CHUNK_ITEMS).min(end);
+            if self
+                .history_range(start..chunk_end)?
+                .iter()
+                .any(HistoryItem::is_transcript_visible)
+            {
+                return Ok(true);
+            }
+            start = chunk_end;
+        }
+        Ok(false)
+    }
+
+    pub fn effective_mode_at(&self, hist_idx: usize, fallback: &str) -> Result<String, String> {
+        const SCAN_CHUNK_ITEMS: usize = 128;
+        let end = hist_idx.min(self.history_len());
+        let mut chunk_end = end;
+        while chunk_end > 0 {
+            let chunk_start = chunk_end.saturating_sub(SCAN_CHUNK_ITEMS);
+            let rows = self.history_range(chunk_start..chunk_end)?;
+            if let Some(mode) = rows
+                .iter()
+                .rev()
+                .filter_map(HistoryItem::as_note)
+                .find_map(protocol::HistoryNote::mode)
+            {
+                return Ok(mode.to_string());
+            }
+            chunk_end = chunk_start;
+        }
+
+        let mut start = end;
+        while start < self.history_len() {
+            let chunk_end = start
+                .saturating_add(SCAN_CHUNK_ITEMS)
+                .min(self.history_len());
+            let rows = self.history_range(start..chunk_end)?;
+            if let Some(mode) = rows
+                .iter()
+                .filter_map(HistoryItem::as_note)
+                .find_map(protocol::HistoryNote::base_mode)
+            {
+                return Ok(mode.to_string());
+            }
+            start = chunk_end;
+        }
+
+        Ok(fallback.to_string())
+    }
+
     pub fn model_history_source(&self, summary_prefix: &str) -> protocol::ModelHistorySource {
         let (prefix, first_live_index) = if let Some(checkpoint) = self.checkpoint.as_ref() {
             (
@@ -365,5 +420,83 @@ mod tests {
             }
             protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
         }
+    }
+
+    #[test]
+    fn store_backed_live_session_scans_mode_and_visibility_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("session.db");
+        let db = smelt_store::SessionDb::open(&db_path).expect("open db");
+        let history = vec![
+            HistoryItem::user(protocol::Content::text("hello")),
+            HistoryItem::Note(protocol::HistoryNote::mode_change_for_transition(
+                "normal", "plan", "switch",
+            )),
+            HistoryItem::user(protocol::Content::text("after mode")),
+        ];
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: SessionState {
+                id: "live-scan".into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: Some("normal".into()),
+                reasoning_effort: None,
+                model: None,
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: 1,
+                history_len: history.len() as u64,
+                created_at: 1,
+                updated_at: 2,
+            },
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: history.len(),
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .expect("save snapshot");
+        let header = SessionHeader {
+            meta: crate::session::SessionMeta {
+                id: "live-scan".into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                mode: Some("normal".into()),
+                reasoning_effort: None,
+                model: None,
+                cwd: None,
+                parent_id: None,
+                context_tokens: None,
+                history_len: Some(3),
+                checkpoint: None,
+                text_bytes: None,
+                migration: None,
+            },
+            history_len: 3,
+            revision: 1,
+        };
+        let live = LiveSession::from_store(
+            header,
+            SessionStoreRef {
+                session_dir: dir.path().to_path_buf(),
+                db_path,
+            },
+        );
+
+        assert!(live.any_transcript_visible_before(2).unwrap());
+        assert_eq!(live.effective_mode_at(3, "normal").unwrap(), "plan");
+        assert_eq!(live.effective_mode_at(0, "normal").unwrap(), "normal");
     }
 }

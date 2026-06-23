@@ -1125,6 +1125,12 @@ impl BlockHistory {
             .is_some()
     }
 
+    pub fn block_origin_at(&self, i: usize) -> Option<BlockOrigin> {
+        self.order
+            .get(i)
+            .and_then(|id| self.origins.get(id).copied())
+    }
+
     pub fn first_block_index_for_history_origin_at_or_after(
         &self,
         before_history_index: usize,

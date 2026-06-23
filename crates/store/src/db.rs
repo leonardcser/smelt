@@ -368,6 +368,77 @@ impl SessionDb {
         )
     }
 
+    pub fn copy_prefix_to(
+        &self,
+        dest_path: impl AsRef<Path>,
+        state: &SessionState,
+        history_len: usize,
+    ) -> Result<()> {
+        let dest = SessionDb::open(dest_path)?;
+        let source_path = self.path.to_string_lossy().to_string();
+        dest.conn
+            .execute("ATTACH DATABASE ?1 AS src", [source_path.as_str()])?;
+        let history_len = history_len as i64;
+        let copy_result = dest.immediate_transaction(|conn| {
+            meta::upsert_session_state(conn, state)?;
+            conn.execute(
+                "INSERT OR IGNORE INTO objects
+                 SELECT * FROM src.objects
+                 WHERE hash IN (
+                     SELECT object_hash FROM src.history_object_refs WHERE history_idx < ?1
+                 )",
+                [history_len],
+            )?;
+            conn.execute(
+                "INSERT INTO history_items
+                 SELECT * FROM src.history_items WHERE idx < ?1 ORDER BY idx",
+                [history_len],
+            )?;
+            conn.execute(
+                "INSERT INTO history_object_refs
+                 SELECT * FROM src.history_object_refs WHERE history_idx < ?1",
+                [history_len],
+            )?;
+            conn.execute(
+                "INSERT INTO transcript_blocks
+                 SELECT * FROM src.transcript_blocks
+                 WHERE block_idx < COALESCE(
+                     (SELECT MIN(block_idx) FROM src.transcript_blocks WHERE history_idx >= ?1),
+                     (SELECT COALESCE(MAX(block_idx) + 1, 0) FROM src.transcript_blocks)
+                 )
+                 AND (history_idx IS NULL OR history_idx < ?1)
+                 ORDER BY block_idx",
+                [history_len],
+            )?;
+            conn.execute(
+                "INSERT INTO transcript_search
+                 SELECT * FROM src.transcript_search
+                 WHERE block_idx IN (SELECT block_idx FROM transcript_blocks)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO turn_metas
+                 SELECT * FROM src.turn_metas WHERE turn_idx < ?1 ORDER BY turn_idx",
+                [history_len],
+            )?;
+            conn.execute(
+                "INSERT INTO metadata_snapshots
+                 SELECT * FROM src.metadata_snapshots WHERE history_idx <= ?1 ORDER BY history_idx",
+                [history_len],
+            )?;
+            conn.execute(
+                "INSERT INTO accounting_snapshots
+                 SELECT * FROM src.accounting_snapshots WHERE history_idx <= ?1 ORDER BY history_idx",
+                [history_len],
+            )?;
+            Ok(())
+        });
+        let detach_result = dest.conn.execute("DETACH DATABASE src", []);
+        copy_result?;
+        detach_result?;
+        dest.quick_check()
+    }
+
     pub fn save_history_suffix_and_transcript_descriptor_suffix_as_writer(
         &self,
         suffix: &SessionHistorySuffix,
@@ -896,6 +967,62 @@ mod tests {
             ]
         );
         assert_eq!(db.session_state().unwrap().unwrap().history_len, 3);
+    }
+
+    #[test]
+    fn copy_prefix_to_forks_store_without_copied_tail() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(source_dir.path().join("session.db")).unwrap();
+        let history = vec![
+            protocol::HistoryItem::user(protocol::Content::text("one")),
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text("two")),
+                None,
+                Vec::new(),
+            )),
+            protocol::HistoryItem::user(protocol::Content::text("three")),
+        ];
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("source", history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: history.len(),
+            history: history.clone(),
+            turn_metas: vec![(0, serde_json::json!({"turn":"first"}))],
+            metadata_snapshots: vec![(2, serde_json::json!({"slug":"prefix"}))],
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let descriptors = vec![
+            transcript_record_with_history(0, 0, "one", "one"),
+            transcript_record_with_history(1, 1, "two", "two"),
+            transcript_record_with_history(2, 2, "three", "three"),
+        ];
+        db.replace_transcript_descriptor_records(&descriptors)
+            .unwrap();
+
+        let mut fork_state = test_session_state("fork", 2);
+        fork_state.parent_id = Some("source".into());
+        db.copy_prefix_to(dest_dir.path().join("session.db"), &fork_state, 2)
+            .unwrap();
+
+        let fork = SessionDb::open_read_only(dest_dir.path().join("session.db")).unwrap();
+        assert_eq!(fork.session_state().unwrap().unwrap().id, "fork");
+        assert_eq!(fork.history_item_count().unwrap(), 2);
+        assert_eq!(
+            fork.read_history_items_range(0..3).unwrap(),
+            history[..2].to_vec()
+        );
+        assert_eq!(fork.transcript_descriptor_count().unwrap(), 2);
+        assert_eq!(
+            fork.search_transcript_candidates("three").unwrap(),
+            Vec::<TranscriptSearchCandidate>::new()
+        );
+        assert_eq!(
+            fork.read_all_transcript_descriptor_records().unwrap(),
+            descriptors[..2].to_vec()
+        );
     }
 
     #[test]

@@ -109,6 +109,22 @@ pub(crate) fn materialize_full_session(
     session::load_full(id)
 }
 
+fn copy_blob_dir(source: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_file() {
+            std::fs::copy(entry.path(), dest_path)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn build_transcript_from_session(
     lua: &crate::lua::LuaRuntime,
     session: &session::Session,
@@ -913,6 +929,10 @@ impl TuiApp {
     }
 
     pub(crate) fn fork_session(&mut self) {
+        if self.live_session.is_some() {
+            self.fork_live_session();
+            return;
+        }
         self.ensure_live_session_materialized();
         if self.session_is_empty() {
             self.notify_error("nothing to fork".into());
@@ -944,6 +964,78 @@ impl TuiApp {
         self.notify(format!("forked from {original_id}"));
         // Drain stale events so old snapshots don't overwrite the forked session.
         while self.core.engine.try_recv().is_ok() {}
+    }
+
+    fn fork_live_session(&mut self) {
+        if self.session_is_empty() {
+            self.notify_error("nothing to fork".into());
+            return;
+        }
+        if self.agent.is_some() {
+            self.cancel_agent();
+            self.agent = None;
+        }
+        self.save_session();
+        self.flush_persist();
+        self.stop_background_processes();
+
+        if let Some(live) = self.live_session.as_mut() {
+            if let Some((header, _)) = session::load_store_header_for_dir(live.dir().to_path_buf())
+            {
+                live.mark_persisted(header.history_len, header.revision);
+            }
+        }
+
+        let Some(live) = self.live_session.as_ref() else {
+            return;
+        };
+        let original_id = self.core.session.id.clone();
+        let history_len = live.history_len();
+        let source_db_path = live.dir().join("session.db");
+        let mut forked = self.core.session.fork(self.core.env.pid());
+        forked.history.clear();
+        let fork_dir = session::dir_for(&forked);
+        let fork_db_path = fork_dir.join("session.db");
+        let state = match session::store_state_from_session(&forked, history_len) {
+            Ok(state) => state,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare fork: {err}"));
+                return;
+            }
+        };
+        let source_db = match smelt_store::SessionDb::open_read_only(&source_db_path) {
+            Ok(db) => db,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to open source session store: {err}"));
+                return;
+            }
+        };
+        if let Err(err) = source_db.copy_prefix_to(&fork_db_path, &state, history_len) {
+            self.notify_error_sticky(format!("failed to fork session store: {err}"));
+            return;
+        }
+        if let Err(err) = copy_blob_dir(&live.dir().join("blobs"), &fork_dir.join("blobs")) {
+            self.notify_error_sticky(format!("failed to fork session blobs: {err}"));
+            return;
+        }
+        if let Err(err) = session::write_db_meta_sidecar(&fork_dir) {
+            self.notify_error_sticky(format!("failed to write fork metadata: {err}"));
+            return;
+        }
+        let Some((header, store_ref)) = session::load_store_header_for_dir(fork_dir.clone()) else {
+            self.notify_error_sticky("failed to load forked session header".into());
+            return;
+        };
+        let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
+            fork_dir.clone(),
+            self.last_width,
+            self.last_height,
+        )
+        .unwrap_or_else(|| crate::app::transcript::LoadedTranscript::empty_store(fork_dir));
+        let live_session = smelt_core::session_runtime::LiveSession::from_store(header, store_ref);
+        self.load_store_backed_session(forked, transcript, live_session);
+        self.publish_history_delta("forked");
+        self.notify(format!("forked from {original_id}"));
     }
 
     pub(crate) fn reset_session(&mut self) {
@@ -1775,28 +1867,41 @@ impl TuiApp {
         &mut self,
         block_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
-        self.ensure_live_session_materialized();
         let turns = self.user_turns();
         let turn_text = turns
             .iter()
             .find(|(i, _)| *i == block_idx)
             .map(|(_, t)| t.clone());
-        let user_turns_to_keep = turns.iter().filter(|(i, _)| *i < block_idx).count();
 
-        let mut user_count = 0;
-        let mut hist_idx = 0;
-        for (i, item) in self.core.session.history.iter().enumerate() {
-            if matches!(item, HistoryItem::User { .. }) {
-                user_count += 1;
-                if user_count > user_turns_to_keep {
-                    hist_idx = i;
-                    break;
+        let hist_idx = if self.live_session.is_some() {
+            match self.transcript.history().block_origin_at(block_idx) {
+                Some(smelt_core::BlockOrigin::History(history_idx)) => history_idx,
+                _ => {
+                    smelt_perf::perf::record_value("rewind:live_missing_history_origin", 1);
+                    self.notify_error("cannot rewind this transcript block".into());
+                    return None;
                 }
             }
-            hist_idx = i + 1;
-        }
+        } else {
+            self.ensure_live_session_materialized();
+            let user_turns_to_keep = turns.iter().filter(|(i, _)| *i < block_idx).count();
+            let mut user_count = 0;
+            let mut hist_idx = 0;
+            for (i, item) in self.core.session.history.iter().enumerate() {
+                if matches!(item, HistoryItem::User { .. }) {
+                    user_count += 1;
+                    if user_count > user_turns_to_keep {
+                        hist_idx = i;
+                        break;
+                    }
+                }
+                hist_idx = i + 1;
+            }
+            hist_idx
+        };
 
-        let images: Vec<(String, String)> = match self.core.session.history.get(hist_idx) {
+        let rewind_item = self.session_history_range(hist_idx..hist_idx.saturating_add(1));
+        let images: Vec<(String, String)> = match rewind_item.first() {
             Some(HistoryItem::User {
                 content: Content::Parts(parts),
                 ..
@@ -1812,13 +1917,38 @@ impl TuiApp {
             _ => Vec::new(),
         };
 
-        let mode_after_rewind = self.core.session.history[..hist_idx]
-            .iter()
-            .any(HistoryItem::is_transcript_visible)
-            .then(|| self.mode_at_history_boundary(hist_idx));
+        let mode_after_rewind = if let Some(live) = &self.live_session {
+            match live.any_transcript_visible_before(hist_idx) {
+                Ok(false) => None,
+                Ok(true) => match live.effective_mode_at(
+                    hist_idx,
+                    self.core.session.mode.as_deref().unwrap_or("normal"),
+                ) {
+                    Ok(mode) => AgentMode::parse(&mode),
+                    Err(err) => {
+                        smelt_perf::perf::record_value("rewind:live_mode_error", 1);
+                        self.notify_error_sticky(format!(
+                            "failed to read mode after rewind: {err}"
+                        ));
+                        None
+                    }
+                },
+                Err(err) => {
+                    smelt_perf::perf::record_value("rewind:live_visible_scan_error", 1);
+                    self.notify_error_sticky(format!(
+                        "failed to read history before rewind: {err}"
+                    ));
+                    None
+                }
+            }
+        } else {
+            self.core.session.history[..hist_idx]
+                .iter()
+                .any(HistoryItem::is_transcript_visible)
+                .then(|| self.mode_at_history_boundary(hist_idx))
+        };
 
-        self.core.session.history.truncate(hist_idx);
-        self.mark_history_dirty_from(hist_idx);
+        self.session_truncate_from(hist_idx);
         let keep_checkpoint_at_boundary = turn_text.is_some()
             && self
                 .core
@@ -1839,9 +1969,8 @@ impl TuiApp {
     }
 
     pub(crate) fn rewind_to_start(&mut self) {
-        self.core.session.history.clear();
-        self.mark_history_dirty_from(0);
-        self.core.session.checkpoint = None;
+        self.session_truncate_from(0);
+        self.session_set_checkpoint(None);
         self.core.session.turn_metas.clear();
         self.core.session.clear_context_snapshots();
         self.core.session.clear_context_tokens();
