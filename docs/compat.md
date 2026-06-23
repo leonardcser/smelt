@@ -55,12 +55,36 @@ with `COMPAT(<id>)`.
 
 ## legacy-session-full-load-fallbacks
 
-- Remove after: SQLite session metadata, history, and transcript descriptors are required for all supported saved sessions
-- Why: explicit open/preview paths still need to display old or partially migrated sessions that lack sparse transcript records or history length metadata
+- Remove after: SQLite session metadata, history, and transcript descriptors are
+  required for all supported saved sessions
+- Why: explicit open/preview paths still need to display old or partially
+  migrated sessions that lack sparse transcript records or history length
+  metadata
 - Code:
-  - `crates/tui/src/app/lua_handlers.rs`: fallback in `load_session_by_id`, counted by `compat:session:load_full_fallback`
-  - `crates/tui/src/lua/api/session.rs`: fallback in `smelt.session.render_preview_into`, counted by `compat:session:preview_full_fallback`
-  - `crates/tui/src/app/history.rs`: fallback transcript rebuild in `rebuild_screen_from_history`, counted by `compat:session:rebuild_transcript_full_fallback`
+  - `crates/tui/src/app/lua_handlers.rs`: fallback in `load_session_by_id`,
+    counted by `compat:session:load_full_fallback`
+  - `crates/tui/src/lua/api/session.rs`: fallback in
+    `smelt.session.render_preview_into`, counted by
+    `compat:session:preview_full_fallback`
+  - `crates/tui/src/app/history.rs`: fallback transcript rebuild in
+    `rebuild_screen_from_history`, counted by
+    `compat:session:rebuild_transcript_full_fallback`, and explicit
+    live-session promotion in `ensure_live_session_materialized`, counted by
+    `compat:session:display_only_promotion`
+
+## allowed-session-full-materialization
+
+- Scope: full session materialization is allowed only for explicit
+  detail/export/debug-style operations, legacy compatibility fallbacks listed
+  above, and tests
+- Why: normal resume, render, save, search, rewind, fork, and Lua lightweight
+  APIs must remain store-backed and bounded
+- Code:
+  - `crates/tui/src/app/history.rs`: `FullSessionMaterializationReason`
+    documents all TUI wrapper reasons and records per-reason counters
+  - `crates/tui/src/inspect_server.rs`: inspect session detail endpoint
+    intentionally materializes a single requested session, counted by
+    `inspect:session:detail_load_full`
 
 ## transcript-group-blocks-alias
 

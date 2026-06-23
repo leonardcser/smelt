@@ -114,7 +114,7 @@ impl TuiApp {
             self.core.session.first_user_message = Some(text.clone().into_owned());
             self.core
                 .session
-                .snapshot_metadata_at(self.core.session.history.len() + 1);
+                .snapshot_metadata_at(self.session_history_len() + 1);
             self.session_dirty = true;
         }
         let history = self.commit_request_history_item(
@@ -322,7 +322,7 @@ impl TuiApp {
                 self.core.session.first_user_message = Some(display.clone());
                 self.core
                     .session
-                    .snapshot_metadata_at(self.core.session.history.len() + 1);
+                    .snapshot_metadata_at(self.session_history_len() + 1);
                 self.session_dirty = true;
             }
             self.commit_request_history_item(
@@ -591,7 +591,7 @@ impl TuiApp {
                     });
                     let meta = self.working.finish(TurnOutcome::Interrupted);
                     self.drain_queued_inputs_into_prompt();
-                    self.restore_session_metadata_after_rewind(self.core.session.history.len());
+                    self.restore_session_metadata_after_rewind(self.session_history_len());
                     (meta, false)
                 }
                 TurnEnd::Errored => {
@@ -622,7 +622,7 @@ impl TuiApp {
         self.core
             .session
             .turn_metas
-            .push((self.core.session.history.len(), meta));
+            .push((self.session_history_len(), meta));
         if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
         }

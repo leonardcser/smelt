@@ -77,6 +77,14 @@ impl LiveSession {
         self.persisted_history_len
     }
 
+    pub fn live_suffix_len(&self) -> usize {
+        self.live_history.len()
+    }
+
+    pub fn live_suffix_bytes(&self) -> usize {
+        history_json_bytes(&self.live_history)
+    }
+
     pub fn set_checkpoint(&mut self, checkpoint: Option<ContextCheckpoint>) {
         self.checkpoint = checkpoint;
     }

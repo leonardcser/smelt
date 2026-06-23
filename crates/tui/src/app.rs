@@ -742,6 +742,14 @@ impl TuiApp {
     }
 
     pub(crate) fn has_visible_session_history(&self) -> bool {
+        if let Some(live) = &self.live_session {
+            return live
+                .any_transcript_visible_before(live.history_len())
+                .unwrap_or_else(|_err| {
+                    smelt_perf::perf::record_value("live_session:visible_scan_error", 1);
+                    false
+                });
+        }
         self.core
             .session
             .history
@@ -750,9 +758,7 @@ impl TuiApp {
     }
 
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
-        !self.core.session.history.is_empty()
-            || !self.transcript.is_empty()
-            || self.live_session.is_some()
+        !self.session_is_empty() || !self.transcript.is_empty() || self.live_session.is_some()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
@@ -842,33 +848,37 @@ impl TuiApp {
     }
 
     pub(crate) fn mode_history_base(&self) -> protocol::AgentMode {
-        let history = &self.core.session.history;
-        let end = if history.last().is_some_and(|item| {
-            item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
-                && item
-                    .as_note()
-                    .and_then(protocol::HistoryNote::mode)
-                    .is_some()
-        }) {
-            history.len() - 1
+        let len = self.session_history_len();
+        let last_is_mode_change = self
+            .session_history_range(len.saturating_sub(1)..len)
+            .last()
+            .is_some_and(|item| {
+                item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+                    && item
+                        .as_note()
+                        .and_then(protocol::HistoryNote::mode)
+                        .is_some()
+            });
+        let end = if last_is_mode_change {
+            len.saturating_sub(1)
         } else {
-            history.len()
+            len
         };
-        let mode = protocol::effective_mode_at(
-            history,
-            end,
-            self.core.session.mode.as_deref().unwrap_or("normal"),
-        );
-        protocol::AgentMode::parse(mode).unwrap_or_else(protocol::AgentMode::normal)
+        self.mode_at_history_boundary(end)
     }
 
     pub(crate) fn mode_at_history_boundary(&self, hist_idx: usize) -> protocol::AgentMode {
-        let mode = protocol::effective_mode_at(
-            &self.core.session.history,
-            hist_idx,
-            self.core.session.mode.as_deref().unwrap_or("normal"),
-        );
-        protocol::AgentMode::parse(mode).unwrap_or_else(protocol::AgentMode::normal)
+        let fallback = self.core.session.mode.as_deref().unwrap_or("normal");
+        let mode = if let Some(live) = &self.live_session {
+            live.effective_mode_at(hist_idx, fallback)
+                .unwrap_or_else(|_err| {
+                    smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
+                    fallback.to_string()
+                })
+        } else {
+            protocol::effective_mode_at(&self.core.session.history, hist_idx, fallback).to_string()
+        };
+        protocol::AgentMode::parse(&mode).unwrap_or_else(protocol::AgentMode::normal)
     }
 
     pub(crate) fn current_context_note_text(&self) -> String {
@@ -2240,7 +2250,7 @@ impl TuiApp {
         // on panic. Shell-outs go through `self.terminal.as_mut().suspended()`.
         self.terminal = crate::term_setup::TuiTerminal::claim().ok();
 
-        if !self.core.session.history.is_empty() {
+        if !self.session_is_empty() {
             self.restore_screen();
             if let Some(ref slug) = self.core.session.slug {
                 self.set_task_label(slug.clone());

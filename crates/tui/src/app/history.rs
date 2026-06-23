@@ -71,6 +71,9 @@ pub(crate) fn live_session_for_test(
     smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
 }
 
+/// Every TUI full-history load must use one of these reasons. Normal resume,
+/// render, save, Lua lightweight APIs, rewind, and fork paths must stay
+/// store-backed and must not add variants here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FullSessionMaterializationReason {
     LegacyOpenFallback,
@@ -867,7 +870,7 @@ impl TuiApp {
     pub(crate) fn snapshot_context(&mut self) {
         self.session_dirty = true;
         if self.context_tokens_updated_this_turn && self.core.session.context_tokens.is_some() {
-            self.core.session.context_tokens_history_len = Some(self.core.session.history.len());
+            self.core.session.context_tokens_history_len = Some(self.session_history_len());
         }
         self.context_tokens_updated_this_turn = false;
         self.core.session.snapshot_context();
@@ -881,7 +884,7 @@ impl TuiApp {
     ) {
         self.core.session.title = Some(title);
         self.core.session.slug = Some(slug.clone());
-        let hist_len = target_history_len.unwrap_or(self.core.session.history.len());
+        let hist_len = target_history_len.unwrap_or_else(|| self.session_history_len());
         self.core.session.snapshot_metadata_at(hist_len);
         self.set_task_label(slug);
         self.save_session();
@@ -1204,7 +1207,28 @@ impl TuiApp {
         }
 
         let live_checkpoint = live_session.checkpoint.clone();
+        let descriptor_window_len = transcript
+            .descriptor_window
+            .as_ref()
+            .map_or(0, |window| window.records.len());
+        smelt_perf::perf::record_value("session:resume:store_backed", 1);
+        smelt_perf::perf::record_value(
+            "transcript:descriptor_window:active_records",
+            descriptor_window_len as u64,
+        );
+        smelt_perf::perf::record_value(
+            "live_session:suffix_items",
+            live_session.live_suffix_len() as u64,
+        );
+        smelt_perf::perf::record_value(
+            "live_session:suffix_bytes",
+            live_session.live_suffix_bytes() as u64,
+        );
         self.install_loaded_session(loaded);
+        debug_assert!(
+            self.core.session.history.is_empty(),
+            "store-backed TUI sessions must not retain materialized history"
+        );
         if self.core.session.checkpoint.is_none() {
             self.core.session.checkpoint = live_checkpoint;
         }
@@ -1234,6 +1258,9 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
+    // COMPAT(legacy-session-full-load-fallbacks): retained for explicit promotion
+    // of old in-memory-only UI flows. Normal store-backed resume, render, save,
+    // rewind, and fork paths must not call this.
     pub(crate) fn ensure_live_session_materialized(&mut self) {
         let Some(live_session) = self.live_session.take() else {
             return;
@@ -1546,6 +1573,11 @@ impl TuiApp {
         };
         let history_len = live.history_len();
         let dirty_history_from = live.dirty.history_from;
+        smelt_perf::perf::record_value("live_session:suffix_items", live.live_suffix_len() as u64);
+        smelt_perf::perf::record_value(
+            "live_session:suffix_bytes",
+            live.live_suffix_bytes() as u64,
+        );
         let descriptor_dirty = self.transcript.history().descriptor_dirty_from();
         let blobs = self.pending_image_blobs();
         if history_len == 0
