@@ -355,6 +355,19 @@ impl SessionDb {
         })
     }
 
+    pub fn save_session_history_suffix_for_import(
+        &self,
+        suffix: &SessionHistorySuffix,
+    ) -> Result<SessionSaveReport> {
+        session_snapshot::save_session_history_suffix(
+            &self.conn,
+            suffix,
+            None,
+            None,
+            self.object_compression,
+        )
+    }
+
     pub fn save_history_suffix_and_transcript_descriptor_suffix_as_writer(
         &self,
         suffix: &SessionHistorySuffix,
@@ -580,6 +593,14 @@ impl SessionDb {
 
     pub fn transcript_missing_descriptor_count(&self) -> Result<usize> {
         history::transcript_missing_descriptor_count(&self.conn)
+    }
+
+    pub fn transcript_descriptor_max_history_idx(&self) -> Result<Option<usize>> {
+        history::transcript_descriptor_max_history_idx(&self.conn)
+    }
+
+    pub fn transcript_max_block_idx(&self) -> Result<Option<u64>> {
+        history::transcript_max_block_idx(&self.conn)
     }
 
     pub fn read_transcript_block_metadata_range(

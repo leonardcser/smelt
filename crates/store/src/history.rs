@@ -325,6 +325,23 @@ pub(crate) fn transcript_missing_descriptor_count(conn: &Connection) -> Result<u
     Ok(count.max(0) as usize)
 }
 
+pub(crate) fn transcript_descriptor_max_history_idx(conn: &Connection) -> Result<Option<usize>> {
+    let idx: Option<i64> = conn.query_row(
+        "SELECT MAX(history_idx) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(idx.map(|idx| idx.max(0) as usize))
+}
+
+pub(crate) fn transcript_max_block_idx(conn: &Connection) -> Result<Option<u64>> {
+    let idx: Option<i64> =
+        conn.query_row("SELECT MAX(block_idx) FROM transcript_blocks", [], |row| {
+            row.get(0)
+        })?;
+    Ok(idx.map(|idx| idx.max(0) as u64))
+}
+
 pub(crate) fn read_transcript_block_metadata_range(
     conn: &Connection,
     range: Range<usize>,

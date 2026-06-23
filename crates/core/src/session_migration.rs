@@ -206,27 +206,25 @@ fn migrate_session_dir_to_db_inner(
 
     let has_split = dir_path.join("history.jsonl").is_file();
     let has_legacy = dir_path.join("session.json").is_file();
-    let (session, loaded_legacy_json) = if has_split {
-        match crate::session::read_jsonl_session(dir_path) {
-            Ok(session) => (session, false),
-            Err(_) if has_legacy => (crate::session::read_legacy_json_session(dir_path)?, true),
+
+    if has_split {
+        match crate::session::import_jsonl_session_to_db_streaming(dir_path) {
+            Ok(()) => {
+                crate::session::cleanup_migrated_legacy_artifacts(dir_path);
+                return Ok(SessionMigrationOutcome::Migrated);
+            }
+            Err(_) if has_legacy => {}
             Err(err) => return Err(err),
         }
-    } else {
-        (crate::session::read_legacy_json_session(dir_path)?, true)
-    };
+    }
 
+    let session = crate::session::read_legacy_json_session(dir_path)?;
     crate::session::import_legacy_session_to_db(dir_path, &session).map_err(|err| {
         SessionMigrationError::ImportSqlite {
             message: err.to_string(),
         }
     })?;
-    if loaded_legacy_json {
-        crate::session::migrate_legacy_json_session(dir_path, &session);
-    } else {
-        crate::session::write_generated_sidecars(dir_path, &session);
-        crate::session::cleanup_migrated_legacy_artifacts(dir_path);
-    }
+    crate::session::migrate_legacy_json_session(dir_path, &session);
     Ok(SessionMigrationOutcome::Migrated)
 }
 

@@ -207,6 +207,33 @@ pub(crate) fn save_session_snapshot_in_transaction(
     Ok(report)
 }
 
+pub(crate) fn save_session_history_suffix(
+    conn: &Connection,
+    suffix: &SessionHistorySuffix,
+    expected_revision: Option<u64>,
+    writer_lease: Option<&WriterLease>,
+    compression: ObjectCompression,
+) -> Result<SessionSaveReport> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = save_session_history_suffix_in_transaction(
+        conn,
+        suffix,
+        expected_revision,
+        writer_lease,
+        compression,
+    );
+    match result {
+        Ok(report) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(report)
+        }
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err)
+        }
+    }
+}
+
 pub(crate) fn save_session_history_suffix_in_transaction(
     conn: &Connection,
     suffix: &SessionHistorySuffix,

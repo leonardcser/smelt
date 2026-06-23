@@ -309,7 +309,7 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom. Silent no-op on miss.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        let store_backed = smelt_core::session::load_store_header(id);
+        let store_backed = smelt_core::session::load_store_header_or_import_bounded(id);
         if let Some((header, store_ref)) = store_backed {
             let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
                 store_ref.session_dir.clone(),

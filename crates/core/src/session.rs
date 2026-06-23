@@ -1557,6 +1557,23 @@ pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionSt
     load_store_header_for_dir(resolved.dir)
 }
 
+pub fn load_store_header_or_import_bounded(
+    id_or_prefix: &str,
+) -> Option<(SessionHeader, SessionStoreRef)> {
+    let resolved = resolve_session_dir_for_read(id_or_prefix)?;
+    match resolved.kind {
+        SessionDirKind::Store => load_store_header_for_dir(resolved.dir),
+        SessionDirKind::Jsonl => {
+            if let Err(err) = crate::session_migration::ensure_session_db(&resolved.dir) {
+                log_session_migration_error(&resolved.dir, &err);
+                return None;
+            }
+            load_store_header_for_dir(resolved.dir)
+        }
+        SessionDirKind::LegacyJson => None,
+    }
+}
+
 pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader, SessionStoreRef)> {
     let db_path = session_dir.join("session.db");
     let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
@@ -1865,22 +1882,76 @@ pub fn backfill_transcript_descriptor_records_from_history_range(
 ) -> Result<usize, smelt_store::StoreError> {
     let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
     let history = db.read_history_items_range(history_range.clone())?;
+    let records = transcript_descriptor_records_from_history_items(
+        history_range.start,
+        block_start_idx,
+        &history,
+        &std::collections::HashMap::new(),
+    )?;
+    let written = records.len();
+    db.replace_transcript_descriptor_suffix(descriptor_start_idx, &records)?;
+    Ok(written)
+}
+
+pub fn backfill_transcript_descriptors_in_history_chunks(
+    session_dir: &Path,
+    chunk_items: usize,
+    max_chunks: Option<usize>,
+) -> Result<usize, smelt_store::StoreError> {
+    let chunk_items = chunk_items.max(1);
+    let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))?;
+    let history_len = db.history_item_count()?;
+    let mut history_start = db
+        .transcript_descriptor_max_history_idx()?
+        .map_or(0, |idx| idx.saturating_add(1))
+        .min(history_len);
+    drop(db);
+
+    let mut total_written = 0usize;
+    let mut chunks = 0usize;
+    while history_start < history_len && max_chunks.is_none_or(|max| chunks < max) {
+        let history_end = history_start.saturating_add(chunk_items).min(history_len);
+        let descriptor_start = {
+            let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))?;
+            db.transcript_descriptor_count()?
+        };
+        let written = backfill_transcript_descriptor_records_from_history_range(
+            session_dir,
+            history_start..history_end,
+            descriptor_start,
+            descriptor_start as u64,
+        )?;
+        if written == 0 {
+            break;
+        }
+        total_written += written;
+        history_start = history_end;
+        chunks += 1;
+        smelt_perf::perf::record_value("session:descriptor_backfill:chunks", chunks as u64);
+        smelt_perf::perf::record_value("session:descriptor_backfill:records", total_written as u64);
+    }
+    Ok(total_written)
+}
+
+fn transcript_descriptor_records_from_history_items(
+    first_history_idx: usize,
+    block_start_idx: u64,
+    history: &[HistoryItem],
+    tool_elapsed: &std::collections::HashMap<String, u64>,
+) -> Result<Vec<smelt_store::TranscriptDescriptorRecord>, smelt_store::StoreError> {
     let mut records = Vec::new();
-    let tool_elapsed = std::collections::HashMap::new();
     for (offset, item) in history.iter().enumerate() {
         push_history_item_descriptor_rows(
             &mut records,
-            history_range.start + offset,
+            first_history_idx + offset,
             item,
-            &tool_elapsed,
+            tool_elapsed,
         )?;
     }
     for (offset, record) in records.iter_mut().enumerate() {
         record.block_idx = block_start_idx.saturating_add(offset as u64);
     }
-    let written = records.len();
-    db.replace_transcript_descriptor_suffix(descriptor_start_idx, &records)?;
-    Ok(written)
+    Ok(records)
 }
 
 fn transcript_descriptor_rows_from_session(
@@ -2126,6 +2197,20 @@ pub(crate) fn import_legacy_session_to_db(
     dir_path: &Path,
     session: &Session,
 ) -> Result<(), smelt_store::StoreError> {
+    import_legacy_session_to_db_with(
+        |db| {
+            let snapshot = store_snapshot_from_session(session, 0)?;
+            db.save_session_snapshot_for_import(&snapshot)?;
+            Ok(())
+        },
+        dir_path,
+    )
+}
+
+fn import_legacy_session_to_db_with(
+    write_import: impl FnOnce(&smelt_store::SessionDb) -> Result<(), smelt_store::StoreError>,
+    dir_path: &Path,
+) -> Result<(), smelt_store::StoreError> {
     cleanup_stale_import_temp_files(dir_path);
 
     let db_path = dir_path.join("session.db");
@@ -2143,8 +2228,7 @@ pub(crate) fn import_legacy_session_to_db(
 
     let db = smelt_store::SessionDb::open(&temp_path)?;
     let result = (|| {
-        let snapshot = store_snapshot_from_session(session, 0)?;
-        db.save_session_snapshot_for_import(&snapshot)?;
+        write_import(&db)?;
         db.import_legacy_requests_jsonl(dir_path)?;
         db.connection()
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -2176,6 +2260,111 @@ pub(crate) fn import_legacy_session_to_db(
             Err(err.into())
         }
     }
+}
+
+const LEGACY_JSONL_IMPORT_CHUNK_ITEMS: usize = 256;
+
+pub(crate) fn import_jsonl_session_to_db_streaming(
+    dir_path: &Path,
+) -> crate::session_migration::SessionMigrationResult<()> {
+    let meta = read_jsonl_meta(dir_path)?;
+    let history_path = dir_path.join("history.jsonl");
+    let history_file = open_jsonl_history_file(&history_path)?;
+    let history_bytes = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
+    smelt_perf::perf::record_value("session:migration:jsonl_history_bytes", history_bytes);
+
+    let shell = meta.into_session(Vec::new());
+    import_legacy_session_to_db_with(
+        |db| import_jsonl_history_chunks(db, &shell, &history_path, history_file),
+        dir_path,
+    )
+    .map_err(
+        |err| crate::session_migration::SessionMigrationError::ImportSqlite {
+            message: err.to_string(),
+        },
+    )
+}
+
+fn import_jsonl_history_chunks(
+    db: &smelt_store::SessionDb,
+    shell: &Session,
+    history_path: &Path,
+    history_file: fs::File,
+) -> Result<(), smelt_store::StoreError> {
+    let initial_snapshot = smelt_store::SessionSnapshot {
+        state: store_state_from_session(shell, 0)?,
+        meta_json: None,
+        history_start_idx: 0,
+        history_len: 0,
+        history: Vec::new(),
+        turn_metas: Vec::new(),
+        metadata_snapshots: Vec::new(),
+        accounting_snapshots: Vec::new(),
+    };
+    db.save_session_snapshot_for_import(&initial_snapshot)?;
+
+    let _perf = smelt_perf::perf::begin("session:migration:parse_history_jsonl_streaming");
+    let reader = std::io::BufReader::new(history_file);
+    let mut chunk = Vec::with_capacity(LEGACY_JSONL_IMPORT_CHUNK_ITEMS);
+    let mut imported = 0usize;
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| {
+            smelt_store::StoreError::Io(std::io::Error::new(
+                err.kind(),
+                format!("read {} line {}: {err}", history_path.display(), idx + 1),
+            ))
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let item = serde_json::from_str::<HistoryItem>(&line).map_err(|err| {
+            smelt_store::StoreError::Integrity(format!(
+                "parse {} line {}: {err}",
+                history_path.display(),
+                idx + 1
+            ))
+        })?;
+        chunk.push(item);
+        if chunk.len() >= LEGACY_JSONL_IMPORT_CHUNK_ITEMS {
+            write_jsonl_import_chunk(db, shell, imported, &mut chunk)?;
+            imported = db.history_item_count()?;
+        }
+    }
+    if !chunk.is_empty() {
+        write_jsonl_import_chunk(db, shell, imported, &mut chunk)?;
+        imported = db.history_item_count()?;
+    }
+
+    let side_tables = store_side_table_suffixes_from_session(shell, 0)?;
+    let suffix = smelt_store::SessionHistorySuffix {
+        state: store_state_from_session(shell, imported)?,
+        history_start_idx: imported,
+        history_len: imported,
+        history: Vec::new(),
+        side_tables: Some(side_tables),
+    };
+    db.save_session_history_suffix_for_import(&suffix)?;
+    smelt_perf::perf::record_value("session:migration:jsonl_history_items", imported as u64);
+    Ok(())
+}
+
+fn write_jsonl_import_chunk(
+    db: &smelt_store::SessionDb,
+    shell: &Session,
+    start_idx: usize,
+    chunk: &mut Vec<HistoryItem>,
+) -> Result<(), smelt_store::StoreError> {
+    let items = std::mem::take(chunk);
+    let history_len = start_idx + items.len();
+    let suffix = smelt_store::SessionHistorySuffix {
+        state: store_state_from_session(shell, history_len)?,
+        history_start_idx: start_idx,
+        history_len,
+        history: items,
+        side_tables: None,
+    };
+    db.save_session_history_suffix_for_import(&suffix)?;
+    Ok(())
 }
 
 // Import temps are only published after SQLite is closed and hard-linked into place.
@@ -2262,9 +2451,47 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 
 // COMPAT(session-split-jsonl): import pre-SQLite meta.json + history.jsonl
 // sessions into canonical SQLite storage during the alpha migration window.
+#[cfg(test)]
 pub(crate) fn read_jsonl_session(
     dir_path: &Path,
 ) -> crate::session_migration::SessionMigrationResult<Session> {
+    let meta = read_jsonl_meta(dir_path)?;
+
+    let history_path = dir_path.join("history.jsonl");
+    let history_file = open_jsonl_history_file(&history_path)?;
+    let history_len = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
+    smelt_perf::perf::record_value("session:load_full:history_jsonl_bytes", history_len);
+    let history = {
+        let _perf = smelt_perf::perf::begin("session:load_full:parse_history_jsonl");
+        let reader = std::io::BufReader::new(history_file);
+        let mut history = Vec::new();
+        for (idx, line) in reader.lines().enumerate() {
+            let line =
+                line.map_err(
+                    |err| crate::session_migration::SessionMigrationError::ReadFile {
+                        path: history_path.clone(),
+                        message: format!("line {}: {err}", idx + 1),
+                    },
+                )?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            history.push(serde_json::from_str::<HistoryItem>(&line).map_err(|err| {
+                crate::session_migration::SessionMigrationError::ParseJson {
+                    path: history_path.clone(),
+                    message: format!("line {}: {err}", idx + 1),
+                }
+            })?);
+        }
+        history
+    };
+    smelt_perf::perf::record_value("session:load_full:history_items", history.len() as u64);
+    Ok(meta.into_session(history))
+}
+
+fn read_jsonl_meta(
+    dir_path: &Path,
+) -> crate::session_migration::SessionMigrationResult<SessionJsonlMeta> {
     let meta_path = dir_path.join("meta.json");
     let meta_contents = {
         let _perf = smelt_perf::perf::begin("session:load_full:read_meta_json");
@@ -2301,50 +2528,24 @@ pub(crate) fn read_jsonl_session(
             },
         );
     }
+    Ok(meta)
+}
 
-    let history_path = dir_path.join("history.jsonl");
-    let history_file = {
-        let _perf = smelt_perf::perf::begin("session:load_full:open_history_jsonl");
-        fs::File::open(&history_path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => {
-                crate::session_migration::SessionMigrationError::MissingFile {
-                    path: history_path.clone(),
-                }
+fn open_jsonl_history_file(
+    history_path: &Path,
+) -> crate::session_migration::SessionMigrationResult<fs::File> {
+    let _perf = smelt_perf::perf::begin("session:load_full:open_history_jsonl");
+    fs::File::open(history_path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => {
+            crate::session_migration::SessionMigrationError::MissingFile {
+                path: history_path.to_path_buf(),
             }
-            _ => crate::session_migration::SessionMigrationError::ReadFile {
-                path: history_path.clone(),
-                message: err.to_string(),
-            },
-        })?
-    };
-    let history_len = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    smelt_perf::perf::record_value("session:load_full:history_jsonl_bytes", history_len);
-    let history = {
-        let _perf = smelt_perf::perf::begin("session:load_full:parse_history_jsonl");
-        let reader = std::io::BufReader::new(history_file);
-        let mut history = Vec::new();
-        for (idx, line) in reader.lines().enumerate() {
-            let line =
-                line.map_err(
-                    |err| crate::session_migration::SessionMigrationError::ReadFile {
-                        path: history_path.clone(),
-                        message: format!("line {}: {err}", idx + 1),
-                    },
-                )?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            history.push(serde_json::from_str::<HistoryItem>(&line).map_err(|err| {
-                crate::session_migration::SessionMigrationError::ParseJson {
-                    path: history_path.clone(),
-                    message: format!("line {}: {err}", idx + 1),
-                }
-            })?);
         }
-        history
-    };
-    smelt_perf::perf::record_value("session:load_full:history_items", history.len() as u64);
-    Ok(meta.into_session(history))
+        _ => crate::session_migration::SessionMigrationError::ReadFile {
+            path: history_path.to_path_buf(),
+            message: err.to_string(),
+        },
+    })
 }
 
 // COMPAT(session-json-monolith): read old monolithic session.json files only as
@@ -3185,6 +3386,53 @@ mod tests {
         let migrated = load_db_session(dir.path()).expect("load migrated db session");
         assert_eq!(migrated.title.as_deref(), Some("split title"));
         assert_eq!(migrated.history.len(), 1);
+    }
+
+    #[test]
+    fn migration_streams_split_session_chunks_and_backfills_descriptors_incrementally() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "split-streaming-migrate".into();
+        s.title = Some("streaming split".into());
+        for i in 0..(LEGACY_JSONL_IMPORT_CHUNK_ITEMS + 5) {
+            s.history.push(user_item(&format!("stream prompt {i}")));
+        }
+        fs::write(
+            dir.path().join("meta.json"),
+            encode_session_jsonl_meta(&s).expect("encode meta"),
+        )
+        .expect("write meta");
+        fs::write(
+            dir.path().join("history.jsonl"),
+            encode_history_jsonl(&s.history).expect("encode history"),
+        )
+        .expect("write history");
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let outcome = migrate_session_dir_to_db(dir.path()).expect("migrate split");
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+
+        assert_eq!(outcome, SessionMigrationOutcome::Migrated);
+        assert!(dir.path().join("session.db").is_file());
+        assert!(!dir.path().join("history.jsonl").exists());
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        assert_eq!(db.history_item_count().unwrap(), s.history.len());
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert_eq!(db.transcript_block_count().unwrap(), s.history.len());
+        assert!(snapshot
+            .durations
+            .iter()
+            .all(|row| row.label != "session:load_full:parse_history_jsonl"));
+        drop(db);
+
+        let written = backfill_transcript_descriptors_in_history_chunks(dir.path(), 32, Some(1))
+            .expect("backfill one chunk");
+        assert!(written > 0);
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), written);
+        assert!(db.history_item_count().unwrap() > db.transcript_descriptor_count().unwrap());
     }
 
     #[test]
