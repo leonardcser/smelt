@@ -62,11 +62,9 @@ app_story!(prompt_slash_completion_two_rows_when_cramped, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(prompt_modal_picker_hides_tip, |ctx| {
-    // Secondary prompt-docked pickers (for slash-command follow-ups like
-    // /model, file finders, and reverse history search) own the prompt via
-    // smelt.prompt.acquire(). The discovery tip must stay hidden while that
-    // modal picker is open even though the prompt text is empty.
+app_story!(prompt_modal_picker_keeps_tip_visible, |ctx| {
+    // A modal prompt-docked picker opens above the visible tip row, so the
+    // transcript and prompt chrome do not shift.
     ctx.set_viewport(50, 10);
     ctx.run_lua(
         r#"
@@ -181,8 +179,7 @@ app_story!(
 );
 
 app_story!(prompt_slash_completion_with_live_notification, |ctx| {
-    // When a toast arrives while slash completion is already open, it paints
-    // above the prompt-docked picker.
+    // A live toast sits below prompt-docked picker rows, not over them.
     ctx.set_viewport(50, 8);
     ctx.type_prompt("/");
     ctx.notify("slash notice", None);
@@ -191,7 +188,7 @@ app_story!(prompt_slash_completion_with_live_notification, |ctx| {
 
 app_story!(prompt_file_completion_with_error_notification, |ctx| {
     // `@file` uses the same prompt-docked picker plane as slash completion.
-    // An error toast must paint above the picker row when they coincide.
+    // An error toast sits below the picker rows when they coincide.
     ctx.set_viewport(50, 8);
     ctx.run_lua(
         r#"
@@ -234,6 +231,19 @@ app_story!(prompt_model_picker_with_notification, |ctx| {
     ]);
     ctx.run_command("/model");
     ctx.notify("model notice", None);
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_picker_with_queue_stash_and_notification, |ctx| {
+    // Picker rows stay above all prompt-adjacent chrome. Notification replaces
+    // the tip; queue and stash remain inside the prompt top bar.
+    ctx.set_viewport(50, 12);
+    ctx.type_prompt("draft note");
+    ctx.stash_prompt();
+    ctx.push_queued_message("first follow-up");
+    ctx.push_queued_message("second follow-up");
+    ctx.type_prompt("/");
+    ctx.notify("queued notice", None);
     ctx.assert_snapshot();
 });
 

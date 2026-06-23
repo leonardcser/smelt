@@ -121,10 +121,11 @@ pub(crate) fn open(
             },
         },
     )?;
-    let height = picker_height(total, placement, &app.ui);
+    let notification_visible = app.notification.is_some();
+    let height = picker_height(total, placement, &app.ui, notification_visible);
     let overlay = Overlay::new(
         layout_for(leaf, height),
-        anchor_for(&app.ui, placement, height),
+        anchor_for(&app.ui, placement, height, notification_visible),
     )
     .with_z(z)
     .blocks_agent(blocks_agent);
@@ -163,8 +164,14 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     state.items = items;
     state.selected = clamp_selected(selected, state.items.len());
     state.materialized = 0..0;
-    let height = picker_height(state.items.len(), state.placement, &app.ui);
-    let new_anchor = anchor_for(&app.ui, state.placement, height);
+    let notification_visible = app.notification.is_some();
+    let height = picker_height(
+        state.items.len(),
+        state.placement,
+        &app.ui,
+        notification_visible,
+    );
+    let new_anchor = anchor_for(&app.ui, state.placement, height, notification_visible);
     let overlay = state.overlay;
     app.picker_state.insert(leaf, state);
 
@@ -235,8 +242,9 @@ pub(crate) fn sync_layouts(app: &mut TuiApp) {
             continue;
         }
         let total = state.items.len();
-        let height = picker_height(total, state.placement, &app.ui);
-        let new_anchor = anchor_for(&app.ui, state.placement, height);
+        let notification_visible = app.notification.is_some();
+        let height = picker_height(total, state.placement, &app.ui, notification_visible);
+        let new_anchor = anchor_for(&app.ui, state.placement, height, notification_visible);
         if let Some(ov) = app.ui.overlay_mut(state.overlay) {
             ov.layout = layout_for(leaf, height);
             ov.anchor = new_anchor;
@@ -275,7 +283,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
     };
     let total = state.items.len();
     state.selected = clamp_selected(selected, total);
-    let height = picker_height(total, state.placement, &app.ui);
+    let height = picker_height(total, state.placement, &app.ui, app.notification.is_some());
     let selected_visual = visual_cursor(state.selected, total, state.reversed);
     let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top()).unwrap_or(0);
     let scroll = match anchor {
@@ -332,7 +340,11 @@ fn clamp_selected(selected: usize, total: usize) -> usize {
 /// Effective row cap for docked pickers, limited by available headroom so
 /// overlays never cover their input chrome. Non-docked placements use the
 /// default picker cap.
-fn effective_max_rows(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> u16 {
+fn effective_max_rows(
+    placement: PickerPlacement,
+    ui: &crate::smelt_edit::Ui,
+    notification_visible: bool,
+) -> u16 {
     let desired = match placement {
         PickerPlacement::PromptDocked { max_rows }
         | PickerPlacement::CmdlineDocked { max_rows } => max_rows,
@@ -341,9 +353,9 @@ fn effective_max_rows(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) ->
     match placement {
         PickerPlacement::PromptDocked { .. } => {
             let headroom = crate::content::layout::available_rows_above_prompt_chrome(ui);
-            // Always keep at least one row so the picker remains usable even when
-            // the prompt block fills the entire terminal.
-            desired.max(1).min(headroom.max(1))
+            let reserved = if notification_visible { 1 } else { 0 };
+            let usable = headroom.saturating_sub(reserved).max(1);
+            desired.max(1).min(usable)
         }
         PickerPlacement::CmdlineDocked { .. } => {
             let (_, term_h) = ui.terminal_size();
@@ -354,9 +366,14 @@ fn effective_max_rows(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) ->
     }
 }
 
-fn picker_height(item_count: usize, placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> u16 {
+fn picker_height(
+    item_count: usize,
+    placement: PickerPlacement,
+    ui: &crate::smelt_edit::Ui,
+    notification_visible: bool,
+) -> u16 {
     let n = item_count.max(1) as u16;
-    n.min(effective_max_rows(placement, ui))
+    n.min(effective_max_rows(placement, ui, notification_visible))
 }
 
 fn logical_from_visual(visual: RowIndex, n: usize, reversed: bool) -> usize {
@@ -390,14 +407,24 @@ fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
     )])
 }
 
-fn anchor_for(ui: &crate::smelt_edit::Ui, placement: PickerPlacement, height: u16) -> Anchor {
+fn anchor_for(
+    ui: &crate::smelt_edit::Ui,
+    placement: PickerPlacement,
+    height: u16,
+    notification_visible: bool,
+) -> Anchor {
     match placement {
         // Float above the prompt's chrome stack. Anchoring at the top
         // bar's window (rather than offset-from-prompt-input) keeps the
         // picker correctly placed when queued messages or a stash row
         // grow the top bar past one row.
         PickerPlacement::PromptDocked { .. } => {
-            crate::content::layout::anchor_above_prompt_chrome(ui, height)
+            let offset_rows = if notification_visible {
+                height.saturating_add(1)
+            } else {
+                height
+            };
+            crate::content::layout::anchor_above_prompt_chrome(ui, offset_rows)
         }
         PickerPlacement::ScreenCenter => Anchor::ScreenCenter,
         PickerPlacement::Cursor => Anchor::Cursor {
@@ -493,20 +520,29 @@ mod tests {
     #[test]
     fn picker_height_uses_item_count_when_below_cap() {
         let ui = fresh_ui();
-        assert_eq!(picker_height(3, PickerPlacement::ScreenCenter, &ui), 3);
+        assert_eq!(
+            picker_height(3, PickerPlacement::ScreenCenter, &ui, false),
+            3
+        );
     }
 
     #[test]
     fn picker_height_clamps_to_max_rows_when_items_exceed_cap() {
         let ui = fresh_ui();
-        assert_eq!(picker_height(50, PickerPlacement::ScreenCenter, &ui), 32);
+        assert_eq!(
+            picker_height(50, PickerPlacement::ScreenCenter, &ui, false),
+            32
+        );
     }
 
     #[test]
     fn picker_height_is_at_least_one_for_empty_lists() {
         // An empty picker still needs a row to show "(no matches)".
         let ui = fresh_ui();
-        assert_eq!(picker_height(0, PickerPlacement::ScreenCenter, &ui), 1);
+        assert_eq!(
+            picker_height(0, PickerPlacement::ScreenCenter, &ui, false),
+            1
+        );
     }
 
     #[test]
@@ -514,7 +550,7 @@ mod tests {
         // `max_rows = 0` is meaningless; fall back to a one-row picker.
         let ui = fresh_ui();
         assert_eq!(
-            picker_height(5, PickerPlacement::PromptDocked { max_rows: 0 }, &ui),
+            picker_height(5, PickerPlacement::PromptDocked { max_rows: 0 }, &ui, false),
             1
         );
     }
@@ -525,13 +561,26 @@ mod tests {
         // With an 80x24 terminal and a one-row prompt at the bottom, the
         // transcript occupies rows 0..21 and headroom above the prompt is 22.
         let placement = PickerPlacement::PromptDocked { max_rows: 8 };
-        assert_eq!(picker_height(50, placement, &ui), 8);
+        assert_eq!(picker_height(50, placement, &ui, false), 8);
 
         // Shrink terminal so only three rows sit above the one-row prompt
         // (seed layout: transcript + gap + prompt).
         ui.set_terminal_size(80, 4);
         ui.set_layout(crate::content::layout::seed_layout_tree(1));
-        assert_eq!(picker_height(50, placement, &ui), 3);
+        assert_eq!(picker_height(50, placement, &ui, false), 3);
+    }
+
+    #[test]
+    fn picker_height_prompt_docked_reserves_row_for_notification() {
+        let ui = ui_with_prompt_layout(80, 24);
+        let placement = PickerPlacement::PromptDocked { max_rows: 8 };
+        // Same headroom as above (22 rows), but one row is reserved for a
+        // visible notification toast.
+        assert_eq!(picker_height(50, placement, &ui, true), 8);
+
+        // On a short terminal the usable headroom drops by one.
+        let ui = ui_with_prompt_layout(80, 4);
+        assert_eq!(picker_height(50, placement, &ui, true), 2);
     }
 
     fn ui_with_prompt_layout(term_w: u16, term_h: u16) -> crate::smelt_edit::Ui {
@@ -686,9 +735,19 @@ mod tests {
         // prompt input itself with `-height` offset. That matches the
         // cold-start case where the Lua composer hasn't run yet.
         let ui = fresh_ui();
-        let a = anchor_for(&ui, PickerPlacement::PromptDocked { max_rows: 8 }, 5);
+        let a = anchor_for(&ui, PickerPlacement::PromptDocked { max_rows: 8 }, 5, false);
         match a {
             Anchor::Win { row_offset, .. } => assert_eq!(row_offset, -5),
+            other => panic!("expected Anchor::Win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anchor_for_prompt_docked_shifts_up_for_notification() {
+        let ui = fresh_ui();
+        let a = anchor_for(&ui, PickerPlacement::PromptDocked { max_rows: 8 }, 5, true);
+        match a {
+            Anchor::Win { row_offset, .. } => assert_eq!(row_offset, -6),
             other => panic!("expected Anchor::Win, got {other:?}"),
         }
     }
@@ -697,7 +756,7 @@ mod tests {
     fn anchor_for_screen_center_returns_centered_anchor() {
         let ui = fresh_ui();
         assert!(matches!(
-            anchor_for(&ui, PickerPlacement::ScreenCenter, 4),
+            anchor_for(&ui, PickerPlacement::ScreenCenter, 4, false),
             Anchor::ScreenCenter
         ));
     }
@@ -705,7 +764,7 @@ mod tests {
     #[test]
     fn anchor_for_cursor_places_overlay_one_row_below_cursor() {
         let ui = fresh_ui();
-        match anchor_for(&ui, PickerPlacement::Cursor, 3) {
+        match anchor_for(&ui, PickerPlacement::Cursor, 3, false) {
             Anchor::Cursor {
                 row_offset,
                 col_offset,
@@ -727,7 +786,7 @@ mod tests {
         // overlays that need to clear chrome anchor explicitly against
         // the Lua-allocated statusline window.
         let ui = fresh_ui();
-        match anchor_for(&ui, PickerPlacement::ScreenBottom, 4) {
+        match anchor_for(&ui, PickerPlacement::ScreenBottom, 4, false) {
             Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 0),
             other => panic!("expected Anchor::ScreenBottom, got {other:?}"),
         }
@@ -736,7 +795,12 @@ mod tests {
     #[test]
     fn anchor_for_cmdline_docked_reserves_cmdline_row() {
         let ui = fresh_ui();
-        match anchor_for(&ui, PickerPlacement::CmdlineDocked { max_rows: 8 }, 4) {
+        match anchor_for(
+            &ui,
+            PickerPlacement::CmdlineDocked { max_rows: 8 },
+            4,
+            false,
+        ) {
             Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 1),
             other => panic!("expected Anchor::ScreenBottom, got {other:?}"),
         }
@@ -747,7 +811,12 @@ mod tests {
         let mut ui = fresh_ui();
         ui.set_terminal_size(80, 5);
         assert_eq!(
-            picker_height(50, PickerPlacement::CmdlineDocked { max_rows: 8 }, &ui),
+            picker_height(
+                50,
+                PickerPlacement::CmdlineDocked { max_rows: 8 },
+                &ui,
+                false
+            ),
             4
         );
     }

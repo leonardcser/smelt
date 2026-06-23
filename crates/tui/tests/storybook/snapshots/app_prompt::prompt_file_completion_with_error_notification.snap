@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 439
+assertion_line: 515
 expression: frame.text()
 ---
 
-
  src/main.rs
+ src
   error  file lookup failed
 ──────────────────────────────────────────────────
  @

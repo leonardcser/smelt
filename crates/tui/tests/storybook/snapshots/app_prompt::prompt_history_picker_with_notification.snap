@@ -1,10 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
 
-
  explain the renderer layering
+ open the model picker next
   info  history notice
 ──────────────────────────────────────────────────
 

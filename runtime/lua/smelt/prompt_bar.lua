@@ -83,14 +83,21 @@ local function more_row(hidden, width)
   }
 end
 
-local function should_show_tip(queued)
+-- Baseline for whether the tip row is allowed: empty prompt, idle, no
+-- stash/queue/notification, and tips enabled. A modal picker should not hide
+-- the tip; the picker is positioned above the prompt chrome instead.
+local function tip_eligible(queued)
   if not tips.enabled() then return false end
   if #queued > 0 or smelt.prompt.has_stash() then return false end
   if (smelt.prompt.text() or "") ~= "" then return false end
-  if smelt.prompt.is_modal and smelt.prompt.is_modal() then return false end
   if smelt.signal.get("notification_visible") then return false end
   local work_state = smelt.signal.get("work_state")
-  return not work_state or work_state == "idle"
+  if work_state and work_state ~= "idle" then return false end
+  return true
+end
+
+local function should_show_tip(queued)
+  return tip_eligible(queued)
 end
 
 local function tip_row(width)
