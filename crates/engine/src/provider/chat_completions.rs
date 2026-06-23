@@ -440,6 +440,7 @@ mod tests {
             )]),
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         let args = &body["messages"][0]["tool_calls"][0]["function"]["arguments"];
@@ -463,6 +464,7 @@ mod tests {
             )]),
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(
             &[
@@ -498,6 +500,7 @@ mod tests {
             )]),
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         let args = &body["messages"][0]["tool_calls"][0]["function"]["arguments"];

@@ -13,7 +13,7 @@ local state = smelt.state.get("debug_panel")
 local NS_HL = smelt.ns("smelt.debug_panel")
 
 local PANEL_W = 52
-local PANEL_H = 24
+local PANEL_H = 30
 
 local function panel_title()
 	return smelt.dialog.title({
@@ -52,6 +52,15 @@ local function add_kv(lines, spans, key, val, width)
 	local line = key_str .. val_str
 	lines[#lines + 1] = line
 	table.insert(spans, { row = #lines, col = 0, end_col = #key_str, fg = "Comment" })
+end
+
+local function join_array(values, sep)
+	if type(values) ~= "table" then return "nil" end
+	local out = {}
+	for _, value in ipairs(values) do
+		out[#out + 1] = tostring(value)
+	end
+	return #out > 0 and table.concat(out, sep or ",") or "nil"
 end
 
 local function compact_stats()
@@ -98,6 +107,7 @@ local function compose_lines(win)
 
 	local pricing = smelt.model.pricing()
 	local mcfg = smelt.config.model_config()
+	local caps = smelt.model.capabilities()
 
 	add_kv(lines, spans, "model", model, width)
 	add_kv(lines, spans, "provider", provider, width)
@@ -123,8 +133,22 @@ local function compose_lines(win)
 		ctx_str = "nil"
 	end
 	add_kv(lines, spans, "context", ctx_str, width)
-	local max_tok = smelt.model.max_tokens()
+	local max_tok = caps.max_tokens or smelt.model.max_tokens()
 	add_kv(lines, spans, "max_tokens", max_tok and fmt_num(max_tok) or "default", width)
+	add_kv(lines, spans, "modalities", join_array(caps.input_modalities, ","), width)
+	local cap_parts = {}
+	cap_parts[#cap_parts + 1] = "img=" .. fmt_bool(caps.supports_image)
+	cap_parts[#cap_parts + 1] = "pdf=" .. fmt_bool(caps.supports_pdf)
+	cap_parts[#cap_parts + 1] = "vid=" .. fmt_bool(caps.supports_video)
+	if caps.supports_reasoning ~= nil then
+		cap_parts[#cap_parts + 1] = "rsn=" .. fmt_bool(caps.supports_reasoning)
+	end
+	cap_parts[#cap_parts + 1] = "tools=" .. fmt_bool(caps.tool_calling)
+	add_kv(lines, spans, "capabilities", table.concat(cap_parts, " "), width)
+	local transport = caps.transport or {}
+	add_kv(lines, spans, "transport", string.format("mm_tools=%s", fmt_bool(transport.multimodal_tool_results)), width)
+	local sources = caps.sources or {}
+	add_kv(lines, spans, "cap_sources", string.format("mods=%s ctx=%s max=%s", sources.input_modalities or "?", sources.context_window or "?", sources.max_tokens or "?"), width)
 	add_kv(lines, spans, "auto_compact", fmt_bool(smelt.settings.auto_compact), width)
 	add_kv(lines, spans, "threshold", string.format("%.0f%%", (smelt.settings.compact_threshold or 0.8) * 100), width)
 	add_kv(lines, spans, "compactions", compact_stats(), width)

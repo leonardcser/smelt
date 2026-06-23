@@ -728,27 +728,36 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                 let calls: Vec<ToolCall> = m.tool_calls.clone().unwrap_or_default();
                 // Collect Role::Tool messages directly following this
                 // assistant. Pair by call_id.
-                let mut results_by_id: std::collections::HashMap<String, (String, bool)> =
-                    std::collections::HashMap::new();
+                let mut results_by_id: std::collections::HashMap<
+                    String,
+                    (String, bool, Option<serde_json::Value>),
+                > = std::collections::HashMap::new();
                 let mut j = i + 1;
                 while j < messages.len() && matches!(messages[j].role, Role::Tool) {
                     if let (Some(id), Some(content)) = (
                         messages[j].tool_call_id.clone(),
                         messages[j].content.clone(),
                     ) {
-                        results_by_id
-                            .insert(id, (content.as_text().to_string(), messages[j].is_error));
+                        results_by_id.insert(
+                            id,
+                            (
+                                content.as_text().to_string(),
+                                messages[j].is_error,
+                                messages[j].tool_metadata.clone(),
+                            ),
+                        );
                     }
                     j += 1;
                 }
                 let invocations = calls
                     .into_iter()
                     .map(|tc| {
-                        let (content, is_error) =
+                        let (content, is_error, metadata) =
                             results_by_id.remove(&tc.id).unwrap_or_else(|| {
                                 (
                                     "interrupted (resumed): no recorded tool result".into(),
                                     true,
+                                    None,
                                 )
                             });
                         ToolInvocation {
@@ -758,7 +767,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                             result: ToolOutcome {
                                 content,
                                 is_error,
-                                metadata: None,
+                                metadata,
                             },
                             elapsed_ms: None,
                         }
@@ -822,10 +831,11 @@ pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
                     tool_calls,
                 ));
                 for inv in &turn.invocations {
-                    out.push(Message::tool(
+                    out.push(Message::tool_with_metadata(
                         inv.call_id.clone(),
                         inv.result.content.clone(),
                         inv.result.is_error,
+                        inv.result.metadata.clone(),
                     ));
                 }
             }

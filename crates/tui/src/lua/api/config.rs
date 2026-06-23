@@ -53,7 +53,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "model_config",
-        "Resolved model-level sampling and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.",
+        "Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let cfg = crate::lua::try_with_app(|app| app.core.config.model_config.clone())
@@ -82,6 +82,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             if let Some(v) = cfg.max_tokens {
                 t.set("max_tokens", v)?;
+            }
+            if let Some(v) = cfg.context_window {
+                t.set("context_window", v)?;
+            }
+            if let Some(v) = cfg.supports_reasoning {
+                t.set("supports_reasoning", v)?;
+            }
+            if let Some(values) = cfg.input_modalities {
+                let arr = lua.create_table()?;
+                for (i, value) in values.iter().enumerate() {
+                    arr.set(i + 1, value.as_str())?;
+                }
+                t.set("input_modalities", arr)?;
             }
             if let Some(budgets) = cfg.thinking_budgets {
                 let b = lua.create_table()?;

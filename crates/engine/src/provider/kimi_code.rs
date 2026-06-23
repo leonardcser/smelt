@@ -60,11 +60,19 @@ impl KimiCodeModelInfo {
 
 impl From<KimiCodeModelInfo> for protocol::ModelMetadata {
     fn from(model: KimiCodeModelInfo) -> Self {
+        let mut input_modalities = vec!["text".to_string()];
+        if model.supports_image_in == Some(true) {
+            input_modalities.push("image".to_string());
+        }
+        if model.supports_video_in == Some(true) {
+            input_modalities.push("video".to_string());
+        }
         Self {
             id: model.id,
             display_name: model.display_name,
             context_window: model.context_length,
             supports_reasoning: model.supports_reasoning,
+            input_modalities: Some(input_modalities),
         }
     }
 }

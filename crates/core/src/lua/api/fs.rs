@@ -304,6 +304,51 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     {
         let s = shared.clone();
         fs.private_fn(
+            "__start_file_info",
+            &["task_id", "path"],
+            move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match std::fs::metadata(&path) {
+                        Ok(meta) => {
+                            if !meta.is_file() {
+                                return serde_json::json!({ "err": "not a regular file" });
+                            }
+                            match std::fs::File::open(&path) {
+                                Ok(mut file) => {
+                                    use std::io::Read;
+                                    let mut sample = vec![0u8; 8192];
+                                    let n = file.read(&mut sample).unwrap_or(0);
+                                    sample.truncate(n);
+                                    let file_kind = if sample.starts_with(b"%PDF-") {
+                                        "pdf"
+                                    } else if engine::image::sniff_image_mime(&sample).is_some() {
+                                        "image"
+                                    } else if std::str::from_utf8(&sample).is_ok() {
+                                        "text"
+                                    } else {
+                                        "binary"
+                                    };
+                                    serde_json::json!({
+                                        "is_file": true,
+                                        "len": meta.len(),
+                                        "kind": file_kind,
+                                        "mtime_ms": crate::fs::file_mtime_ms(&path).unwrap_or(0),
+                                    })
+                                }
+                                Err(err) => serde_json::json!({ "err": err.to_string() }),
+                            }
+                        }
+                        Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.private_fn(
             "__start_read",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {

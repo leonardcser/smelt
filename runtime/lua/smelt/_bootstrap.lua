@@ -517,6 +517,12 @@ function smelt.fs.read_async(path)
   return nil, result.err, nil
 end
 
+-- Return `{ is_file, len, mtime_ms }` for `path` off the main thread, or `(nil, err)`.
+---@type fun(path: string): table?, string?
+function smelt.fs.file_info_async(path)
+  return external_or_err(function(id) smelt.fs.__start_file_info(id, path) end)
+end
+
 -- Write `contents` to `path` off the main thread. Same yielding rules as
 -- `smelt.fs.read_async`. Returns `(true, nil, mtime_ms)` on success or
 -- `(false, err, nil)` on failure - mirrors `smelt.fs.write`.

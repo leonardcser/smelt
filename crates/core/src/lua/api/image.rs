@@ -22,6 +22,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     m.fn_(
+        "mime_from_path",
+        "Return the image MIME type inferred from `p`'s extension.",
+        &["p"],
+        |_, p: String| Ok(engine::image::mime_from_path(&p).to_string()),
+    )?;
+
+    m.fn_(
+        "label_from_path",
+        "Return a display label for an image path.",
+        &["p"],
+        |_, p: String| Ok(engine::image::image_label_from_path(&p)),
+    )?;
+
+    m.fn_(
         "read_as_data_url",
         "Read the image at `p` and encode it as a `data:` URL. Returns `(url, nil)` on success or `(nil, err_string)` on failure.",
         &["p"],

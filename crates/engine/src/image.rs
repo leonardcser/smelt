@@ -5,8 +5,38 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 pub fn is_image_file(path: &str) -> bool {
+    if let Ok(bytes) = std::fs::read(path) {
+        if sniff_image_mime(&bytes).is_some() {
+            return true;
+        }
+    }
     let lower = path.to_lowercase();
     IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    let prefix = std::str::from_utf8(&bytes[..bytes.len().min(256)])
+        .ok()?
+        .trim_start();
+    if prefix.starts_with("<svg") || prefix.starts_with("<?xml") && prefix.contains("<svg") {
+        return Some("image/svg+xml");
+    }
+    None
 }
 
 fn mime_from_extension(path: &str) -> &'static str {
@@ -25,6 +55,13 @@ fn mime_from_extension(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         _ => "image/png",
     }
+}
+
+pub fn mime_from_path(path: &str) -> &'static str {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| sniff_image_mime(&bytes))
+        .unwrap_or_else(|| mime_from_extension(path))
 }
 
 /// Read an image file and return a data URL (`data:mime;base64,...`).

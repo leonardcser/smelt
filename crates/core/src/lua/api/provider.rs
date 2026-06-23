@@ -48,6 +48,8 @@ pub struct LuaProviderModel {
     pub context_window: Option<u32>,
     /// Whether this model supports reasoning/thinking parameters.
     pub supports_reasoning: Option<bool>,
+    /// Input modalities supported by this model, for example { "text", "image", "pdf" }.
+    pub input_modalities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -126,6 +128,7 @@ impl FromLua for LuaModelEntry {
                     thinking_budgets: m.thinking_budgets.map(Into::into),
                     context_window: m.context_window,
                     supports_reasoning: m.supports_reasoning,
+                    input_modalities: m.input_modalities,
                 }))
             }
             other => Err(mlua::Error::external(format!(

@@ -6,6 +6,7 @@ use super::{
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
+use base64::Engine;
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
 };
@@ -168,6 +169,54 @@ fn anthropic_content_blocks(content: Option<&protocol::Content>) -> Vec<serde_js
     }
 }
 
+fn anthropic_file_attachment_block(metadata: &serde_json::Value) -> Option<serde_json::Value> {
+    let modality = metadata.get("modality")?.as_str()?;
+    let path = metadata.get("path")?.as_str()?;
+    let mime = metadata.get("mime")?.as_str()?;
+    let bytes = std::fs::read(path).ok()?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    match modality {
+        "image" => Some(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": data,
+            },
+        })),
+        "pdf" => Some(serde_json::json!({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": data,
+            },
+        })),
+        _ => None,
+    }
+}
+
+fn anthropic_tool_result_content(m: &Message) -> serde_json::Value {
+    let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+    let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);
+    let Some(metadata) = &m.tool_metadata else {
+        return serde_json::Value::String(trimmed);
+    };
+    if metadata.get("kind").and_then(|v| v.as_str()) != Some("file_attachment") {
+        return serde_json::Value::String(trimmed);
+    }
+    let mut parts = vec![serde_json::json!({"type": "text", "text": trimmed})];
+    if let Some(block) = anthropic_file_attachment_block(metadata) {
+        parts.push(block);
+    } else {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": "attachment could not be read for provider request",
+        }));
+    }
+    serde_json::Value::Array(parts)
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -236,14 +285,12 @@ pub(super) fn build_body(
                 content.push(message);
             }
             Role::Tool => {
-                let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-                let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);
                 content.push(serde_json::json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
-                        "content": trimmed,
+                        "content": anthropic_tool_result_content(m),
                     }],
                 }));
             }
@@ -791,6 +838,50 @@ mod tests {
     // ---- build_body ----
 
     #[test]
+    fn build_body_serializes_tool_result_image_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nimage-bytes").unwrap();
+        let tool = Message::tool_with_metadata(
+            "toolu_1".into(),
+            "image file attached",
+            false,
+            Some(json!({
+                "kind": "file_attachment",
+                "modality": "image",
+                "path": path.to_string_lossy(),
+                "mime": "image/png",
+                "label": "tiny.png"
+            })),
+        );
+        let body = build_body(
+            &[
+                assistant_calls(
+                    None,
+                    vec![ToolCall::new(
+                        "toolu_1".into(),
+                        FunctionCall {
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        },
+                    )],
+                ),
+                tool,
+            ],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+        let result_content = &body["messages"][1]["content"][0]["content"];
+        assert_eq!(result_content[0]["type"], "text");
+        assert_eq!(result_content[1]["type"], "image");
+        assert_eq!(result_content[1]["source"]["media_type"], "image/png");
+        assert_eq!(result_content[1]["source"]["type"], "base64");
+    }
+
+    #[test]
     fn build_body_joins_multiple_system_messages_with_double_newline() {
         let body = build_body(
             &[system("first"), system("second"), user("hi")],
@@ -1009,6 +1100,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(
             &[msg],
@@ -1714,6 +1806,7 @@ mod tests {
             )]),
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(
             &[m],
@@ -1744,6 +1837,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(
             &[m],

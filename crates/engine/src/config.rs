@@ -27,6 +27,8 @@ pub struct ModelConfig {
     pub context_window: Option<u32>,
     /// Whether metadata says this model supports reasoning/thinking parameters.
     pub supports_reasoning: Option<bool>,
+    /// Input modalities supported by this model, such as `text`, `image`, and `pdf`.
+    pub input_modalities: Option<Vec<String>>,
 }
 
 impl ModelConfig {

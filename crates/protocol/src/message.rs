@@ -24,6 +24,9 @@ pub struct Message {
     /// Whether this tool result is an error. Only meaningful for `Role::Tool`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
+    /// Structured metadata for tool results. Only meaningful for `Role::Tool`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_metadata: Option<serde_json::Value>,
 }
 
 /// Opaque reasoning block captured from a provider response. `provider`
@@ -54,6 +57,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         }
     }
 
@@ -66,6 +70,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         }
     }
 
@@ -91,10 +96,20 @@ impl Message {
             tool_calls,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         }
     }
 
     pub fn tool(call_id: String, content: impl Into<String>, is_error: bool) -> Self {
+        Self::tool_with_metadata(call_id, content, is_error, None)
+    }
+
+    pub fn tool_with_metadata(
+        call_id: String,
+        content: impl Into<String>,
+        is_error: bool,
+        metadata: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: Some(Content::text(content)),
@@ -103,6 +118,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(call_id),
             is_error,
+            tool_metadata: metadata,
         }
     }
 }

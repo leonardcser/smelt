@@ -443,6 +443,7 @@ impl From<CopilotModel> for protocol::ModelMetadata {
             display_name: Some(model.name),
             context_window: model.context_window,
             supports_reasoning: (!model.supported_reasoning_efforts.is_empty()).then_some(true),
+            input_modalities: None,
         }
     }
 }

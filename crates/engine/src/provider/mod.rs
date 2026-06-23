@@ -1806,6 +1806,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         }
     }
 
@@ -2444,6 +2445,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         assert!(messages_have_images(&[m]));
     }
@@ -2462,6 +2464,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         assert!(!messages_have_images(&[m]));
     }

@@ -33,6 +33,8 @@ pub struct ModelConfig {
     pub context_window: Option<u32>,
     /// Whether metadata says this model supports reasoning/thinking parameters.
     pub supports_reasoning: Option<bool>,
+    /// Input modalities supported by this model, such as `text`, `image`, and `pdf`.
+    pub input_modalities: Option<Vec<String>>,
 }
 
 impl From<&ModelConfig> for engine::ModelConfig {
@@ -53,6 +55,7 @@ impl From<&ModelConfig> for engine::ModelConfig {
             thinking_budgets: c.thinking_budgets,
             context_window: c.context_window,
             supports_reasoning: c.supports_reasoning,
+            input_modalities: c.input_modalities.clone(),
         }
     }
 }
@@ -533,6 +536,7 @@ impl Config {
             {
                 resolved_model.config.context_window = model.context_window;
                 resolved_model.config.supports_reasoning = model.supports_reasoning;
+                resolved_model.config.input_modalities = model.input_modalities.clone();
             }
         }
 
@@ -551,6 +555,7 @@ impl Config {
                     name: Some(model.id.clone()),
                     context_window: model.context_window,
                     supports_reasoning: model.supports_reasoning,
+                    input_modalities: model.input_modalities.clone(),
                     ..ModelConfig::default()
                 },
             });

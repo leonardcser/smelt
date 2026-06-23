@@ -517,6 +517,7 @@ impl From<CodexModel> for protocol::ModelMetadata {
             display_name: Some(model.display_name),
             context_window: model.context_window,
             supports_reasoning: None,
+            input_modalities: None,
         }
     }
 }

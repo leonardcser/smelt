@@ -683,6 +683,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         let parts = &body["input"][0]["content"];
@@ -703,6 +704,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         assert_eq!(body["input"][0]["content"], "");
@@ -735,6 +737,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         assert!(body["input"].as_array().unwrap().is_empty());
@@ -758,6 +761,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
 
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
@@ -785,6 +789,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            tool_metadata: None,
         };
 
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());

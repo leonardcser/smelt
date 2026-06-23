@@ -56,12 +56,13 @@ fn cache_put_with_ttl(key: &str, value: &str, ttl: Duration) {
 
 /// One row in the catalog. New fields slot in here as they're needed -
 /// new consumers don't pay a separate fetch.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelEntry {
     pub pricing: Option<ModelPricing>,
     pub context_window: Option<u32>,
     pub output_tokens: Option<u32>,
     pub supports_reasoning: Option<bool>,
+    pub input_modalities: Option<Vec<String>>,
 }
 
 const MODELS_API_URL: &str = "https://models.dev/api.json";
@@ -105,12 +106,12 @@ pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelE
     let catalog = CATALOG.get()?;
     for key in catalog_keys(provider_type, api_base) {
         if let Some(entry) = catalog.get(&(key.clone(), model.to_string())) {
-            return Some(*entry);
+            return Some(entry.clone());
         }
         let slug = model_slug(model);
         if slug != model {
             if let Some(entry) = catalog.get(&(key, slug)) {
-                return Some(*entry);
+                return Some(entry.clone());
             }
         }
     }
@@ -132,6 +133,10 @@ pub fn output_tokens(provider_type: &str, api_base: &str, model: &str) -> Option
 
 pub fn supports_reasoning(provider_type: &str, api_base: &str, model: &str) -> Option<bool> {
     lookup(provider_type, api_base, model).and_then(|e| e.supports_reasoning)
+}
+
+pub fn input_modalities(provider_type: &str, api_base: &str, model: &str) -> Option<Vec<String>> {
+    lookup(provider_type, api_base, model).and_then(|e| e.input_modalities)
 }
 
 async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelEntry> {
@@ -236,7 +241,7 @@ fn insert_entry(
     for provider_key in provider_keys {
         for model_key in model_keys {
             map.entry((provider_key.clone(), model_key.clone()))
-                .or_insert(entry);
+                .or_insert_with(|| entry.clone());
         }
     }
 }
@@ -259,6 +264,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
         last_updated: Option<String>,
         cost: Option<CatalogCost>,
         limit: Option<CatalogLimit>,
+        modalities: Option<CatalogModalities>,
         #[serde(default)]
         reasoning: Option<bool>,
     }
@@ -275,6 +281,10 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
     struct CatalogLimit {
         context: Option<u32>,
         output: Option<u32>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CatalogModalities {
+        input: Option<Vec<String>>,
     }
 
     let root: HashMap<String, CatalogProvider> = serde_json::from_str(json).ok()?;
@@ -323,10 +333,22 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
                 .and_then(|l| l.output)
                 .filter(|v| *v > 0);
             let supports_reasoning = model_val.reasoning;
+            let input_modalities = model_val.modalities.and_then(|m| {
+                let mut values = m
+                    .input?
+                    .into_iter()
+                    .map(|v| v.to_ascii_lowercase())
+                    .filter(|v| !v.is_empty())
+                    .collect::<Vec<_>>();
+                values.sort();
+                values.dedup();
+                (!values.is_empty()).then_some(values)
+            });
             if pricing.is_none()
                 && context_window.is_none()
                 && output_tokens.is_none()
                 && supports_reasoning.is_none()
+                && input_modalities.is_none()
             {
                 continue;
             }
@@ -335,6 +357,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
                 context_window,
                 output_tokens,
                 supports_reasoning,
+                input_modalities,
             };
             let mut model_keys = vec![model_id.clone()];
             if let Some(name) = model_val.name.as_deref() {
@@ -343,7 +366,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
                     model_keys.push(slug);
                 }
             }
-            insert_entry(&mut map, &provider_keys, &model_keys, entry);
+            insert_entry(&mut map, &provider_keys, &model_keys, entry.clone());
             let default_sort = model_val
                 .last_updated
                 .or(model_val.release_date)
@@ -410,6 +433,23 @@ mod tests {
         assert_eq!(
             catalog_keys("openai-compatible", "https://OpenRouter.ai/api/v1/"),
             vec!["api:https://openrouter.ai/api/v1".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_extracts_input_modalities() {
+        let json = r#"{
+            "openai": {"models": {
+                "gpt-4o": {
+                    "modalities": {"input": ["text", "image", "pdf"]}
+                }
+            }}
+        }"#;
+        let map = parse(json).unwrap();
+        let entry = map.get(&("openai".into(), "gpt-4o".into())).unwrap();
+        assert_eq!(
+            entry.input_modalities.as_deref(),
+            Some(["image".to_string(), "pdf".to_string(), "text".to_string()].as_slice())
         );
     }
 

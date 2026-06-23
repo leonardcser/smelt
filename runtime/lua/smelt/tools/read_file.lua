@@ -1,4 +1,4 @@
--- Built-in read_file tool. Supports text, notebooks (.ipynb), and images.
+-- Built-in read_file tool. Supports text, notebooks (.ipynb), images, and PDFs.
 -- Returns a stub for unchanged files at the same range to save prompt-cache tokens.
 
 local transcript_defaults = require("smelt.transcript.defaults")
@@ -78,6 +78,65 @@ local function range_display(args, content)
   return ":" .. tostring(offset) .. "-" .. tostring(offset + limit - 1)
 end
 
+local function is_pdf_file(path)
+  return type(path) == "string" and path:lower():sub(-4) == ".pdf"
+end
+
+local function active_transport_supports_multimodal_tool_results()
+  if not smelt.model or not smelt.model.transport then return false end
+  local transport = smelt.model.transport()
+  return transport and transport.multimodal_tool_results == true
+end
+
+local function active_model_supports(modality)
+  if not smelt.model or not smelt.model.supports_input then return modality == "text" end
+  return smelt.model.supports_input(modality)
+end
+
+local function multimodal_error(kind, path)
+  if not active_model_supports(kind) then
+    return {
+      content = string.format("cannot read %s file %s: active model does not support %s input", kind, path, kind),
+      is_error = true,
+    }
+  end
+  if not active_transport_supports_multimodal_tool_results() then
+    return {
+      content = string.format("cannot read %s file %s: active provider transport cannot send %s tool results", kind, path, kind),
+      is_error = true,
+    }
+  end
+  return nil
+end
+
+local function multimodal_result(kind, path, mime, info)
+  if not info then
+    local info_err
+    info, info_err = smelt.fs.file_info_async(path)
+    if not info then
+      return { content = info_err or ("could not read file: " .. path), is_error = true }
+    end
+  end
+  local err = multimodal_error(kind, path)
+  if err then return err end
+  return {
+    content = string.format("%s file attached: %s", kind, path),
+    is_error = false,
+    metadata = {
+      kind = "file_attachment",
+      modality = kind,
+      path = path,
+      mime = mime,
+      label = smelt.image.label_from_path and smelt.image.label_from_path(path) or path,
+    },
+  }
+end
+
+local function is_binary_read_error(err)
+  err = tostring(err or ""):lower()
+  return err:find("utf-8", 1, true) ~= nil or err:find("stream did not contain valid utf-8", 1, true) ~= nil
+end
+
 function smelt.tools.read_file_summary(args, content, ctx)
   args = args or {}
   return smelt.tools.path_summary(args.file_path or "", ctx, { suffix = range_display(args, content) })
@@ -94,7 +153,7 @@ end
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "read_file",
-  description = "Reads a file from the local filesystem. Supports text files and image files (png, jpg, gif, webp, bmp, tiff, svg).",
+  description = "Reads a file from the local filesystem. Supports text files, image files (png, jpg, gif, webp, bmp, tiff, svg), and PDFs when the active model/provider can accept them.",
   override = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   effect = "read",
@@ -133,12 +192,21 @@ smelt.tools.register(smelt.tools._with_watchdog({
       return { content = "missing required parameter: file_path", is_error = true }
     end
 
-    if smelt.image.is_image_file(path) then
-      local data_url, err = smelt.image.read_as_data_url_async(path)
-      if not data_url then
-        return { content = err or "could not read image", is_error = true }
-      end
-      return string.format("![image](%s)", data_url)
+    local file_info, file_info_err = smelt.fs.file_info_async(path)
+    if not file_info then
+      return { content = file_info_err or "could not read file", is_error = true }
+    end
+
+    if file_info.kind == "image" or smelt.image.is_image_file(path) then
+      return multimodal_result("image", path, smelt.image.mime_from_path(path), file_info)
+    end
+
+    if file_info.kind == "pdf" or is_pdf_file(path) then
+      return multimodal_result("pdf", path, "application/pdf", file_info)
+    end
+
+    if file_info.kind == "binary" then
+      return { content = "cannot read binary file as text: " .. path, is_error = true }
     end
 
     local offset, limit = effective_range(args)
@@ -162,6 +230,9 @@ smelt.tools.register(smelt.tools._with_watchdog({
 
     local content, read_err, mtime_ms = smelt.fs.read_async(path)
     if not content then
+      if is_binary_read_error(read_err) then
+        return { content = "cannot read binary file as text: " .. path, is_error = true }
+      end
       return { content = read_err or "could not read file", is_error = true }
     end
     if cached and mtime_ms and cached.mtime_ms == mtime_ms then

@@ -12,6 +12,7 @@ pub(crate) fn user(text: &str) -> Message {
         tool_calls: None,
         tool_call_id: None,
         is_error: false,
+        tool_metadata: None,
     }
 }
 
@@ -25,6 +26,7 @@ pub(crate) fn system(text: &str) -> Message {
         tool_calls: None,
         tool_call_id: None,
         is_error: false,
+        tool_metadata: None,
     }
 }
 
@@ -38,6 +40,7 @@ pub(crate) fn assistant_text(text: &str) -> Message {
         tool_calls: None,
         tool_call_id: None,
         is_error: false,
+        tool_metadata: None,
     }
 }
 
@@ -51,6 +54,7 @@ pub(crate) fn assistant_calls(content: Option<&str>, calls: Vec<ToolCall>) -> Me
         tool_calls: Some(calls),
         tool_call_id: None,
         is_error: false,
+        tool_metadata: None,
     }
 }
 
@@ -68,5 +72,6 @@ pub(crate) fn tool_msg_with_error(call_id: Option<&str>, output: &str, is_error:
         tool_calls: None,
         tool_call_id: call_id.map(String::from),
         is_error,
+        tool_metadata: None,
     }
 }
