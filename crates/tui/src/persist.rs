@@ -20,10 +20,20 @@ pub(crate) struct Blob {
 pub(crate) struct PersistRequest {
     pub(crate) session_id: String,
     pub(crate) session_dir: PathBuf,
-    pub(crate) history_suffix: smelt_store::SessionHistorySuffix,
+    pub(crate) delta: PersistDelta,
     pub(crate) blobs: Vec<Blob>,
-    pub(crate) descriptor_start_idx: usize,
-    pub(crate) descriptor_records: Vec<TranscriptBlockRecord>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PersistDelta {
+    pub(crate) history: smelt_store::SessionHistorySuffix,
+    pub(crate) descriptors: Option<PersistDescriptorDelta>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PersistDescriptorDelta {
+    pub(crate) start_descriptor_idx: usize,
+    pub(crate) records: Vec<TranscriptBlockRecord>,
 }
 
 pub(crate) struct PersistMetadataRequest {
@@ -174,46 +184,60 @@ fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), Stri
     let _perf = smelt_perf::perf::begin("persist:write");
     smelt_perf::perf::record_value(
         "persist:write:history_items",
-        req.history_suffix.history.len() as u64,
+        req.delta.history.history.len() as u64,
     );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     std::fs::create_dir_all(&req.session_dir)
         .map_err(|err| format!("create session directory: {err}"))?;
     let blob_dir = req.session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs)?;
-    let mut history_suffix = req.history_suffix.clone();
+    let mut delta = req.delta.clone();
     if !url_to_blob.is_empty() {
-        smelt_core::session::externalize_blobs(&mut history_suffix.history, &url_to_blob);
+        smelt_core::session::externalize_blobs(&mut delta.history.history, &url_to_blob);
     }
     let db_path = req.session_dir.join("session.db");
     let db = db_cache
         .db(&db_path)
         .map_err(|err| format!("open session database: {err}"))?;
-    let descriptor_rows = req
-        .descriptor_records
-        .iter()
-        .enumerate()
-        .map(|(offset, record)| {
-            transcript_descriptor_row(req.descriptor_start_idx + offset, record)
+    let descriptor_delta = delta
+        .descriptors
+        .as_ref()
+        .map(|descriptors| {
+            let records = descriptors
+                .records
+                .iter()
+                .enumerate()
+                .map(|(offset, record)| {
+                    transcript_descriptor_row(descriptors.start_descriptor_idx + offset, record)
+                })
+                .collect::<Result<Vec<_>, smelt_store::StoreError>>()
+                .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
+            Ok::<_, String>(smelt_store::TranscriptDescriptorSuffix {
+                start_descriptor_idx: descriptors.start_descriptor_idx,
+                records,
+            })
         })
-        .collect::<Result<Vec<_>, smelt_store::StoreError>>()
-        .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
+        .transpose()?;
+    let store_delta = smelt_store::SessionDelta {
+        history: delta.history,
+        descriptors: descriptor_delta,
+    };
     let save_report = db
-        .save_history_suffix_and_transcript_descriptor_suffix_as_writer(
-            &history_suffix,
-            req.descriptor_start_idx,
-            &descriptor_rows,
-        )
+        .apply_session_delta_as_writer(&store_delta)
         .map_err(|err| format!("save session database: {err}"))?;
     record_save_report(&save_report);
-    smelt_perf::perf::record_value(
-        "persist:write:descriptor_start_idx",
-        req.descriptor_start_idx as u64,
-    );
-    smelt_perf::perf::record_value(
-        "persist:write:descriptor_records",
-        req.descriptor_records.len() as u64,
-    );
+    let (descriptor_start_idx, descriptor_records) = store_delta
+        .descriptors
+        .as_ref()
+        .map(|descriptors| {
+            (
+                descriptors.start_descriptor_idx as u64,
+                descriptors.records.len() as u64,
+            )
+        })
+        .unwrap_or((0, 0));
+    smelt_perf::perf::record_value("persist:write:descriptor_start_idx", descriptor_start_idx);
+    smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
     smelt_core::session::write_db_meta_sidecar(&req.session_dir)
         .map_err(|err| format!("write session metadata: {err}"))?;
     Ok(())

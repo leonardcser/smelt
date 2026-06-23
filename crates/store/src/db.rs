@@ -8,8 +8,8 @@ use rusqlite::{Connection, OpenFlags};
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
 use crate::history::{
-    self, TranscriptDescriptorIndex, TranscriptDescriptorRange, TranscriptDescriptorRecord,
-    TranscriptDescriptorSlice, TranscriptSearchCandidate,
+    self, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex, TranscriptDescriptorRange,
+    TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptSearchCandidate,
 };
 use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
@@ -17,7 +17,8 @@ use crate::object::{self, ObjectMeta, StoredObject};
 use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
 use crate::schema;
 use crate::session_snapshot::{
-    self, SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes, SessionSnapshot,
+    self, SessionDelta, SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes,
+    SessionSnapshot, TranscriptDescriptorSuffix,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +361,16 @@ impl SessionDb {
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<SessionSaveReport> {
+        self.apply_session_delta_as_writer(&SessionDelta {
+            history: suffix.clone(),
+            descriptors: Some(TranscriptDescriptorSuffix {
+                start_descriptor_idx,
+                records: records.to_vec(),
+            }),
+        })
+    }
+
+    pub fn apply_session_delta_as_writer(&self, delta: &SessionDelta) -> Result<SessionSaveReport> {
         let lease = self.current_process_writer_lease()?;
         let expected_revision = self
             .session_state()?
@@ -368,17 +379,19 @@ impl SessionDb {
         self.immediate_transaction(|conn| {
             let report = session_snapshot::save_session_history_suffix_in_transaction(
                 conn,
-                suffix,
+                &delta.history,
                 Some(expected_revision),
                 Some(&lease),
                 self.object_compression,
             )?;
-            history::replace_transcript_descriptor_suffix_in_transaction(
-                conn,
-                start_descriptor_idx,
-                records,
-                self.object_compression,
-            )?;
+            if let Some(descriptors) = &delta.descriptors {
+                history::replace_transcript_descriptor_suffix_in_transaction(
+                    conn,
+                    descriptors.start_descriptor_idx,
+                    &descriptors.records,
+                    self.object_compression,
+                )?;
+            }
             Ok(report)
         })
     }
@@ -555,6 +568,32 @@ impl SessionDb {
         range: std::ops::Range<usize>,
     ) -> Result<Vec<protocol::HistoryItem>> {
         history::read_history_items_range(&self.conn, range)
+    }
+
+    pub fn history_item_count(&self) -> Result<usize> {
+        history::history_item_count(&self.conn)
+    }
+
+    pub fn transcript_block_count(&self) -> Result<usize> {
+        history::transcript_block_count(&self.conn)
+    }
+
+    pub fn transcript_missing_descriptor_count(&self) -> Result<usize> {
+        history::transcript_missing_descriptor_count(&self.conn)
+    }
+
+    pub fn read_transcript_block_metadata_range(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> Result<Vec<TranscriptBlockMetadataRecord>> {
+        history::read_transcript_block_metadata_range(&self.conn, range)
+    }
+
+    pub fn read_transcript_block_metadata_tail(
+        &self,
+        count: usize,
+    ) -> Result<Vec<TranscriptBlockMetadataRecord>> {
+        history::read_transcript_block_metadata_tail(&self.conn, count)
     }
 
     pub fn history_text_bytes(&self) -> Result<u64> {
@@ -839,6 +878,113 @@ mod tests {
     }
 
     #[test]
+    fn session_delta_without_descriptors_preserves_transcript_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let initial_history = vec![
+            protocol::HistoryItem::user(protocol::Content::text("old user")),
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text("old assistant")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        let initial_snapshot = SessionSnapshot {
+            state: test_session_state("delta-history-only", initial_history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: initial_history.len(),
+            history: initial_history.clone(),
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+        db.save_session_snapshot_for_import(&initial_snapshot)
+            .unwrap();
+        let initial_descriptors = vec![
+            transcript_record_with_history(0, 0, "old-user", "old user"),
+            transcript_record_with_history(1, 1, "old-assistant", "old assistant"),
+        ];
+        db.replace_transcript_descriptor_records(&initial_descriptors)
+            .unwrap();
+
+        let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
+        let suffix = SessionHistorySuffix {
+            state: test_session_state("delta-history-only", 3),
+            history_start_idx: 2,
+            history_len: 3,
+            history: vec![appended],
+            side_tables: None,
+        };
+        db.apply_session_delta_as_writer(&SessionDelta {
+            history: suffix,
+            descriptors: None,
+        })
+        .unwrap();
+
+        assert_eq!(db.history_item_count().unwrap(), 3);
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
+        assert_eq!(db.transcript_block_count().unwrap(), 3);
+        assert_eq!(db.transcript_missing_descriptor_count().unwrap(), 1);
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            initial_descriptors
+        );
+    }
+
+    #[test]
+    fn session_delta_descriptor_suffix_replaces_only_requested_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let initial_history = vec![protocol::HistoryItem::user(protocol::Content::text("user"))];
+        let initial_snapshot = SessionSnapshot {
+            state: test_session_state("delta-descriptors", initial_history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: initial_history.len(),
+            history: initial_history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+        db.save_session_snapshot_for_import(&initial_snapshot)
+            .unwrap();
+        let initial_descriptors = vec![
+            transcript_record(0, "zero", "old zero"),
+            transcript_record(1, "one", "old one"),
+            transcript_record(2, "two", "old two"),
+        ];
+        db.replace_transcript_descriptor_records(&initial_descriptors)
+            .unwrap();
+
+        let suffix = SessionHistorySuffix {
+            state: test_session_state("delta-descriptors", 1),
+            history_start_idx: 1,
+            history_len: 1,
+            history: Vec::new(),
+            side_tables: None,
+        };
+        let replacement = transcript_record(1, "one-new", "updated one");
+        db.apply_session_delta_as_writer(&SessionDelta {
+            history: suffix,
+            descriptors: Some(TranscriptDescriptorSuffix {
+                start_descriptor_idx: 1,
+                records: vec![replacement.clone()],
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            vec![initial_descriptors[0].clone(), replacement]
+        );
+        assert_eq!(
+            db.search_transcript_candidates("old two").unwrap(),
+            Vec::<TranscriptSearchCandidate>::new()
+        );
+    }
+
+    #[test]
     fn history_suffix_write_syncs_requested_snapshot_table_suffixes() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
@@ -1057,6 +1203,57 @@ mod tests {
                 .unwrap()
                 .records,
             expected_all
+        );
+    }
+
+    #[test]
+    fn transcript_block_metadata_reads_include_descriptorless_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = vec![
+            transcript_record(0, "zero", "zero text"),
+            transcript_record(2, "two", "two text"),
+        ];
+        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO transcript_blocks
+                 (block_idx, history_idx, kind, estimated_text_bytes, estimated_rows, preview_text)
+                 VALUES (1, NULL, 'note', 4, 2, 'gap one'),
+                        (3, NULL, 'tool', 8, NULL, 'gap three')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.transcript_block_count().unwrap(), 4);
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
+        assert_eq!(db.transcript_missing_descriptor_count().unwrap(), 2);
+
+        let range = db.read_transcript_block_metadata_range(1..4).unwrap();
+        assert_eq!(range.len(), 3);
+        assert_eq!(range[0].block_idx, 1);
+        assert_eq!(range[0].descriptor_idx, None);
+        assert_eq!(range[0].kind, "note");
+        assert_eq!(range[0].estimated_rows, Some(2));
+        assert_eq!(range[0].preview_text, "gap one");
+        assert!(!range[0].has_descriptor);
+        assert_eq!(range[1].block_idx, 2);
+        assert_eq!(range[1].descriptor_idx, Some(1));
+        assert!(range[1].has_descriptor);
+        assert_eq!(range[2].block_idx, 3);
+        assert_eq!(range[2].descriptor_idx, None);
+        assert_eq!(range[2].estimated_rows, None);
+        assert!(!range[2].has_descriptor);
+
+        let tail = db.read_transcript_block_metadata_tail(2).unwrap();
+        assert_eq!(
+            tail.iter().map(|row| row.block_idx).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(db.read_transcript_block_metadata_tail(0).unwrap(), vec![]);
+        assert_eq!(
+            db.read_transcript_block_metadata_range(2..2).unwrap(),
+            vec![]
         );
     }
 

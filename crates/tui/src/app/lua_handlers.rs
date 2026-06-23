@@ -310,10 +310,13 @@ impl TuiApp {
     /// Load a saved session by id, refresh screen, and scroll to bottom. Silent no-op on miss.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
         let display_only =
-            smelt_core::session::prepare_session_dir_for_read(id).and_then(|session_dir| {
-                let meta = smelt_core::session::load_meta_for_prepared_dir(session_dir.clone())?;
+            smelt_core::session::resolve_session_dir_for_read(id).and_then(|resolved| {
+                if resolved.kind != smelt_core::session::SessionDirKind::Store {
+                    return None;
+                }
+                let meta = smelt_core::session::load_meta_for_prepared_dir(resolved.dir.clone())?;
                 let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
-                    session_dir,
+                    resolved.dir,
                     self.last_width,
                     self.last_height,
                 )?;
@@ -322,8 +325,10 @@ impl TuiApp {
         if let Some((meta, transcript)) = display_only {
             let Some(history_len) = meta.history_len else {
                 // COMPAT(legacy-session-full-load-fallbacks): sessions without SQLite history metadata still need monolithic load until legacy session imports are retired.
-                smelt_perf::perf::record_value("compat:session:load_full_fallback", 1);
-                if let Some(loaded) = smelt_core::session::load_full(id) {
+                if let Some(loaded) = crate::app::history::materialize_full_session_with_perf(
+                    id,
+                    "compat:session:load_full_fallback",
+                ) {
                     self.load_session(loaded);
                     self.restore_screen();
                     self.finish_transcript_turn();
@@ -360,8 +365,10 @@ impl TuiApp {
             return;
         }
         // COMPAT(legacy-session-full-load-fallbacks): if the sparse SQLite transcript path is unavailable, fall back to legacy full session open.
-        smelt_perf::perf::record_value("compat:session:load_full_fallback", 1);
-        if let Some(loaded) = smelt_core::session::load_full(id) {
+        if let Some(loaded) = crate::app::history::materialize_full_session_with_perf(
+            id,
+            "compat:session:load_full_fallback",
+        ) {
             self.load_session(loaded);
             self.restore_screen();
             self.finish_transcript_turn();

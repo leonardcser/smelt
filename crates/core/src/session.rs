@@ -1333,6 +1333,33 @@ pub fn dir_for_id(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionDirKind {
+    Store,
+    Jsonl,
+    LegacyJson,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedSessionDir {
+    pub id: String,
+    pub dir: PathBuf,
+    pub kind: SessionDirKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionStoreRef {
+    pub session_dir: PathBuf,
+    pub db_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionHeader {
+    pub meta: SessionMeta,
+    pub history_len: usize,
+    pub revision: u64,
+}
+
 pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
@@ -1506,14 +1533,69 @@ pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
     load_meta_for_prepared_dir(prepare_session_dir_for_read(id_or_prefix)?)
 }
 
-pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
+pub fn resolve_session_dir_for_read(id_or_prefix: &str) -> Option<ResolvedSessionDir> {
     let id = resolve_prefix(id_or_prefix)?;
     let dir = dir_for_id(&id);
-    if let Err(err) = crate::session_migration::ensure_session_db(&dir) {
-        log_session_migration_error(&dir, &err);
+    let kind = session_dir_kind(&dir)?;
+    Some(ResolvedSessionDir { id, dir, kind })
+}
+
+pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
+    let resolved = resolve_session_dir_for_read(id_or_prefix)?;
+    if let Err(err) = crate::session_migration::ensure_session_db(&resolved.dir) {
+        log_session_migration_error(&resolved.dir, &err);
         return None;
     }
-    Some(dir)
+    Some(resolved.dir)
+}
+
+pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionStoreRef)> {
+    let resolved = resolve_session_dir_for_read(id_or_prefix)?;
+    if resolved.kind != SessionDirKind::Store {
+        return None;
+    }
+    load_store_header_for_dir(resolved.dir)
+}
+
+pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader, SessionStoreRef)> {
+    let db_path = session_dir.join("session.db");
+    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
+    let state = db.session_state().ok()??;
+    let meta = load_meta_from_db(&session_dir)?;
+    let history_len = state.history_len as usize;
+    let header = SessionHeader {
+        meta,
+        history_len,
+        revision: state.revision,
+    };
+    Some((
+        header,
+        SessionStoreRef {
+            session_dir,
+            db_path,
+        },
+    ))
+}
+
+fn session_dir_kind(dir: &Path) -> Option<SessionDirKind> {
+    match crate::session_migration::classify_session_dir(dir) {
+        crate::session_migration::SessionDirKind::SqliteOnly
+        | crate::session_migration::SessionDirKind::SqliteWithMetadata
+        | crate::session_migration::SessionDirKind::SqliteWithLegacySidecars => {
+            Some(SessionDirKind::Store)
+        }
+        crate::session_migration::SessionDirKind::LegacySidecars => {
+            if dir.join("history.jsonl").is_file() {
+                Some(SessionDirKind::Jsonl)
+            } else if dir.join("session.json").is_file() {
+                Some(SessionDirKind::LegacyJson)
+            } else {
+                None
+            }
+        }
+        crate::session_migration::SessionDirKind::Empty
+        | crate::session_migration::SessionDirKind::MigrationStatus => None,
+    }
 }
 
 pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
@@ -2921,6 +3003,41 @@ mod tests {
                 .any(|row| row.label == "store:db:open_read_only" && row.count > 0),
             "exact load should still enrich stale metadata from sqlite"
         );
+    }
+
+    #[test]
+    fn resolve_session_dir_for_read_classifies_without_migrating() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
+
+        let legacy_id = "legacy-resolve";
+        let legacy_dir = sessions_dir().join(legacy_id);
+        fs::create_dir_all(&legacy_dir).expect("create legacy session dir");
+        fs::write(legacy_dir.join("session.json"), "{}").expect("write legacy marker");
+
+        let mut session = fixture_session();
+        session.id = "store-header-resolve".into();
+        session.history.push(user_item("hello"));
+        save(&session, &crate::attachment::AttachmentStore::new());
+
+        let legacy = resolve_session_dir_for_read("legacy-res").expect("resolve legacy prefix");
+        assert_eq!(legacy.id, legacy_id);
+        assert_eq!(legacy.kind, SessionDirKind::LegacyJson);
+        assert_eq!(legacy.dir, legacy_dir);
+        assert!(!legacy.dir.join("session.db").exists());
+
+        let store = resolve_session_dir_for_read("store-header").expect("resolve store prefix");
+        assert_eq!(store.id, session.id);
+        assert_eq!(store.kind, SessionDirKind::Store);
+
+        let (header, store_ref) = load_store_header("store-header").expect("load store header");
+        assert_eq!(header.meta.id, session.id);
+        assert_eq!(header.history_len, 1);
+        assert_eq!(header.meta.history_len, Some(1));
+        assert!(header.revision > 0);
+        assert_eq!(store_ref.session_dir, dir_for(&session));
+        assert!(store_ref.db_path.is_file());
+        assert!(!legacy.dir.join("session.db").exists());
     }
 
     #[test]

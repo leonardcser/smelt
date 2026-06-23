@@ -79,6 +79,21 @@ pub struct TranscriptDescriptorRecord {
     pub tool_state_json: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptBlockMetadataRecord {
+    pub block_idx: u64,
+    pub descriptor_idx: Option<u64>,
+    pub history_idx: Option<u64>,
+    pub kind: String,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub content_hash: Option<String>,
+    pub estimated_text_bytes: u64,
+    pub estimated_rows: Option<u64>,
+    pub preview_text: String,
+    pub has_descriptor: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscriptDescriptorHydration {
     Hydrated,
@@ -287,6 +302,99 @@ pub(crate) fn read_history_items_range(
     perf::record_value("store:history:read_range_rows", out.len() as u64);
     perf::record_value("store:history:json_bytes_read", json_bytes);
     Ok(out)
+}
+
+pub(crate) fn history_item_count(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM history_items", [], |row| row.get(0))?;
+    Ok(count.max(0) as usize)
+}
+
+pub(crate) fn transcript_block_count(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM transcript_blocks", [], |row| {
+        row.get(0)
+    })?;
+    Ok(count.max(0) as usize)
+}
+
+pub(crate) fn transcript_missing_descriptor_count(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as usize)
+}
+
+pub(crate) fn read_transcript_block_metadata_range(
+    conn: &Connection,
+    range: Range<usize>,
+) -> Result<Vec<TranscriptBlockMetadataRecord>> {
+    let _perf = perf::begin("store:transcript:read_block_metadata_range");
+    if range.end <= range.start {
+        return Ok(Vec::new());
+    }
+    let start = checked_i64(range.start as u64, "block_start_idx")?;
+    let end = checked_i64(range.end as u64, "block_end_idx")?;
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name,
+                content_hash, estimated_text_bytes, estimated_rows, preview_text,
+                descriptor_json IS NOT NULL AS has_descriptor
+         FROM transcript_blocks
+         WHERE block_idx >= ?1 AND block_idx < ?2
+         ORDER BY block_idx",
+    )?;
+    let rows = stmt.query_map(params![start, end], transcript_block_metadata_from_row)?;
+    let records = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    perf::record_value(
+        "store:transcript:block_metadata_rows_read",
+        records.len() as u64,
+    );
+    Ok(records)
+}
+
+pub(crate) fn read_transcript_block_metadata_tail(
+    conn: &Connection,
+    count: usize,
+) -> Result<Vec<TranscriptBlockMetadataRecord>> {
+    let _perf = perf::begin("store:transcript:read_block_metadata_tail");
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = checked_i64(count as u64, "block_tail_count")?;
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name,
+                content_hash, estimated_text_bytes, estimated_rows, preview_text,
+                descriptor_json IS NOT NULL AS has_descriptor
+         FROM transcript_blocks
+         ORDER BY block_idx DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], transcript_block_metadata_from_row)?;
+    let mut records = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    records.reverse();
+    perf::record_value(
+        "store:transcript:block_metadata_rows_read",
+        records.len() as u64,
+    );
+    Ok(records)
+}
+
+fn transcript_block_metadata_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<TranscriptBlockMetadataRecord> {
+    Ok(TranscriptBlockMetadataRecord {
+        block_idx: row.get::<_, i64>(0)? as u64,
+        descriptor_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
+        history_idx: row.get::<_, Option<i64>>(2)?.map(|idx| idx as u64),
+        kind: row.get(3)?,
+        tool_call_id: row.get(4)?,
+        tool_name: row.get(5)?,
+        content_hash: row.get(6)?,
+        estimated_text_bytes: row.get::<_, i64>(7)? as u64,
+        estimated_rows: row.get::<_, Option<i64>>(8)?.map(|rows| rows as u64),
+        preview_text: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        has_descriptor: row.get::<_, i64>(10)? != 0,
+    })
 }
 
 pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {

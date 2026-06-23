@@ -40,6 +40,15 @@ impl<'a> ToolSummaryResolver<'a> {
     }
 }
 
+pub(crate) fn materialize_full_session_with_perf(
+    id: &str,
+    counter: &'static str,
+) -> Option<session::Session> {
+    smelt_perf::perf::record_value("compat:session:full_materialized", 1);
+    smelt_perf::perf::record_value(counter, 1);
+    session::load_full(id)
+}
+
 pub(crate) fn build_transcript_from_session(
     lua: &crate::lua::LuaRuntime,
     session: &session::Session,
@@ -119,8 +128,11 @@ pub(crate) fn load_transcript_tail_from_sqlite_id(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let session_dir = session::prepare_session_dir_for_read(id)?;
-    load_transcript_tail_from_sqlite_dir(session_dir, width, viewport_rows)
+    let resolved = session::resolve_session_dir_for_read(id)?;
+    if resolved.kind != session::SessionDirKind::Store {
+        return None;
+    }
+    load_transcript_tail_from_sqlite_dir(resolved.dir, width, viewport_rows)
 }
 
 pub(crate) fn load_transcript_tail_from_sqlite_dir(
@@ -1007,8 +1019,10 @@ impl TuiApp {
         let Some(display_only) = self.display_only_session.take() else {
             return;
         };
-        smelt_perf::perf::record_value("session:display_only_load_full", 1);
-        if let Some(loaded) = session::load_full(&display_only.full_session_id) {
+        if let Some(loaded) = materialize_full_session_with_perf(
+            &display_only.full_session_id,
+            "session:display_only_load_full",
+        ) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
@@ -1206,10 +1220,14 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session_id,
             session_dir,
-            history_suffix: suffix,
+            delta: crate::persist::PersistDelta {
+                history: suffix,
+                descriptors: descriptor_work.then_some(crate::persist::PersistDescriptorDelta {
+                    start_descriptor_idx: descriptor_start_idx,
+                    records: descriptor_records,
+                }),
+            },
             blobs,
-            descriptor_start_idx,
-            descriptor_records,
         });
         self.persisted_store_ready = true;
         self.transcript_descriptors_persisted = true;
@@ -1509,10 +1527,14 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session_id,
             session_dir,
-            history_suffix: suffix,
+            delta: crate::persist::PersistDelta {
+                history: suffix,
+                descriptors: Some(crate::persist::PersistDescriptorDelta {
+                    start_descriptor_idx: descriptor_start_idx,
+                    records: descriptor_records,
+                }),
+            },
             blobs: self.pending_image_blobs(),
-            descriptor_start_idx,
-            descriptor_records,
         });
         self.persisted_store_ready = true;
         self.transcript_descriptors_persisted = true;

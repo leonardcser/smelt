@@ -5,7 +5,7 @@ use smelt_perf::perf;
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
-use crate::history;
+use crate::history::{self, TranscriptDescriptorRecord};
 use crate::meta::{self, SessionState, WriterLease};
 use crate::object::checked_i64;
 
@@ -33,6 +33,18 @@ pub struct SessionHistorySuffix {
     pub history_len: usize,
     pub history: Vec<HistoryItem>,
     pub side_tables: Option<SessionSideTableSuffixes>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranscriptDescriptorSuffix {
+    pub start_descriptor_idx: usize,
+    pub records: Vec<TranscriptDescriptorRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionDelta {
+    pub history: SessionHistorySuffix,
+    pub descriptors: Option<TranscriptDescriptorSuffix>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

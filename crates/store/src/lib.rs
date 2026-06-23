@@ -16,9 +16,9 @@ pub use compression::{
 pub use db::{OpenMode, OpenOptions, SessionDb};
 pub use error::{Result, StoreError};
 pub use history::{
-    TranscriptDescriptorHydration, TranscriptDescriptorIndex, TranscriptDescriptorRange,
-    TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptSearchCandidate,
-    TranscriptSearchDirection,
+    TranscriptBlockMetadataRecord, TranscriptDescriptorHydration, TranscriptDescriptorIndex,
+    TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
+    TranscriptSearchCandidate, TranscriptSearchDirection,
 };
 pub use legacy::{LegacyImportReport, RequestAttemptSummary};
 pub use meta::{SessionMeta, SessionState, WriterLease};
@@ -29,5 +29,6 @@ pub use request_audit::{
 };
 pub use schema::SCHEMA_VERSION;
 pub use session_snapshot::{
-    SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes, SessionSnapshot,
+    SessionDelta, SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes,
+    SessionSnapshot, TranscriptDescriptorSuffix,
 };
