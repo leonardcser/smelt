@@ -1572,6 +1572,43 @@ mod tests {
     }
 
     #[test]
+    fn transcript_wheel_down_at_tail_keeps_tail_follow_before_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        let tail_top = app.transcript_win().scroll_top();
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        assert!(app.transcript_win().is_following_tail());
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            row: vp.rect.top,
+            column: vp.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        let win = app.transcript_win();
+        assert_eq!(win.scroll_top(), tail_top);
+        assert!(
+            win.is_following_tail(),
+            "overscrolling downward at tail must not transiently pin before projection"
+        );
+
+        app.render_normal_to(&mut std::io::sink());
+        let win = app.transcript_win();
+        assert_eq!(win.scroll_top(), tail_top);
+        assert!(win.is_following_tail());
+    }
+
+    #[test]
     fn transcript_page_down_to_bottom_reengages_tail_follow() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {

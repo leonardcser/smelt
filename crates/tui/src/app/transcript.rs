@@ -1760,30 +1760,24 @@ impl TranscriptDocument {
             TranscriptScrollIntent::Tail => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::Tail,
                 allow_sparse_placeholders: false,
-                tail_at_bottom: true,
+                tail_at_bottom: intent.tail_at_bottom(),
             },
-            TranscriptScrollIntent::UserDelta { rows } => TranscriptIntentBehavior {
-                viewport_mode: TranscriptViewportMode::Anchored,
-                allow_sparse_placeholders: false,
-                tail_at_bottom: *rows > 0,
-            },
-            TranscriptScrollIntent::PageDelta { pages } => TranscriptIntentBehavior {
-                viewport_mode: TranscriptViewportMode::Anchored,
-                allow_sparse_placeholders: false,
-                tail_at_bottom: *pages > 0,
-            },
-            TranscriptScrollIntent::ScrollbarFraction {
-                numerator,
-                denominator,
-            } => TranscriptIntentBehavior {
+            TranscriptScrollIntent::UserDelta { .. } | TranscriptScrollIntent::PageDelta { .. } => {
+                TranscriptIntentBehavior {
+                    viewport_mode: TranscriptViewportMode::Anchored,
+                    allow_sparse_placeholders: false,
+                    tail_at_bottom: intent.tail_at_bottom(),
+                }
+            }
+            TranscriptScrollIntent::ScrollbarFraction { .. } => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::FarSeek,
                 allow_sparse_placeholders: true,
-                tail_at_bottom: *numerator >= (*denominator).max(1),
+                tail_at_bottom: intent.tail_at_bottom(),
             },
             TranscriptScrollIntent::ApproximateRowSeek(_) => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::FarSeek,
                 allow_sparse_placeholders: true,
-                tail_at_bottom: true,
+                tail_at_bottom: intent.tail_at_bottom(),
             },
             TranscriptScrollIntent::PreserveViewport
             | TranscriptScrollIntent::ExactContentAnchor(_)
@@ -1792,7 +1786,7 @@ impl TranscriptDocument {
             | TranscriptScrollIntent::ResizeReflow { .. } => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::Anchored,
                 allow_sparse_placeholders: false,
-                tail_at_bottom: false,
+                tail_at_bottom: intent.tail_at_bottom(),
             },
         }
     }

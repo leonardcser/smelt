@@ -133,7 +133,7 @@ impl TuiApp {
         hint: Option<TranscriptProjectionHint>,
     ) {
         let label = label.into();
-        if matches!(intent, TranscriptScrollIntent::UserDelta { .. })
+        if matches!(&intent, TranscriptScrollIntent::UserDelta { .. })
             && restore.cursor_screen_row.is_none()
         {
             restore.cursor_screen_row = self
@@ -147,7 +147,12 @@ impl TuiApp {
                         .and_then(|v| win.cursor_screen_row(v.rect.height))
                 });
         }
-        if !matches!(intent, TranscriptScrollIntent::Tail) {
+        let keep_tail_follow_until_projection = intent.tail_at_bottom()
+            && self
+                .ui
+                .win(crate::app::TRANSCRIPT_WIN)
+                .is_some_and(|win| win.is_following_tail());
+        if !matches!(&intent, TranscriptScrollIntent::Tail) && !keep_tail_follow_until_projection {
             if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
                 win.pin_current_scroll();
             }

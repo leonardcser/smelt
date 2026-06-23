@@ -75,6 +75,26 @@ pub(crate) enum TranscriptScrollIntent {
     ApproximateRowSeek(RowIndex),
 }
 
+impl TranscriptScrollIntent {
+    pub(crate) fn tail_at_bottom(&self) -> bool {
+        match self {
+            Self::Tail => true,
+            Self::UserDelta { rows } => *rows > 0,
+            Self::PageDelta { pages } => *pages > 0,
+            Self::ScrollbarFraction {
+                numerator,
+                denominator,
+            } => *numerator >= (*denominator).max(1),
+            Self::ApproximateRowSeek(_) => true,
+            Self::PreserveViewport
+            | Self::ExactContentAnchor(_)
+            | Self::SearchJump { .. }
+            | Self::RevealBlock { .. }
+            | Self::ResizeReflow { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptDescriptorTraceRange {
     pub(crate) start: usize,
