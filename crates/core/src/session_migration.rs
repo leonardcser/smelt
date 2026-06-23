@@ -341,9 +341,10 @@ pub fn spawn_background_migration_with_event(
         .name("smelt-session-migration".to_string())
         .spawn(move || {
             let pending = pending_session_migration_count();
-            if pending > 0 {
-                on_event(SessionMigrationEvent::Started { pending });
+            if pending == 0 {
+                return;
             }
+            on_event(SessionMigrationEvent::Started { pending });
             let report = migrate_all_sessions_once();
             log_migration_batch_report(&report);
             on_event(SessionMigrationEvent::Completed(report));
@@ -451,6 +452,21 @@ pub(crate) fn max_migration_failure_logs() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_migration_is_silent_when_no_sessions_are_pending() {
+        let state = tempfile::tempdir().unwrap();
+        let _g = crate::test_util::isolate_xdg_state(state.path());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        spawn_background_migration_with_event(move |event| {
+            tx.send(event).unwrap();
+        });
+
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+    }
 
     #[test]
     fn existing_invalid_db_with_legacy_sidecars_is_a_failure() {

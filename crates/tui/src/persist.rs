@@ -214,7 +214,7 @@ fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), Stri
         "persist:write:descriptor_records",
         req.descriptor_records.len() as u64,
     );
-    db.write_meta_sidecar(req.session_dir.join("meta.json"))
+    smelt_core::session::write_db_meta_sidecar(&req.session_dir)
         .map_err(|err| format!("write session metadata: {err}"))?;
     Ok(())
 }
@@ -238,7 +238,7 @@ fn write_metadata(
         .save_session_state_and_side_table_suffixes_as_writer(&req.state, &req.side_tables)
         .map_err(|err| format!("save session metadata: {err}"))?;
     record_save_report(&save_report);
-    db.write_meta_sidecar(req.session_dir.join("meta.json"))
+    smelt_core::session::write_db_meta_sidecar(&req.session_dir)
         .map_err(|err| format!("write session metadata: {err}"))?;
     Ok(())
 }

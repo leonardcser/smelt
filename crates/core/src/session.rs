@@ -2476,6 +2476,15 @@ fn migration_status_for_dir(path: &Path) -> Option<SessionMigrationStatus> {
     })
 }
 
+pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
+    let Some(meta) = load_meta_from_db(dir_path) else {
+        return Ok(false);
+    };
+    let json = serde_json::to_vec_pretty(&meta).map_err(|err| err.to_string())?;
+    fs::write(dir_path.join("meta.json"), json).map_err(|err| err.to_string())?;
+    Ok(true)
+}
+
 fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
     let db_path = path.join("session.db");
     if !db_path.is_file() {
