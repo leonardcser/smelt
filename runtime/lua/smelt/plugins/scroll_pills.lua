@@ -37,7 +37,7 @@ local function close_top()
   state.top_buf = nil
   state.top_win = nil
   state.top_width = nil
-  state.top_target_idx = nil
+  state.top_target_descriptor_index = nil
 end
 
 local function close_all()
@@ -222,13 +222,15 @@ smelt.lifecycle.on_ready(function()
   refresh()
 end)
 
--- The session reset path can clear transcript content without changing the
--- previous scroll tuple enough to emit `scrolled`; lifecycle/history cells are
--- the semantic source of truth for stale overlay cleanup.
+-- History clears can remove transcript content without changing the previous
+-- scroll tuple enough to emit `scrolled`; navigation generation tracks every
+-- user-block index change, including store-backed resume and rewind paths.
 smelt.events.on("history", function(payload)
   if payload and payload.kind == "cleared" then close_all() end
 end)
 smelt.events.on("session_started", close_all)
+
+smelt.signal.subscribe("transcript_navigation_generation", refresh)
 
 smelt.signal.subscribe("cursor_pos", function()
   if smelt.focus() == "transcript" then refresh() end

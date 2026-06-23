@@ -815,6 +815,64 @@ fn transcript_pinned_bottom_resize_click_selects_clicked_row_without_tail_snap()
 }
 
 #[test]
+fn transcript_scroll_state_does_not_request_tail_repin_when_pinned_at_bottom() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = row_document_transcript_app(180, false);
+    app.app.transcript_win_mut().follow_tail();
+    app.render_silent();
+    assert!(app.app.transcript_win().is_following_tail());
+
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: vp.rect.bottom().saturating_sub(2),
+        column: vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(3),
+        modifiers: KeyModifiers::empty(),
+    })));
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "selection click should pin the transcript even at bottom"
+    );
+
+    assert!(app.run_lua(
+        r#"
+        local scroll = assert(smelt.win.transcript():scroll())
+        _G.transcript_scroll_at_bottom = scroll.at_bottom
+        _G.transcript_scroll_needs_tail_repin = scroll.needs_tail_repin
+        _G.transcript_scroll_follow = scroll.follow
+        "#
+    ));
+    let globals = app.app.lua.lua.globals();
+    assert!(
+        globals
+            .get::<bool>("transcript_scroll_at_bottom")
+            .expect("transcript at_bottom global"),
+        "clicked bottom-pinned transcript should still report at_bottom"
+    );
+    assert!(
+        !globals
+            .get::<bool>("transcript_scroll_follow")
+            .expect("transcript follow global"),
+        "test setup should exercise pinned-not-following state"
+    );
+    assert!(
+        !globals
+            .get::<bool>("transcript_scroll_needs_tail_repin")
+            .expect("transcript needs_tail_repin global"),
+        "bottom pill state should stay false when the viewport is already at bottom"
+    );
+}
+
+#[test]
 fn transcript_interaction_trace_records_click_and_projection_events() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -911,6 +969,65 @@ fn transcript_fast_scroll_jump_bottom_then_click_preserves_bottom_viewport() {
         after_scroll,
         bottom_scroll,
         "bottom click teleported transcript after fast sparse scroll; trace={:#?}",
+        app.app.transcript.scroll_trace_interaction_events()
+    );
+}
+
+#[test]
+fn resumed_sparse_bottom_click_keeps_clicked_row_and_viewport() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(120, 60, 14);
+    app.app.transcript_win_mut().set_vim_enabled(true);
+    app.app
+        .transcript_win_mut()
+        .set_vim_mode(crate::smelt_edit::VimMode::Normal);
+    app.app.transcript.set_scroll_trace_enabled(true);
+
+    app.type_char('G');
+    app.render_silent();
+    app.app.transcript.take_scroll_trace_interaction_events();
+
+    let vp = app
+        .app
+        .transcript_win()
+        .viewport
+        .expect("transcript viewport");
+    let click_row = vp.rect.bottom().saturating_sub(1);
+    let click_col = vp
+        .rect
+        .left
+        .saturating_add(vp.gutter_width)
+        .saturating_add(3);
+    let rel_row = click_row.saturating_sub(vp.rect.top) as crate::smelt_edit::RowIndex;
+    let before_scroll = app.app.transcript_win().scroll_top();
+    let total_rows = app
+        .app
+        .transcript_win()
+        .materialized_rows()
+        .expect("resumed transcript should be row-materialized")
+        .total_rows;
+    let expected_row = before_scroll
+        .saturating_add(rel_row)
+        .min(total_rows.saturating_sub(1));
+
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: click_row,
+        column: click_col,
+        modifiers: KeyModifiers::empty(),
+    })));
+
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        before_scroll,
+        "mouse down should not scroll the resumed transcript; trace={:#?}",
+        app.app.transcript.scroll_trace_interaction_events()
+    );
+    assert_eq!(
+        transcript_row_cursor_row(&app),
+        expected_row,
+        "mouse down should put the cursor on the clicked transcript row; trace={:#?}",
         app.app.transcript.scroll_trace_interaction_events()
     );
 }

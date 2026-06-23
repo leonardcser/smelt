@@ -495,6 +495,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     event("tool_end"),
     event("tool_start"),
     state("tps"),
+    state("transcript_navigation_generation"),
     event("turn_complete"),
     event("turn_end"),
     event("turn_error"),

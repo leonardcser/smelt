@@ -245,15 +245,21 @@ impl TuiApp {
         win: WinId,
         event: crossterm::event::MouseEvent,
     ) -> Option<DocPosition> {
-        let (viewport, scroll_top, scroll_left, gutter_pad_left) = {
+        let (viewport, scroll_top, scroll_left, gutter_pad_left, buf, active) = {
             let win_ref = self.ui.win(win)?;
             (
                 win_ref.viewport?,
                 win_ref.scroll_top(),
                 win_ref.scroll_left,
                 win_ref.config.gutters.pad_left,
+                win_ref.buf,
+                win_ref.has_materialized_rows(),
             )
         };
+        if active {
+            let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
+            return win_ref?.viewer_doc_pos_at_mouse(buf_ref?, event, viewport);
+        }
         self.with_display_document_for_win(win, |document| {
             DocumentViewExecutor::position_at_mouse(
                 document,
@@ -276,8 +282,8 @@ impl TuiApp {
     ) -> (Status, Option<CopyOutput>) {
         let (
             buf,
-            mut state,
-            mut vim_mode,
+            state,
+            vim_mode,
             viewport,
             scroll_top,
             scroll_left,
@@ -345,47 +351,114 @@ impl TuiApp {
             );
         }
 
-        let Some((status, copy)) = self.with_display_document_for_win(win, |document| {
-            let total_rows = document.snapshot().total_rows;
-            if !state.active {
-                state.active = true;
-                state.materialized = MaterializedRows {
-                    clamped_scroll: scroll_top,
-                    row_base: 0,
-                    total_rows,
-                    materialized_rows: total_rows,
+        let registered_document = self.registered_document_for_win(win);
+
+        // Once a row document has been rendered, mouse coordinates belong to that
+        // materialized buffer slice. Sparse documents may refine their estimated
+        // total during `snapshot`; using that estimate for hit testing can make a
+        // click land on a different row than the one currently on screen.
+        let (status, copy, mut state_after, vim_mode_after) = if registered_document
+            == Some(RegisteredDocument::Transcript)
+        {
+            self.sync_transcript_renderer_generation();
+            let width = self.transcript_width() as u16;
+            let theme = self.ui.theme().clone();
+            let (status, copy, state_after, vim_mode_after) = {
+                let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
+                let (Some(win_ref), Some(buf_ref)) = (win_ref, buf_ref) else {
+                    return (Status::Ignored, None);
                 };
-                state.cursor = crate::smelt_edit::DocPosition {
-                    row: cursor.row.min(total_rows.saturating_sub(1)),
-                    byte_col: cursor.byte_col,
+                let mut document =
+                    TranscriptDisplayDocument::new(&mut self.transcript, &self.lua, width, &theme);
+                let (status, range) = win_ref.handle_document_view_mouse(
+                    buf_ref,
+                    &mut document,
+                    event,
+                    click_count,
+                    now,
+                );
+                let copy = range.and_then(|range| document.copy_range(TextRange::Rows(range)));
+                (
+                    status,
+                    copy,
+                    win_ref.document_view_state(),
+                    win_ref.vim_mode(),
+                )
+            };
+            (status, copy, state_after, vim_mode_after)
+        } else if state.active {
+            let (status, range, state_after, vim_mode_after) = {
+                let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
+                let (Some(win_ref), Some(buf_ref)) = (win_ref, buf_ref) else {
+                    return (Status::Ignored, None);
                 };
-            }
-            let (status, range) = DocumentViewExecutor::handle_mouse(
-                &mut state,
-                document,
-                event,
-                viewport,
-                gutter_pad_left,
-                scroll_top,
-                scroll_left,
-                click_count,
-                vim_enabled,
-                &mut vim_mode,
-                now,
-            );
-            let copy = range.and_then(|range| document.copy_range(TextRange::Rows(range)));
-            (status, copy)
-        }) else {
-            return (Status::Ignored, None);
+                let Some((status, range)) = win_ref.handle_materialized_viewer_mouse(
+                    buf_ref,
+                    event,
+                    viewport,
+                    click_count,
+                    now,
+                ) else {
+                    return (Status::Ignored, None);
+                };
+                (
+                    status,
+                    range,
+                    win_ref.document_view_state(),
+                    win_ref.vim_mode(),
+                )
+            };
+            let copy = range.and_then(|range| self.copy_document_rows(win, range));
+            (status, copy, state_after, vim_mode_after)
+        } else {
+            let Some((status, copy, state_after, vim_mode_after)) = self
+                .with_display_document_for_win(win, |document| {
+                    let mut state = state;
+                    let mut vim_mode = vim_mode;
+                    let total_rows = document.snapshot().total_rows;
+                    state.active = true;
+                    state.materialized = MaterializedRows {
+                        clamped_scroll: scroll_top,
+                        row_base: 0,
+                        total_rows,
+                        materialized_rows: total_rows,
+                    };
+                    state.cursor = crate::smelt_edit::DocPosition {
+                        row: cursor.row.min(total_rows.saturating_sub(1)),
+                        byte_col: cursor.byte_col,
+                    };
+                    let (status, range) = DocumentViewExecutor::handle_mouse(
+                        &mut state,
+                        document,
+                        event,
+                        viewport,
+                        gutter_pad_left,
+                        scroll_top,
+                        scroll_left,
+                        click_count,
+                        vim_enabled,
+                        &mut vim_mode,
+                        now,
+                    );
+                    let copy = range.and_then(|range| document.copy_range(TextRange::Rows(range)));
+                    (status, copy, state, vim_mode)
+                })
+            else {
+                return (Status::Ignored, None);
+            };
+            (status, copy, state_after, vim_mode_after)
         };
 
         let viewport_rows = viewport.rect.height;
         if let (Some(win_ref), Some(buf_ref)) = self.ui.win_and_buf_mut(win, buf) {
-            win_ref.set_document_view_state(state);
-            if win_ref.vim_mode() != vim_mode {
-                win_ref.set_vim_mode(vim_mode);
+            if !state.active {
+                win_ref.set_document_view_state(state_after);
+                if win_ref.vim_mode() != vim_mode_after {
+                    win_ref.set_vim_mode(vim_mode_after);
+                }
             }
             win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
+            state_after = win_ref.document_view_state();
         }
 
         if trace_transcript_mouse {
@@ -393,7 +466,7 @@ impl TuiApp {
             let state_cursor_anchor = self.transcript.trace_anchor_at_row(
                 &self.lua,
                 viewport.content_width,
-                state.cursor.row,
+                state_after.cursor.row,
             );
             self.transcript.record_scroll_trace_event(
                 "document_mouse_after",
@@ -402,11 +475,11 @@ impl TuiApp {
                     "status": format!("{:?}", status),
                     "window_scroll_before": scroll_top,
                     "window_scroll_after": window_scroll_after,
-                    "document_state_cursor_after": trace_doc_position_json(state.cursor),
+                    "document_state_cursor_after": trace_doc_position_json(state_after.cursor),
                     "document_state_cursor_anchor_after": format!("{:?}", state_cursor_anchor),
-                    "selection_anchor_after": state.selection_anchor.map(trace_doc_position_json),
-                    "drag_endpoint_after": state.drag_endpoint.map(trace_doc_position_json),
-                    "materialized_after": trace_materialized_rows_json(state.materialized),
+                    "selection_anchor_after": state_after.selection_anchor.map(trace_doc_position_json),
+                    "drag_endpoint_after": state_after.drag_endpoint.map(trace_doc_position_json),
+                    "materialized_after": trace_materialized_rows_json(state_after.materialized),
                     "copy_returned": copy.is_some(),
                 }),
             );

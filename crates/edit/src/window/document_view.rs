@@ -690,6 +690,87 @@ impl Window {
         vim::handle_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
     }
 
+    pub fn handle_document_view_mouse(
+        &mut self,
+        buf: &Buffer,
+        document: &mut dyn DisplayDocument,
+        event: MouseEvent,
+        click_count: u8,
+        now: Instant,
+    ) -> (Status, Option<DocRange>) {
+        let Some(viewport) = self.viewport else {
+            return (Status::Ignored, None);
+        };
+        let viewport_rows = viewport.rect.height;
+        let result = if self.document_view_state_ref().active {
+            let mouse_ctx = MouseCtx {
+                soft_breaks: &[],
+                hard_breaks: &[],
+                viewport,
+                click_count,
+            };
+            self.handle_row_mouse(buf, event, mouse_ctx, now)
+        } else {
+            let Some(cursor) = self.viewer_doc_cursor(buf) else {
+                return (Status::Ignored, None);
+            };
+            let mut state = *self.document_view_state_ref();
+            let mut vim_mode = self.vim_mode();
+            let total_rows = document.snapshot().total_rows;
+            state.active = true;
+            state.materialized = MaterializedRows {
+                clamped_scroll: self.scroll_top,
+                row_base: 0,
+                total_rows,
+                materialized_rows: total_rows,
+            };
+            state.cursor = DocPosition {
+                row: cursor.row.min(total_rows.saturating_sub(1)),
+                byte_col: cursor.byte_col,
+            };
+            let (status, range) = DocumentViewExecutor::handle_mouse(
+                &mut state,
+                document,
+                event,
+                viewport,
+                self.config.gutters.pad_left,
+                self.scroll_top,
+                self.scroll_left,
+                click_count,
+                self.vim_enabled(),
+                &mut vim_mode,
+                now,
+            );
+            *self.document_view_state_mut() = state;
+            if self.vim_mode() != vim_mode {
+                self.set_vim_mode(vim_mode);
+            }
+            (status, range)
+        };
+        self.sync_row_cursor_to_local(buf, viewport_rows);
+        result
+    }
+
+    pub fn handle_materialized_viewer_mouse(
+        &mut self,
+        buf: &Buffer,
+        event: MouseEvent,
+        viewport: WindowViewport,
+        click_count: u8,
+        now: Instant,
+    ) -> Option<(Status, Option<DocRange>)> {
+        if !self.document_view_state_ref().active {
+            return None;
+        }
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count,
+        };
+        Some(self.handle_row_mouse(buf, event, mouse_ctx, now))
+    }
+
     pub fn handle_row_mouse(
         &mut self,
         buf: &Buffer,

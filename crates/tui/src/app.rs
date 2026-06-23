@@ -1569,8 +1569,9 @@ impl TuiApp {
     }
 
     /// Publish `vim_mode`, `vim_pending_input`, `keymap_pending`,
-    /// `confirms_pending`, `now`, `notification_visible`, `spinner_frame`,
-    /// and the `work_*` family of signals whenever their values change.
+    /// `confirms_pending`, transcript navigation generation, `now`,
+    /// `notification_visible`, `spinner_frame`, and the `work_*` family of
+    /// signals whenever their values change.
     pub(crate) fn publish_diff_signals(&mut self) {
         let keymap_pending = self.keymap_pending_cell_value();
         self.core
@@ -1642,6 +1643,10 @@ impl TuiApp {
 
         let cursor = self.focused_cursor_pos();
         self.core.signals.publish_if_changed("cursor_pos", cursor);
+        self.core.signals.publish_if_changed(
+            "transcript_navigation_generation",
+            self.transcript.history().navigation_generation(),
+        );
 
         self.publish_work_signals();
     }

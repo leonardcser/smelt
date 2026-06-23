@@ -638,15 +638,13 @@ fn scroll_pills_source_uses_only_semantic_transcript_navigation() {
         "top scroll pill must not use generic row reveal for transcript navigation"
     );
     assert!(
-        SCROLL_PILLS_LUA.contains("scroll.needs_tail_repin"),
-        "bottom scroll pill should use the derived tail-repin scroll state"
+        SCROLL_PILLS_LUA.contains("transcript_navigation_generation"),
+        "scroll pills should refresh from transcript navigation generation"
     );
 }
 
-#[test]
-fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
-    let lua = mlua::Lua::new();
-    install_explicit_api_fixtures(&lua);
+fn install_scroll_pills_fixture(lua: &mlua::Lua) {
+    install_explicit_api_fixtures(lua);
     lua.load(
         r#"
         local active = {}
@@ -788,6 +786,12 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     lua.load(SCROLL_PILLS_LUA)
         .exec()
         .expect("load scroll pills plugin");
+}
+
+#[test]
+fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
+    let lua = mlua::Lua::new();
+    install_scroll_pills_fixture(&lua);
 
     let bottom_under_cursor: bool = lua
         .load(r#"return __active("smelt.scroll_pills.bottom")"#)
@@ -854,30 +858,6 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert!(bottom_after_blur);
     assert!(!bottom_after_focus);
 
-    let bottom_at_bottom_without_follow: bool = lua
-        .load(
-            r#"
-            __set_focus("prompt")
-            __set_cursor(12)
-            __set_scroll({
-              top = 25,
-              viewport = 5,
-              total = 30,
-              max = 25,
-              overflow = true,
-              follow = false,
-              at_top = false,
-              at_bottom = true,
-              needs_tail_repin = true,
-            })
-            __event("scrolled")
-            return __active("smelt.scroll_pills.bottom")
-            "#,
-        )
-        .eval()
-        .expect("drive at-bottom pinned bottom pill refresh");
-    assert!(bottom_at_bottom_without_follow);
-
     let (top_before_bottom_press, bottom_after_bottom_press, top_after_bottom_press): (
         bool,
         bool,
@@ -897,4 +877,53 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert!(top_before_bottom_press);
     assert!(!bottom_after_bottom_press);
     assert!(top_after_bottom_press);
+}
+
+#[test]
+fn scroll_pills_refresh_top_on_navigation_generation_change() {
+    let lua = mlua::Lua::new();
+    install_scroll_pills_fixture(&lua);
+
+    let top_after_history_append: bool = lua
+        .load(
+            r#"
+            __set_cursor(11)
+            __set_blocks({ { descriptor_index = 2, role = "user", first_line = "new previous", already_at_top = false } })
+            __publish("transcript_navigation_generation")
+            return __active("smelt.scroll_pills.top")
+            "#,
+        )
+        .eval()
+        .expect("drive navigation-generation top pill");
+    assert!(top_after_history_append);
+}
+
+#[test]
+fn scroll_pills_hide_bottom_when_already_at_bottom() {
+    let lua = mlua::Lua::new();
+    install_scroll_pills_fixture(&lua);
+
+    let bottom_at_bottom_without_follow: bool = lua
+        .load(
+            r#"
+            __set_focus("prompt")
+            __set_cursor(12)
+            __set_scroll({
+              top = 25,
+              viewport = 5,
+              total = 30,
+              max = 25,
+              overflow = true,
+              follow = false,
+              at_top = false,
+              at_bottom = true,
+              needs_tail_repin = false,
+            })
+            __event("scrolled")
+            return __active("smelt.scroll_pills.bottom")
+            "#,
+        )
+        .eval()
+        .expect("drive at-bottom pinned bottom pill refresh");
+    assert!(!bottom_at_bottom_without_follow);
 }

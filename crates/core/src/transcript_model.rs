@@ -894,6 +894,8 @@ pub struct BlockHistory {
     /// Bumped only when transcript order changes, so projections can reuse
     /// block-to-node structure across content and sidecar updates.
     order_generation: u64,
+    /// Bumped when user-message navigation targets may have changed.
+    navigation_generation: u64,
     /// Earliest transcript order index whose persisted descriptor may be stale.
     descriptor_dirty_from: Option<usize>,
 }
@@ -912,6 +914,7 @@ impl BlockHistory {
             finished_blocks: Vec::new(),
             generation: 0,
             order_generation: 0,
+            navigation_generation: 0,
             descriptor_dirty_from: None,
         }
     }
@@ -924,6 +927,10 @@ impl BlockHistory {
         self.order_generation
     }
 
+    pub fn navigation_generation(&self) -> u64 {
+        self.navigation_generation
+    }
+
     pub(crate) fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
@@ -933,9 +940,14 @@ impl BlockHistory {
         self.order_generation = self.order_generation.wrapping_add(1);
     }
 
+    fn bump_navigation_generation(&mut self) {
+        self.navigation_generation = self.navigation_generation.wrapping_add(1);
+    }
+
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
         self.bump_order_generation();
+        self.bump_navigation_generation();
         self.mark_descriptor_dirty_from(0);
     }
 
@@ -958,6 +970,10 @@ impl BlockHistory {
         if let Some(idx) = self.order.iter().position(|candidate| *candidate == id) {
             self.mark_descriptor_dirty_from(idx);
         }
+    }
+
+    fn entry_affects_navigation(&self, id: BlockId) -> bool {
+        self.block_kind(id) == Some("user")
     }
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -1169,6 +1185,7 @@ impl BlockHistory {
         origin: Option<BlockOrigin>,
     ) -> BlockId {
         let block = block.normalize_content();
+        let navigation_changed = block.kind() == "user";
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
         self.next_id += 1;
@@ -1180,6 +1197,9 @@ impl BlockHistory {
             self.origins.insert(id, origin);
         }
         self.bump_order_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         self.mark_descriptor_dirty_from(order_index);
         id
     }
@@ -1210,6 +1230,7 @@ impl BlockHistory {
             .filter(|hash| *hash == normalized_hash)
             .unwrap_or(normalized_hash);
         let descriptor = normalized;
+        let navigation_changed = descriptor.kind() == "user";
         self.next_id = self.next_id.max(id.0.saturating_add(1));
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
         self.order.insert(order_index, id);
@@ -1220,6 +1241,9 @@ impl BlockHistory {
             self.origins.insert(id, origin);
         }
         self.bump_order_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         self.mark_descriptor_dirty_from(order_index);
         id
     }
@@ -1283,6 +1307,7 @@ impl BlockHistory {
         if self.origins.contains_key(&id) {
             return None;
         }
+        let navigation_changed = self.entry_affects_navigation(id);
         self.order.remove(idx);
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
@@ -1292,6 +1317,9 @@ impl BlockHistory {
         }
         let block = self.entries.remove(&id).map(BlockEntry::into_materialized);
         self.bump_order_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         self.mark_descriptor_dirty_from(idx);
         block
     }
@@ -1311,6 +1339,7 @@ impl BlockHistory {
             .iter()
             .position(|id| removed.contains(id))
             .unwrap_or(self.order.len());
+        let navigation_changed = removed.iter().any(|id| self.entry_affects_navigation(*id));
         self.order.retain(|id| !removed.contains(id));
         for id in removed {
             self.entries.remove(&id);
@@ -1319,6 +1348,9 @@ impl BlockHistory {
             self.origins.remove(&id);
         }
         self.bump_order_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         self.mark_descriptor_dirty_from(first_removed);
     }
 
@@ -1389,7 +1421,9 @@ impl BlockHistory {
         if !self.entries.contains_key(&id) {
             return;
         }
+        let old_kind = self.block_kind(id);
         let block = block.normalize_content();
+        let navigation_changed = old_kind == Some("user") || block.kind() == "user";
         let hash = block.content_hash();
         if self.content_hashes.get(&id) == Some(&hash) {
             self.entries.insert(id, BlockEntry::Materialized(block));
@@ -1398,6 +1432,9 @@ impl BlockHistory {
         self.entries.insert(id, BlockEntry::Materialized(block));
         self.content_hashes.insert(id, hash);
         self.bump_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         self.mark_descriptor_dirty_for_id(id);
     }
 
@@ -1420,6 +1457,7 @@ impl BlockHistory {
         if !self.entries.contains_key(&id) {
             return;
         }
+        let navigation_changed = self.entry_affects_navigation(id);
         let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
         self.order.retain(|candidate| *candidate != id);
         self.entries.remove(&id);
@@ -1427,6 +1465,9 @@ impl BlockHistory {
         self.statuses.remove(&id);
         self.origins.remove(&id);
         self.bump_order_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         if let Some(idx) = dirty_idx {
             self.mark_descriptor_dirty_from(idx);
         }
@@ -1434,6 +1475,10 @@ impl BlockHistory {
     }
 
     pub fn clear(&mut self) {
+        let navigation_changed = self
+            .order
+            .iter()
+            .any(|id| self.entry_affects_navigation(*id));
         self.order.clear();
         self.entries.clear();
         self.content_hashes.clear();
@@ -1443,6 +1488,9 @@ impl BlockHistory {
         self.statuses.clear();
         self.origins.clear();
         self.bump_order_generation();
+        if navigation_changed {
+            self.bump_navigation_generation();
+        }
         self.mark_descriptor_dirty_from(0);
     }
 

@@ -464,6 +464,8 @@ impl mlua::UserData for LuaWin {
 
         // ── scroll: get / set / jump-to-tail ───────────────────────
         // `win:scroll()` returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }`.
+        // `needs_tail_repin` is true whenever content overflows and the viewport
+        // is not positioned at the current bottom, regardless of follow state.
         // `win:scroll(integer)` pins the viewport at that `scroll_top`.
         // `win:scroll("tail")` jumps the viewport to the buffer tail while
         // keeping the cursor on the same screen row, then enables tail-follow.
@@ -484,11 +486,20 @@ impl mlua::UserData for LuaWin {
                             let max = total.saturating_sub(viewport as u64);
                             let top = win.scroll_top().min(max);
                             let overflow = total > viewport as u64;
-                            Some((top, win.is_following_tail(), total, viewport, max, overflow))
+                            let at_bottom = top >= max;
+                            Some((
+                                top,
+                                win.is_following_tail(),
+                                total,
+                                viewport,
+                                max,
+                                overflow,
+                                at_bottom,
+                            ))
                         })
                         .flatten();
                         match info {
-                            Some((top, follow, total, viewport, max, overflow)) => {
+                            Some((top, follow, total, viewport, max, overflow, at_bottom)) => {
                                 let t = lua.create_table()?;
                                 t.set("top", top)?;
                                 t.set("follow", follow)?;
@@ -497,8 +508,8 @@ impl mlua::UserData for LuaWin {
                                 t.set("max", max)?;
                                 t.set("overflow", overflow)?;
                                 t.set("at_top", top == 0)?;
-                                t.set("at_bottom", top >= max)?;
-                                t.set("needs_tail_repin", overflow && !follow)?;
+                                t.set("at_bottom", at_bottom)?;
+                                t.set("needs_tail_repin", overflow && !at_bottom)?;
                                 Ok(mlua::Value::Table(t))
                             }
                             None => Ok(mlua::Value::Nil),
@@ -698,7 +709,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
-            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the window is not following tail, even when `at_bottom` is true). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
+            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
         },
     });
 
