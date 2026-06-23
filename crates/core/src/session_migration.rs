@@ -151,6 +151,9 @@ pub fn migrate_session_dir_to_db(
         Ok(SessionMigrationOutcome::Migrated | SessionMigrationOutcome::Repaired) => {
             let _ = fs::remove_file(dir_path.join(MIGRATION_STATUS_FILE));
         }
+        Ok(SessionMigrationOutcome::Skipped) if dir_path.join("session.db").is_file() => {
+            let _ = fs::remove_file(dir_path.join(MIGRATION_STATUS_FILE));
+        }
         Ok(SessionMigrationOutcome::Skipped) => {}
         Err(err) => write_migration_status(
             dir_path,
@@ -175,11 +178,17 @@ fn migrate_session_dir_to_db_inner(
         SessionDirKind::SqliteOnly
         | SessionDirKind::SqliteWithMetadata
         | SessionDirKind::SqliteWithLegacySidecars => {
-            let repaired = crate::session::repair_sqlite_session_dir(dir_path).map_err(|err| {
-                SessionMigrationError::OpenDatabase {
-                    message: err.to_string(),
+            let repaired = match crate::session::repair_sqlite_session_dir(dir_path) {
+                Ok(repaired) => repaired,
+                Err(err) if err.is_database_locked() => {
+                    return Ok(SessionMigrationOutcome::Skipped)
                 }
-            })?;
+                Err(err) => {
+                    return Err(SessionMigrationError::OpenDatabase {
+                        message: err.to_string(),
+                    });
+                }
+            };
             if matches!(kind, SessionDirKind::SqliteWithLegacySidecars) {
                 crate::session::cleanup_migrated_legacy_artifacts(dir_path);
             }

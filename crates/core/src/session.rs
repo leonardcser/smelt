@@ -1652,6 +1652,22 @@ pub(crate) fn write_generated_sidecars(dir_path: &Path, session: &Session) {
 // COMPAT(session-search-sidecar-missing): repair already-SQLite sessions that
 // predate generated sidecars or sparse transcript descriptors.
 pub(crate) fn repair_sqlite_session_dir(dir_path: &Path) -> Result<bool, smelt_store::StoreError> {
+    if let Ok(db) = smelt_store::SessionDb::open_read_only(dir_path.join("session.db")) {
+        let Some(state) = db.session_state()? else {
+            return Ok(false);
+        };
+        let descriptor_count = db.transcript_descriptor_count()?;
+        let search_blob = db.search_blob().ok();
+        if sqlite_session_artifacts_look_current(
+            dir_path,
+            &state,
+            descriptor_count,
+            search_blob.as_deref(),
+        ) {
+            return Ok(false);
+        }
+    }
+
     let db = smelt_store::SessionDb::open(dir_path.join("session.db"))?;
     let Some(state) = db.session_state()? else {
         return Ok(false);
@@ -3103,6 +3119,68 @@ mod tests {
             migrate_session_dir_to_db(dir.path()).expect("second scan"),
             SessionMigrationOutcome::Skipped
         );
+    }
+
+    #[test]
+    fn canonical_sqlite_session_clears_stale_migration_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "stale-migration-status".into();
+        s.history.push(user_item("canonical prompt"));
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
+            .unwrap();
+        drop(db);
+
+        assert_eq!(
+            migrate_session_dir_to_db(dir.path()).expect("initial repair"),
+            SessionMigrationOutcome::Repaired
+        );
+        fs::write(
+            dir.path()
+                .join(crate::session_migration::MIGRATION_STATUS_FILE),
+            serde_json::to_vec(&crate::session_migration::SessionMigrationStatus {
+                state: crate::session_migration::SessionMigrationState::Failed,
+                message: Some(
+                    "failed to open sqlite database: sqlite error: database is locked".into(),
+                ),
+                updated_at_ms: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate_session_dir_to_db(dir.path()).expect("second scan"),
+            SessionMigrationOutcome::Skipped
+        );
+        assert!(!dir
+            .path()
+            .join(crate::session_migration::MIGRATION_STATUS_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn sqlite_session_locked_during_repair_is_skipped_without_failure_status() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "locked-sqlite".into();
+        s.history.push(user_item("locked prompt"));
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
+            .unwrap();
+        db.connection().execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        assert_eq!(
+            migrate_session_dir_to_db(dir.path()).expect("skip locked sqlite"),
+            SessionMigrationOutcome::Skipped
+        );
+        assert!(!dir
+            .path()
+            .join(crate::session_migration::MIGRATION_STATUS_FILE)
+            .exists());
+
+        db.connection().execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
