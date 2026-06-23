@@ -67,10 +67,10 @@ impl TestApp {
         }
     }
 
-    /// Length of `session.history`. Used by post-event invariants that
+    /// User-facing session history length. Used by post-event invariants that
     /// assert compaction or `set_history` replaced the conversation.
     pub fn session_message_count(&self) -> usize {
-        self.app.core.session.history.len()
+        self.app.session_history_len()
     }
 
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that

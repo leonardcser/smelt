@@ -110,22 +110,15 @@ fn display_only_resume_sets_resume_hint_state() {
         content: "restored transcript".into(),
     });
 
-    app.app.load_session_display_only(
+    app.app.load_store_backed_session(
         session,
         crate::app::transcript::LoadedTranscript::full(transcript),
-        crate::app::DisplayOnlySessionState {
-            full_session_id: "full-session".into(),
-            persisted_history_len: 0,
-            checkpoint: None,
-        },
+        crate::app::history::live_session_for_test("full-session".into(), 0, None),
     );
 
     assert!(app.app.core.session.history.is_empty());
     assert_eq!(
-        app.app
-            .display_only_session
-            .as_ref()
-            .map(|display_only| display_only.full_session_id.as_str()),
+        app.app.live_session.as_ref().map(|live| live.id()),
         Some("full-session")
     );
     assert!(app.app.has_resume_hint_messages());
@@ -146,11 +139,11 @@ fn display_only_resume_sets_resume_hint_state() {
 #[test]
 fn shared_session_state_uses_resume_hint_message_state() {
     let mut app = TestApp::builder().build();
-    app.app.display_only_session = Some(crate::app::DisplayOnlySessionState {
-        full_session_id: "saved-session".into(),
-        persisted_history_len: 0,
-        checkpoint: None,
-    });
+    app.app.live_session = Some(crate::app::history::live_session_for_test(
+        "saved-session".into(),
+        0,
+        None,
+    ));
 
     app.app.publish_shared_session_state();
 

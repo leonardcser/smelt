@@ -1,4 +1,4 @@
-use crate::app::{DisplayOnlySessionState, TuiApp};
+use crate::app::TuiApp;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::transcript_model::BlockHistory;
@@ -40,9 +40,39 @@ impl<'a> ToolSummaryResolver<'a> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn live_session_for_test(
+    id: String,
+    persisted_history_len: usize,
+    checkpoint: Option<smelt_core::ContextCheckpoint>,
+) -> smelt_core::session_runtime::LiveSession {
+    let header = smelt_core::session::SessionHeader {
+        meta: smelt_core::session::SessionMeta {
+            id,
+            title: None,
+            slug: None,
+            first_user_message: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            mode: None,
+            reasoning_effort: None,
+            model: None,
+            cwd: None,
+            parent_id: None,
+            context_tokens: None,
+            history_len: Some(persisted_history_len),
+            checkpoint,
+            text_bytes: None,
+            migration: None,
+        },
+        history_len: persisted_history_len,
+        revision: 0,
+    };
+    smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FullSessionMaterializationReason {
-    DisplayOnlyPromotion,
     LegacyOpenFallback,
     LegacyPreviewFallback,
     InspectSessionDetail,
@@ -53,9 +83,6 @@ pub(crate) enum FullSessionMaterializationReason {
 impl FullSessionMaterializationReason {
     fn counter(self) -> &'static str {
         match self {
-            FullSessionMaterializationReason::DisplayOnlyPromotion => {
-                "session:display_only_load_full"
-            }
             FullSessionMaterializationReason::LegacyOpenFallback => {
                 "compat:session:load_full_fallback"
             }
@@ -688,11 +715,7 @@ impl TuiApp {
         if matches!(kind, "cleared" | "rewound" | "loaded" | "forked") {
             self.bump_epoch("history_epoch");
         }
-        let count = self
-            .display_only_session
-            .as_ref()
-            .map(|display_only| display_only.persisted_history_len)
-            .unwrap_or(self.core.session.history.len());
+        let count = self.session_history_len();
         self.core.signals.emit_dyn(
             "history",
             std::rc::Rc::new(smelt_core::signals::HistoryDelta {
@@ -819,8 +842,8 @@ impl TuiApp {
     }
 
     pub(crate) fn fork_session(&mut self) {
-        self.ensure_display_only_session_loaded();
-        if self.core.session.history.is_empty() {
+        self.ensure_live_session_materialized();
+        if self.session_is_empty() {
             self.notify_error("nothing to fork".into());
             return;
         }
@@ -854,7 +877,7 @@ impl TuiApp {
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_perf::perf::begin("app:reset_session");
-        self.display_only_session = None;
+        self.live_session = None;
         // Reset is a hard session boundary: cancel in-flight engine work and all
         // Lua tasks before clearing state so stale events and child processes
         // don't restore old data into the new session.
@@ -919,7 +942,7 @@ impl TuiApp {
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
-        self.display_only_session = None;
+        self.live_session = None;
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
         if self.agent.is_some() {
             self.cancel_agent();
@@ -983,11 +1006,11 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
-    pub(crate) fn load_session_display_only(
+    pub(crate) fn load_store_backed_session(
         &mut self,
         loaded: session::Session,
         transcript: crate::app::transcript::LoadedTranscript,
-        display_only: DisplayOnlySessionState,
+        live_session: smelt_core::session_runtime::LiveSession,
     ) {
         if self.agent.is_some() {
             self.cancel_agent();
@@ -1017,12 +1040,12 @@ impl TuiApp {
             }
         }
 
-        let display_only_checkpoint = display_only.checkpoint.clone();
+        let live_checkpoint = live_session.checkpoint.clone();
         self.install_loaded_session(loaded);
         if self.core.session.checkpoint.is_none() {
-            self.core.session.checkpoint = display_only_checkpoint;
+            self.core.session.checkpoint = live_checkpoint;
         }
-        self.display_only_session = Some(display_only);
+        self.live_session = Some(live_session);
         self.persisted_store_ready = false;
         self.transcript_descriptors_persisted = true;
         self.session_dirty = false;
@@ -1048,26 +1071,122 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
-    pub(crate) fn ensure_display_only_session_loaded(&mut self) {
-        let Some(display_only) = self.display_only_session.take() else {
+    pub(crate) fn ensure_live_session_materialized(&mut self) {
+        let Some(live_session) = self.live_session.take() else {
             return;
         };
-        if let Some(loaded) = materialize_full_session(
-            &display_only.full_session_id,
-            FullSessionMaterializationReason::DisplayOnlyPromotion,
-        ) {
-            self.install_loaded_session(loaded);
-            self.prune_rewindable_session_state(self.core.session.history.len());
-            if !block_history_covers_history(self.transcript.history(), &self.core.session) {
-                let transcript = build_transcript_from_session(&self.lua, &self.core.session);
-                self.transcript.replace_transcript(transcript);
-                self.transcript_descriptors_persisted = false;
-                self.transcript.history_mut().mark_changed();
+        match live_session
+            .materialize_full_session(&self.core.session, "compat:session:display_only_promotion")
+        {
+            Ok(loaded) => {
+                self.install_loaded_session(loaded);
+                self.prune_rewindable_session_state(self.core.session.history.len());
+                if !block_history_covers_history(self.transcript.history(), &self.core.session) {
+                    let transcript = build_transcript_from_session(&self.lua, &self.core.session);
+                    self.transcript.replace_transcript(transcript);
+                    self.transcript_descriptors_persisted = false;
+                    self.transcript.history_mut().mark_changed();
+                }
+                self.sync_session_snapshot();
             }
-            self.sync_session_snapshot();
-        } else {
-            self.display_only_session = Some(display_only);
+            Err(_err) => {
+                smelt_perf::perf::record_value("live_session:materialize_error", 1);
+                self.live_session = Some(live_session);
+            }
         }
+    }
+
+    pub(crate) fn session_history_len(&self) -> usize {
+        self.live_session
+            .as_ref()
+            .map_or(self.core.session.history.len(), |live| live.history_len())
+    }
+
+    pub(crate) fn session_is_empty(&self) -> bool {
+        self.live_session
+            .as_ref()
+            .map_or(self.core.session.history.is_empty(), |live| live.is_empty())
+    }
+
+    pub(crate) fn session_history_range(&self, range: std::ops::Range<usize>) -> Vec<HistoryItem> {
+        if let Some(live) = &self.live_session {
+            return live.history_range(range).unwrap_or_else(|_err| {
+                smelt_perf::perf::record_value("live_session:history_range_error", 1);
+                Vec::new()
+            });
+        }
+        let end = range.end.min(self.core.session.history.len());
+        let start = range.start.min(end);
+        self.core.session.history[start..end].to_vec()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn session_history_tail(
+        &self,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    ) -> Vec<HistoryItem> {
+        if let Some(live) = &self.live_session {
+            return live
+                .history_tail(max_items, max_bytes)
+                .unwrap_or_else(|_err| {
+                    smelt_perf::perf::record_value("live_session:history_tail_error", 1);
+                    Vec::new()
+                });
+        }
+        let len = self.core.session.history.len();
+        self.core.session.history[len.saturating_sub(max_items)..].to_vec()
+    }
+
+    pub(crate) fn session_append_history(&mut self, item: HistoryItem) -> usize {
+        if let Some(live) = &mut self.live_session {
+            let idx = live.append_history(item);
+            self.core.session.checkpoint = live.checkpoint.clone();
+            return idx;
+        }
+        let idx = self.core.session.history.len();
+        self.core.session.history.push(item);
+        self.mark_history_dirty_from(idx);
+        idx
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn session_truncate_from(&mut self, index: usize) {
+        if let Some(live) = &mut self.live_session {
+            live.truncate_from(index);
+            return;
+        }
+        self.core.session.history.truncate(index);
+        self.mark_history_dirty_from(index);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn session_checkpoint(&self) -> Option<&smelt_core::ContextCheckpoint> {
+        self.live_session
+            .as_ref()
+            .and_then(|live| live.checkpoint.as_ref())
+            .or(self.core.session.checkpoint.as_ref())
+    }
+
+    pub(crate) fn session_set_checkpoint(
+        &mut self,
+        checkpoint: Option<smelt_core::ContextCheckpoint>,
+    ) {
+        self.core.session.checkpoint = checkpoint.clone();
+        if let Some(live) = &mut self.live_session {
+            live.set_checkpoint(checkpoint);
+        }
+    }
+
+    pub(crate) fn session_model_history_source(&self) -> protocol::ModelHistorySource {
+        if let Some(live) = &self.live_session {
+            return live.model_history_source(engine::SUMMARY_PREFIX);
+        }
+        let (prefix, first_live_index, end_index) = self
+            .core
+            .session
+            .model_history_range(engine::SUMMARY_PREFIX);
+        protocol::ModelHistorySource::store(prefix, first_live_index, end_index)
     }
 
     // ── History / session ────────────────────────────────────────────────
@@ -1117,11 +1236,11 @@ impl TuiApp {
 
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
-        if self.display_only_session.is_some() {
+        if self.live_session.is_some() {
             self.session_save_pending = false;
             return;
         }
-        if self.core.session.history.is_empty()
+        if self.session_history_len() == 0
             && !self.session_dirty
             && !self.persisted_store_ready
             && self.transcript.history().descriptor_dirty_from().is_none()
@@ -1348,6 +1467,7 @@ impl TuiApp {
             first_live_message_index,
             tokens_before,
         );
+        self.session_set_checkpoint(self.core.session.checkpoint.clone());
         if !installed {
             self.clear_compaction_preview();
             self.notify("nothing old enough to compact".to_string());
@@ -1366,34 +1486,21 @@ impl TuiApp {
     }
 
     pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
-        if let Some(display_only) = &self.display_only_session {
-            let Some(checkpoint) = self.core.session.checkpoint.as_ref() else {
-                return protocol::ModelHistorySource::store(
-                    Vec::new(),
-                    0,
-                    display_only.persisted_history_len,
-                );
-            };
-            let prefix = vec![HistoryItem::user(protocol::Content::text(format!(
-                "{}\n{}",
-                engine::SUMMARY_PREFIX.trim_end(),
-                checkpoint.summary
-            )))];
-            return protocol::ModelHistorySource::store(
-                prefix,
-                checkpoint.first_live_index,
-                display_only.persisted_history_len,
-            );
-        }
-        let (prefix, first_live_index, end_index) = self
-            .core
-            .session
-            .model_history_range(engine::SUMMARY_PREFIX);
-        protocol::ModelHistorySource::store(prefix, first_live_index, end_index)
+        self.session_model_history_source()
     }
 
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
-        self.core.session.model_history(engine::SUMMARY_PREFIX)
+        let protocol::ModelHistorySource::Store {
+            prefix,
+            first_live_index,
+            end_index,
+        } = self.model_history_source()
+        else {
+            return self.core.session.model_history(engine::SUMMARY_PREFIX);
+        };
+        let mut history = prefix;
+        history.extend(self.session_history_range(first_live_index..end_index));
+        history
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
@@ -1450,7 +1557,7 @@ impl TuiApp {
         &mut self,
         block_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
-        self.ensure_display_only_session_loaded();
+        self.ensure_live_session_materialized();
         let turns = self.user_turns();
         let turn_text = turns
             .iter()
@@ -1577,18 +1684,13 @@ impl TuiApp {
         true
     }
 
-    fn commit_display_only_request_history_item(
+    fn commit_live_session_request_history_item(
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
     ) -> protocol::ModelHistorySource {
         let history = self.model_history_source();
-        let history_index = self
-            .display_only_session
-            .as_ref()
-            .map_or(self.core.session.history.len(), |display_only| {
-                display_only.persisted_history_len
-            });
+        let history_index = self.session_history_len();
         let descriptor_order_start = self.transcript.history().len();
         let descriptor_start_idx = self.transcript.descriptor_total_count().unwrap_or_else(|| {
             self.transcript
@@ -1603,7 +1705,7 @@ impl TuiApp {
             .transcript
             .history()
             .descriptor_records_from(descriptor_order_start);
-        self.core.session.history.push(item.clone());
+        self.session_append_history(item.clone());
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();
         let had_descriptor_total = self.transcript.descriptor_total_count().is_some();
@@ -1620,9 +1722,8 @@ impl TuiApp {
                     .note_persisted_descriptor_append(descriptor_count);
             }
             let checkpoint = self.core.session.checkpoint.clone();
-            if let Some(display_only) = self.display_only_session.as_mut() {
-                display_only.persisted_history_len = history_len;
-                display_only.checkpoint = checkpoint;
+            if let Some(live) = self.live_session.as_mut() {
+                live.set_checkpoint(checkpoint);
             }
         }
         self.publish_history_delta("request");
@@ -1635,8 +1736,8 @@ impl TuiApp {
         item: HistoryItem,
         block: Option<Block>,
     ) -> protocol::ModelHistorySource {
-        if self.display_only_session.is_some() {
-            return self.commit_display_only_request_history_item(item, block);
+        if self.live_session.is_some() {
+            return self.commit_live_session_request_history_item(item, block);
         }
         let history = self.model_history_source();
         let history_index = self.core.session.history.len();
@@ -1666,7 +1767,7 @@ impl TuiApp {
             .transcript
             .history()
             .descriptor_records_from(descriptor_order_start);
-        self.core.session.history.push(item.clone());
+        self.session_append_history(item.clone());
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();
         let had_descriptor_total = self.transcript.descriptor_total_count().is_some();
@@ -1910,14 +2011,10 @@ mod checkpoint_tests {
         display_session.id = id.clone();
         display_session.first_user_message = Some("old user".into());
 
-        app.app.load_session_display_only(
+        app.app.load_store_backed_session(
             display_session,
             loaded_transcript,
-            crate::app::DisplayOnlySessionState {
-                full_session_id: id.clone(),
-                persisted_history_len: 2,
-                checkpoint: None,
-            },
+            crate::app::history::live_session_for_test(id.clone(), 2, None),
         );
 
         let source = app.app.commit_request_history_item(
@@ -1937,10 +2034,7 @@ mod checkpoint_tests {
             }
         ));
         assert_eq!(
-            app.app
-                .display_only_session
-                .as_ref()
-                .map(|display_only| display_only.persisted_history_len),
+            app.app.live_session.as_ref().map(|live| live.history_len()),
             Some(3)
         );
 

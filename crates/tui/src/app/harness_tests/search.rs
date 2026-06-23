@@ -40,14 +40,10 @@ fn sparse_display_only_search_app(
     let mut session =
         smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
     session.id = session_id.to_string();
-    app.app.load_session_display_only(
+    app.app.load_store_backed_session(
         session,
         loaded,
-        crate::app::DisplayOnlySessionState {
-            full_session_id: session_id.to_string(),
-            persisted_history_len: 200,
-            checkpoint: None,
-        },
+        crate::app::history::live_session_for_test(session_id.to_string(), 200, None),
     );
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);

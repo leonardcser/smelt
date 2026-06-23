@@ -67,13 +67,6 @@ pub struct ShutdownContext {
     pub has_messages: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct DisplayOnlySessionState {
-    pub(crate) full_session_id: String,
-    pub(crate) persisted_history_len: usize,
-    pub(crate) checkpoint: Option<smelt_core::ContextCheckpoint>,
-}
-
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
@@ -129,7 +122,7 @@ pub struct TuiApp {
     pub(crate) dirty_history_from: Option<usize>,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
-    pub(crate) display_only_session: Option<DisplayOnlySessionState>,
+    pub(crate) live_session: Option<smelt_core::session_runtime::LiveSession>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
@@ -759,7 +752,7 @@ impl TuiApp {
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
         !self.core.session.history.is_empty()
             || !self.transcript.is_empty()
-            || self.display_only_session.is_some()
+            || self.live_session.is_some()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
@@ -1313,7 +1306,7 @@ impl TuiApp {
             session_dirty: false,
             dirty_history_from: None,
             transient_render_requested: false,
-            display_only_session: None,
+            live_session: None,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,

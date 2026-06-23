@@ -309,33 +309,17 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom. Silent no-op on miss.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        let display_only =
-            smelt_core::session::resolve_session_dir_for_read(id).and_then(|resolved| {
-                if resolved.kind != smelt_core::session::SessionDirKind::Store {
-                    return None;
-                }
-                let meta = smelt_core::session::load_meta_for_prepared_dir(resolved.dir.clone())?;
+        let store_backed =
+            smelt_core::session::load_store_header(id).and_then(|(header, store_ref)| {
                 let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
-                    resolved.dir,
+                    store_ref.session_dir.clone(),
                     self.last_width,
                     self.last_height,
                 )?;
-                Some((meta, transcript))
+                Some((header, store_ref, transcript))
             });
-        if let Some((meta, transcript)) = display_only {
-            let Some(history_len) = meta.history_len else {
-                // COMPAT(legacy-session-full-load-fallbacks): sessions without SQLite history metadata still need monolithic load until legacy session imports are retired.
-                if let Some(loaded) = crate::app::history::materialize_full_session(
-                    id,
-                    crate::app::history::FullSessionMaterializationReason::LegacyOpenFallback,
-                ) {
-                    self.load_session(loaded);
-                    self.restore_screen();
-                    self.finish_transcript_turn();
-                    self.transcript_win_mut().follow_tail();
-                }
-                return;
-            };
+        if let Some((header, store_ref, transcript)) = store_backed {
+            let meta = header.meta.clone();
             let mut session =
                 smelt_core::session::Session::new(self.core.env.pid(), self.core.env.cwd());
             session.id = meta.id.clone();
@@ -351,14 +335,10 @@ impl TuiApp {
             session.parent_id = meta.parent_id;
             session.checkpoint = meta.checkpoint.clone();
             session.display_context_tokens = meta.context_tokens;
-            self.load_session_display_only(
+            self.load_store_backed_session(
                 session,
                 transcript,
-                crate::app::DisplayOnlySessionState {
-                    full_session_id: meta.id,
-                    persisted_history_len: history_len,
-                    checkpoint: meta.checkpoint,
-                },
+                smelt_core::session_runtime::LiveSession::from_store(header, store_ref),
             );
             self.finish_transcript_turn();
             self.transcript_win_mut().follow_tail();
