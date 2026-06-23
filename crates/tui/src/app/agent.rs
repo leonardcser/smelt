@@ -162,6 +162,10 @@ impl TuiApp {
         if matches!(history, protocol::ModelHistorySource::Store { .. })
             && history.requested_len() > 0
             && (self.session_dirty
+                || self
+                    .live_session
+                    .as_ref()
+                    .is_some_and(|live| live.dirty.history_from.is_some())
                 || !self.persisted_store_ready
                 || !self.transcript_descriptors_persisted
                 || self.transcript.history().descriptor_dirty_from().is_some())

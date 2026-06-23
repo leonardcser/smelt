@@ -735,15 +735,19 @@ impl TuiApp {
         smelt_perf::perf::record_value("tui:history_appended:first_index", first_index as u64);
 
         let already_present = self.core.session.checkpoint.is_none()
-            && first_index <= self.core.session.history.len()
-            && self.core.session.history[first_index..].starts_with(&items);
+            && first_index.saturating_add(items.len()) <= self.session_history_len()
+            && self.session_history_range(first_index..first_index.saturating_add(items.len()))
+                == items;
 
         if already_present {
             smelt_perf::perf::record_value("tui:history_appended:already_present", 1);
         } else {
-            let dirty_from = self.core.session.history.len();
-            self.core.session.history.extend(items.iter().cloned());
-            self.mark_history_dirty_from(dirty_from);
+            if first_index < self.session_history_len() {
+                self.session_truncate_from(first_index);
+            }
+            for item in items.iter().cloned() {
+                self.session_append_history(item);
+            }
         }
 
         for item in &items {
@@ -779,6 +783,31 @@ impl TuiApp {
         &mut self,
         append: &protocol::HistoryAppend,
     ) -> protocol::HistoryAppendResult {
+        if self.live_session.is_some() {
+            let old_len = self.session_history_len();
+            if matches!(append.policy, protocol::HistoryAppendPolicy::Append) {
+                self.session_append_history(append.item.clone());
+                return protocol::HistoryAppendResult::Pushed;
+            }
+
+            let tail_start = old_len.saturating_sub(128);
+            let mut tail = self.session_history_range(tail_start..old_len);
+            let old_tail = tail.clone();
+            let result = protocol::apply_history_append(&mut tail, append);
+            if result != protocol::HistoryAppendResult::Unchanged {
+                let dirty_offset = old_tail
+                    .iter()
+                    .zip(tail.iter())
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                self.session_truncate_from(tail_start.saturating_add(dirty_offset));
+                for item in tail.into_iter().skip(dirty_offset) {
+                    self.session_append_history(item);
+                }
+            }
+            return result;
+        }
+
         let old_len = self.core.session.history.len();
         let result = protocol::apply_history_append(&mut self.core.session.history, append);
         match result {
@@ -1279,7 +1308,7 @@ impl TuiApp {
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
         if self.live_session.is_some() {
-            self.session_save_pending = false;
+            self.save_live_session();
             return;
         }
         if self.session_history_len() == 0
@@ -1362,18 +1391,6 @@ impl TuiApp {
                 descriptor_start_idx,
                 descriptor_records,
             } => (descriptor_start_idx, descriptor_records, true),
-            crate::app::transcript::TranscriptDescriptorSaveSuffix::NeedsFullRebuild => {
-                smelt_perf::perf::record_value("session:save:descriptor_sparse_full_rebuild", 1);
-                let transcript = build_transcript_from_session(&self.lua, &self.core.session);
-                self.transcript.replace_transcript(transcript);
-                self.transcript_descriptors_persisted = false;
-                self.transcript.history_mut().mark_changed();
-                (
-                    0,
-                    self.transcript.history().descriptor_records_from(0),
-                    true,
-                )
-            }
         };
         if !descriptor_work && blobs.is_empty() && !self.session_dirty {
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
@@ -1430,6 +1447,119 @@ impl TuiApp {
         self.dirty_history_from = None;
     }
 
+    fn save_live_session(&mut self) {
+        self.session_save_pending = false;
+        let Some(live) = self.live_session.as_ref() else {
+            return;
+        };
+        let history_len = live.history_len();
+        let dirty_history_from = live.dirty.history_from;
+        let descriptor_dirty = self.transcript.history().descriptor_dirty_from();
+        let blobs = self.pending_image_blobs();
+        if history_len == 0
+            && dirty_history_from.is_none()
+            && descriptor_dirty.is_none()
+            && blobs.is_empty()
+        {
+            return;
+        }
+        if dirty_history_from.is_none()
+            && self.transcript_descriptors_persisted
+            && descriptor_dirty.is_none()
+            && blobs.is_empty()
+            && !self.session_dirty
+        {
+            smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
+            return;
+        }
+
+        self.update_session_persist_metadata();
+        let history_start_idx = dirty_history_from.unwrap_or(history_len).min(history_len);
+        let descriptor_save = self
+            .transcript
+            .descriptor_save_suffix(self.transcript_descriptors_persisted, dirty_history_from);
+        let (descriptor_start_idx, descriptor_records, descriptor_work) = match descriptor_save {
+            crate::app::transcript::TranscriptDescriptorSaveSuffix::Unchanged => {
+                (0, Vec::new(), false)
+            }
+            crate::app::transcript::TranscriptDescriptorSaveSuffix::Suffix {
+                descriptor_start_idx,
+                descriptor_records,
+            } => (descriptor_start_idx, descriptor_records, true),
+        };
+        if !descriptor_work
+            && blobs.is_empty()
+            && dirty_history_from.is_none()
+            && !self.session_dirty
+        {
+            smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
+            return;
+        }
+
+        let history = match self
+            .live_session
+            .as_ref()
+            .expect("live session present")
+            .history_range(history_start_idx..history_len)
+        {
+            Ok(history) => history,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                return;
+            }
+        };
+        let state = match session::store_state_from_session(&self.core.session, history_len) {
+            Ok(state) => state,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                return;
+            }
+        };
+        let side_tables = match session::store_side_table_suffixes_from_session_at(
+            &self.core.session,
+            history_start_idx,
+        ) {
+            Ok(tables) => tables,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                return;
+            }
+        };
+        let session_id = self.core.session.id.clone();
+        let session_dir = self
+            .live_session
+            .as_ref()
+            .expect("live session present")
+            .dir()
+            .to_path_buf();
+        self.publish_shared_session_state();
+        self.persister.save(crate::persist::PersistRequest {
+            session_id,
+            session_dir,
+            delta: crate::persist::PersistDelta {
+                history: smelt_store::SessionHistorySuffix {
+                    state,
+                    history_start_idx,
+                    history_len,
+                    history,
+                    side_tables: Some(side_tables),
+                },
+                descriptors: descriptor_work.then_some(crate::persist::PersistDescriptorDelta {
+                    start_descriptor_idx: descriptor_start_idx,
+                    records: descriptor_records,
+                }),
+            },
+            blobs,
+        });
+        self.persisted_store_ready = true;
+        self.transcript_descriptors_persisted = true;
+        self.transcript.history_mut().clear_descriptor_dirty();
+        if let Some(live) = self.live_session.as_mut() {
+            live.dirty.history_from = None;
+        }
+        self.session_dirty = false;
+        self.dirty_history_from = None;
+    }
     fn pending_image_blobs(&self) -> Vec<crate::persist::Blob> {
         self.input
             .store
@@ -1850,9 +1980,7 @@ impl TuiApp {
     }
 
     pub(crate) fn append_request_history_item(&mut self, item: HistoryItem) {
-        let old_len = self.core.session.history.len();
-        self.core.session.history.push(item);
-        self.mark_history_dirty_from(old_len);
+        self.session_append_history(item);
         self.sync_session_snapshot();
         self.publish_history_delta("request");
         self.save_session();
@@ -2255,6 +2383,41 @@ mod checkpoint_tests {
             descriptors.last().and_then(|row| row.history_idx),
             Some(OLD_HISTORY_LEN as u64)
         );
+    }
+
+    #[test]
+    fn live_session_save_persists_only_dirty_suffix_rows() {
+        const OLD_HISTORY_LEN: usize = 256;
+        let mut app = large_saved_session_app("live-save-dirty-suffix-gate", OLD_HISTORY_LEN);
+        let id = app.app.core.session.id.clone();
+        app.app.load_session_by_id(&id);
+        assert!(app.app.live_session.is_some());
+        assert!(app.app.core.session.history.is_empty());
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        app.app
+            .append_engine_history_items(OLD_HISTORY_LEN, vec![assistant("new assistant")]);
+        app.app.save_session();
+        app.app.flush_persist();
+        smelt_perf::perf::set_enabled(false);
+
+        assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN + 1);
+        assert!(app.app.core.session.history.is_empty());
+        assert_perf_value_at_most("persist:write:history_items", 1);
+        assert_perf_value_at_most("store:session:dirty_suffix_history_rows", 1);
+        assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
+        assert_perf_value_at_most("store:session:history_rows_inserted", 1);
+        assert_perf_value_at_most("store:session:history_rows_deleted", 0);
+        assert_no_full_store_reads();
+
+        let db =
+            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+                .expect("open session db");
+        let tail = db
+            .read_history_items_range(OLD_HISTORY_LEN..OLD_HISTORY_LEN + 1)
+            .expect("read persisted tail");
+        assert_eq!(tail, vec![assistant("new assistant")]);
     }
 
     #[test]

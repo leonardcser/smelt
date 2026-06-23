@@ -1031,7 +1031,6 @@ pub(crate) enum TranscriptDescriptorSaveSuffix {
         descriptor_start_idx: usize,
         descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
     },
-    NeedsFullRebuild,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4154,11 +4153,6 @@ impl TranscriptDocument {
         let Some(descriptor_order_start) = descriptor_order_dirty else {
             return TranscriptDescriptorSaveSuffix::Unchanged;
         };
-        if descriptors_persisted
-            && self.dirty_history_precedes_active_descriptor_window(dirty_history_from)
-        {
-            return TranscriptDescriptorSaveSuffix::NeedsFullRebuild;
-        }
         let local_descriptor_start_idx = if descriptors_persisted {
             history.descriptor_record_index_for_order_index(descriptor_order_start)
         } else {
@@ -4177,30 +4171,6 @@ impl TranscriptDocument {
             descriptor_start_idx,
             descriptor_records: history.descriptor_records_from(descriptor_order_start),
         }
-    }
-
-    fn dirty_history_precedes_active_descriptor_window(
-        &self,
-        dirty_history_from: Option<usize>,
-    ) -> bool {
-        let Some(dirty_history_from) = dirty_history_from else {
-            return false;
-        };
-        let Some(active_range) = self.descriptors.active_range() else {
-            return false;
-        };
-        if active_range.start.get() == 0 {
-            return false;
-        }
-        let first_loaded_history_origin = self
-            .history()
-            .descriptor_records_from(0)
-            .into_iter()
-            .find_map(|record| match record.origin {
-                Some(smelt_core::BlockOrigin::History(index)) => Some(index),
-                _ => None,
-            });
-        first_loaded_history_origin.is_none_or(|origin| origin > dirty_history_from)
     }
 
     pub(crate) fn history(&self) -> &BlockHistory {
