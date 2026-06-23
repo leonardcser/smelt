@@ -21,6 +21,8 @@ use crate::session_snapshot::{
     SessionSnapshot, TranscriptDescriptorSuffix,
 };
 
+const WRITER_LEASE_STALE_AFTER_SECS: i64 = 30 * 60;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenMode {
     ReadWrite,
@@ -695,6 +697,19 @@ impl SessionDb {
     pub fn search_blob(&self) -> Result<String> {
         session_snapshot::search_blob(&self.conn)
     }
+    pub fn active_writer_lease_for_current_process(&self) -> Result<Option<WriterLease>> {
+        let lease = self.current_process_writer_lease()?;
+        Ok(self.writer_lease()?.filter(|existing| {
+            meta::writer_lease_conflicts(existing, &lease, WRITER_LEASE_STALE_AFTER_SECS)
+        }))
+    }
+
+    pub fn acquire_current_process_writer_lease(&self) -> Result<WriterLease> {
+        let lease = self.current_process_writer_lease()?;
+        meta::acquire_writer_lease(&self.conn, &lease, WRITER_LEASE_STALE_AFTER_SECS)?;
+        Ok(lease)
+    }
+
     fn current_process_writer_lease(&self) -> Result<WriterLease> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

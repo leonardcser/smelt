@@ -67,6 +67,79 @@ pub struct ShutdownContext {
     pub has_messages: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum SessionAccess {
+    Owned,
+    ReadOnly { reason: String },
+}
+
+impl SessionAccess {
+    fn is_read_only(&self) -> bool {
+        matches!(self, Self::ReadOnly { .. })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingSessionSave {
+    pub(crate) save_id: u64,
+    pub(crate) session_id: String,
+    pub(crate) kind: crate::persist::PersistSaveKind,
+    pub(crate) dirty_generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SessionPersistState {
+    pub(crate) save_pending: bool,
+    pub(crate) pending_save: Option<PendingSessionSave>,
+    pub(crate) next_save_id: u64,
+    pub(crate) dirty_generation: u64,
+    pub(crate) persisted_history_len: Option<usize>,
+    pub(crate) store_ready: bool,
+    pub(crate) descriptors_persisted: bool,
+    pub(crate) session_dirty: bool,
+    pub(crate) dirty_history_from: Option<usize>,
+}
+
+impl SessionPersistState {
+    fn new() -> Self {
+        Self {
+            save_pending: false,
+            pending_save: None,
+            next_save_id: 1,
+            dirty_generation: 0,
+            persisted_history_len: None,
+            store_ready: false,
+            descriptors_persisted: false,
+            session_dirty: false,
+            dirty_history_from: None,
+        }
+    }
+
+    pub(crate) fn mark_session_dirty(&mut self) {
+        self.session_dirty = true;
+        self.dirty_generation = self.dirty_generation.saturating_add(1);
+    }
+
+    pub(crate) fn mark_history_dirty_from(&mut self, idx: usize) {
+        self.mark_session_dirty();
+        self.dirty_history_from = Some(
+            self.dirty_history_from
+                .map_or(idx, |current| current.min(idx)),
+        );
+    }
+
+    pub(crate) fn mark_clean(&mut self) {
+        self.session_dirty = false;
+        self.dirty_history_from = None;
+    }
+
+    pub(crate) fn reset_unpersisted(&mut self) {
+        self.store_ready = false;
+        self.persisted_history_len = None;
+        self.descriptors_persisted = false;
+    }
+}
+
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
@@ -115,11 +188,8 @@ pub struct TuiApp {
     pub(crate) inspect_server: Arc<Mutex<Option<crate::inspect_server::Server>>>,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
-    pub(crate) session_save_pending: bool,
-    pub(crate) persisted_store_ready: bool,
-    pub(crate) transcript_descriptors_persisted: bool,
-    pub(crate) session_dirty: bool,
-    pub(crate) dirty_history_from: Option<usize>,
+    pub(crate) session_persist: SessionPersistState,
+    pub(crate) session_access: SessionAccess,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
     pub(crate) live_session: Option<smelt_core::session_runtime::LiveSession>,
@@ -1310,11 +1380,8 @@ impl TuiApp {
             inspect_server: Arc::new(Mutex::new(None)),
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
-            session_save_pending: false,
-            persisted_store_ready: false,
-            transcript_descriptors_persisted: false,
-            session_dirty: false,
-            dirty_history_from: None,
+            session_persist: SessionPersistState::new(),
+            session_access: SessionAccess::Owned,
             transient_render_requested: false,
             live_session: None,
             last_width: term_w,
@@ -1911,12 +1978,12 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn drain_persist_errors(&mut self) {
-        for err in self.persister.drain_errors() {
-            self.notify_error_sticky(format!(
-                "failed to save session {}: {}",
-                err.session_id, err.message
-            ));
+    pub(crate) fn drain_persist_reports(&mut self) {
+        for report in self.persister.drain_reports() {
+            match report {
+                crate::persist::PersistReport::Saved(ack) => self.ack_persist_save(ack),
+                crate::persist::PersistReport::Failed(err) => self.fail_persist_save(err),
+            }
         }
     }
 
@@ -2351,7 +2418,7 @@ impl TuiApp {
                 break 'main;
             }
             self.tick_timers();
-            self.drain_persist_errors();
+            self.drain_persist_reports();
             self.publish_diff_signals();
             self.drain_signals_pending();
             self.drive_lua_tasks();

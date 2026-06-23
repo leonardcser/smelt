@@ -21,14 +21,16 @@ impl TuiApp {
     }
 
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
-        if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
-            if tokens > 0 {
-                self.core
-                    .session
-                    .record_context_tokens(tokens, self.active_context_token_identity());
-                self.context_tokens_updated_this_turn = true;
-                if self.active_provider_supports_mid_turn_reasoning_changes() {
-                    self.sync_reasoning_effort_applied();
+        if !self.session_is_read_only() {
+            if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
+                if tokens > 0 {
+                    self.core
+                        .session
+                        .record_context_tokens(tokens, self.active_context_token_identity());
+                    self.context_tokens_updated_this_turn = true;
+                    if self.active_provider_supports_mid_turn_reasoning_changes() {
+                        self.sync_reasoning_effort_applied();
+                    }
                 }
             }
         }
@@ -95,9 +97,11 @@ impl TuiApp {
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
-                self.session_dirty = true;
-                self.core.session.session_cost_usd += cost;
-                self.core.session.session_usage.accumulate(&usage);
+                if !self.session_is_read_only() {
+                    self.mark_session_dirty();
+                    self.core.session.session_cost_usd += cost;
+                    self.core.session.session_usage.accumulate(&usage);
+                }
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

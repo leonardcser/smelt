@@ -95,10 +95,7 @@ pub(crate) fn acquire_writer_lease(
     stale_after_secs: i64,
 ) -> Result<()> {
     if let Some(existing) = writer_lease(conn)? {
-        let stale = lease.heartbeat_at.saturating_sub(existing.heartbeat_at) > stale_after_secs
-            || same_host_dead_writer(&existing, lease);
-        let same_owner = existing.owner_id == lease.owner_id;
-        if !same_owner && !stale {
+        if writer_lease_conflicts(&existing, lease, stale_after_secs) {
             return Err(StoreError::Integrity(format!(
                 "session has active writer lease from pid {} on {}",
                 existing.pid, existing.hostname
@@ -106,6 +103,17 @@ pub(crate) fn acquire_writer_lease(
         }
     }
     set_writer_lease(conn, lease)
+}
+
+pub(crate) fn writer_lease_conflicts(
+    existing: &WriterLease,
+    lease: &WriterLease,
+    stale_after_secs: i64,
+) -> bool {
+    let stale = lease.heartbeat_at.saturating_sub(existing.heartbeat_at) > stale_after_secs
+        || same_host_dead_writer(existing, lease);
+    let same_owner = existing.owner_id == lease.owner_id;
+    !same_owner && !stale
 }
 
 fn same_host_dead_writer(existing: &WriterLease, lease: &WriterLease) -> bool {

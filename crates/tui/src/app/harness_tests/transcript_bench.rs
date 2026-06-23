@@ -1694,7 +1694,7 @@ fn saved_hot_path_app(
 
     app.app.load_session(session);
     app.app.restore_screen();
-    app.app.persisted_store_ready = false;
+    app.app.session_persist.store_ready = false;
     app.app.save_session();
     app.app.flush_persist();
     app
@@ -1979,7 +1979,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         16,
     );
     assert!(
-        app.app.session_save_pending,
+        app.app.session_persist.save_pending,
         "{} did not defer completion metadata for the next save point",
         sample.operation
     );

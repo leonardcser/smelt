@@ -203,6 +203,18 @@ pub use crate::session_migration::{
     SessionMigrationStatus,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionAccessDecision {
+    Owned,
+    ReadOnly { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedSession {
+    pub session: Session,
+    pub access: SessionAccessDecision,
+}
+
 // COMPAT(session-v1-messages): load old session.json files that stored
 // provider-style messages instead of native HistoryItem rows.
 /// Legacy on-disk JSON shape. Older sessions stored provider-style messages;
@@ -1559,6 +1571,15 @@ pub fn load_full(id_or_prefix: &str) -> Option<Session> {
     load_full_exact(&id)
 }
 
+pub fn load_full_for_resume(id_or_prefix: &str) -> Option<LoadedSession> {
+    let _perf = smelt_perf::perf::begin("session:load_full_for_resume");
+    let id = {
+        let _perf = smelt_perf::perf::begin("session:load_full:resolve");
+        resolve_prefix(id_or_prefix)?
+    };
+    load_session_files_for_resume(&sessions_dir().join(id))
+}
+
 pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
     let _perf = smelt_perf::perf::begin("session:load_meta");
     load_meta_for_prepared_dir(prepare_session_dir_for_read(id_or_prefix)?)
@@ -1573,6 +1594,9 @@ pub fn resolve_session_dir_for_read(id_or_prefix: &str) -> Option<ResolvedSessio
 
 pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
     let resolved = resolve_session_dir_for_read(id_or_prefix)?;
+    if writer_lease_conflict_for_session_dir(&resolved.dir).is_some() {
+        return Some(resolved.dir);
+    }
     if let Err(err) = crate::session_migration::ensure_session_db(&resolved.dir) {
         log_session_migration_error(&resolved.dir, &err);
         return None;
@@ -1663,6 +1687,56 @@ fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
     load_db_session(dir_path).and_then(|session| internalize_session_blobs(dir_path, session))
 }
 
+fn writer_lease_conflict_for_session_dir(dir_path: &Path) -> Option<SessionAccessDecision> {
+    let db_path = dir_path.join("session.db");
+    if !db_path.is_file() {
+        return None;
+    }
+    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
+    let lease = db.active_writer_lease_for_current_process().ok()??;
+    Some(SessionAccessDecision::ReadOnly {
+        reason: format!(
+            "session has active writer lease from pid {} on {}",
+            lease.pid, lease.hostname
+        ),
+    })
+}
+
+pub fn claim_access_for_session_dir(dir_path: &Path) -> SessionAccessDecision {
+    let db_path = dir_path.join("session.db");
+    if !db_path.is_file() {
+        return SessionAccessDecision::Owned;
+    }
+    if let Some(access) = writer_lease_conflict_for_session_dir(dir_path) {
+        return access;
+    }
+    match smelt_store::SessionDb::open(&db_path)
+        .and_then(|db| db.acquire_current_process_writer_lease())
+    {
+        Ok(_) => SessionAccessDecision::Owned,
+        Err(err) => SessionAccessDecision::ReadOnly {
+            reason: err.to_string(),
+        },
+    }
+}
+
+fn load_session_files_for_resume(dir_path: &std::path::Path) -> Option<LoadedSession> {
+    if let Some(access) = writer_lease_conflict_for_session_dir(dir_path) {
+        let session = load_db_session(dir_path)
+            .and_then(|session| internalize_session_blobs(dir_path, session))?;
+        return Some(LoadedSession { session, access });
+    }
+
+    if let Err(err) = crate::session_migration::ensure_session_db(dir_path) {
+        log_session_migration_error(dir_path, &err);
+        return None;
+    }
+    let access = claim_access_for_session_dir(dir_path);
+    let session = load_db_session(dir_path)
+        .and_then(|session| internalize_session_blobs(dir_path, session))?;
+    Some(LoadedSession { session, access })
+}
+
 fn log_session_migration_error(dir_path: &std::path::Path, err: &SessionMigrationError) {
     engine::log::entry(
         engine::log::Level::Warn,
@@ -1695,7 +1769,7 @@ fn load_db_session(dir_path: &std::path::Path) -> Option<Session> {
     if !db_path.is_file() {
         return None;
     }
-    let db = smelt_store::SessionDb::open(&db_path).ok()?;
+    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
     let mut snapshot = db.load_full_session_snapshot().ok()??;
     let history = std::mem::take(&mut snapshot.history);
     Some(session_from_store_snapshot(snapshot, history))

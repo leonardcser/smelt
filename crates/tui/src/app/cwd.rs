@@ -32,11 +32,15 @@ impl TuiApp {
     /// note or marking the restored session dirty.
     pub(crate) fn restore_session_cwd(&mut self, cwd: Option<&str>) -> SessionCwdRestore {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
-            self.core.session.cwd = Some(self.cwd.clone());
+            if !self.session_is_read_only() {
+                self.core.session.cwd = Some(self.cwd.clone());
+            }
             return SessionCwdRestore::Missing;
         };
         if cwd == self.cwd {
-            self.core.session.cwd = Some(self.cwd.clone());
+            if !self.session_is_read_only() {
+                self.core.session.cwd = Some(self.cwd.clone());
+            }
             return SessionCwdRestore::Current;
         }
 
@@ -51,7 +55,9 @@ impl TuiApp {
             }
             Err(err) => {
                 let fallback = self.cwd.clone();
-                self.core.session.cwd = Some(fallback.clone());
+                if !self.session_is_read_only() {
+                    self.core.session.cwd = Some(fallback.clone());
+                }
                 SessionCwdRestore::Fallback {
                     requested: cwd.to_string(),
                     fallback,
@@ -71,7 +77,9 @@ impl TuiApp {
         std::env::set_var("PWD", &cwd);
         self.cwd = cwd.to_string_lossy().into_owned();
         self.core.env.set_cwd(cwd.clone());
-        self.core.session.cwd = Some(self.cwd.clone());
+        if !self.session_is_read_only() {
+            self.core.session.cwd = Some(self.cwd.clone());
+        }
         self.refresh_cwd_status();
         self.core
             .signals
@@ -119,8 +127,10 @@ impl TuiApp {
         self.core.engine.send(protocol::UiCommand::SetCwd {
             cwd: self.cwd.clone(),
         });
-        self.ensure_current_context_note();
-        self.session_dirty = true;
-        self.save_session();
+        if !self.session_is_read_only() {
+            self.ensure_current_context_note();
+            self.mark_session_dirty();
+            self.save_session();
+        }
     }
 }

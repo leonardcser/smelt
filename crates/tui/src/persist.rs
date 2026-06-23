@@ -18,6 +18,7 @@ pub(crate) struct Blob {
 }
 
 pub(crate) struct PersistRequest {
+    pub(crate) save_id: u64,
     pub(crate) session_id: String,
     pub(crate) session_dir: PathBuf,
     pub(crate) delta: PersistDelta,
@@ -37,10 +38,38 @@ pub(crate) struct PersistDescriptorDelta {
 }
 
 pub(crate) struct PersistMetadataRequest {
+    pub(crate) save_id: u64,
     pub(crate) session_id: String,
     pub(crate) session_dir: PathBuf,
     pub(crate) state: smelt_store::SessionState,
     pub(crate) side_tables: smelt_store::SessionSideTableSuffixes,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PersistSaveKind {
+    History,
+    Metadata,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PersistAck {
+    pub(crate) save_id: u64,
+    pub(crate) session_id: String,
+    pub(crate) kind: PersistSaveKind,
+    pub(crate) history_len: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PersistFailure {
+    pub(crate) save_id: u64,
+    pub(crate) session_id: String,
+    pub(crate) message: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PersistReport {
+    Saved(PersistAck),
+    Failed(PersistFailure),
 }
 
 enum Cmd {
@@ -49,29 +78,23 @@ enum Cmd {
     Flush(Sender<()>),
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PersistError {
-    pub(crate) session_id: String,
-    pub(crate) message: String,
-}
-
 pub(crate) struct Persister {
     tx: Option<Sender<Cmd>>,
-    errors: Receiver<PersistError>,
+    reports: Receiver<PersistReport>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Persister {
     pub(crate) fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
-        let (err_tx, errors) = mpsc::channel();
+        let (report_tx, reports) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("smelt-persist".into())
-            .spawn(move || worker_loop(rx, err_tx))
+            .spawn(move || worker_loop(rx, report_tx))
             .expect("spawn persist worker");
         Self {
             tx: Some(tx),
-            errors,
+            reports,
             handle: Some(handle),
         }
     }
@@ -88,12 +111,12 @@ impl Persister {
         }
     }
 
-    pub(crate) fn drain_errors(&self) -> Vec<PersistError> {
-        let mut errors = Vec::new();
-        while let Ok(err) = self.errors.try_recv() {
-            errors.push(err);
+    pub(crate) fn drain_reports(&self) -> Vec<PersistReport> {
+        let mut reports = Vec::new();
+        while let Ok(report) = self.reports.try_recv() {
+            reports.push(report);
         }
-        errors
+        reports
     }
 
     /// Block until all queued saves are written. No-op if the worker has exited.
@@ -138,19 +161,15 @@ impl PersistDbCache {
     }
 }
 
-fn worker_loop(rx: Receiver<Cmd>, errors: Sender<PersistError>) {
+fn worker_loop(rx: Receiver<Cmd>, reports: Sender<PersistReport>) {
     let mut db_cache = PersistDbCache { current: None };
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Save(req) => {
-                report_error(write(&req, &mut db_cache), &req.session_id, &errors);
+                report_history_result(write(&req, &mut db_cache), &req, &reports);
             }
             Cmd::SaveMetadata(req) => {
-                report_error(
-                    write_metadata(&req, &mut db_cache),
-                    &req.session_id,
-                    &errors,
-                );
+                report_metadata_result(write_metadata(&req, &mut db_cache), &req, &reports);
             }
             Cmd::Flush(done) => {
                 let _ = done.send(());
@@ -159,13 +178,46 @@ fn worker_loop(rx: Receiver<Cmd>, errors: Sender<PersistError>) {
     }
 }
 
-fn report_error(result: Result<(), String>, session_id: &str, errors: &Sender<PersistError>) {
-    if let Err(message) = result {
-        let _ = errors.send(PersistError {
-            session_id: session_id.to_string(),
+fn report_history_result(
+    result: Result<smelt_store::SessionSaveReport, String>,
+    req: &PersistRequest,
+    reports: &Sender<PersistReport>,
+) {
+    let report = match result {
+        Ok(_save_report) => PersistReport::Saved(PersistAck {
+            save_id: req.save_id,
+            session_id: req.session_id.clone(),
+            kind: PersistSaveKind::History,
+            history_len: req.delta.history.history_len,
+        }),
+        Err(message) => PersistReport::Failed(PersistFailure {
+            save_id: req.save_id,
+            session_id: req.session_id.clone(),
             message,
-        });
-    }
+        }),
+    };
+    let _ = reports.send(report);
+}
+
+fn report_metadata_result(
+    result: Result<smelt_store::SessionSaveReport, String>,
+    req: &PersistMetadataRequest,
+    reports: &Sender<PersistReport>,
+) {
+    let report = match result {
+        Ok(_save_report) => PersistReport::Saved(PersistAck {
+            save_id: req.save_id,
+            session_id: req.session_id.clone(),
+            kind: PersistSaveKind::Metadata,
+            history_len: req.state.history_len as usize,
+        }),
+        Err(message) => PersistReport::Failed(PersistFailure {
+            save_id: req.save_id,
+            session_id: req.session_id.clone(),
+            message,
+        }),
+    };
+    let _ = reports.send(report);
 }
 
 fn record_save_report(save_report: &smelt_store::SessionSaveReport) {
@@ -180,7 +232,10 @@ fn record_save_report(save_report: &smelt_store::SessionSaveReport) {
     );
 }
 
-fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), String> {
+fn write(
+    req: &PersistRequest,
+    db_cache: &mut PersistDbCache,
+) -> Result<smelt_store::SessionSaveReport, String> {
     let _perf = smelt_perf::perf::begin("persist:write");
     smelt_perf::perf::record_value(
         "persist:write:history_items",
@@ -240,13 +295,13 @@ fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), Stri
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
     smelt_core::session::write_db_meta_sidecar(&req.session_dir)
         .map_err(|err| format!("write session metadata: {err}"))?;
-    Ok(())
+    Ok(save_report)
 }
 
 fn write_metadata(
     req: &PersistMetadataRequest,
     db_cache: &mut PersistDbCache,
-) -> Result<(), String> {
+) -> Result<smelt_store::SessionSaveReport, String> {
     let _perf = smelt_perf::perf::begin("persist:write_metadata");
     smelt_perf::perf::record_value("persist:write:history_items", 0);
     smelt_perf::perf::record_value("persist:write:blobs", 0);
@@ -264,7 +319,7 @@ fn write_metadata(
     record_save_report(&save_report);
     smelt_core::session::write_db_meta_sidecar(&req.session_dir)
         .map_err(|err| format!("write session metadata: {err}"))?;
-    Ok(())
+    Ok(save_report)
 }
 
 fn write_blobs(

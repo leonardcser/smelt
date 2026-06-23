@@ -115,7 +115,7 @@ impl TuiApp {
             self.core
                 .session
                 .snapshot_metadata_at(self.session_history_len() + 1);
-            self.session_dirty = true;
+            self.mark_session_dirty();
         }
         let history = self.commit_request_history_item(
             protocol::history_item_from_user_content(content.clone()),
@@ -161,13 +161,13 @@ impl TuiApp {
     fn persist_model_history_source(&mut self, history: &protocol::ModelHistorySource) {
         if matches!(history, protocol::ModelHistorySource::Store { .. })
             && history.requested_len() > 0
-            && (self.session_dirty
+            && (self.session_persist.session_dirty
                 || self
                     .live_session
                     .as_ref()
                     .is_some_and(|live| live.dirty.history_from.is_some())
-                || !self.persisted_store_ready
-                || !self.transcript_descriptors_persisted
+                || !self.session_persist.store_ready
+                || !self.session_persist.descriptors_persisted
                 || self.transcript.history().descriptor_dirty_from().is_some())
         {
             self.save_session();
@@ -323,7 +323,7 @@ impl TuiApp {
                 self.core
                     .session
                     .snapshot_metadata_at(self.session_history_len() + 1);
-                self.session_dirty = true;
+                self.mark_session_dirty();
             }
             self.commit_request_history_item(
                 protocol::HistoryItem::user_with_display(
@@ -618,7 +618,7 @@ impl TuiApp {
         if meta.display_tps.is_none() {
             meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
         }
-        self.session_dirty = true;
+        self.mark_session_dirty();
         self.core
             .session
             .turn_metas
@@ -1227,7 +1227,7 @@ mod tests {
         app.app.restore_screen();
         app.app.ensure_current_context_note();
         app.app.apply_pending_history_appends_for_request();
-        app.app.persisted_store_ready = false;
+        app.app.session_persist.store_ready = false;
         app.app.save_session();
         app.app.flush_persist();
         app

@@ -296,7 +296,7 @@ impl TuiApp {
             SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
         };
         let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
-        let descriptors_persisted = self.transcript_descriptors_persisted;
+        let descriptors_persisted = self.session_persist.descriptors_persisted;
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
                 .search_transcript_candidate_page(query, origin_block, store_direction, limit)

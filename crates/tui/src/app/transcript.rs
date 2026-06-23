@@ -7270,6 +7270,9 @@ impl TuiApp {
     }
 
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
+        if self.block_read_only_mutation("update read-only session history") {
+            return;
+        }
         let appends = std::mem::take(&mut self.pending_history_appends);
         for append in appends {
             let mode_base = append.mode().map(|_| self.mode_history_base());
