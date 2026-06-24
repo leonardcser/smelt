@@ -73,12 +73,88 @@ fn normalize_openai_reasoning_item(data: &serde_json::Value) -> serde_json::Valu
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserMessageShape {
+    Shorthand,
+    TaggedInput,
+}
+
+fn input_content_items(content: Option<&protocol::Content>) -> Vec<serde_json::Value> {
+    match content {
+        Some(protocol::Content::Text(text)) => {
+            vec![serde_json::json!({"type": "input_text", "text": text})]
+        }
+        Some(protocol::Content::Parts(parts)) => parts
+            .iter()
+            .map(|p| match p {
+                protocol::ContentPart::Text { text } => {
+                    serde_json::json!({"type": "input_text", "text": text})
+                }
+                protocol::ContentPart::ImageUrl { url, .. } => {
+                    serde_json::json!({"type": "input_image", "image_url": url})
+                }
+            })
+            .collect(),
+        None => vec![serde_json::json!({"type": "input_text", "text": ""})],
+    }
+}
+
+fn shorthand_user_content(content: Option<&protocol::Content>) -> serde_json::Value {
+    match content {
+        Some(protocol::Content::Text(text)) => serde_json::json!(text),
+        Some(protocol::Content::Parts(_)) => serde_json::json!(input_content_items(content)),
+        None => serde_json::json!(""),
+    }
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
     model: &str,
     effort: ReasoningEffort,
     config: &ModelConfig,
+) -> serde_json::Value {
+    build_body_with_user_shape(
+        messages,
+        tools,
+        model,
+        effort,
+        config,
+        UserMessageShape::Shorthand,
+    )
+}
+
+pub(super) fn build_codex_body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: ReasoningEffort,
+    config: &ModelConfig,
+) -> serde_json::Value {
+    let mut body = build_body_with_user_shape(
+        messages,
+        tools,
+        model,
+        effort,
+        config,
+        UserMessageShape::TaggedInput,
+    );
+    body["store"] = serde_json::json!(false);
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("temperature");
+        obj.remove("top_p");
+        obj.remove("max_output_tokens");
+    }
+    body
+}
+
+fn build_body_with_user_shape(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: ReasoningEffort,
+    config: &ModelConfig,
+    user_shape: UserMessageShape,
 ) -> serde_json::Value {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -91,30 +167,21 @@ pub(super) fn build_body(
                 }
                 instructions.push_str(text);
             }
-            Role::User => {
-                let content_val = match &m.content {
-                    Some(protocol::Content::Text(t)) => serde_json::json!(t),
-                    Some(protocol::Content::Parts(parts)) => {
-                        let items: Vec<serde_json::Value> = parts
-                            .iter()
-                            .map(|p| match p {
-                                protocol::ContentPart::Text { text } => {
-                                    serde_json::json!({"type": "input_text", "text": text})
-                                }
-                                protocol::ContentPart::ImageUrl { url, .. } => {
-                                    serde_json::json!({"type": "input_image", "image_url": url})
-                                }
-                            })
-                            .collect();
-                        serde_json::json!(items)
-                    }
-                    None => serde_json::json!(""),
-                };
-                input.push(serde_json::json!({
-                    "role": "user",
-                    "content": content_val,
-                }));
-            }
+            Role::User => match user_shape {
+                UserMessageShape::Shorthand => {
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": shorthand_user_content(m.content.as_ref()),
+                    }));
+                }
+                UserMessageShape::TaggedInput => {
+                    input.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": input_content_items(m.content.as_ref()),
+                    }));
+                }
+            },
             Role::Assistant => {
                 // Reasoning items must appear *before* the message and
                 // function_call items they preceded in the original
@@ -708,6 +775,79 @@ mod tests {
         };
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         assert_eq!(body["input"][0]["content"], "");
+    }
+
+    #[test]
+    fn build_codex_body_user_text_serialized_as_tagged_input_text_message() {
+        let body = build_codex_body(&[user("hello")], &[], "m", ReasoningEffort::Off, &cfg());
+        let msg = &body["input"][0];
+        assert_eq!(msg["type"], "message");
+        assert_eq!(msg["role"], "user");
+        assert_eq!(msg["content"][0]["type"], "input_text");
+        assert_eq!(msg["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn build_codex_body_user_parts_serialized_inside_tagged_message() {
+        let m = Message {
+            role: Role::User,
+            content: Some(Content::Parts(vec![
+                ContentPart::Text {
+                    text: "look".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://x/y.png".into(),
+                    label: None,
+                },
+            ])),
+            reasoning_content: None,
+
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+            tool_metadata: None,
+        };
+        let body = build_codex_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let msg = &body["input"][0];
+        assert_eq!(msg["type"], "message");
+        assert_eq!(msg["content"][0]["type"], "input_text");
+        assert_eq!(msg["content"][0]["text"], "look");
+        assert_eq!(msg["content"][1]["type"], "input_image");
+        assert_eq!(msg["content"][1]["image_url"], "https://x/y.png");
+    }
+
+    #[test]
+    fn build_codex_body_user_none_content_serialized_as_empty_input_text() {
+        let m = Message {
+            role: Role::User,
+            content: None,
+            reasoning_content: None,
+
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+            tool_metadata: None,
+        };
+        let body = build_codex_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let msg = &body["input"][0];
+        assert_eq!(msg["type"], "message");
+        assert_eq!(msg["content"][0]["type"], "input_text");
+        assert_eq!(msg["content"][0]["text"], "");
+    }
+
+    #[test]
+    fn build_codex_body_sets_store_and_omits_unsupported_sampling_fields() {
+        let mut c = cfg();
+        c.temperature = Some(0.7);
+        c.top_p = Some(0.9);
+        c.max_tokens = Some(123);
+        let body = build_codex_body(&[user("hello")], &[], "m", ReasoningEffort::Off, &c);
+        assert_eq!(body["store"], false);
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]

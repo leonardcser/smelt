@@ -888,6 +888,21 @@ pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, ser
     }
 }
 
+fn apply_codex_request_headers(
+    mut req: reqwest::RequestBuilder,
+    tokens: Option<&codex::CodexTokens>,
+    turn_state: Option<&str>,
+) -> reqwest::RequestBuilder {
+    req = req.header(reqwest::header::ACCEPT, "text/event-stream");
+    if let Some(tokens) = tokens {
+        req = tokens.apply_headers(req).header("originator", "smelt");
+        if let Some(ts) = turn_state {
+            req = req.header("x-codex-turn-state", ts);
+        }
+    }
+    req
+}
+
 impl Provider {
     pub(crate) fn supports_mid_turn_reasoning_changes(&self) -> bool {
         self.kind.descriptor().mid_turn_reasoning_changes
@@ -1041,13 +1056,7 @@ impl Provider {
             }
             ProviderKind::Codex => {
                 let url = codex::CODEX_API_ENDPOINT.to_string();
-                let mut body = openai::build_body(messages, tools, model, effort, &config);
-                body["store"] = serde_json::json!(false);
-                if let Some(obj) = body.as_object_mut() {
-                    obj.remove("temperature");
-                    obj.remove("top_p");
-                    obj.remove("max_output_tokens");
-                }
+                let body = openai::build_codex_body(messages, tools, model, effort, &config);
                 (url, body)
             }
             ProviderKind::AnthropicCompatible
@@ -1160,12 +1169,8 @@ impl Provider {
                 req = kimi_code::apply_default_headers(req);
             }
             if is_codex {
-                if let Some(ref tokens) = codex_auth {
-                    req = tokens.apply_headers(req).header("originator", "smelt");
-                    if let Some(ref ts) = *self.turn_state.lock().unwrap() {
-                        req = req.header("x-codex-turn-state", ts.as_str());
-                    }
-                }
+                let turn_state = self.turn_state.lock().unwrap().clone();
+                req = apply_codex_request_headers(req, codex_auth.as_ref(), turn_state.as_deref());
             } else if is_copilot {
                 if let Some(ref tokens) = copilot_auth {
                     req = req.bearer_auth(&tokens.access_token);
@@ -1884,6 +1889,46 @@ mod tests {
         assert_eq!(api_key_auth(ProviderKind::OpenAiCompatible, ""), None);
         assert_eq!(api_key_auth(ProviderKind::Codex, "key"), None);
         assert_eq!(api_key_auth(ProviderKind::Copilot, "key"), None);
+    }
+
+    #[test]
+    fn codex_request_headers_include_event_stream_accept() {
+        let req =
+            apply_codex_request_headers(Client::new().post("https://example.test"), None, None)
+                .build()
+                .unwrap();
+
+        assert_eq!(
+            req.headers().get(reqwest::header::ACCEPT).unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    #[test]
+    fn codex_request_headers_include_auth_originator_and_turn_state() {
+        let tokens = codex::CodexTokens {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: 123,
+            account_id: Some("acct".into()),
+            last_refresh: 0,
+        };
+        let req = apply_codex_request_headers(
+            Client::new().post("https://example.test"),
+            Some(&tokens),
+            Some("turn"),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            req.headers().get(reqwest::header::ACCEPT).unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer access");
+        assert_eq!(req.headers().get("ChatGPT-Account-ID").unwrap(), "acct");
+        assert_eq!(req.headers().get("originator").unwrap(), "smelt");
+        assert_eq!(req.headers().get("x-codex-turn-state").unwrap(), "turn");
     }
 
     // ---- non_empty ----
