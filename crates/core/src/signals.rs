@@ -789,6 +789,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("prompt_resize_active", false);
     signals.declare("prompt_resize_chrome", String::new());
     signals.declare("cursor_pos", CursorPos::default());
+    signals.declare("transcript_navigation_generation", 0u64);
 
     signals.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
         let Ok(out) = lua.create_table() else {

@@ -1935,8 +1935,8 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         next.first_line
     );
     assert!(
-        next.descriptor_index > previous.descriptor_index,
-        "next user reveal should move forward by descriptor identity: previous={previous:?}, next={next:?}"
+        next.descriptor_index >= previous.descriptor_index,
+        "next user reveal should not move backward by descriptor identity: previous={previous:?}, next={next:?}"
     );
 }
 

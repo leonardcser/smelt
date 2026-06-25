@@ -2821,7 +2821,17 @@ impl Window {
         }
         let max_scroll = self.clamp_scroll_top(total, viewport_rows, buf);
         if self.is_following_tail() {
-            self.pin_current_scroll();
+            let cursor_row = self.absolute_cursor_row();
+            let visible =
+                self.scroll_top..self.scroll_top.saturating_add(viewport_rows as RowIndex);
+            if visible.contains(&cursor_row) {
+                self.pin_current_scroll();
+            } else {
+                self.set_resolved_scroll(max_scroll);
+                if delta < 0 {
+                    self.pin_current_scroll();
+                }
+            }
         }
         let new_scroll = add_signed_row(self.scroll_top, delta).min(max_scroll);
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);

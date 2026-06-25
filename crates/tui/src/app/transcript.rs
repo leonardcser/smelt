@@ -2419,11 +2419,7 @@ impl TranscriptDocument {
         }
 
         if let Some(active) = self.descriptors.active_range() {
-            let index = if matches!(self.viewport.state.mode, TranscriptViewportMode::Tail) {
-                active.end.get().saturating_sub(1)
-            } else {
-                active.start.get()
-            };
+            let index = active.start.get();
             if let Some(record) = self
                 .descriptors
                 .sparse
