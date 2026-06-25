@@ -123,6 +123,10 @@ Or use `/resume` from within the TUI. Use `/fork` to branch the current
 conversation into a new session, or `/rewind` (also `Esc Esc` when idle) to roll
 back to an earlier turn.
 
+Use `smelt --ephemeral` for a temporary interactive session. Ephemeral sessions
+can use tools and attachments normally, but they are stored in a temporary
+directory, are removed when Smelt exits, and do not appear in resume lists.
+
 For debugging or auditing saved sessions and provider requests, run the local
 inspector web UI:
 

@@ -189,10 +189,10 @@ path.
 
 `smelt.events.on(name, handler)` subscribes to runtime events: agent turns,
 session load, tool start/end, and so on. Events carry only future occurrences,
-so handlers receive the payload without a previous value. `smelt.signal.subscribe(name, handler)`
-subscribes to durable runtime state such as mode changes. Both return a `Reg`
-whose `:remove()` drops the subscription. The full lists are the
-`smelt.events.Name` and `smelt.signal.Name` aliases in
+so handlers receive the payload without a previous value.
+`smelt.signal.subscribe(name, handler)` subscribes to durable runtime state such
+as mode changes. Both return a `Reg` whose `:remove()` drops the subscription.
+The full lists are the `smelt.events.Name` and `smelt.signal.Name` aliases in
 [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 

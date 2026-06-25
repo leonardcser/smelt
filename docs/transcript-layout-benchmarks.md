@@ -57,8 +57,8 @@ and reports:
 - `G` plus redraw;
 - sparse/resumed 80-key burst scroll timings without scroll trace enabled,
   reported with the `prod_burst_*` prefix;
-- sparse/resumed 80-key burst scroll timings with scroll trace enabled,
-  reported with the `burst_*` prefix for diagnostic projection-frame counters;
+- sparse/resumed 80-key burst scroll timings with scroll trace enabled, reported
+  with the `burst_*` prefix for diagnostic projection-frame counters;
 - sparse/resumed search submission and 100 `n` result jumps, reported with the
   `sparse_*` prefix.
 

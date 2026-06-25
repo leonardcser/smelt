@@ -12,8 +12,8 @@ with `COMPAT(<id>)`.
     accounting snapshots, and `context_snapshots` field aliasing
   - `crates/protocol/src/history.rs`: `history_from_messages`, legacy
     note-prefix decoding
-  - `crates/store/src/legacy.rs`: provider-message import when old
-    monolithic `session.json` files lack native `history` rows
+  - `crates/store/src/legacy.rs`: provider-message import when old monolithic
+    `session.json` files lack native `history` rows
 - Tests:
   - `legacy_messages_session_loads_with_no_user_display`
   - `legacy_session_with_orphan_tool_use_is_repaired_on_deserialize`
@@ -22,7 +22,8 @@ with `COMPAT(<id>)`.
 ## session-json-monolith
 
 - Remove after: two alpha releases after SQLite session storage ships
-- Why: import old monolithic `session.json` files to canonical SQLite storage on open or background migration, then remove the monolith
+- Why: import old monolithic `session.json` files to canonical SQLite storage on
+  open or background migration, then remove the monolith
 - Code:
   - `crates/core/src/session.rs`: `read_legacy_json_session`,
     `migrate_legacy_json_session`, monolithic-session prefix matching, and
@@ -47,11 +48,12 @@ with `COMPAT(<id>)`.
 
 - Remove after: old session dirs without `meta.json` / `content.txt` no longer
   matter
-- Why: rebuild list metadata, search text, and missing transcript descriptor rows from canonical SQLite, surfacing pending
-  migration status for legacy inputs without loading them directly
+- Why: rebuild list metadata, search text, and missing transcript descriptor
+  rows from canonical SQLite, surfacing pending migration status for legacy
+  inputs without loading them directly
 - Code:
-  - `crates/core/src/session.rs`: session listing/search blob fallbacks and SQLite
-    session repair during background migration
+  - `crates/core/src/session.rs`: session listing/search blob fallbacks and
+    SQLite session repair during background migration
 
 ## legacy-session-full-load-fallbacks
 
@@ -68,8 +70,8 @@ with `COMPAT(<id>)`.
     `compat:session:preview_full_fallback`
   - `crates/tui/src/app/history.rs`: fallback transcript rebuild in
     `rebuild_screen_from_history`, counted by
-    `compat:session:rebuild_transcript_full_fallback`, and explicit
-    live-session promotion in `ensure_live_session_materialized`, counted by
+    `compat:session:rebuild_transcript_full_fallback`, and explicit live-session
+    promotion in `ensure_live_session_materialized`, counted by
     `compat:session:display_only_promotion`
 
 ## allowed-session-full-materialization
@@ -88,8 +90,8 @@ with `COMPAT(<id>)`.
 
 ## transcript-group-blocks-alias
 
-- Remove after: two alpha releases after transcript group snapshots consistently use
-  `children`
+- Remove after: two alpha releases after transcript group snapshots consistently
+  use `children`
 - Why: keep older Lua transcript renderers and saved/custom group snapshots that
   still read or provide `blocks` working during the group schema rename
 - Code:

@@ -4,6 +4,8 @@
 smelt [MESSAGE]
 smelt auth
 smelt config default
+smelt export history [--output <PATH>] <SESSION>
+smelt export requests [--output <PATH>] <SESSION>
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
 smelt upgrade [--channel stable|unstable]
 smelt upgrade check [--channel stable|unstable]
@@ -18,13 +20,22 @@ with `smelt.remember.set(...)`.
 
 ## Subcommands
 
-| Subcommand             | Description                                                                                         |
-| ---------------------- | --------------------------------------------------------------------------------------------------- |
-| `smelt auth`           | Provider picker for login/logout flows and API-key provider snippets                                |
-| `smelt config default` | Print a default `init.lua` template with built-in setting values and commented examples             |
-| `smelt inspect`        | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
-| `smelt upgrade`        | Check for and install the newest smelt build                                                        |
-| `smelt upgrade check`  | Check for updates without installing                                                                |
+| Subcommand              | Description                                                                                         |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| `smelt auth`            | Provider picker for login/logout flows and API-key provider snippets                                |
+| `smelt config default`  | Print a default `init.lua` template with built-in setting values and commented examples             |
+| `smelt export history`  | Export semantic history rows for a saved session as JSONL                                           |
+| `smelt export requests` | Export request audit entries for a saved session as JSONL                                           |
+| `smelt inspect`         | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
+| `smelt upgrade`         | Check for and install the newest smelt build                                                        |
+| `smelt upgrade check`   | Check for updates without installing                                                                |
+
+`smelt export history` and `smelt export requests` options:
+
+| Flag                  | Description                           |
+| --------------------- | ------------------------------------- |
+| `<SESSION>`           | Session id or unique prefix to export |
+| `-o, --output <PATH>` | Output file path. Defaults to stdout  |
 
 `smelt inspect` options:
 
@@ -93,10 +104,11 @@ and anthropic-compatible providers that support `reasoning_effort`. For OpenAI,
 
 ## Sessions
 
-| Flag                        | Description                                              |
-| --------------------------- | -------------------------------------------------------- |
-| `-r, --resume [SESSION_ID]` | Resume a session (picker if no ID)                       |
-| `-w, --worktree [NAME]`     | Start in a managed git worktree, optionally named `NAME` |
+| Flag                        | Description                                                        |
+| --------------------------- | ------------------------------------------------------------------ |
+| `-r, --resume [SESSION_ID]` | Resume a session (picker if no ID)                                 |
+| `--ephemeral`               | Do not persist this interactive session or show it in resume lists |
+| `-w, --worktree [NAME]`     | Start in a managed git worktree, optionally named `NAME`           |
 
 ## Runtime
 

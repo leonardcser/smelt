@@ -46,8 +46,8 @@ every key and default.
 
 Model, mode, and reasoning effort have two layers: a cold-start default and the
 last value you picked in the TUI. Pin the cold-start defaults with
-`smelt.defaults.set`, and opt out of last-used recall with `smelt.remember.set` when you
-want a value to reset on every launch:
+`smelt.defaults.set`, and opt out of last-used recall with `smelt.remember.set`
+when you want a value to reset on every launch:
 
 ```lua
 smelt.defaults.set({
