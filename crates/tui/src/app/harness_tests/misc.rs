@@ -1080,6 +1080,345 @@ fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic(
 }
 
 #[test]
+fn resumed_sparse_scroll_up_reports_tail_repin_needed() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+    let bottom_scroll = app.app.transcript_win().scroll_top();
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    assert!(app.run_lua(
+        r#"
+        local scroll = assert(smelt.win.transcript():scroll())
+        _G.transcript_scroll_at_bottom = scroll.at_bottom
+        _G.transcript_scroll_needs_tail_repin = scroll.needs_tail_repin
+        _G.transcript_scroll_follow = scroll.follow
+        _G.transcript_scroll_top = scroll.top
+        _G.transcript_scroll_max = scroll.max
+        "#
+    ));
+    let globals = app.app.lua.lua.globals();
+    assert!(
+        !globals
+            .get::<bool>("transcript_scroll_follow")
+            .expect("transcript follow global"),
+        "wheel up should leave tail-follow mode"
+    );
+    assert!(
+        !globals
+            .get::<bool>("transcript_scroll_at_bottom")
+            .expect("transcript at_bottom global"),
+        "wheel up should report off-bottom: bottom={bottom_scroll}, top={:?}, max={:?}, needs_tail_repin={:?}",
+        globals.get::<u64>("transcript_scroll_top"),
+        globals.get::<u64>("transcript_scroll_max"),
+        globals.get::<bool>("transcript_scroll_needs_tail_repin")
+    );
+    assert!(
+        globals
+            .get::<bool>("transcript_scroll_needs_tail_repin")
+            .expect("transcript needs_tail_repin global"),
+        "wheel up should show the jump-to-bottom pill: top={:?}, max={:?}",
+        globals.get::<u64>("transcript_scroll_top"),
+        globals.get::<u64>("transcript_scroll_max")
+    );
+}
+
+#[test]
+fn resumed_sparse_jump_to_bottom_after_scroll_up_renders_tail() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    app.render_silent();
+    let before_tail_command = app.app.transcript_win().scroll_top();
+    assert!(
+        app.run_lua(r#"assert(smelt.win.transcript()):scroll("tail")"#),
+        "jump-to-bottom lua command should succeed"
+    );
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        before_tail_command,
+        "transcript tail command should wait for projection instead of jumping to a sparse estimated row"
+    );
+    app.render_silent();
+
+    let lines = transcript_viewport_lines(&app);
+    assert!(
+        lines.iter().any(|line| line.contains("record-025")),
+        "jump-to-bottom should render tail records instead of an empty transcript: scroll={}, lines={lines:?}",
+        app.app.transcript_win().scroll_top()
+    );
+    assert!(
+        app.app.transcript_win().is_following_tail(),
+        "jump-to-bottom should restore tail-follow"
+    );
+}
+
+#[test]
+fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+
+    for _ in 0..140 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "test setup should leave tail-follow"
+    );
+
+    for _ in 0..200 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+        app.render_silent();
+        if app.app.transcript_win().is_following_tail() {
+            break;
+        }
+    }
+    assert!(
+        app.app.transcript_win().is_following_tail(),
+        "wheel down should eventually reach semantic tail"
+    );
+    assert!(app.run_lua(
+        r#"
+        local scroll = assert(smelt.win.transcript():scroll())
+        _G.transcript_scroll_at_bottom = scroll.at_bottom
+        _G.transcript_scroll_needs_tail_repin = scroll.needs_tail_repin
+        "#
+    ));
+    let globals = app.app.lua.lua.globals();
+    assert!(
+        globals
+            .get::<bool>("transcript_scroll_at_bottom")
+            .expect("transcript at_bottom global"),
+        "tail should report at_bottom"
+    );
+    assert!(
+        !globals
+            .get::<bool>("transcript_scroll_needs_tail_repin")
+            .expect("transcript needs_tail_repin global"),
+        "jump-to-bottom pill should hide at semantic tail"
+    );
+}
+
+fn previous_user_descriptor_index(app: &TestApp) -> usize {
+    app.app
+        .transcript
+        .previous_navigation_block(Some("user"))
+        .expect("previous user target")
+        .descriptor_index
+}
+
+fn previous_user_record_index(app: &TestApp) -> usize {
+    let target = app
+        .app
+        .transcript
+        .previous_navigation_block(Some("user"))
+        .expect("previous user target");
+    parse_record_index(&target.first_line).unwrap_or_else(|| {
+        panic!(
+            "previous user target did not include a record marker: {:?}",
+            target.first_line
+        )
+    })
+}
+
+fn previous_heterogeneous_user_before(index: usize) -> usize {
+    index.saturating_sub(1) / 10 * 10
+}
+
+fn previous_tail_consecutive_user_before(index: usize, count: usize) -> usize {
+    let first_tail_user = count.saturating_sub(2);
+    if index > first_tail_user {
+        first_tail_user
+    } else {
+        previous_heterogeneous_user_before(index)
+    }
+}
+
+fn wheel_and_render(app: &mut TestApp, kind: crossterm::event::MouseEventKind) {
+    wheel_transcript(app, kind);
+    app.render_silent();
+}
+
+#[test]
+fn resumed_sparse_jump_to_bottom_anchors_previous_user_to_visible_tail() {
+    let (mut app, _dir) =
+        resumed_transcript_app_from_records(tail_consecutive_user_records(260), 78, 18);
+
+    for _ in 0..8 {
+        wheel_and_render(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    }
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "test setup should leave tail-follow mode"
+    );
+
+    assert!(
+        app.run_lua(r#"assert(smelt.win.transcript()):scroll("tail")"#),
+        "jump-to-bottom lua command should succeed"
+    );
+    app.render_silent();
+    assert!(
+        app.app.transcript_win().is_following_tail(),
+        "jump-to-bottom should restore tail-follow"
+    );
+
+    let first_visible = first_visible_record_index(&app).expect("visible tail record");
+    assert!(
+        first_visible < 258,
+        "test must keep consecutive tail users below the top visible anchor; first_visible={first_visible}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    let expected = previous_tail_consecutive_user_before(first_visible, 260);
+    let target_after_jump = previous_user_record_index(&app);
+    assert_eq!(
+        target_after_jump,
+        expected,
+        "jump-to-bottom should anchor previous-user navigation to the visible tail, not the loaded sparse window start; first_visible={first_visible}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+
+    wheel_and_render(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    let first_visible_after_scroll =
+        first_visible_record_index(&app).expect("visible record after scroll");
+    let expected_after_scroll =
+        previous_tail_consecutive_user_before(first_visible_after_scroll, 260);
+    assert_eq!(
+        previous_user_record_index(&app),
+        expected_after_scroll,
+        "a small scroll should not be required to repair the previous-user target"
+    );
+}
+
+#[test]
+fn resumed_sparse_tail_scroll_down_keeps_previous_user_target_stable() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(260, 78, 18);
+    assert!(
+        app.app.transcript_win().is_following_tail(),
+        "resumed transcript test starts pinned to tail"
+    );
+    let bottom_scroll = app.app.transcript_win().scroll_top();
+    let initial_target = previous_user_descriptor_index(&app);
+
+    for _ in 0..3 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+        app.render_silent();
+        assert!(
+            app.app.transcript_win().is_following_tail(),
+            "scrolling down at tail should remain tail-following"
+        );
+        assert_eq!(
+            app.app.transcript_win().scroll_top(),
+            bottom_scroll,
+            "scrolling down at tail should not move the viewport"
+        );
+        assert_eq!(
+            previous_user_descriptor_index(&app),
+            initial_target,
+            "top pill target changed after wheel-down input at tail"
+        );
+
+        app.render_silent();
+        assert_eq!(
+            previous_user_descriptor_index(&app),
+            initial_target,
+            "top pill target changed on the idle render after wheel-down at tail"
+        );
+    }
+}
+
+#[test]
+fn resumed_sparse_near_tail_scroll_down_stays_incremental() {
+    let count = 260;
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
+    let loaded = app.app.transcript.history().descriptor_records().len();
+    assert!(
+        loaded < count / 2,
+        "resume test must stay sparse, loaded={loaded}, count={count}"
+    );
+
+    assert!(
+        app.app.transcript_win().is_following_tail(),
+        "resumed transcript test starts pinned to tail"
+    );
+    let bottom_scroll = app.app.transcript_win().scroll_top();
+
+    for _ in 0..3 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+    let after_up = app.app.transcript_win().scroll_top();
+    assert!(
+        after_up.saturating_add(3) < bottom_scroll,
+        "test setup should remain near but off tail after one down tick: bottom={bottom_scroll}, after_up={after_up}"
+    );
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "wheel up should leave tail-follow mode"
+    );
+
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+    app.render_silent();
+    let after_down = app.app.transcript_win().scroll_top();
+    assert_eq!(
+        after_down,
+        after_up.saturating_add(3),
+        "near-tail wheel down should move by one wheel tick, not snap to tail; bottom={bottom_scroll}, after_up={after_up}, after_down={after_down}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    assert!(
+        after_down < bottom_scroll,
+        "near-tail wheel down should remain off semantic tail: bottom={bottom_scroll}, after_down={after_down}"
+    );
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "near-tail wheel down should not re-enter tail-follow"
+    );
+}
+
+#[test]
+fn resumed_sparse_scroll_down_after_scroll_up_does_not_snap_to_tail() {
+    let count = 260;
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
+    let loaded = app.app.transcript.history().descriptor_records().len();
+    assert!(
+        loaded < count / 2,
+        "resume test must stay sparse, loaded={loaded}, count={count}"
+    );
+
+    assert!(
+        app.app.transcript_win().is_following_tail(),
+        "resumed transcript test starts pinned to tail"
+    );
+    let bottom_scroll = app.app.transcript_win().scroll_top();
+
+    for _ in 0..140 {
+        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+        app.render_silent();
+    }
+    let after_up = app.app.transcript_win().scroll_top();
+    assert!(
+        after_up < bottom_scroll,
+        "wheel up should move away from tail: bottom={bottom_scroll}, after_up={after_up}"
+    );
+    assert!(
+        !app.app.transcript_win().is_following_tail(),
+        "wheel up should leave tail-follow mode"
+    );
+
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+    app.render_silent();
+    let after_down = app.app.transcript_win().scroll_top();
+    assert_eq!(
+        after_down,
+        after_up.saturating_add(3),
+        "first wheel down should move by one wheel tick, not snap to tail; bottom={bottom_scroll}, after_up={after_up}, after_down={after_down}, lines={:?}",
+        transcript_viewport_lines(&app)
+    );
+    assert!(
+        after_down < bottom_scroll,
+        "first wheel down should remain off tail: bottom={bottom_scroll}, after_down={after_down}"
+    );
+}
+
+#[test]
 fn streaming_tool_and_compaction_updates_do_not_snap_scrolled_transcript_to_tail() {
     let mut app = row_document_transcript_app(180, false);
     app.app.transcript_win_mut().follow_tail();
@@ -2705,7 +3044,14 @@ fn resumed_heterogeneous_transcript_app(
     width: u16,
     height: u16,
 ) -> (TestApp, tempfile::TempDir) {
-    let records = heterogeneous_resume_records(count);
+    resumed_transcript_app_from_records(heterogeneous_resume_records(count), width, height)
+}
+
+fn resumed_transcript_app_from_records(
+    records: Vec<smelt_core::TranscriptBlockRecord>,
+    width: u16,
+    height: u16,
+) -> (TestApp, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("session dir");
     crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records)
         .expect("write transcript descriptors");
@@ -2787,6 +3133,26 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 event: None,
             }),
         };
+    }
+    source.history.descriptor_records()
+}
+
+fn tail_consecutive_user_records(count: usize) -> Vec<smelt_core::TranscriptBlockRecord> {
+    use smelt_core::transcript_model::Block;
+
+    let mut source = smelt_core::content::transcript::Transcript::new();
+    for idx in 0..count {
+        let marker = format!("record-{idx:04}");
+        if idx % 10 == 0 || idx >= count.saturating_sub(2) {
+            source.push(Block::User {
+                text: format!("{marker} user prompt {}", "u ".repeat(8)),
+                image_labels: Vec::new(),
+            });
+        } else {
+            source.push(Block::Text {
+                content: format!("{marker} assistant output\n{}", "tail context ".repeat(18)),
+            });
+        }
     }
     source.history.descriptor_records()
 }

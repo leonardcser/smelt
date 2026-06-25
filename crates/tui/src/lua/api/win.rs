@@ -486,7 +486,16 @@ impl mlua::UserData for LuaWin {
                             let max = total.saturating_sub(viewport as u64);
                             let top = win.scroll_top().min(max);
                             let overflow = total > viewport as u64;
-                            let at_bottom = top >= max;
+                            let numeric_at_bottom = top >= max;
+                            let semantic_needs_tail_repin = if this.id == crate::app::TRANSCRIPT_WIN
+                            {
+                                app.transcript.needs_tail_repin()
+                            } else {
+                                false
+                            };
+                            let needs_tail_repin =
+                                overflow && (semantic_needs_tail_repin || !numeric_at_bottom);
+                            let at_bottom = numeric_at_bottom && !semantic_needs_tail_repin;
                             Some((
                                 top,
                                 win.is_following_tail(),
@@ -495,11 +504,21 @@ impl mlua::UserData for LuaWin {
                                 max,
                                 overflow,
                                 at_bottom,
+                                needs_tail_repin,
                             ))
                         })
                         .flatten();
                         match info {
-                            Some((top, follow, total, viewport, max, overflow, at_bottom)) => {
+                            Some((
+                                top,
+                                follow,
+                                total,
+                                viewport,
+                                max,
+                                overflow,
+                                at_bottom,
+                                needs_tail_repin,
+                            )) => {
                                 let t = lua.create_table()?;
                                 t.set("top", top)?;
                                 t.set("follow", follow)?;
@@ -509,7 +528,7 @@ impl mlua::UserData for LuaWin {
                                 t.set("overflow", overflow)?;
                                 t.set("at_top", top == 0)?;
                                 t.set("at_bottom", at_bottom)?;
-                                t.set("needs_tail_repin", overflow && !at_bottom)?;
+                                t.set("needs_tail_repin", needs_tail_repin)?;
                                 Ok(mlua::Value::Table(t))
                             }
                             None => Ok(mlua::Value::Nil),

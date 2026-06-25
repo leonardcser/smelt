@@ -76,21 +76,37 @@ pub(crate) enum TranscriptScrollIntent {
 }
 
 impl TranscriptScrollIntent {
-    pub(crate) fn tail_at_bottom(&self) -> bool {
+    pub(crate) fn is_explicit_tail_intent(&self) -> bool {
         match self {
             Self::Tail => true,
-            Self::UserDelta { rows } => *rows > 0,
-            Self::PageDelta { pages } => *pages > 0,
             Self::ScrollbarFraction {
                 numerator,
                 denominator,
             } => *numerator >= (*denominator).max(1),
             Self::ApproximateRowSeek(_) => true,
             Self::PreserveViewport
+            | Self::UserDelta { .. }
+            | Self::PageDelta { .. }
             | Self::ExactContentAnchor(_)
             | Self::SearchJump { .. }
             | Self::RevealBlock { .. }
             | Self::ResizeReflow { .. } => false,
+        }
+    }
+
+    pub(crate) fn may_repin_when_semantic_tail_reached(&self) -> bool {
+        match self {
+            Self::UserDelta { rows } => *rows > 0,
+            Self::PageDelta { pages } => *pages > 0,
+            _ => self.is_explicit_tail_intent(),
+        }
+    }
+
+    pub(crate) fn is_downward_local_delta(&self) -> bool {
+        match self {
+            Self::UserDelta { rows } => *rows > 0,
+            Self::PageDelta { pages } => *pages > 0,
+            _ => false,
         }
     }
 }

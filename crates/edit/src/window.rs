@@ -2820,11 +2820,14 @@ impl Window {
             return;
         }
         let max_scroll = self.clamp_scroll_top(total, viewport_rows, buf);
-        if self.is_following_tail() && self.scroll_top != max_scroll {
-            self.set_scroll(max_scroll, buf);
+        if self.is_following_tail() {
+            self.pin_current_scroll();
         }
         let new_scroll = add_signed_row(self.scroll_top, delta).min(max_scroll);
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
+        if new_scroll >= max_scroll && delta > 0 && !self.selection_active() {
+            self.scroll_state = VerticalScroll::Tail;
+        }
     }
 
     /// Move `scroll_top` to `new_scroll_top` and adjust the cursor so it stays
@@ -3997,6 +4000,24 @@ mod tests {
         assert_eq!(w.scroll_top(), 130);
         assert_eq!(w.cursor_screen_row(viewport), Some(3));
         assert_eq!(w.cursor_row(), 133);
+    }
+
+    #[test]
+    fn pan_by_lines_does_not_resolve_tail_before_user_delta() {
+        let mut w = make_win();
+        let rows = sample_rows(200);
+        let buf = make_buf(rows);
+        let viewport = 10;
+        w.ensure_layout(&buf, 80);
+        w.jump_to_line_col(&buf, 153, 0, viewport);
+        w.resolve_tail_scroll(150);
+        assert!(w.is_following_tail());
+
+        w.pan_by_lines(&buf, 3, viewport);
+
+        assert_eq!(w.scroll_top(), 153);
+        assert!(!w.is_following_tail());
+        assert_eq!(w.cursor_screen_row(viewport), Some(3));
     }
 
     #[test]

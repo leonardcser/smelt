@@ -1175,6 +1175,7 @@ struct TranscriptViewportState {
     mode: TranscriptViewportMode,
     pending_projection: Option<PendingTranscriptProjection>,
     resolved_scroll_top: Option<RowIndex>,
+    needs_tail_repin: bool,
 }
 
 impl Default for TranscriptViewportState {
@@ -1186,6 +1187,7 @@ impl Default for TranscriptViewportState {
             mode: TranscriptViewportMode::Tail,
             pending_projection: None,
             resolved_scroll_top: None,
+            needs_tail_repin: false,
         }
     }
 }
@@ -1389,7 +1391,7 @@ pub(crate) struct AppliedTranscriptViewport {
 struct TranscriptIntentBehavior {
     viewport_mode: TranscriptViewportMode,
     allow_sparse_placeholders: bool,
-    tail_at_bottom: bool,
+    repin_at_semantic_tail: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1418,7 +1420,7 @@ pub(crate) struct TranscriptProjectionPlan {
     row_offset: RowIndex,
     total_rows: RowIndex,
     requested_scroll: Option<RowIndex>,
-    tail_at_bottom: bool,
+    repin_at_semantic_tail: bool,
     cursor_target: Option<TranscriptCursorTarget>,
     semantic_anchor: Option<TranscriptSemanticAnchor>,
     scroll_anchor: TranscriptScrollAnchor,
@@ -1431,7 +1433,7 @@ pub(crate) struct TranscriptProjectionPlan {
 #[derive(Clone, Copy, Debug)]
 struct TranscriptProjectionOptions {
     allow_sparse_placeholders: bool,
-    tail_at_bottom: bool,
+    repin_at_semantic_tail: bool,
 }
 
 struct TranscriptScrollTraceFinishContext {
@@ -1648,6 +1650,27 @@ impl TranscriptDocument {
             }
             (_, intent) => (intent, None, hint),
         };
+        match intent {
+            TranscriptScrollIntent::Tail => {
+                self.viewport.state.needs_tail_repin = false;
+            }
+            TranscriptScrollIntent::UserDelta { rows } if rows < 0 => {
+                self.viewport.state.needs_tail_repin = true;
+            }
+            TranscriptScrollIntent::PageDelta { pages } if pages < 0 => {
+                self.viewport.state.needs_tail_repin = true;
+            }
+            TranscriptScrollIntent::SearchJump { .. }
+            | TranscriptScrollIntent::RevealBlock { .. }
+            | TranscriptScrollIntent::ExactContentAnchor(_)
+            | TranscriptScrollIntent::ScrollbarFraction { .. }
+            | TranscriptScrollIntent::ApproximateRowSeek(_)
+                if !intent.is_explicit_tail_intent() =>
+            {
+                self.viewport.state.needs_tail_repin = true;
+            }
+            _ => {}
+        }
         self.viewport.state.mode = Self::intent_behavior(&intent).viewport_mode;
         self.viewport.state.pending_projection = Some(PendingTranscriptProjection {
             intent,
@@ -1747,6 +1770,10 @@ impl TranscriptDocument {
         );
     }
 
+    pub(crate) fn needs_tail_repin(&self) -> bool {
+        self.viewport.state.needs_tail_repin
+    }
+
     pub(crate) fn clear_pending_local_scroll_top(&mut self) {
         if let Some(pending) = self.viewport.state.pending_projection.as_mut() {
             pending.local_scroll_top = None;
@@ -1763,28 +1790,29 @@ impl TranscriptDocument {
     }
 
     fn intent_behavior(intent: &TranscriptScrollIntent) -> TranscriptIntentBehavior {
+        let repin_at_semantic_tail = intent.may_repin_when_semantic_tail_reached();
         match intent {
             TranscriptScrollIntent::Tail => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::Tail,
                 allow_sparse_placeholders: false,
-                tail_at_bottom: intent.tail_at_bottom(),
+                repin_at_semantic_tail,
             },
             TranscriptScrollIntent::UserDelta { .. } | TranscriptScrollIntent::PageDelta { .. } => {
                 TranscriptIntentBehavior {
                     viewport_mode: TranscriptViewportMode::Anchored,
                     allow_sparse_placeholders: false,
-                    tail_at_bottom: intent.tail_at_bottom(),
+                    repin_at_semantic_tail,
                 }
             }
             TranscriptScrollIntent::ScrollbarFraction { .. } => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::FarSeek,
                 allow_sparse_placeholders: true,
-                tail_at_bottom: intent.tail_at_bottom(),
+                repin_at_semantic_tail,
             },
             TranscriptScrollIntent::ApproximateRowSeek(_) => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::FarSeek,
                 allow_sparse_placeholders: true,
-                tail_at_bottom: intent.tail_at_bottom(),
+                repin_at_semantic_tail,
             },
             TranscriptScrollIntent::PreserveViewport
             | TranscriptScrollIntent::ExactContentAnchor(_)
@@ -1793,7 +1821,7 @@ impl TranscriptDocument {
             | TranscriptScrollIntent::ResizeReflow { .. } => TranscriptIntentBehavior {
                 viewport_mode: TranscriptViewportMode::Anchored,
                 allow_sparse_placeholders: false,
-                tail_at_bottom: intent.tail_at_bottom(),
+                repin_at_semantic_tail,
             },
         }
     }
@@ -2391,7 +2419,11 @@ impl TranscriptDocument {
         }
 
         if let Some(active) = self.descriptors.active_range() {
-            let index = active.start.get();
+            let index = if matches!(self.viewport.state.mode, TranscriptViewportMode::Tail) {
+                active.end.get().saturating_sub(1)
+            } else {
+                active.start.get()
+            };
             if let Some(record) = self
                 .descriptors
                 .sparse
@@ -3039,17 +3071,35 @@ impl TranscriptDocument {
         total_rows.saturating_sub(RowIndex::from(viewport_rows.max(1)))
     }
 
-    fn projected_scroll_state(
-        &self,
+    fn projected_viewport_reached_semantic_tail(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
         rows: crate::smelt_edit::MaterializedRows,
         viewport_rows: u16,
-        tail_at_bottom: bool,
-    ) -> VerticalScroll {
-        if self.viewport.state.mode == TranscriptViewportMode::Tail
-            || (tail_at_bottom
-                && rows.clamped_scroll
-                    >= Self::max_scroll_for_total(rows.total_rows, viewport_rows))
-        {
+    ) -> bool {
+        if let Some(total) = self.descriptors.total_count() {
+            let Some(active) = self.descriptors.active_range() else {
+                return false;
+            };
+            if active.end.get() < total {
+                return false;
+            }
+        }
+        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let loaded_rows = self.content.projection.estimated_total_rows(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+        );
+        let tail_row = row_offset.saturating_add(loaded_rows);
+        rows.clamped_scroll
+            .saturating_add(RowIndex::from(viewport_rows.max(1)))
+            >= tail_row
+    }
+
+    fn projected_scroll_state(&self, reached_semantic_tail: bool) -> VerticalScroll {
+        if self.viewport.state.mode == TranscriptViewportMode::Tail || reached_semantic_tail {
             VerticalScroll::Tail
         } else {
             VerticalScroll::Pinned
@@ -3532,7 +3582,7 @@ impl TranscriptDocument {
             viewport_rows,
             TranscriptProjectionOptions {
                 allow_sparse_placeholders: behavior.allow_sparse_placeholders,
-                tail_at_bottom: behavior.tail_at_bottom,
+                repin_at_semantic_tail: behavior.repin_at_semantic_tail,
             },
         );
         plan.cursor_target = cursor_target;
@@ -3556,7 +3606,7 @@ impl TranscriptDocument {
             viewport_rows,
             TranscriptProjectionOptions {
                 allow_sparse_placeholders: true,
-                tail_at_bottom: false,
+                repin_at_semantic_tail: false,
             },
         )
     }
@@ -3682,7 +3732,7 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             requested_scroll,
-            tail_at_bottom: options.tail_at_bottom,
+            repin_at_semantic_tail: options.repin_at_semantic_tail,
             cursor_target: None,
             semantic_anchor: None,
             scroll_anchor,
@@ -3757,7 +3807,7 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             requested_scroll,
-            tail_at_bottom,
+            repin_at_semantic_tail,
             cursor_target,
             semantic_anchor,
             scroll_anchor,
@@ -3776,7 +3826,10 @@ impl TranscriptDocument {
         let mut rows = match materialization {
             TranscriptMaterializationPlan::UnloadedGap(gap) => {
                 let rows = self.project_unloaded_sparse_gap(buf, total_rows, viewport_rows, gap);
-                let scroll_state = self.projected_scroll_state(rows, viewport_rows, tail_at_bottom);
+                let scroll_state = self.projected_scroll_state(false);
+                if matches!(scroll_state, VerticalScroll::Tail) {
+                    self.viewport.state.needs_tail_repin = false;
+                }
                 self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, true);
                 return self.applied_viewport(rows, viewport_rows, true, scroll_state, None);
             }
@@ -3812,14 +3865,18 @@ impl TranscriptDocument {
             viewport_rows,
             scroll_anchor,
         );
-        let captured_semantic_anchor = match self.viewport.state.top_anchor {
-            Some(TranscriptScrollAnchor::Content(anchor)) => Some(anchor.into()),
-            _ => None,
-        };
+        let captured_semantic_anchor = self
+            .content_anchor_at_or_after_row(lua, width, rows.clamped_scroll, viewport_rows)
+            .map(|(anchor, _)| anchor.into());
         self.viewport.state.semantic_anchor = semantic_anchor.or(captured_semantic_anchor);
         self.viewport.state.resolved_scroll_top = Some(rows.clamped_scroll);
         self.viewport.state.pending_projection = None;
-        let scroll_state = self.projected_scroll_state(rows, viewport_rows, tail_at_bottom);
+        let reached_semantic_tail = repin_at_semantic_tail
+            && self.projected_viewport_reached_semantic_tail(lua, width, rows, viewport_rows);
+        let scroll_state = self.projected_scroll_state(reached_semantic_tail);
+        if matches!(scroll_state, VerticalScroll::Tail) {
+            self.viewport.state.needs_tail_repin = false;
+        }
         self.finish_scroll_trace_frame(lua, rows, &mut trace_ctx, false);
         self.applied_viewport(rows, viewport_rows, false, scroll_state, cursor_range)
     }

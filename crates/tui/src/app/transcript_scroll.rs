@@ -49,24 +49,19 @@ impl TuiApp {
                 }
             }
             WindowScrollCommand::Tail => {
-                let jumped = {
-                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-                    if let (Some(win), Some(buf)) = (win, buf) {
-                        win.jump_to_bottom(buf);
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if let (true, true, Some(window_scroll_before)) =
-                    (is_transcript, jumped, window_scroll_before)
-                {
+                if let (true, Some(window_scroll_before)) = (is_transcript, window_scroll_before) {
                     self.record_transcript_scroll_intent(
                         "lua_scroll_tail",
                         TranscriptScrollIntent::Tail,
                         window_scroll_before,
                     );
                     self.request_transient_render();
+                    return;
+                }
+
+                let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                if let (Some(win), Some(buf)) = (win, buf) {
+                    win.jump_to_bottom(buf);
                 }
             }
         }
@@ -126,7 +121,7 @@ impl TuiApp {
     pub(crate) fn record_transcript_scroll_intent_for_projection(
         &mut self,
         label: impl Into<String>,
-        intent: TranscriptScrollIntent,
+        mut intent: TranscriptScrollIntent,
         window_scroll_before: RowIndex,
         mut restore: TranscriptProjectionRestore,
         local_scroll_top: Option<RowIndex>,
@@ -147,7 +142,15 @@ impl TuiApp {
                         .and_then(|v| win.cursor_screen_row(v.rect.height))
                 });
         }
-        let keep_tail_follow_until_projection = intent.tail_at_bottom()
+        if intent.is_downward_local_delta()
+            && self
+                .ui
+                .win(crate::app::TRANSCRIPT_WIN)
+                .is_some_and(|win| win.is_following_tail() && !win.selection_active())
+        {
+            intent = TranscriptScrollIntent::Tail;
+        }
+        let keep_tail_follow_until_projection = intent.is_explicit_tail_intent()
             && self
                 .ui
                 .win(crate::app::TRANSCRIPT_WIN)
