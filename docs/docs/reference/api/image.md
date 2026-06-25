@@ -24,6 +24,22 @@ fun(p: string): boolean
 
 Return `true` if `p` looks like an image file (matched by extension/sniffing).
 
+## `smelt.image.label_from_path`
+
+```lua
+fun(p: string): string
+```
+
+Return a display label for an image path.
+
+## `smelt.image.mime_from_path`
+
+```lua
+fun(p: string): string
+```
+
+Return the image MIME type inferred from `p`'s extension.
+
 ## `smelt.image.read_as_data_url`
 
 ```lua

@@ -646,6 +646,8 @@ Sync filesystem primitives.
   Copy file `from` to `to`.
 - `smelt.fs.exists` :: `fun(p: string): boolean`
   Return `true` if a filesystem entry exists at `p`.
+- `smelt.fs.file_info_async` :: `fun(path: string): table?, string?`
+  Return `{ is_file, len, mtime_ms }` for `path` off the main thread, or `(nil, err)`.
 - `smelt.fs.glob` :: `fun(pattern: string, path: string?, opts: table?): string[]?, string?`
   Find paths matching `pattern` under `path` (defaults to cwd).
 - `smelt.fs.glob_async` :: `fun(pattern: string, path: string?, opts: table?): table?, string?`
@@ -763,6 +765,10 @@ Image file detection and base64 data-URL loading.
   Encode raw `bytes` as a base64 `data:` URL with the given `mime` type.
 - `smelt.image.is_image_file` :: `fun(p: string): boolean`
   Return `true` if `p` looks like an image file (matched by extension/sniffing).
+- `smelt.image.label_from_path` :: `fun(p: string): string`
+  Return a display label for an image path.
+- `smelt.image.mime_from_path` :: `fun(p: string): string`
+  Return the image MIME type inferred from `p`'s extension.
 - `smelt.image.read_as_data_url` :: `fun(p: string): string?, string?`
   Read the image at `p` and encode it as a `data:` URL.
 - `smelt.image.read_as_data_url_async` :: `fun(path: string): string?, string?`
@@ -1230,7 +1236,7 @@ Resolved application configuration introspection.
 - `smelt.config.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model, or `nil` when not declared.
 - `smelt.config.model_config` :: `fun(): table`
-  Resolved model-level sampling and cost overrides as a table.
+  Resolved model-level sampling, capability, and cost overrides as a table.
 - `smelt.config.provider_type` :: `fun(): string`
   Active provider type string, e.g.
 
@@ -1367,8 +1373,12 @@ Perf instrumentation toggle, clear, and snapshot.
 
 Model selector.
 
+- `smelt.model.capabilities` :: `fun(): table`
+  Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.
 - `smelt.model.current` :: `fun(): string`
   Return the active model key.
+- `smelt.model.input_modalities` :: `fun(): table`
+  Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`.
 - `smelt.model.list` :: `fun(): table`
   Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
 - `smelt.model.max_tokens` :: `fun(): integer?`
@@ -1378,6 +1388,10 @@ Model selector.
   Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`.
 - `smelt.model.set` :: `fun(name: string): nil`
   Switch the active model by key.
+- `smelt.model.supports_input` :: `fun(modality: string): boolean`
+  Return whether the active model supports the named input modality, for example `image` or `pdf`.
+- `smelt.model.transport` :: `fun(): table`
+  Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.
 
 #### `smelt.notebook`
 

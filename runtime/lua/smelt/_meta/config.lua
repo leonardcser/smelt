@@ -19,7 +19,7 @@ config.api_key_env = nil
 ---@type fun(): integer?
 config.context_window = nil
 
---- Resolved model-level sampling and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.
+--- Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.
 ---@type fun(): table
 config.model_config = nil
 

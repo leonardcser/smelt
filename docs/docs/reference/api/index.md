@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 81 namespace(s), 427 function(s), 83 class(es), 11 alias(es).
+**Coverage:** 81 namespace(s), 434 function(s), 83 class(es), 11 alias(es).
 
 Functions and namespaces marked `Internal` are implementation details for bundled Lua. They are documented for transparency, but user config and plugins should prefer public APIs.
 
@@ -25,14 +25,14 @@ Available in every runtime, including headless mode.
 - [`smelt.events`](events.md) - 3 function(s)
 - [`smelt.files`](files.md) - 4 function(s)
 - [`smelt.frontend`](frontend.md) - 2 function(s)
-- [`smelt.fs`](fs.md) - 21 function(s)
+- [`smelt.fs`](fs.md) - 22 function(s)
 - [`smelt.fs.file_state`](fs_file_state.md) - 7 function(s)
 - [`smelt.fuzzy`](fuzzy.md) - 2 function(s)
 - [`smelt.grep`](grep.md) - 1 function(s)
 - [`smelt.html`](html.md) - 5 function(s)
 - [`smelt.http`](http.md) - 3 function(s)
 - [`smelt.http.cache`](http_cache.md) - 2 function(s)
-- [`smelt.image`](image.md) - 4 function(s)
+- [`smelt.image`](image.md) - 6 function(s)
 - [`smelt.json`](json.md) - 2 function(s)
 - [`smelt.layout`](layout.md) - 17 function(s)
 - [`smelt.lifecycle`](lifecycle.md) - 4 function(s)
@@ -75,7 +75,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.list`](list.md) - 1 function(s)
 - [`smelt.metrics`](metrics.md) - 1 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) - 5 function(s)
-- [`smelt.model`](model.md) - 6 function(s)
+- [`smelt.model`](model.md) - 10 function(s)
 - [`smelt.notebook`](notebook.md) - 7 function(s) - 1 internal function(s)
 - [`smelt.notify`](notify.md) - 4 function(s)
 - [`smelt.overlay`](overlay.md) - 1 function(s)

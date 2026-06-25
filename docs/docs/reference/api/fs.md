@@ -24,6 +24,14 @@ fun(p: string): boolean
 
 Return `true` if a filesystem entry exists at `p`.
 
+## `smelt.fs.file_info_async`
+
+```lua
+fun(path: string): table?, string?
+```
+
+Return `{ is_file, len, mtime_ms }` for `path` off the main thread, or `(nil, err)`.
+
 ## `smelt.fs.glob`
 
 ```lua

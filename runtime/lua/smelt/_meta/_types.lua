@@ -526,6 +526,7 @@
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 ---@field context_window? integer Total context window, in tokens.
 ---@field supports_reasoning? boolean Whether this model supports reasoning/thinking parameters.
+---@field input_modalities? string[] Input modalities supported by this model, for example { "text", "image", "pdf" }.
 
 ---@class smelt.provider.NormalizedResult
 ---@field rows table[] Rows to render after optional synthetic message insertion.

@@ -15,6 +15,10 @@ fs.copy = nil
 ---@type fun(p: string): boolean
 fs.exists = nil
 
+--- Return `{ is_file, len, mtime_ms }` for `path` off the main thread, or `(nil, err)`.
+---@type fun(path: string): table?, string?
+fs.file_info_async = nil
+
 --- Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.
 ---@type fun(pattern: string, path: string?, opts: table?): string[]?, string?
 fs.glob = nil

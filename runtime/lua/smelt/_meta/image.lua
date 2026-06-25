@@ -15,6 +15,14 @@ image.data_url_from_bytes = nil
 ---@type fun(p: string): boolean
 image.is_image_file = nil
 
+--- Return a display label for an image path.
+---@type fun(p: string): string
+image.label_from_path = nil
+
+--- Return the image MIME type inferred from `p`'s extension.
+---@type fun(p: string): string
+image.mime_from_path = nil
+
 --- Read the image at `p` and encode it as a `data:` URL. Returns `(url, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(p: string): string?, string?
 image.read_as_data_url = nil

@@ -7,9 +7,17 @@
 ---@class smelt.model
 local model = {}
 
+--- Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.
+---@type fun(): table
+model.capabilities = nil
+
 --- Return the active model key.
 ---@type fun(): string
 model.current = nil
+
+--- Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.
+---@type fun(): table
+model.input_modalities = nil
 
 --- Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
 ---@type fun(): table
@@ -29,5 +37,13 @@ model.pricing = nil
 --- Switch the active model by key.
 ---@type fun(name: string): nil
 model.set = nil
+
+--- Return whether the active model supports the named input modality, for example `image` or `pdf`.
+---@type fun(modality: string): boolean
+model.supports_input = nil
+
+--- Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.
+---@type fun(): table
+model.transport = nil
 
 return model

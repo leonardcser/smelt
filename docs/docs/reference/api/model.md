@@ -8,6 +8,14 @@
 
 Model selector. `smelt.model.current()` reads the active model key, `smelt.model.set(v)` switches, and `smelt.model.list()` returns the available models.
 
+## `smelt.model.capabilities`
+
+```lua
+fun(): table
+```
+
+Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.
+
 ## `smelt.model.current`
 
 ```lua
@@ -15,6 +23,14 @@ fun(): string
 ```
 
 Return the active model key.
+
+## `smelt.model.input_modalities`
+
+```lua
+fun(): table
+```
+
+Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.
 
 ## `smelt.model.list`
 
@@ -55,4 +71,20 @@ fun(name: string): nil
 ```
 
 Switch the active model by key.
+
+## `smelt.model.supports_input`
+
+```lua
+fun(modality: string): boolean
+```
+
+Return whether the active model supports the named input modality, for example `image` or `pdf`.
+
+## `smelt.model.transport`
+
+```lua
+fun(): table
+```
+
+Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.
 

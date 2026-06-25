@@ -761,6 +761,7 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 | `context_window` | `integer` |  | Total context window, in tokens. |
 | `supports_reasoning` | `boolean` |  | Whether this model supports reasoning/thinking parameters. |
+| `input_modalities` | `string[]` |  | Input modalities supported by this model, for example { "text", "image", "pdf" }. |
 
 ### `smelt.provider.NormalizedResult`
 
