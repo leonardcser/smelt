@@ -1451,7 +1451,7 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn session_model_history_source(&self) -> protocol::ModelHistorySource {
+    fn store_session_model_history_source(&self) -> protocol::ModelHistorySource {
         if let Some(live) = &self.live_session {
             return live.model_history_source(engine::SUMMARY_PREFIX);
         }
@@ -1460,6 +1460,35 @@ impl TuiApp {
             .session
             .model_history_range(engine::SUMMARY_PREFIX);
         protocol::ModelHistorySource::store(prefix, first_live_index, end_index)
+    }
+
+    fn materialize_model_history_source(
+        &self,
+        source: protocol::ModelHistorySource,
+    ) -> Vec<HistoryItem> {
+        match source {
+            protocol::ModelHistorySource::Items(history) => history,
+            protocol::ModelHistorySource::Store {
+                prefix,
+                first_live_index,
+                end_index,
+                suffix,
+            } => {
+                let mut history = prefix;
+                history.extend(self.session_history_range(first_live_index..end_index));
+                history.extend(suffix);
+                history
+            }
+        }
+    }
+
+    pub(crate) fn session_model_history_source(&self) -> protocol::ModelHistorySource {
+        let source = self.store_session_model_history_source();
+        if self.ephemeral() {
+            protocol::ModelHistorySource::items(self.materialize_model_history_source(source))
+        } else {
+            source
+        }
     }
 
     // ── History / session ────────────────────────────────────────────────
@@ -1580,6 +1609,17 @@ impl TuiApp {
 
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
+        if self.ephemeral() {
+            self.session_persist.save_pending = false;
+            self.update_session_persist_metadata();
+            self.publish_shared_session_state();
+            self.session_persist.mark_clean();
+            self.transcript.history_mut().clear_descriptor_dirty();
+            if let Some(live) = self.live_session.as_mut() {
+                live.dirty.history_from = None;
+            }
+            return;
+        }
         if self.session_access.is_read_only() {
             self.session_persist.save_pending = false;
             return;
@@ -1649,6 +1689,7 @@ impl TuiApp {
                     *guard = Some(crate::app::SharedSessionState {
                         id: session_id.clone(),
                         has_messages: !session.history.is_empty(),
+                        ephemeral: self.ephemeral(),
                     });
                 }
                 smelt_perf::perf::record_value("session:save:metadata_only", 1);
@@ -1723,6 +1764,7 @@ impl TuiApp {
             *guard = Some(crate::app::SharedSessionState {
                 id: session_id.clone(),
                 has_messages: !session.history.is_empty(),
+                ephemeral: self.ephemeral(),
             });
         }
         let Some(save_id) =
@@ -2007,19 +2049,7 @@ impl TuiApp {
     }
 
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
-        let protocol::ModelHistorySource::Store {
-            prefix,
-            first_live_index,
-            end_index,
-            suffix,
-        } = self.model_history_source()
-        else {
-            return self.core.session.model_history(engine::SUMMARY_PREFIX);
-        };
-        let mut history = prefix;
-        history.extend(self.session_history_range(first_live_index..end_index));
-        history.extend(suffix);
-        history
+        self.materialize_model_history_source(self.model_history_source())
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
@@ -2208,6 +2238,14 @@ impl TuiApp {
     ) -> bool {
         self.update_session_persist_metadata();
         self.publish_shared_session_state();
+        if self.ephemeral() {
+            self.session_persist.mark_clean();
+            self.transcript.history_mut().clear_descriptor_dirty();
+            if let Some(live) = self.live_session.as_mut() {
+                live.dirty.history_from = None;
+            }
+            return true;
+        }
         let session = &self.core.session;
         let state = match session::store_state_from_session(session, history_len) {
             Ok(state) => state,
@@ -3366,6 +3404,27 @@ mod checkpoint_tests {
             summaries,
             vec!["user-written summary-looking block", "new summary"]
         );
+    }
+
+    #[test]
+    fn ephemeral_session_save_does_not_create_persistent_session_dir() {
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_ephemeral(true)
+            .build();
+        let persistent_dir = session::dir_for(&app.app.core.session);
+        let temp_dir = app.app.current_session_dir();
+        app.app.core.session.history = vec![user("temporary")];
+        app.app.mark_session_dirty();
+
+        app.app.save_session();
+        app.app.flush_persist();
+
+        assert!(app.app.ephemeral());
+        assert!(temp_dir.exists());
+        assert!(!persistent_dir.exists());
+        assert!(app.app.shutdown_context().ephemeral);
+        let shared = app.app.shared_session.lock().unwrap().clone().unwrap();
+        assert!(shared.ephemeral);
     }
 
     #[tokio::test(flavor = "current_thread")]

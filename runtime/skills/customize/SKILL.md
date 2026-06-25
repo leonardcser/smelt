@@ -1538,7 +1538,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.delete` :: `fun(id: string): nil`
   Delete the persisted session with `id`.
 - `smelt.session.dir` :: `fun(): string`
-  Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
+  Absolute path of the current session directory.
 - `smelt.session.enter_worktree` :: `fun(opts: table?): table`
   Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions.
 - `smelt.session.fork` :: `fun(): nil`

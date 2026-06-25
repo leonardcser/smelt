@@ -413,8 +413,13 @@ impl LuaRuntime {
     }
 
     /// Forward to [`smelt_core::lua::LuaRuntime::drain_shutdown_hooks`].
-    pub fn drain_shutdown_hooks(&mut self, session_id: &str, has_messages: bool) -> Vec<String> {
-        self.core.drain_shutdown_hooks(session_id, has_messages)
+    pub fn drain_shutdown_hooks(&mut self, ctx: &crate::app::ShutdownContext) -> Vec<String> {
+        self.core
+            .drain_shutdown_hooks(smelt_core::lua::ShutdownHookContext {
+                session_id: &ctx.session_id,
+                has_messages: ctx.has_messages,
+                ephemeral: ctx.ephemeral,
+            })
     }
 
     /// Evaluate `~/.config/smelt/early.lua` (if present). Call BEFORE

@@ -417,7 +417,7 @@ smelt.lifecycle.on_ready(function()
 end)
 
 smelt.lifecycle.on_shutdown(function(ctx)
-	if not ctx.has_messages then
+	if not ctx.has_messages or ctx.ephemeral then
 		return
 	end
 	local rows = banner.LOGO_MARK_PIXELS

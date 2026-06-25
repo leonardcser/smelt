@@ -96,6 +96,12 @@ pub struct Args {
     bench: bool,
     #[arg(long, help = "Run headless (no TUI), requires a message argument")]
     headless: bool,
+    #[arg(
+        long,
+        conflicts_with = "headless",
+        help = "Do not persist this interactive session or show it in resume lists"
+    )]
+    ephemeral: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Headless output format")]
     format: OutputFormat,
     #[arg(long, value_enum, default_value_t = ColorMode::Auto, help = "Color output")]
@@ -498,7 +504,7 @@ async fn main() {
             let session_id = if let Ok(guard) = shared.lock() {
                 guard
                     .as_ref()
-                    .filter(|session| session.has_messages)
+                    .filter(|session| session.has_messages && !session.ephemeral)
                     .map(|session| session.id.clone())
             } else {
                 None
@@ -727,17 +733,31 @@ async fn main() {
                 let _ = app_event_tx.send(tui::app::AppEvent::SessionMigration(event));
             }
         });
+        let session_persistence = if args.ephemeral {
+            match tui::app::SessionPersistence::ephemeral() {
+                Ok(persistence) => persistence,
+                Err(err) => {
+                    eprintln!("error: failed to create ephemeral session directory: {err}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            tui::app::SessionPersistence::persistent()
+        };
         let mut app = tui::app::TuiApp::new(
             app_config,
             engine_handle,
             Arc::clone(&permissions),
             shared_session,
-            startup_auth_error.take(),
             lua_runtime,
             project_trust,
             Arc::clone(&clock),
             Arc::clone(&env),
-            Some(app_event_rx),
+            tui::app::TuiAppOptions {
+                startup_auth_error: startup_auth_error.take(),
+                app_event_rx: Some(app_event_rx),
+                session_persistence,
+            },
         );
         app.core.skills = Some(Arc::clone(&skill_loader));
         app.core.mcp = Some(Arc::clone(&mcp_manager));
@@ -758,9 +778,7 @@ async fn main() {
         // the bundled resume-hint banner) can `print(...)` straight to the
         // user's terminal scrollback.
         let shutdown_ctx = app.shutdown_context();
-        let errs = app
-            .lua
-            .drain_shutdown_hooks(&shutdown_ctx.session_id, shutdown_ctx.has_messages);
+        let errs = app.lua.drain_shutdown_hooks(&shutdown_ctx);
         for err in errs {
             eprintln!("smelt: lifecycle.shutdown: {err}");
         }

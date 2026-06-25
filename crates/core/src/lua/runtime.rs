@@ -20,6 +20,12 @@ use crate::transcript_model::{Block, BlockId, ToolState, ToolStatus};
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
 
+pub struct ShutdownHookContext<'a> {
+    pub session_id: &'a str,
+    pub has_messages: bool,
+    pub ephemeral: bool,
+}
+
 /// Embedded `runtime/lua/smelt/` tree; every `.lua` file is `require`-able as `smelt.<path>`.
 static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
 
@@ -1005,14 +1011,15 @@ impl LuaRuntime {
     }
 
     /// Convenience over [`drain_lifecycle_hooks`] for the `"shutdown"` event:
-    /// builds the standard `{ session_id, has_messages }` ctx so the binary
-    /// crate doesn't need a direct `mlua` dependency.
-    pub fn drain_shutdown_hooks(&mut self, session_id: &str, has_messages: bool) -> Vec<String> {
-        let sid = session_id.to_string();
+    /// builds the standard shutdown context table so callers don't need a direct
+    /// `mlua` dependency.
+    pub fn drain_shutdown_hooks(&mut self, ctx: ShutdownHookContext<'_>) -> Vec<String> {
+        let sid = ctx.session_id.to_string();
         self.drain_lifecycle_hooks("shutdown", |lua| {
             let t = lua.create_table()?;
             t.set("session_id", sid.as_str())?;
-            t.set("has_messages", has_messages)?;
+            t.set("has_messages", ctx.has_messages)?;
+            t.set("ephemeral", ctx.ephemeral)?;
             Ok(mlua::Value::Table(t))
         })
     }

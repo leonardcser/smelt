@@ -86,7 +86,7 @@ Delete the persisted session with `id`. Refuses to delete the currently active s
 fun(): string
 ```
 
-Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
+Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when Smelt exits.
 
 ## `smelt.session.enter_worktree`
 
@@ -126,7 +126,7 @@ Stable session id (matches the on-disk session filename).
 fun(): table
 ```
 
-Return current session metadata as a table. Includes id, title, slug, timestamps, paths, parent id, model/mode, usage counts, and current worktree context.
+Return current session metadata as a table. Includes id, title, slug, timestamps, paths, ephemeral flag, parent id, model/mode, usage counts, and current worktree context.
 
 ## `smelt.session.list`
 

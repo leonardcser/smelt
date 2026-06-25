@@ -218,7 +218,7 @@ impl TuiApp {
                 api_base: Some(turn.api_base),
                 api_key: Some(turn.api_key),
                 session_id: self.core.session.id.clone(),
-                session_dir: smelt_core::session::dir_for(&self.core.session),
+                session_dir: self.current_session_dir(),
                 model_config_overrides: turn.model_config_overrides,
                 permission_overrides: turn.permission_overrides,
                 system_prompt: Some(system_prompt),
@@ -666,7 +666,7 @@ impl TuiApp {
     ) {
         let mode = self.core.config.mode.clone();
         let session_id = self.core.session.id.clone();
-        let session_dir = smelt_core::session::dir_for(&self.core.session);
+        let session_dir = self.current_session_dir();
         match self.lua.execute_tool(
             &tool_name,
             &args,

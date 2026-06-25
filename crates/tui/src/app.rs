@@ -59,12 +59,60 @@ pub(crate) struct ContextWindowUpdate {
 pub struct SharedSessionState {
     pub id: String,
     pub has_messages: bool,
+    pub ephemeral: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ShutdownContext {
     pub session_id: String,
     pub has_messages: bool,
+    pub ephemeral: bool,
+}
+
+#[derive(Debug)]
+pub enum SessionPersistence {
+    Persistent,
+    Ephemeral { dir: tempfile::TempDir },
+}
+
+impl SessionPersistence {
+    pub fn persistent() -> Self {
+        Self::Persistent
+    }
+
+    pub fn ephemeral() -> std::io::Result<Self> {
+        tempfile::Builder::new()
+            .prefix("smelt-session-")
+            .tempdir()
+            .map(|dir| Self::Ephemeral { dir })
+    }
+
+    fn is_ephemeral(&self) -> bool {
+        matches!(self, Self::Ephemeral { .. })
+    }
+
+    fn session_dir(&self, session: &smelt_core::session::Session) -> std::path::PathBuf {
+        match self {
+            Self::Persistent => smelt_core::session::dir_for(session),
+            Self::Ephemeral { dir } => dir.path().to_path_buf(),
+        }
+    }
+}
+
+pub struct TuiAppOptions {
+    pub startup_auth_error: Option<String>,
+    pub app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+    pub session_persistence: SessionPersistence,
+}
+
+impl Default for TuiAppOptions {
+    fn default() -> Self {
+        Self {
+            startup_auth_error: None,
+            app_event_rx: None,
+            session_persistence: SessionPersistence::persistent(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +238,7 @@ pub struct TuiApp {
     pub(crate) persister: crate::persist::Persister,
     pub(crate) session_persist: SessionPersistState,
     pub(crate) session_access: SessionAccess,
+    pub(crate) session_persistence: SessionPersistence,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
     pub(crate) live_session: Option<smelt_core::session_runtime::LiveSession>,
@@ -833,6 +882,14 @@ impl TuiApp {
             .any(protocol::HistoryItem::is_transcript_visible)
     }
 
+    pub(crate) fn ephemeral(&self) -> bool {
+        self.session_persistence.is_ephemeral()
+    }
+
+    pub(crate) fn current_session_dir(&self) -> std::path::PathBuf {
+        self.session_persistence.session_dir(&self.core.session)
+    }
+
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
         !self.session_is_empty() || !self.transcript.is_empty() || self.live_session.is_some()
     }
@@ -841,6 +898,7 @@ impl TuiApp {
         ShutdownContext {
             session_id: self.core.session.id.clone(),
             has_messages: self.has_resume_hint_messages(),
+            ephemeral: self.ephemeral(),
         }
     }
 
@@ -849,6 +907,7 @@ impl TuiApp {
             *guard = Some(SharedSessionState {
                 id: self.core.session.id.clone(),
                 has_messages: self.has_resume_hint_messages(),
+                ephemeral: self.ephemeral(),
             });
         }
     }
@@ -1185,14 +1244,18 @@ impl TuiApp {
         mut engine: EngineHandle,
         permissions: Arc<smelt_core::permissions::Permissions>,
         shared_session: Arc<Mutex<Option<SharedSessionState>>>,
-        startup_auth_error: Option<String>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
-        app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+        options: TuiAppOptions,
     ) -> Self {
         let host_rx = engine.take_host_rx();
+        let TuiAppOptions {
+            startup_auth_error,
+            app_event_rx,
+            session_persistence,
+        } = options;
         let input = PromptState::new();
         let vim_enabled = config.settings.vim;
 
@@ -1388,6 +1451,7 @@ impl TuiApp {
             persister: crate::persist::Persister::spawn(),
             session_persist: SessionPersistState::new(),
             session_access: SessionAccess::Owned,
+            session_persistence,
             transient_render_requested: false,
             live_session: None,
             last_width: term_w,

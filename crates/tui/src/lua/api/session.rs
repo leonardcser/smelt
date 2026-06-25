@@ -483,14 +483,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "info",
-        "Return current session metadata as a table. Includes id, title, slug, timestamps, paths, parent id, model/mode, usage counts, and current worktree context.",
+        "Return current session metadata as a table. Includes id, title, slug, timestamps, paths, ephemeral flag, parent id, model/mode, usage counts, and current worktree context.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
                 let session = &app.core.session;
                 out.set("id", session.id.as_str())?;
-                out.set("dir", smelt_core::session::dir_for(session).display().to_string())?;
+                out.set("dir", app.current_session_dir().display().to_string())?;
+                out.set("ephemeral", app.ephemeral())?;
                 out.set("title", session.title.as_deref())?;
                 out.set("slug", session.slug.as_deref())?;
                 out.set("first_user_message", session.first_user_message.as_deref())?;
@@ -546,15 +547,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "dir",
-        "Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).",
+        "Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when Smelt exits.",
         &[],
         |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| {
-                smelt_core::session::dir_for(&app.core.session)
-                    .display()
-                    .to_string()
-            })
-            .unwrap_or_default())
+            Ok(crate::lua::try_with_app(|app| app.current_session_dir().display().to_string())
+                .unwrap_or_default())
         },
     )?;
     m.fn_(

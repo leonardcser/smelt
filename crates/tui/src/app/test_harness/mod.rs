@@ -126,6 +126,7 @@ pub struct TestAppBuilder {
     mode: AgentMode,
     mode_cycle: Option<Vec<AgentMode>>,
     init_lua: Option<std::path::PathBuf>,
+    ephemeral: bool,
 }
 
 impl Default for TestAppBuilder {
@@ -135,6 +136,7 @@ impl Default for TestAppBuilder {
             mode: AgentMode::normal(),
             mode_cycle: None,
             init_lua: None,
+            ephemeral: false,
         }
     }
 }
@@ -160,6 +162,11 @@ impl TestAppBuilder {
     /// path again on every `reload_lua()`.
     pub fn with_init_lua(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.init_lua = Some(path.into());
+        self
+    }
+
+    pub fn with_ephemeral(mut self, ephemeral: bool) -> Self {
+        self.ephemeral = ephemeral;
         self
     }
 
@@ -234,17 +241,24 @@ impl TestAppBuilder {
             std::num::NonZeroUsize::new(1).unwrap(),
         ));
 
+        let session_persistence = if self.ephemeral {
+            crate::app::SessionPersistence::ephemeral().expect("ephemeral session directory")
+        } else {
+            crate::app::SessionPersistence::persistent()
+        };
         let mut app = TuiApp::new(
             config,
             engine,
             permissions,
             shared_session,
-            None, // startup_auth_error
             lua,
             smelt_core::trust::TrustState::NoContent,
             Arc::clone(&clock) as Arc<dyn engine::clock::Clock>,
             env,
-            None,
+            crate::app::TuiAppOptions {
+                session_persistence,
+                ..Default::default()
+            },
         );
 
         // Match production startup: re-run bootstrap + autoload + init.lua
