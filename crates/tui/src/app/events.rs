@@ -1451,7 +1451,7 @@ impl TuiApp {
             let buf = buf.expect("buffer");
             win.execute_viewer_command(buf, command, viewport_rows, now)
         };
-        self.copy_viewer_selection(win_id, buf_id, copied);
+        self.copy_viewer_selection(win_id, buf_id, copied, now);
         Status::Consumed
     }
 
@@ -1460,6 +1460,7 @@ impl TuiApp {
         win_id: crate::smelt_edit::WinId,
         buf_id: crate::smelt_edit::BufId,
         copied: Option<crate::smelt_edit::DocumentCopy>,
+        now: std::time::Instant,
     ) {
         match copied {
             Some(crate::smelt_edit::DocumentCopy::Rows(range)) => {
@@ -1468,8 +1469,22 @@ impl TuiApp {
                 }
             }
             Some(crate::smelt_edit::DocumentCopy::Bytes(range)) => {
-                if let Some(buf) = self.ui.buf(buf_id) {
-                    self.yank_to_clipboard(buf.copy_range(range));
+                let copied = self.ui.buf(buf_id).map(|buf| {
+                    let ranges =
+                        smelt_buffer::coords::byte_range_to_row_ranges(buf, range.start, range.end);
+                    (buf.copy_range(range.clone()), ranges)
+                });
+                if let Some(win) = self.ui.win_mut(win_id) {
+                    win.set_byte_yank_flash(range, now);
+                    if let Some((_, ranges)) = copied.as_ref() {
+                        win.set_range_layer(
+                            crate::smelt_edit::RangeLayer::YankFlash,
+                            ranges.clone(),
+                        );
+                    }
+                }
+                if let Some((out, _)) = copied {
+                    self.yank_to_clipboard(out);
                 }
             }
             None => {}

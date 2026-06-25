@@ -178,7 +178,10 @@ impl TuiApp {
         let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();
         let clipboard = &self.core.clipboard;
-        let focused_overlay = self.ui.focused_overlay().is_some();
+        let focused_overlay_leaf = self
+            .ui
+            .focus()
+            .filter(|win| self.ui.overlay_for_leaf(*win).is_some());
         let search_session = self
             .search
             .session
@@ -298,20 +301,39 @@ impl TuiApp {
                         let text = buf.text();
                         win.clamp_anchors_to_source(&text);
                         buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
-                        if !focused_overlay {
-                            if let Some((s, e)) = clipboard.kill_ring.yank_flash_range(render_now) {
-                                let ranges =
-                                    smelt_buffer::coords::byte_range_to_row_ranges(buf, s, e);
-                                buf.set_range_layer(
-                                    crate::smelt_edit::RangeLayer::YankFlash,
-                                    ranges,
-                                );
-                            } else {
-                                buf.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
-                            }
+                        win.clear_expired_byte_yank_flash(render_now);
+
+                        let window_can_paint_yank = focused_overlay_leaf
+                            .map(|focused| focused == request.win)
+                            .unwrap_or(true);
+                        let global_can_paint_yank = focused_overlay_leaf.is_none();
+                        let flash_range = if window_can_paint_yank {
+                            win.byte_yank_flash_range(render_now)
                         } else {
-                            buf.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
+                            None
                         }
+                        .or_else(|| {
+                            global_can_paint_yank
+                                .then(|| {
+                                    clipboard
+                                        .kill_ring
+                                        .yank_flash_range(render_now)
+                                        .map(|(s, e)| s..e)
+                                })
+                                .flatten()
+                        });
+
+                        if let Some(range) = flash_range {
+                            let ranges = smelt_buffer::coords::byte_range_to_row_ranges(
+                                buf,
+                                range.start,
+                                range.end,
+                            );
+                            win.set_range_layer(crate::smelt_edit::RangeLayer::YankFlash, ranges);
+                        } else {
+                            win.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
+                        }
+                        buf.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
                         win.scroll_left = 0;
                     }
                 }

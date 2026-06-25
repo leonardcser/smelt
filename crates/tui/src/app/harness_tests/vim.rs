@@ -130,6 +130,31 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
         app.app.core.clipboard.kill_ring.last_clipboard_write(),
         Some("alpha")
     );
+    assert_eq!(
+        app.app.ui.win(leaf).expect("overlay window").vim_mode(),
+        VimMode::Normal
+    );
+    assert!(
+        app.app
+            .ui
+            .win(leaf)
+            .expect("overlay window")
+            .byte_yank_flash_until()
+            .is_some(),
+        "byte-backed overlay yank should record a source-local flash"
+    );
+
+    app.render_silent();
+
+    assert!(
+        !app.app
+            .ui
+            .win(leaf)
+            .expect("overlay window")
+            .range_layer(crate::smelt_edit::RangeLayer::YankFlash)
+            .is_empty(),
+        "yanked overlay selection should flash in the focused dialog viewer"
+    );
 }
 
 #[test]

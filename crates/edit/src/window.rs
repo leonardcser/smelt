@@ -314,6 +314,13 @@ pub enum VerticalScroll {
     Tail,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ByteYankFlash {
+    start: usize,
+    end: usize,
+    until: std::time::Instant,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowTextState {
     pub(crate) cpos: usize,
@@ -354,6 +361,9 @@ pub struct WindowTextState {
     /// leaves (`is_caret_leaf`); otherwise the value is discarded and `cpos`
     /// returns to its pre-drag position.
     pub(crate) drag_endpoint: Option<usize>,
+    /// Source byte range for the most recent byte-backed viewer yank while its
+    /// flash window is active. Row-backed viewers use `DocumentViewState` instead.
+    pub(crate) yank_flash: Option<ByteYankFlash>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -621,6 +631,42 @@ impl Window {
 
     pub fn clear_range_layer(&mut self, layer: crate::RangeLayer) {
         self.range_layer_slot_mut(layer).clear();
+    }
+
+    pub fn set_byte_yank_flash(&mut self, range: std::ops::Range<usize>, now: std::time::Instant) {
+        if range.start >= range.end {
+            self.clear_byte_yank_flash();
+            return;
+        }
+        self.text_state_mut().yank_flash = Some(ByteYankFlash {
+            start: range.start,
+            end: range.end,
+            until: now + smelt_buffer::kill_ring::YANK_FLASH_DURATION,
+        });
+    }
+
+    pub fn byte_yank_flash_range(&self, now: std::time::Instant) -> Option<std::ops::Range<usize>> {
+        let flash = self.text_state().yank_flash?;
+        (now < flash.until && flash.start < flash.end).then_some(flash.start..flash.end)
+    }
+
+    pub fn byte_yank_flash_until(&self) -> Option<std::time::Instant> {
+        self.text_state().yank_flash.map(|flash| flash.until)
+    }
+
+    pub fn clear_expired_byte_yank_flash(&mut self, now: std::time::Instant) {
+        if self
+            .text_state()
+            .yank_flash
+            .is_some_and(|flash| now >= flash.until)
+        {
+            self.clear_byte_yank_flash();
+        }
+    }
+
+    pub fn clear_byte_yank_flash(&mut self) {
+        self.text_state_mut().yank_flash = None;
+        self.clear_range_layer(crate::RangeLayer::YankFlash);
     }
 
     fn painted_range_layer<'a>(
