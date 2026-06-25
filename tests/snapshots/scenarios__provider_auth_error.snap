@@ -24,6 +24,7 @@ expression: out.events
   },
   {
     "TurnError": {
+      "kind": "other",
       "message": "authentication failed: {\"error\":{\"message\":\"invalid api key\",\"type\":\"authentication_error\"}}"
     }
   }

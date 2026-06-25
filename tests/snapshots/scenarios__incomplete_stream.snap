@@ -29,6 +29,7 @@ expression: out.events
   },
   {
     "TurnError": {
+      "kind": "invalid_response",
       "message": "invalid response: stream ended without message_stop"
     }
   }
