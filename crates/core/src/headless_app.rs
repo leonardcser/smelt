@@ -475,7 +475,7 @@ impl HeadlessApp {
                 {
                     self.sink.log_error(message);
                 }
-                EngineEvent::TurnError { message } => {
+                EngineEvent::TurnError { message, .. } => {
                     if self.sink.format == OutputFormat::Text {
                         self.sink.log_error(message);
                     }

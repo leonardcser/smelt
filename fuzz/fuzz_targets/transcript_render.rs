@@ -76,7 +76,11 @@ fn run_with_app(input: Input) {
                 }));
             }
             Op::Error(message) => {
-                app.feed_one(SourceEvent::Engine(EngineEvent::TurnError { message }));
+                app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+                    message,
+                    kind: None,
+                    retry_at_ms: None,
+                }));
             }
             Op::Resize { w, h } => app.feed_one(SourceEvent::Resize {
                 width: u16::from(w % 120).max(1),

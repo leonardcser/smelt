@@ -474,6 +474,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | --- | --- | --- | --- |
 | `vim` | `bool` | `false` | Vi keybindings in the prompt. |
 | `auto_compact` | `bool` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
+| `goal_auto_continue_after_quota` | `bool` | `true` | Continue active auto goals after recoverable quota or rate-limit resets. |
 | `show_tps` | `bool` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `bool` | `true` | Context token count in status bar. |
 | `show_cost` | `bool` | `true` | Session cost in status bar. |

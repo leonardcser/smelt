@@ -145,6 +145,8 @@ impl TestApp {
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: false,
                 continuation_token: None,
+                error_kind: None,
+                retry_at_ms: None,
             }),
         );
         self.app.pump_lua();
@@ -291,6 +293,8 @@ impl TestApp {
         match variant % 4 {
             2 => self.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
                 message: "fuzz turn error".into(),
+                kind: None,
+                retry_at_ms: None,
             })),
             3 => self.cancel(),
             _ => {

@@ -1916,7 +1916,11 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             unreachable!("EngineTurnComplete handled inline in apply()")
         }
         FuzzOp::EngineTurnError(message) => {
-            let ev = SourceEvent::Engine(EngineEvent::TurnError { message });
+            let ev = SourceEvent::Engine(EngineEvent::TurnError {
+                message,
+                kind: None,
+                retry_at_ms: None,
+            });
             (Some(ev), PostCheck::TurnErrored)
         }
         FuzzOp::EngineSteered { text, count } => {

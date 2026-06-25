@@ -150,6 +150,8 @@ app_story!(turn_error_block, |ctx| {
     });
     ctx.engine(EngineEvent::TurnError {
         message: "provider returned 503: service unavailable".into(),
+        kind: None,
+        retry_at_ms: None,
     });
     ctx.assert_snapshot();
 });

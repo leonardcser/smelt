@@ -21,6 +21,17 @@ struct PreparedTurn {
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
 }
 
+fn is_resumable_turn_error(
+    kind: Option<protocol::EngineAskErrorKind>,
+    retry_at_ms: Option<u64>,
+) -> bool {
+    retry_at_ms.is_some()
+        && matches!(
+            kind,
+            Some(protocol::EngineAskErrorKind::Quota | protocol::EngineAskErrorKind::RateLimited)
+        )
+}
+
 impl TuiApp {
     /// Send a permission decision to the local engine.
     pub(crate) fn send_permission_decision(
@@ -538,24 +549,31 @@ impl TuiApp {
                 self.cancel_generation = self.cancel_generation.wrapping_add(1);
                 self.busy_stack.clear();
             }
-            TurnEnd::Complete | TurnEnd::Errored => {}
+            TurnEnd::Complete | TurnEnd::Errored { .. } => {}
         }
 
         let interrupted = !matches!(end, TurnEnd::Complete);
-        let continuation_token = if interrupted {
-            self.pending_continuation_token = None;
-            None
-        } else {
+        let (error_kind, retry_at_ms) = match &end {
+            TurnEnd::Errored { kind, retry_at_ms } => (*kind, *retry_at_ms),
+            _ => (None, None),
+        };
+        let resumable = interrupted && is_resumable_turn_error(error_kind, retry_at_ms);
+        let continuation_token = if !interrupted || resumable {
             let token = self.next_continuation_token;
             self.next_continuation_token = self.next_continuation_token.wrapping_add(1).max(1);
             self.pending_continuation_token = Some(token);
             Some(token)
+        } else {
+            self.pending_continuation_token = None;
+            None
         };
         self.core.signals.set_dyn(
             "turn_end",
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: interrupted,
                 continuation_token,
+                error_kind: error_kind.map(|kind| kind.as_str().to_string()),
+                retry_at_ms,
             }),
         );
         {
@@ -594,7 +612,7 @@ impl TuiApp {
                     self.restore_session_metadata_after_rewind(self.session_history_len());
                     (meta, false)
                 }
-                TurnEnd::Errored => {
+                TurnEnd::Errored { .. } => {
                     self.pending_history_appends.retain(|pending| {
                         pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
                     });
@@ -958,7 +976,9 @@ impl TuiApp {
         match ctrl {
             SessionControl::Continue => SessionControl::Continue,
             SessionControl::Done => SessionControl::Done,
-            SessionControl::Error => SessionControl::Error,
+            SessionControl::Error { kind, retry_at_ms } => {
+                SessionControl::Error { kind, retry_at_ms }
+            }
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
                     req.tool_name = turn

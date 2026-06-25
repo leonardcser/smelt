@@ -113,7 +113,11 @@ pub(crate) async fn engine_task(
                         let history = match load_model_history(history, &session_dir) {
                             Ok(history) => history,
                             Err(message) => {
-                                let _ = event_tx.send(EngineEvent::TurnError { message });
+                                let _ = event_tx.send(EngineEvent::TurnError {
+                                    message,
+                                    kind: None,
+                                    retry_at_ms: None,
+                                });
                                 continue;
                             }
                         };
@@ -525,7 +529,7 @@ fn spawn_engine_ask(
 fn classify_provider_error(e: &ProviderError) -> EngineAskErrorKind {
     match e {
         ProviderError::Cancelled => EngineAskErrorKind::Cancelled,
-        ProviderError::QuotaExceeded(_) => EngineAskErrorKind::Quota,
+        ProviderError::QuotaExceeded { .. } => EngineAskErrorKind::Quota,
         ProviderError::Network(_) | ProviderError::Stream(_) => EngineAskErrorKind::Network,
         ProviderError::RateLimited { .. } => EngineAskErrorKind::RateLimited,
         ProviderError::Server { .. } => {
@@ -545,6 +549,18 @@ fn classify_provider_error(e: &ProviderError) -> EngineAskErrorKind {
         ProviderError::Auth(_) | ProviderError::NotFound(_) | ProviderError::MaxRetries => {
             EngineAskErrorKind::Other
         }
+    }
+}
+
+fn provider_retry_at_ms(e: &ProviderError) -> Option<u64> {
+    match e {
+        ProviderError::RateLimited { resets_at } => {
+            resets_at.map(|epoch| epoch.saturating_mul(1000))
+        }
+        ProviderError::QuotaExceeded { resets_at, .. } => {
+            resets_at.map(|epoch| epoch.saturating_mul(1000))
+        }
+        _ => None,
     }
 }
 
@@ -1413,7 +1429,11 @@ impl<'a> Turn<'a> {
                     return;
                 }
                 PrepareRequestOutcome::Abort(message) => {
-                    self.emit(EngineEvent::TurnError { message });
+                    self.emit(EngineEvent::TurnError {
+                        message,
+                        kind: None,
+                        retry_at_ms: None,
+                    });
                     self.emit_turn_complete(false);
                     return;
                 }
@@ -1436,7 +1456,7 @@ impl<'a> Turn<'a> {
                     self.emit_turn_complete(true);
                     return;
                 }
-                Err(ProviderError::QuotaExceeded(ref body)) => {
+                Err(ProviderError::QuotaExceeded { body, resets_at }) => {
                     log::entry(
                         log::Level::Warn,
                         "agent_stop",
@@ -1444,6 +1464,8 @@ impl<'a> Turn<'a> {
                     );
                     self.emit(EngineEvent::TurnError {
                         message: provider::quota_exceeded_message().to_string(),
+                        kind: Some(EngineAskErrorKind::Quota),
+                        retry_at_ms: resets_at.map(|epoch| epoch.saturating_mul(1000)),
                     });
                     self.emit_turn_complete(false);
                     return;
@@ -1489,7 +1511,11 @@ impl<'a> Turn<'a> {
                             HostCallResult::Replied(crate::host::HostRequestDecision::Abort(
                                 message,
                             )) => {
-                                self.emit(EngineEvent::TurnError { message });
+                                self.emit(EngineEvent::TurnError {
+                                    message,
+                                    kind: None,
+                                    retry_at_ms: None,
+                                });
                                 self.emit_turn_complete(false);
                                 return;
                             }
@@ -1517,7 +1543,11 @@ impl<'a> Turn<'a> {
                     } else {
                         error_msg
                     };
-                    self.emit(EngineEvent::TurnError { message });
+                    self.emit(EngineEvent::TurnError {
+                        message,
+                        kind: Some(classify_provider_error(&e)),
+                        retry_at_ms: provider_retry_at_ms(&e),
+                    });
                     self.emit_turn_complete(false);
                     return;
                 }

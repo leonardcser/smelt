@@ -120,7 +120,7 @@ fn provider_error_to_log_error(
     let (kind, status) = match err {
         ProviderError::Cancelled => ("cancelled", http_status),
         ProviderError::RateLimited { .. } => ("rate_limited", http_status),
-        ProviderError::QuotaExceeded(_) => ("quota", http_status),
+        ProviderError::QuotaExceeded { .. } => ("quota", http_status),
         ProviderError::Auth(_) => ("auth", http_status),
         ProviderError::NotFound(_) => ("not_found", http_status),
         ProviderError::Server { status, .. } => ("server", Some(*status)),

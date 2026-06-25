@@ -62,8 +62,8 @@ impl TuiApp {
                     self.discard_turn(crate::app::TurnEnd::Complete);
                     false
                 }
-                SessionControl::Error => {
-                    self.discard_turn(crate::app::TurnEnd::Errored);
+                SessionControl::Error { kind, retry_at_ms } => {
+                    self.discard_turn(crate::app::TurnEnd::Errored { kind, retry_at_ms });
                     false
                 }
             }
@@ -375,7 +375,11 @@ impl TuiApp {
                 self.pending_turn_meta = meta;
                 SessionControl::Done
             }
-            EngineEvent::TurnError { message } => {
+            EngineEvent::TurnError {
+                message,
+                kind,
+                retry_at_ms,
+            } => {
                 {
                     self.working.finish(TurnOutcome::Interrupted);
                 };
@@ -386,9 +390,12 @@ impl TuiApp {
                     }),
                 );
                 self.notify_error_sticky(message);
-                SessionControl::Error
+                SessionControl::Error { kind, retry_at_ms }
             }
-            EngineEvent::Shutdown { .. } => SessionControl::Error,
+            EngineEvent::Shutdown { .. } => SessionControl::Error {
+                kind: None,
+                retry_at_ms: None,
+            },
             EngineEvent::ToolDispatch {
                 request_id,
                 call_id,
@@ -466,7 +473,7 @@ impl TuiApp {
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);
             }
-            EngineEvent::TurnError { message } => {
+            EngineEvent::TurnError { message, .. } => {
                 self.working.finish(TurnOutcome::Interrupted);
                 self.notify_error_sticky(message);
             }

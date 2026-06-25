@@ -16,7 +16,8 @@ local state = smelt.state.persistent("goal", { debounce_ms = 200 })
 if type(state.sessions) ~= "table" then state.sessions = {} end
 if type(state.next_id) ~= "number" then state.next_id = 0 end
 
-local scheduled = false
+local short_schedule_id = 0
+local quota_schedule_id = 0
 local setup_done = false
 local generation = 0
 
@@ -225,6 +226,13 @@ local function should_auto_continue()
     and not smelt.engine.is_running()
     and not smelt.work.is_busy()
     and prompt_is_empty()
+end
+
+local function recoverable_quota_error(ev)
+  if not ev or not ev.cancelled then return false end
+  if smelt.settings and smelt.settings.goal_auto_continue_after_quota == false then return false end
+  if ev.error_kind ~= "quota" and ev.error_kind ~= "rate_limited" then return false end
+  return type(ev.retry_at_ms) == "number" and type(ev.continuation_token) == "number"
 end
 
 local function store_and_sync(goal)
@@ -477,13 +485,25 @@ function M.continue(reason, continuation_token)
 end
 
 function M.schedule_auto_continue(continuation_token)
-  if scheduled or not can_schedule_auto_continue() then return end
-  scheduled = true
+  if not can_schedule_auto_continue() then return end
+  short_schedule_id = short_schedule_id + 1
+  local schedule_id = short_schedule_id
   local gen = generation
   smelt.timer.set(AUTO_DELAY_MS, function()
-    scheduled = false
-    if gen ~= generation or not should_auto_continue() then return end
+    if schedule_id ~= short_schedule_id or gen ~= generation or not should_auto_continue() then return end
     M.continue("auto", continuation_token)
+  end)
+end
+
+function M.schedule_quota_auto_continue(ev)
+  if not recoverable_quota_error(ev) or not can_schedule_auto_continue() then return end
+  quota_schedule_id = quota_schedule_id + 1
+  local schedule_id = quota_schedule_id
+  local gen = generation
+  local delay = math.max(AUTO_DELAY_MS, math.floor(ev.retry_at_ms - now_ms()) + 1000)
+  smelt.timer.set(delay, function()
+    if schedule_id ~= quota_schedule_id or gen ~= generation or not should_auto_continue() then return end
+    M.continue("auto", ev.continuation_token)
   end)
 end
 
@@ -686,7 +706,10 @@ function M.setup()
 
   smelt.signal.subscribe("session_epoch", sync_context_note)
   smelt.events.on("turn_end", function(ev)
-    if ev and ev.cancelled then return end
+    if ev and ev.cancelled then
+      M.schedule_quota_auto_continue(ev)
+      return
+    end
     M.schedule_auto_continue(ev and ev.continuation_token)
   end)
 end

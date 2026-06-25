@@ -8,6 +8,8 @@ fn turn_error_preserves_request_queue() {
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
         message: "connection failed".to_string(),
+        kind: None,
+        retry_at_ms: None,
     }));
 
     assert!(!app.agent_running(), "error should end the active turn");
@@ -41,6 +43,8 @@ fn turn_error_preserves_turn_queue() {
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
+        kind: None,
+        retry_at_ms: None,
     }));
 
     assert!(!app.agent_running(), "error should end the active turn");
@@ -65,6 +69,117 @@ fn turn_error_preserves_turn_queue() {
         app.app.working.last_outcome(),
         Some(smelt_core::working::TurnOutcome::Interrupted)
     );
+}
+
+#[test]
+fn resumable_turn_error_publishes_continuation_token() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+        message: "quota exceeded".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Quota),
+        retry_at_ms: Some(123_000),
+    }));
+
+    let turn_end = app
+        .app
+        .core
+        .signals
+        .get::<smelt_core::signals::TurnEnd>("turn_end")
+        .expect("turn_end should be published");
+    assert!(turn_end.cancelled);
+    assert_eq!(turn_end.error_kind.as_deref(), Some("quota"));
+    assert_eq!(turn_end.retry_at_ms, Some(123_000));
+    assert!(turn_end.continuation_token.is_some());
+}
+
+#[test]
+fn non_quota_retry_metadata_does_not_publish_continuation_token() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+        message: "network failed".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Network),
+        retry_at_ms: Some(123_000),
+    }));
+
+    let turn_end = app
+        .app
+        .core
+        .signals
+        .get::<smelt_core::signals::TurnEnd>("turn_end")
+        .expect("turn_end should be published");
+    assert!(turn_end.cancelled);
+    assert_eq!(turn_end.error_kind.as_deref(), Some("network"));
+    assert_eq!(turn_end.retry_at_ms, Some(123_000));
+    assert!(turn_end.continuation_token.is_none());
+}
+
+fn run_due_timers(app: &mut TestApp, ms: u64) -> Vec<protocol::UiCommand> {
+    app.feed_one(SourceEvent::Tick(ms));
+    app.app.tick_timers();
+    app.drain_engine_sends()
+}
+
+fn has_started_turn(cmds: &[protocol::UiCommand]) -> bool {
+    cmds.iter()
+        .any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(_)))
+}
+
+#[test]
+fn goal_auto_continues_after_recoverable_quota_error() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"assert(require("smelt.goal").create("finish quota test", { auto_continue = true }))"#
+    ));
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+        message: "quota exceeded".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Quota),
+        retry_at_ms: Some(0),
+    }));
+
+    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
+}
+
+#[test]
+fn goal_auto_continue_after_quota_setting_disables_retry() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        smelt.settings.goal_auto_continue_after_quota = false
+        assert(require("smelt.goal").create("finish quota test", { auto_continue = true }))
+        "#
+    ));
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+        message: "quota exceeded".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Quota),
+        retry_at_ms: Some(0),
+    }));
+
+    assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+}
+
+#[test]
+fn goal_auto_continue_ignores_non_quota_errors() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"assert(require("smelt.goal").create("finish quota test", { auto_continue = true }))"#
+    ));
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+        message: "network failed".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Network),
+        retry_at_ms: Some(0),
+    }));
+
+    assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
 }
 
 #[test]

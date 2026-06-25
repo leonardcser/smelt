@@ -195,6 +195,8 @@ settings! {
     vim:                   Bool   = false;
     /// Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless).
     auto_compact:          Bool   = true;
+    /// Continue active auto goals after recoverable quota or rate-limit resets.
+    goal_auto_continue_after_quota: Bool = true;
     /// Tokens/sec in status bar.
     show_tps:              Bool   = true;
     /// Context token count in status bar.

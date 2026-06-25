@@ -347,7 +347,13 @@ pub enum EngineEvent {
     },
 
     /// The agent turn ended with an error.
-    TurnError { message: String },
+    TurnError {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        kind: Option<EngineAskErrorKind>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        retry_at_ms: Option<u64>,
+    },
 
     /// Engine is shutting down.
     Shutdown { reason: Option<String> },

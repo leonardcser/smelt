@@ -585,7 +585,10 @@ pub(super) fn apply_sse_event(
                     || code == "billing_not_active"
                     || err_type == "usage_limit_reached"
                 {
-                    state.error = Some(ProviderError::QuotaExceeded(message.to_string()));
+                    state.error = Some(ProviderError::QuotaExceeded {
+                        body: message.to_string(),
+                        resets_at,
+                    });
                 } else if code == "context_length_exceeded" {
                     state.error = Some(ProviderError::InvalidResponse(message.to_string()));
                 } else {
@@ -1624,7 +1627,7 @@ mod tests {
         );
         assert!(matches!(
             state.error.unwrap(),
-            ProviderError::QuotaExceeded(_)
+            ProviderError::QuotaExceeded { .. }
         ));
     }
 
@@ -1641,7 +1644,7 @@ mod tests {
             );
             assert!(matches!(
                 state.error.unwrap(),
-                ProviderError::QuotaExceeded(_)
+                ProviderError::QuotaExceeded { .. }
             ));
         }
     }
@@ -1717,12 +1720,15 @@ mod tests {
     #[test]
     fn finalize_returns_error_when_state_error_set() {
         let state = StreamState {
-            error: Some(ProviderError::QuotaExceeded("x".into())),
+            error: Some(ProviderError::QuotaExceeded {
+                body: "x".into(),
+                resets_at: None,
+            }),
             ..Default::default()
         };
         assert!(matches!(
             state.finalize(),
-            Err(ProviderError::QuotaExceeded(_))
+            Err(ProviderError::QuotaExceeded { .. })
         ));
     }
 

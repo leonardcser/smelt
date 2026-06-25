@@ -106,6 +106,8 @@ fn publish_turn_end(app: &mut TestApp) {
         std::rc::Rc::new(smelt_core::signals::TurnEnd {
             cancelled: false,
             continuation_token: None,
+            error_kind: None,
+            retry_at_ms: None,
         }),
     );
     app.app.pump_lua();

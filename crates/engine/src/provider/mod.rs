@@ -157,7 +157,10 @@ pub enum ProviderError {
     #[error("{}", format_rate_limit(resets_at))]
     RateLimited { resets_at: Option<u64> },
     #[error("{}", quota_exceeded_message())]
-    QuotaExceeded(String),
+    QuotaExceeded {
+        body: String,
+        resets_at: Option<u64>,
+    },
     #[error("authentication failed: {0}")]
     Auth(String),
     #[error("not found: {0}")]
@@ -338,7 +341,11 @@ impl ProviderError {
         let is_quota = is_quota_error_body(&body);
 
         match code {
-            _ if is_quota => ProviderError::QuotaExceeded(body),
+            _ if is_quota => ProviderError::QuotaExceeded {
+                resets_at: parse_resets_at(&body)
+                    .or_else(|| retry_after.map(|d| now_secs + d.as_secs())),
+                body,
+            },
             400 => ProviderError::InvalidResponse(body),
             401 | 403 => ProviderError::Auth(body),
             404 => ProviderError::NotFound(body),
@@ -2106,10 +2113,23 @@ mod tests {
         for (code, body) in cases {
             let err = ProviderError::from_http(code, body.into(), None);
             assert!(
-                matches!(err, ProviderError::QuotaExceeded(_)),
+                matches!(err, ProviderError::QuotaExceeded { .. }),
                 "expected QuotaExceeded for ({code}, {body:?})"
             );
             assert_eq!(err.to_string(), quota_exceeded_message());
+        }
+    }
+
+    #[test]
+    fn from_http_quota_429_preserves_retry_after() {
+        match ProviderError::from_http_at(
+            429,
+            "usage_limit_reached".into(),
+            Some(Duration::from_secs(30)),
+            1_000,
+        ) {
+            ProviderError::QuotaExceeded { resets_at, .. } => assert_eq!(resets_at, Some(1_030)),
+            e => panic!("expected QuotaExceeded with resets_at, got {e:?}"),
         }
     }
 

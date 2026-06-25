@@ -247,7 +247,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                             metadata: None,
                         });
                     }
-                    Ok(Some(EngineEvent::TurnError { message })) => {
+                    Ok(Some(EngineEvent::TurnError { message, .. })) => {
                         turn_error = Some(message);
                         break;
                     }

@@ -561,7 +561,10 @@ pub(crate) enum SessionControl {
     Continue,
     NeedsConfirm(Box<ConfirmRequest>),
     Done,
-    Error,
+    Error {
+        kind: Option<protocol::EngineAskErrorKind>,
+        retry_at_ms: Option<u64>,
+    },
 }
 
 /// How the active turn is ending. Drives whether queued inputs are preserved
@@ -572,7 +575,10 @@ pub(crate) enum TurnEnd {
     /// User cancelled: queue is drained back to the prompt.
     Cancelled,
     /// Provider/engine error: queue is preserved so the user can retry.
-    Errored,
+    Errored {
+        kind: Option<protocol::EngineAskErrorKind>,
+        retry_at_ms: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2455,7 +2461,10 @@ impl TuiApp {
                                 "source": "try_recv_drain",
                             }),
                         );
-                        self.discard_turn(TurnEnd::Errored);
+                        self.discard_turn(TurnEnd::Errored {
+                            kind: None,
+                            retry_at_ms: None,
+                        });
                         break;
                     }
                 };
@@ -2510,8 +2519,8 @@ impl TuiApp {
                         SessionControl::Done => {
                             self.discard_turn(TurnEnd::Complete);
                         }
-                        SessionControl::Error => {
-                            self.discard_turn(TurnEnd::Errored);
+                        SessionControl::Error { kind, retry_at_ms } => {
+                            self.discard_turn(TurnEnd::Errored { kind, retry_at_ms });
                         }
                     }
                 }

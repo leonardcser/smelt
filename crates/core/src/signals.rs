@@ -352,6 +352,8 @@ pub struct HistoryDelta {
 pub struct TurnEnd {
     pub cancelled: bool,
     pub continuation_token: Option<u64>,
+    pub error_kind: Option<String>,
+    pub retry_at_ms: Option<u64>,
 }
 
 /// Payload for the `tool_start` signal.
@@ -680,6 +682,12 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         let _ = t.set("cancelled", e.cancelled);
         if let Some(token) = e.continuation_token {
             let _ = t.set("continuation_token", token);
+        }
+        if let Some(kind) = &e.error_kind {
+            let _ = t.set("error_kind", kind.as_str());
+        }
+        if let Some(retry_at_ms) = e.retry_at_ms {
+            let _ = t.set("retry_at_ms", retry_at_ms);
         }
         mlua::Value::Table(t)
     });
