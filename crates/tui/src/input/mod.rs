@@ -119,6 +119,37 @@ struct PromptSubmission {
     display: String,
 }
 
+fn rewind_source_and_attachments(
+    mut text: String,
+    images: Vec<(String, String)>,
+) -> (String, Vec<Attachment>) {
+    let mut attachments = Vec::new();
+    for (label, data_url) in images {
+        let attachment = Attachment::Image { label, data_url };
+        let display_label = attachment.display_label();
+        let labels = match &attachment {
+            Attachment::Image { label, .. } if format!("[{label}]") != display_label => {
+                vec![format!("[{label}]"), display_label]
+            }
+            _ => vec![display_label],
+        };
+
+        if let Some((pos, len)) = labels
+            .iter()
+            .find_map(|label| text.find(label).map(|pos| (pos, label.len())))
+        {
+            text.replace_range(pos..pos + len, &ATTACHMENT_MARKER.to_string());
+        } else {
+            if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
+                text.push(' ');
+            }
+            text.push(ATTACHMENT_MARKER);
+        }
+        attachments.push(attachment);
+    }
+    (text, attachments)
+}
+
 impl Default for PromptState {
     fn default() -> Self {
         Self::new()
@@ -403,22 +434,18 @@ impl PromptState {
         }
     }
 
-    /// Restore rewind text: replace `[label]` placeholders with attachment markers.
+    /// Restore rewind text by turning visible attachment labels back into prompt markers.
     pub(crate) fn restore_from_rewind(
         &mut self,
         ctx: &mut PromptCtx<'_>,
-        mut text: String,
+        text: String,
         images: Vec<(String, String)>,
     ) {
-        let mut ids = Vec::new();
-        for (label, data_url) in images {
-            let display = format!("[{label}]");
-            if let Some(pos) = text.find(&display) {
-                text.replace_range(pos..pos + display.len(), &ATTACHMENT_MARKER.to_string());
-                let id = self.store.lock().unwrap().insert_image(label, data_url);
-                ids.push(id);
-            }
-        }
+        let (text, attachments) = rewind_source_and_attachments(text, images);
+        let ids = attachments
+            .into_iter()
+            .map(|attachment| self.store.lock().unwrap().insert(attachment))
+            .collect();
         let cpos = text.len();
         self.install_source(ctx, text, cpos, ids);
     }
@@ -1301,6 +1328,57 @@ mod tests {
             self.state
                 .execute_key_action(&mut ctx, action, None, &mut clip)
         }
+    }
+
+    // ── rewind attachment restoration ────────────────────────────────────────
+
+    #[test]
+    fn rewind_restore_replaces_visible_attachment_label_with_marker() {
+        let (source, attachments) = rewind_source_and_attachments(
+            "look [shot.png]".into(),
+            vec![("shot.png".into(), "data:image/png;base64,AAA".into())],
+        );
+
+        assert_eq!(source, format!("look {ATTACHMENT_MARKER}"));
+        assert_eq!(attachments.len(), 1);
+    }
+
+    #[test]
+    fn rewind_restore_keeps_attachment_when_text_lacks_label() {
+        let (source, attachments) = rewind_source_and_attachments(
+            "look".into(),
+            vec![("shot.png".into(), "data:image/png;base64,AAA".into())],
+        );
+
+        assert_eq!(source, format!("look {ATTACHMENT_MARKER}"));
+        assert_eq!(attachments.len(), 1);
+    }
+
+    #[test]
+    fn rewind_restore_installs_prompt_attachment_id_when_label_missing() {
+        let mut input = Harness::new();
+        input.state.restore_from_rewind(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            "look".into(),
+            vec![("shot.png".into(), "data:image/png;base64,AAA".into())],
+        );
+
+        assert_eq!(input.buf.source(), &format!("look {ATTACHMENT_MARKER}"));
+        assert_eq!(input.buf.attachment_ids.len(), 1);
+    }
+
+    #[test]
+    fn rewind_restore_matches_sanitized_display_label() {
+        let (source, attachments) = rewind_source_and_attachments(
+            "look [bad�label]".into(),
+            vec![("bad\nlabel".into(), "data:image/png;base64,AAA".into())],
+        );
+
+        assert_eq!(source, format!("look {ATTACHMENT_MARKER}"));
+        assert_eq!(attachments.len(), 1);
     }
 
     // ── from_paste behavior for shell escape prevention ───────────────────
