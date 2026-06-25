@@ -21,6 +21,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod build_pathspecs;
+
 fn main() {
     let sha = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let date = git(&["show", "-s", "--format=%cI", "HEAD"]).unwrap_or_else(|| "unknown".into());
@@ -48,16 +50,16 @@ fn main() {
     println!("cargo:rustc-env=SMELT_BUILD_DIRTY={dirty}");
     println!("cargo:rustc-env=SMELT_DISPLAY={display}");
 
-    // Rebuild when HEAD moves. `git rev-parse --git-path HEAD` resolves
-    // to the right file for both regular checkouts and worktrees.
-    rerun_if_git_path("HEAD");
-    // Release builds often add a tag without moving HEAD. Watch both loose and
-    // packed tags so the embedded display updates after tagging.
-    rerun_if_git_path("refs/tags");
-    rerun_if_git_path("packed-refs");
-    // The dirty flag flips when tracked files change without a commit;
-    // there's no single sentinel file to watch, so re-run every build.
+    // Rebuild when HEAD moves. `.git/HEAD` only contains the current ref for
+    // normal branch checkouts, so also watch the resolved branch ref where the
+    // commit actually changes when new commits are added.
+    for pathspec in build_pathspecs::git_pathspecs(
+        git(&["rev-parse", "--symbolic-full-name", "HEAD"]).as_deref(),
+    ) {
+        rerun_if_git_path(pathspec);
+    }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_pathspecs.rs");
     println!("cargo:rerun-if-env-changed=TARGET");
 }
 
@@ -108,10 +110,7 @@ fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String
 
 fn rerun_if_git_path(pathspec: &str) {
     if let Some(path) = git(&["rev-parse", "--git-path", pathspec]) {
-        let path = PathBuf::from(&path);
-        if path.exists() {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
+        println!("cargo:rerun-if-changed={}", PathBuf::from(path).display());
     }
 }
 
