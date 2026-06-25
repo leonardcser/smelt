@@ -63,6 +63,12 @@ impl From<&ServerInfo> for McpServerInfo {
     }
 }
 
+impl From<Arc<ServerInfo>> for McpServerInfo {
+    fn from(info: Arc<ServerInfo>) -> Self {
+        Self::from(info.as_ref())
+    }
+}
+
 /// A discovered MCP tool definition (before wrapping as a Tool trait object).
 #[derive(Debug, Clone)]
 pub struct McpToolDef {
