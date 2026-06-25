@@ -20,7 +20,7 @@ set -o pipefail; cargo test -p smelt-tui --features harness double_esc 2>&1 | ta
 set -o pipefail; cargo fmt && cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings 2>&1 | tail -120
 
 # coverage / CI-equivalent test gate (requires `cargo install cargo-llvm-cov`; enables smelt-tui's harness feature for storybook/test helpers)
-set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 65 2>&1 | tail -120
+set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80 2>&1 | tail -120
 
 # quick coverage summary (does not enforce CI's coverage floor)
 set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness --summary-only 2>&1 | tail -120

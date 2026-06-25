@@ -57,7 +57,7 @@ jobs:
         run: cargo build --workspace
 
       - name: Run tests with coverage floor
-        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 65
+        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
 
       - name: Check Lua API docs are in sync
         run: |
