@@ -23,6 +23,8 @@ impl TestApp {
             turn_id,
             pending: Vec::new(),
             permissions: self.app.core.permissions.clone(),
+            rewind_block_idx: None,
+            assistant_output_started: false,
             _perf: smelt_perf::perf::begin("test_harness:turn"),
         });
         // Production `dispatch_prepared_turn` flips `working` into `Working`
@@ -37,6 +39,13 @@ impl TestApp {
             std::rc::Rc::new(smelt_core::signals::EventStub),
         );
         self.app.pump_lua();
+    }
+
+    pub fn start_submitted_turn(&mut self, text: &str) {
+        let turn = self
+            .app
+            .begin_agent_turn(text, protocol::Content::text(text));
+        self.app.agent = Some(turn);
     }
 
     /// Whether an agent turn is currently active.

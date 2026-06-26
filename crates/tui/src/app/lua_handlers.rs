@@ -273,6 +273,23 @@ impl TuiApp {
         self.picker_state.clear();
     }
 
+    pub(crate) fn rewind_active_user_turn_if_no_output(
+        &mut self,
+        restore_vim_insert: bool,
+    ) -> bool {
+        let Some(turn) = self.agent.as_ref() else {
+            return false;
+        };
+        let Some(block_idx) = turn.rewind_block_idx else {
+            return false;
+        };
+        if !self.queued_inputs.is_empty() || turn.assistant_output_started {
+            return false;
+        }
+        self.rewind_to_block(Some(block_idx), restore_vim_insert);
+        true
+    }
+
     /// Rewind to a transcript block, or to before the first turn when `block_idx` is `None`.
     pub(crate) fn rewind_to_block(&mut self, block_idx: Option<usize>, restore_vim_insert: bool) {
         if let Some(bidx) = block_idx {

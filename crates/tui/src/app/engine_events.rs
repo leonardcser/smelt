@@ -5,6 +5,29 @@ use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
+fn starts_assistant_or_tool_output(ev: &EngineEvent) -> bool {
+    match ev {
+        EngineEvent::Thinking { content } | EngineEvent::Text { content } => !content.is_empty(),
+        EngineEvent::ThinkingDelta { delta } | EngineEvent::TextDelta { delta } => {
+            !delta.is_empty()
+        }
+        EngineEvent::ToolCallDraftStarted { .. }
+        | EngineEvent::ToolCallDraftFinished { .. }
+        | EngineEvent::ToolStarted { .. }
+        | EngineEvent::ToolOutput { .. }
+        | EngineEvent::ToolFinished { .. }
+        | EngineEvent::RequestPermission { .. } => true,
+        EngineEvent::ToolCallDraftDelta { delta, .. } => !delta.is_empty(),
+        EngineEvent::HistoryAppended { items, .. } => items
+            .iter()
+            .any(|item| matches!(item, protocol::HistoryItem::Assistant(_))),
+        EngineEvent::HistoryUpdated { history, .. } => history
+            .iter()
+            .any(|item| matches!(item, protocol::HistoryItem::Assistant(_))),
+        _ => false,
+    }
+}
+
 impl TuiApp {
     pub(crate) fn publish_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         self.core
@@ -139,6 +162,9 @@ impl TuiApp {
 
     fn dispatch_engine_event_inner(&mut self, ev: EngineEvent) -> bool {
         if let Some(mut ag) = self.agent.take() {
+            if starts_assistant_or_tool_output(&ev) {
+                ag.assistant_output_started = true;
+            }
             let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
             let end = self.dispatch_control(ctrl, &mut ag);

@@ -61,6 +61,45 @@ fn vim_insert_double_esc_cancels_running_agent_on_second_press() {
 }
 
 #[test]
+fn vim_insert_double_esc_rewinds_active_user_turn_before_output() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.start_submitted_turn("wrong prompt");
+
+    app.press(KeyCode::Esc);
+    assert!(app.agent_running(), "first Esc is the local Vim action");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+
+    app.press(KeyCode::Esc);
+    let after_second = app.state();
+    assert!(
+        !after_second.agent_running,
+        "second Esc rewinds the active turn"
+    );
+    assert_eq!(after_second.prompt_text, "wrong prompt");
+    assert!(user_blocks(&app).is_empty());
+}
+
+#[test]
+fn vim_insert_double_esc_only_cancels_after_assistant_output() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.start_submitted_turn("keep prompt");
+    app.app
+        .dispatch_engine_event(protocol::EngineEvent::TextDelta {
+            delta: "started".into(),
+        });
+
+    app.press(KeyCode::Esc);
+    assert!(app.agent_running(), "first Esc is the local Vim action");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+
+    app.press(KeyCode::Esc);
+    let after_second = app.state();
+    assert!(!after_second.agent_running, "second Esc cancels the agent");
+    assert_eq!(after_second.prompt_text, "");
+    assert_eq!(user_blocks(&app), vec![("keep prompt".to_string(), vec![])]);
+}
+
+#[test]
 fn vim_insert_double_esc_unqueues_messages_on_second_press() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.start_turn(1);

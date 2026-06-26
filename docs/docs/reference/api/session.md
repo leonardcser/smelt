@@ -8,6 +8,16 @@
 
 Current session metadata, turn list, message snapshots, rewind, and persisted session management. UiHost-only.
 
+## `smelt.session._rewind_active_turn_if_clean`
+
+```lua
+fun(opts: table?): boolean
+```
+
+**Visibility:** `Internal` - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
+
+Cancel the active turn and restore its submitted user message into the prompt only if no assistant or tool output has started. Returns true when it rewound.
+
 ## `smelt.session.checkpoint`
 
 ```lua

@@ -737,6 +737,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         },
     )?;
+    m.internal_fn(
+        "_rewind_active_turn_if_clean",
+        "Cancel the active turn and restore its submitted user message into the prompt only if no assistant or tool output has started. Returns true when it rewound.",
+        &["opts"],
+        |_, opts: Option<mlua::Table>| -> LuaResult<bool> {
+            let restore_vim_insert = opts
+                .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
+                .unwrap_or(false);
+            Ok(crate::lua::with_app(|app| {
+                app.rewind_active_user_turn_if_no_output(restore_vim_insert)
+            }))
+        },
+    )?;
     m.fn_(
         "list",
         "List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, `size_bytes` when available, and `migration_status` / `migration_message` when a legacy import is pending or failed.",

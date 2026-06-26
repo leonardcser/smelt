@@ -7,6 +7,11 @@
 ---@class smelt.session
 local session = {}
 
+--- Visibility: Internal - Runtime implementation detail. Bundled Lua may call it, but user config and plugins should not depend on it.
+--- Cancel the active turn and restore its submitted user message into the prompt only if no assistant or tool output has started. Returns true when it rewound.
+---@type fun(opts: table?): boolean
+session._rewind_active_turn_if_clean = nil
+
 --- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.
 ---@see smelt.work.guard
 ---@see smelt.session.model_messages

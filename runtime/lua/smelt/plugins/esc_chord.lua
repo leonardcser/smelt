@@ -5,6 +5,9 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   local restore_insert = ctx.vim_mode_at_chord_start == "insert"
 
   if smelt.engine.is_running() or smelt.work.is_busy() then
+    if smelt.engine.is_running() and smelt.session._rewind_active_turn_if_clean({ restore_vim_insert = restore_insert }) then
+      return
+    end
     smelt.engine.cancel()
     if restore_insert then
       smelt.vim.set_mode("insert")

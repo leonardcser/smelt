@@ -19,6 +19,7 @@ struct PreparedTurn {
     model_config_overrides: Option<protocol::ModelConfigOverrides>,
     permission_overrides: Option<protocol::PermissionOverrides>,
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+    rewind_block_idx: Option<usize>,
 }
 
 fn is_resumable_turn_error(
@@ -119,7 +120,7 @@ impl TuiApp {
         if content.is_empty() {
             self.publish_turn_input(submitted);
             let history = self.model_history_source();
-            return self.dispatch_turn(content, history);
+            return self.dispatch_turn(content, history, None);
         }
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(text.clone().into_owned());
@@ -135,14 +136,16 @@ impl TuiApp {
                 image_labels: content.image_labels(),
             }),
         );
+        let rewind_block_idx = self.user_turns().last().map(|(idx, _)| *idx);
         self.publish_turn_input(submitted);
-        self.dispatch_turn(content, history)
+        self.dispatch_turn(content, history, rewind_block_idx)
     }
 
     fn dispatch_turn(
         &mut self,
         content: Content,
         history: protocol::ModelHistorySource,
+        rewind_block_idx: Option<usize>,
     ) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
@@ -152,6 +155,8 @@ impl TuiApp {
                 turn_id: 0,
                 pending: Vec::new(),
                 permissions: self.core.permissions.clone(),
+                rewind_block_idx: None,
+                assistant_output_started: false,
                 _perf: smelt_perf::perf::begin("agent:turn"),
             };
         };
@@ -166,6 +171,7 @@ impl TuiApp {
             model_config_overrides: None,
             permission_overrides: None,
             permissions: self.core.permissions.clone(),
+            rewind_block_idx,
         })
     }
 
@@ -229,6 +235,8 @@ impl TuiApp {
             turn_id,
             pending: Vec::new(),
             permissions,
+            rewind_block_idx: turn.rewind_block_idx,
+            assistant_output_started: false,
             _perf: smelt_perf::perf::begin("agent:turn"),
         }
     }
@@ -256,6 +264,8 @@ impl TuiApp {
                     turn_id: 0,
                     pending: Vec::new(),
                     permissions: self.core.permissions.clone(),
+                    rewind_block_idx: None,
+                    assistant_output_started: false,
                     _perf: smelt_perf::perf::begin("agent:turn"),
                 };
             }
@@ -270,6 +280,7 @@ impl TuiApp {
             model_config_overrides: None,
             permission_overrides: None,
             permissions: self.core.permissions.clone(),
+            rewind_block_idx: None,
         })
     }
 
@@ -349,6 +360,11 @@ impl TuiApp {
         } else {
             self.show_user_message(&display, vec![]);
             self.model_history_source()
+        };
+        let rewind_block_idx = if !evaluated.is_empty() {
+            self.user_turns().last().map(|(idx, _)| *idx)
+        } else {
+            None
         };
         self.publish_turn_input(submitted);
 
@@ -479,6 +495,7 @@ impl TuiApp {
             model_config_overrides,
             permission_overrides,
             permissions,
+            rewind_block_idx,
         })
     }
 
