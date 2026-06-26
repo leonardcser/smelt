@@ -155,6 +155,30 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
             .is_empty(),
         "yanked overlay selection should flash in the focused dialog viewer"
     );
+
+    app.clock.advance(
+        smelt_buffer::kill_ring::YANK_FLASH_DURATION + std::time::Duration::from_millis(1),
+    );
+    app.render_silent();
+
+    assert!(
+        app.app
+            .ui
+            .win(leaf)
+            .expect("overlay window")
+            .range_layer(crate::smelt_edit::RangeLayer::YankFlash)
+            .is_empty(),
+        "expired overlay yank flash should clear like transcript flashes"
+    );
+    assert!(
+        app.app
+            .ui
+            .win(leaf)
+            .expect("overlay window")
+            .byte_yank_flash_until()
+            .is_none(),
+        "expired overlay yank flash state should be cleared"
+    );
 }
 
 #[test]

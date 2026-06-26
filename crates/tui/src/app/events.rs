@@ -1469,21 +1469,11 @@ impl TuiApp {
                 }
             }
             Some(crate::smelt_edit::DocumentCopy::Bytes(range)) => {
-                let copied = self.ui.buf(buf_id).map(|buf| {
-                    let ranges =
-                        smelt_buffer::coords::byte_range_to_row_ranges(buf, range.start, range.end);
-                    (buf.copy_range(range.clone()), ranges)
-                });
+                let copied = self.ui.buf(buf_id).map(|buf| buf.copy_range(range.clone()));
                 if let Some(win) = self.ui.win_mut(win_id) {
                     win.set_byte_yank_flash(range, now);
-                    if let Some((_, ranges)) = copied.as_ref() {
-                        win.set_range_layer(
-                            crate::smelt_edit::RangeLayer::YankFlash,
-                            ranges.clone(),
-                        );
-                    }
                 }
-                if let Some((out, _)) = copied {
+                if let Some(out) = copied {
                     self.yank_to_clipboard(out);
                 }
             }

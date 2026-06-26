@@ -576,6 +576,14 @@ impl Window {
         out
     }
 
+    pub fn sync_yank_flash_layer(&mut self, buf: &mut Buffer, viewport_rows: u16, now: Instant) {
+        if self.has_materialized_rows() {
+            self.sync_row_render_state(buf, viewport_rows, now);
+        } else {
+            self.sync_byte_yank_flash_layer(buf, now);
+        }
+    }
+
     pub fn sync_row_render_state(&mut self, buf: &mut Buffer, viewport_rows: u16, now: Instant) {
         self.refresh_row_cursor_columns(buf);
         self.resync_row_display_coords(buf);

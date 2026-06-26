@@ -1356,6 +1356,12 @@ impl Ui {
         self.wins.iter().map(|(id, w)| (*id, w))
     }
 
+    pub fn yank_flash_active(&self, now: std::time::Instant) -> bool {
+        self.wins
+            .values()
+            .any(|win| win.yank_flash_until().is_some_and(|until| until > now))
+    }
+
     /// Read-only iterator over every live `(BufId, &Buffer)` pair. Order
     /// is unspecified (backed by `HashMap`), so callers must not rely on it.
     pub fn iter_bufs(&self) -> impl Iterator<Item = (BufId, &Buffer)> {

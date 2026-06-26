@@ -669,6 +669,34 @@ impl Window {
         self.clear_range_layer(crate::RangeLayer::YankFlash);
     }
 
+    pub fn yank_flash_until(&self) -> Option<std::time::Instant> {
+        match (self.byte_yank_flash_until(), self.row_yank_flash_until()) {
+            (Some(byte), Some(row)) => Some(byte.max(row)),
+            (Some(byte), None) => Some(byte),
+            (None, Some(row)) => Some(row),
+            (None, None) => None,
+        }
+    }
+
+    pub fn sync_byte_yank_flash_layer(&mut self, buf: &mut Buffer, now: std::time::Instant) {
+        if self.text_state().yank_flash.is_none()
+            && self.range_layer(crate::RangeLayer::YankFlash).is_empty()
+            && buf.range_layer(crate::RangeLayer::YankFlash).is_empty()
+        {
+            return;
+        }
+
+        self.clear_expired_byte_yank_flash(now);
+        if let Some(range) = self.byte_yank_flash_range(now) {
+            let ranges =
+                smelt_buffer::coords::byte_range_to_row_ranges(buf, range.start, range.end);
+            self.set_range_layer(crate::RangeLayer::YankFlash, ranges);
+        } else {
+            self.clear_range_layer(crate::RangeLayer::YankFlash);
+        }
+        buf.clear_range_layer(crate::RangeLayer::YankFlash);
+    }
+
     fn painted_range_layer<'a>(
         &'a self,
         buf: &'a Buffer,
