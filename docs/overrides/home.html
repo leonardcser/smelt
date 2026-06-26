@@ -165,18 +165,26 @@
     line-height: 1.1;
   }
 
+  .hero-actions .btn-shadow,
+  .hero-actions .btn-bg {
+    line-height: 1;
+    transform: scaleY(1.1);
+    transform-origin: top;
+  }
+
   .hero-actions .btn-shadow {
     position: absolute;
     top: 0.2em;
     left: -0.3em;
     color: #ff7a1a;
     display: block;
-    line-height: 1;
-    transform: scaleY(1.1);
-    transform-origin: top;
     opacity: 0;
     pointer-events: none;
     z-index: -1;
+  }
+
+  .hero-actions .btn-row {
+    display: block;
   }
 
   .hero-actions a:hover .btn-shadow {
@@ -194,9 +202,6 @@
     color: #ff8c42;
     background: var(--md-default-bg-color);
     display: block;
-    line-height: 1;
-    transform: scaleY(1.1);
-    transform-origin: top;
   }
 
   .hero-actions .btn-label {
@@ -227,16 +232,24 @@
     <div class="hero-actions">
       <a href="guide/getting-started/"
         ><span class="btn-shadow"
-          >░░░░░░░░░░░░░░░░ ░░░░░░░░░░░░░░░░ ░░░░░░░░░░░░░░░░</span
+          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
+          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
+          ><span class="btn-row">░░░░░░░░░░░░░░░░</span></span
         ><span class="btn-bg"
-          >████████████████ ████████████████ ████████████████</span
+          ><span class="btn-row">████████████████</span
+          ><span class="btn-row">████████████████</span
+          ><span class="btn-row">████████████████</span></span
         ><span class="btn-label">Get Started</span></a
       >
       <a href="https://github.com/leonardcser/smelt"
         ><span class="btn-shadow"
-          >████████████████ ████████████████ ████████████████</span
+          ><span class="btn-row">████████████████</span
+          ><span class="btn-row">████████████████</span
+          ><span class="btn-row">████████████████</span></span
         ><span class="btn-bg"
-          >░░░░░░░░░░░░░░░░ ░░░░░░░░░░░░░░░░ ░░░░░░░░░░░░░░░░</span
+          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
+          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
+          ><span class="btn-row">░░░░░░░░░░░░░░░░</span></span
         ><span class="btn-label">GitHub</span></a
       >
     </div>
