@@ -13,6 +13,7 @@ mod goal;
 mod lua_reload;
 mod misc;
 mod mouse;
+mod persistence;
 mod picker;
 mod process_status;
 mod prompt;

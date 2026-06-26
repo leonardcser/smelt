@@ -1922,6 +1922,21 @@ impl TuiApp {
         self.core.session.model = Some(self.current_model_key());
     }
 
+    /// Save the current session, then block until all persistence work triggered by
+    /// that save has either completed or stopped scheduling follow-up writes.
+    pub(crate) fn save_session_and_flush(&mut self) {
+        self.save_session();
+        for _ in 0..8 {
+            self.flush_persist();
+            if self.session_persist.pending_save.is_none() && !self.session_persist.save_pending {
+                break;
+            }
+            if self.session_persist.pending_save.is_none() {
+                self.save_session();
+            }
+        }
+    }
+
     /// Block until all queued persist writes complete. Call before reading session files from disk.
     pub(crate) fn flush_persist(&mut self) {
         self.persister.flush();

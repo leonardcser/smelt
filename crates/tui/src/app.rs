@@ -2861,7 +2861,7 @@ impl TuiApp {
                 .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
             app.drain_signals_pending();
             app.stop_background_processes();
-            app.save_session();
+            app.save_session_and_flush();
         });
 
         // Stop the stdin reader before releasing terminal modes so no background
