@@ -78,5 +78,6 @@ pub use timers::Timers;
 
 pub use crate::transcript_model::{
     ApprovalScope, Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, PermissionEntry,
-    ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor, TranscriptBlockRecord, ViewState,
+    ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor, TranscriptBlockRecord,
+    TranscriptBlockRecordWithId, ViewState,
 };

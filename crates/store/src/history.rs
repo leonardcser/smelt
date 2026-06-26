@@ -488,6 +488,7 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     compression: ObjectCompression,
 ) -> Result<()> {
     let _perf = perf::begin("store:transcript:replace_descriptor_suffix");
+    compact_transcript_descriptor_indices(conn)?;
     perf::record_value(
         "store:transcript:dirty_descriptor_suffix_rows",
         records.len() as u64,
@@ -554,6 +555,50 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
         "store:transcript:descriptor_db_rows_inserted",
         records.len() as u64,
     );
+    Ok(())
+}
+
+fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<()> {
+    let (count, indexed_count, max_descriptor_idx) = conn.query_row(
+        "SELECT COUNT(*), COUNT(descriptor_idx), COALESCE(MAX(descriptor_idx), -1)
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    )?;
+    if count == indexed_count && max_descriptor_idx == count.saturating_sub(1) {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, descriptor_idx
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL
+         ORDER BY descriptor_idx IS NULL, descriptor_idx, block_idx",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+    })?;
+    let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+    for (idx, (block_idx, _)) in rows.iter().enumerate() {
+        conn.execute(
+            "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
+            params![-((idx as i64) + 1), block_idx],
+        )?;
+    }
+    for (idx, (block_idx, _)) in rows.iter().enumerate() {
+        conn.execute(
+            "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
+            params![idx as i64, block_idx],
+        )?;
+    }
     Ok(())
 }
 

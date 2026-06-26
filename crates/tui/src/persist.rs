@@ -6,7 +6,7 @@
 //! fork, shutdown).
 
 use crate::content::transcript_search_text::descriptor_search_text;
-use smelt_core::TranscriptBlockRecord;
+use smelt_core::TranscriptBlockRecordWithId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -34,7 +34,7 @@ pub(crate) struct PersistDelta {
 #[derive(Clone)]
 pub(crate) struct PersistDescriptorDelta {
     pub(crate) start_descriptor_idx: usize,
-    pub(crate) records: Vec<TranscriptBlockRecord>,
+    pub(crate) records: Vec<TranscriptBlockRecordWithId>,
 }
 
 pub(crate) struct PersistMetadataRequest {
@@ -263,7 +263,11 @@ fn write(
                 .iter()
                 .enumerate()
                 .map(|(offset, record)| {
-                    transcript_descriptor_row(descriptors.start_descriptor_idx + offset, record)
+                    transcript_descriptor_row(
+                        descriptors.start_descriptor_idx + offset,
+                        record,
+                        delta.history.history_len,
+                    )
                 })
                 .collect::<Result<Vec<_>, smelt_store::StoreError>>()
                 .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
@@ -347,24 +351,101 @@ fn write_blobs(
 pub(crate) fn write_transcript_descriptor_suffix(
     session_dir: &std::path::Path,
     start_descriptor_idx: usize,
-    records: &[TranscriptBlockRecord],
+    records: &[smelt_core::TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
     let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
     let rows = records
         .iter()
         .enumerate()
-        .map(|(offset, record)| transcript_descriptor_row(start_descriptor_idx + offset, record))
+        .map(|(offset, record)| {
+            let descriptor_idx = start_descriptor_idx + offset;
+            let record = TranscriptBlockRecordWithId {
+                block_id: smelt_core::BlockId::new(descriptor_idx as u64),
+                record: record.clone(),
+            };
+            transcript_descriptor_row(descriptor_idx, &record, usize::MAX)
+        })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
     db.replace_transcript_descriptor_suffix(start_descriptor_idx, &rows)
 }
 
 fn transcript_descriptor_row(
     descriptor_idx: usize,
-    record: &TranscriptBlockRecord,
+    record: &TranscriptBlockRecordWithId,
+    history_len: usize,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
     let search_text = descriptor_search_text(
-        &record.descriptor,
-        record.tool_state.as_ref().map(|(_, state)| state),
+        &record.record.descriptor,
+        record.record.tool_state.as_ref().map(|(_, state)| state),
     );
-    smelt_core::transcript_model::transcript_descriptor_row(descriptor_idx, record, search_text)
+    let owned_record;
+    // Descriptor-only saves can include blocks whose matching history row is
+    // still outside this delta. Persist the descriptor without an FK to a row
+    // that is not present in the transaction.
+    let record_ref = if matches!(
+        record.record.origin,
+        Some(smelt_core::BlockOrigin::History(idx)) if idx >= history_len
+    ) {
+        owned_record = smelt_core::TranscriptBlockRecord {
+            origin: None,
+            ..record.record.clone()
+        };
+        &owned_record
+    } else {
+        &record.record
+    };
+    smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
+        descriptor_idx,
+        record.block_id.get(),
+        record_ref,
+        search_text,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_descriptor_row_preserves_sparse_block_id() {
+        let record = TranscriptBlockRecordWithId {
+            block_id: smelt_core::BlockId::new(302),
+            record: smelt_core::TranscriptBlockRecord {
+                descriptor: smelt_core::TranscriptBlockDescriptor::User {
+                    text: "follow up".to_string(),
+                    image_labels: Vec::new(),
+                },
+                content_hash: 0,
+                origin: Some(smelt_core::BlockOrigin::History(11)),
+                tool_state: None,
+            },
+        };
+
+        let row = transcript_descriptor_row(1, &record, 12).expect("descriptor row");
+
+        assert_eq!(row.block_idx, 302);
+        assert_eq!(row.history_idx, Some(11));
+    }
+
+    #[test]
+    fn transcript_descriptor_row_omits_unsaved_history_origin() {
+        let record = TranscriptBlockRecordWithId {
+            block_id: smelt_core::BlockId::new(303),
+            record: smelt_core::TranscriptBlockRecord {
+                descriptor: smelt_core::TranscriptBlockDescriptor::User {
+                    text: "follow up".to_string(),
+                    image_labels: Vec::new(),
+                },
+                content_hash: 0,
+                origin: Some(smelt_core::BlockOrigin::History(12)),
+                tool_state: None,
+            },
+        };
+
+        let row = transcript_descriptor_row(2, &record, 12).expect("descriptor row");
+
+        assert_eq!(row.block_idx, 303);
+        assert_eq!(row.history_idx, None);
+        assert_eq!(row.origin_json, None);
+    }
 }

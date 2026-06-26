@@ -713,6 +713,20 @@ pub fn transcript_descriptor_row(
     record: &TranscriptBlockRecord,
     search_text: String,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
+    transcript_descriptor_row_with_block_idx(
+        descriptor_idx,
+        descriptor_idx as u64,
+        record,
+        search_text,
+    )
+}
+
+pub fn transcript_descriptor_row_with_block_idx(
+    _descriptor_idx: usize,
+    block_idx: u64,
+    record: &TranscriptBlockRecord,
+    search_text: String,
+) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
     let descriptor_json = serde_json::to_string(&record.descriptor)?;
     let origin_json = record
         .origin
@@ -729,7 +743,7 @@ pub fn transcript_descriptor_row(
         _ => None,
     };
     Ok(smelt_store::TranscriptDescriptorRecord {
-        block_idx: descriptor_idx as u64,
+        block_idx,
         history_idx,
         kind: record.descriptor.kind().to_string(),
         tool_call_id: record.descriptor.tool_call_id().map(str::to_string),
@@ -1047,6 +1061,10 @@ impl BlockHistory {
         self.descriptor_records_from(0)
     }
 
+    pub fn descriptor_records_with_ids(&self) -> Vec<TranscriptBlockRecordWithId> {
+        self.descriptor_records_with_ids_from(0)
+    }
+
     pub fn descriptor_record_index_for_order_index(&self, start: usize) -> usize {
         self.order
             .iter()
@@ -1060,14 +1078,24 @@ impl BlockHistory {
     }
 
     pub fn descriptor_records_from(&self, start: usize) -> Vec<TranscriptBlockRecord> {
-        self.order
-            .iter()
-            .skip(start.min(self.order.len()))
-            .filter_map(|id| self.descriptor_record(*id))
+        self.descriptor_records_with_ids_from(start)
+            .into_iter()
+            .map(|record| record.record)
             .collect()
     }
 
-    fn descriptor_record(&self, id: BlockId) -> Option<TranscriptBlockRecord> {
+    pub fn descriptor_records_with_ids_from(
+        &self,
+        start: usize,
+    ) -> Vec<TranscriptBlockRecordWithId> {
+        self.order
+            .iter()
+            .skip(start.min(self.order.len()))
+            .filter_map(|id| self.descriptor_record_with_id(*id))
+            .collect()
+    }
+
+    fn descriptor_record_with_id(&self, id: BlockId) -> Option<TranscriptBlockRecordWithId> {
         let entry = self.entries.get(&id)?;
         if !entry.has_persisted_descriptor() {
             return None;
@@ -1078,11 +1106,14 @@ impl BlockHistory {
                 .get(call_id)
                 .map(|state| (call_id.to_string(), state.clone()))
         });
-        Some(TranscriptBlockRecord {
-            descriptor,
-            content_hash: self.content_hash(id),
-            origin: self.origins.get(&id).copied(),
-            tool_state,
+        Some(TranscriptBlockRecordWithId {
+            block_id: id,
+            record: TranscriptBlockRecord {
+                descriptor,
+                content_hash: self.content_hash(id),
+                origin: self.origins.get(&id).copied(),
+                tool_state,
+            },
         })
     }
 

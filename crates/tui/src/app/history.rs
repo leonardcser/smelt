@@ -2234,7 +2234,7 @@ impl TuiApp {
         history: Vec<HistoryItem>,
         side_tables: Option<smelt_store::SessionSideTableSuffixes>,
         descriptor_start_idx: usize,
-        descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
+        descriptor_records: Vec<smelt_core::TranscriptBlockRecordWithId>,
     ) -> bool {
         self.update_session_persist_metadata();
         self.publish_shared_session_state();
@@ -2304,7 +2304,7 @@ impl TuiApp {
         let descriptor_records = self
             .transcript
             .history()
-            .descriptor_records_from(descriptor_order_start);
+            .descriptor_records_with_ids_from(descriptor_order_start);
         self.session_append_history(item.clone());
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();
@@ -2366,7 +2366,7 @@ impl TuiApp {
         let descriptor_records = self
             .transcript
             .history()
-            .descriptor_records_from(descriptor_order_start);
+            .descriptor_records_with_ids_from(descriptor_order_start);
         self.session_append_history(item.clone());
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();

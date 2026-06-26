@@ -826,6 +826,105 @@ mod tests {
     }
 
     #[test]
+    fn transcript_descriptor_suffix_compacts_sparse_existing_descriptor_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = transcript_record(0, "zero", "zero");
+        let sparse = transcript_record(302, "sparse", "sparse");
+        db.replace_transcript_descriptor_suffix(0, std::slice::from_ref(&first))
+            .unwrap();
+        db.replace_transcript_descriptor_suffix(302, std::slice::from_ref(&sparse))
+            .unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
+        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 303);
+
+        let appended = transcript_record(303, "appended", "appended");
+        db.replace_transcript_descriptor_suffix(2, std::slice::from_ref(&appended))
+            .unwrap();
+
+        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 3);
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            vec![first, sparse, appended]
+        );
+    }
+
+    #[test]
+    fn session_delta_appends_after_sparse_descriptors_and_nondescriptor_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let history = (0..12)
+            .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
+            .collect::<Vec<_>>();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("sparse-follow-up", history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: history.len(),
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        db.connection()
+            .execute("DELETE FROM transcript_search", [])
+            .unwrap();
+        db.connection()
+            .execute("DELETE FROM transcript_blocks", [])
+            .unwrap();
+
+        let first = transcript_record_with_history(0, 1, "first", "first");
+        let sparse = transcript_record_with_history(302, 11, "sparse", "sparse");
+        db.replace_transcript_descriptor_suffix(0, std::slice::from_ref(&first))
+            .unwrap();
+        db.replace_transcript_descriptor_suffix(302, std::slice::from_ref(&sparse))
+            .unwrap();
+        for (block_idx, history_idx, kind) in [(1_i64, 10_i64, "assistant"), (2, 11, "user")] {
+            db.connection()
+                .execute(
+                    "INSERT INTO transcript_blocks (block_idx, history_idx, kind)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![block_idx, history_idx, kind],
+                )
+                .unwrap();
+        }
+
+        let appended_history = protocol::HistoryItem::user(protocol::Content::text("new user"));
+        let appended_descriptor = transcript_record_with_history(303, 12, "appended", "new user");
+        db.apply_session_delta_as_writer(&SessionDelta {
+            history: SessionHistorySuffix {
+                state: test_session_state("sparse-follow-up", 13),
+                history_start_idx: 12,
+                history_len: 13,
+                history: vec![appended_history],
+                side_tables: None,
+            },
+            descriptors: Some(TranscriptDescriptorSuffix {
+                start_descriptor_idx: 2,
+                records: vec![appended_descriptor.clone()],
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 3);
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            vec![first, sparse, appended_descriptor]
+        );
+        let old_nondescriptor_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_blocks
+                 WHERE block_idx = 2 AND history_idx = 11 AND descriptor_json IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_nondescriptor_count, 1);
+    }
+
+    #[test]
     fn transcript_descriptor_estimated_rows_sums_dense_descriptor_ranges() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();

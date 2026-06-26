@@ -1029,7 +1029,7 @@ pub(crate) enum TranscriptDescriptorSaveSuffix {
     Unchanged,
     Suffix {
         descriptor_start_idx: usize,
-        descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
+        descriptor_records: Vec<smelt_core::TranscriptBlockRecordWithId>,
     },
 }
 
@@ -4222,7 +4222,7 @@ impl TranscriptDocument {
         };
         TranscriptDescriptorSaveSuffix::Suffix {
             descriptor_start_idx,
-            descriptor_records: history.descriptor_records_from(descriptor_order_start),
+            descriptor_records: history.descriptor_records_with_ids_from(descriptor_order_start),
         }
     }
 
