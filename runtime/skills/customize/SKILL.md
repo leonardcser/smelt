@@ -1635,23 +1635,6 @@ Visual-width measurement.
 - `smelt.text.width` :: `fun(s: string): integer`
   Return the visual column count of `s`.
 
-#### `smelt.theme`
-
-Apply, read, and override the active colorscheme.
-
-- `smelt.theme.apply` :: `fun(spec: smelt.theme.ThemeSpec): nil`
-  Compile `spec` against the current light/dark setting and install it as the active theme.
-- `smelt.theme.get` :: `fun(group: string): table`
-  Read the resolved `StyleDecl` for `group`.
-- `smelt.theme.is_light` :: `fun(): boolean`
-  Return `true` if the active theme is a light theme.
-- `smelt.theme.set` :: `fun(group: string, style: smelt.theme.StyleDecl): nil`
-  Override a single highlight group's style.
-- `smelt.theme.snapshot` :: `fun(): table`
-  Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
-- `smelt.theme.use` :: `fun(name: string): nil`
-  Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua` and apply it.
-
 #### `smelt.ui`
 
 Screen-composition primitives: main layout composer and per-window renderer registration.
@@ -1772,6 +1755,31 @@ Reasoning-effort selector.
   Return the configured reasoning-effort cycle.
 - `smelt.reasoning.set` (UiHost) :: `fun(effort: smelt.reasoning.Effort): nil`
   Set the active reasoning effort.
+
+#### `smelt.theme`
+
+Apply, read, and override the active colorscheme.
+
+- `smelt.theme.apply` (UiHost) :: `fun(spec: smelt.theme.ThemeSpec): nil`
+  Compile `spec` against the current light/dark setting and install it as the active theme.
+- `smelt.theme.get` (UiHost) :: `fun(group: string): table`
+  Read the resolved `StyleDecl` for `group`.
+- `smelt.theme.info` (Host) :: `fun(name: string): table?`
+  Return metadata for a built-in colorscheme by display name or module slug.
+- `smelt.theme.is_light` (UiHost) :: `fun(): boolean`
+  Return `true` if the active theme is a light theme.
+- `smelt.theme.list` (Host) :: `fun(): table[]`
+  Return built-in colorschemes as `{ name, module, syntax, light, detail? }` rows.
+- `smelt.theme.set` (UiHost) :: `fun(group: string, style: smelt.theme.StyleDecl): nil`
+  Override a single highlight group's style.
+- `smelt.theme.snapshot` (UiHost) :: `fun(): table`
+  Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
+- `smelt.theme.syntax_theme` (UiHost) :: `fun(): string?`
+  Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.
+- `smelt.theme.syntax_theme_names` (UiHost) :: `fun(): table`
+  Return all bundled syntect/two-face syntax theme names accepted by `ThemeSpec.syntax`.
+- `smelt.theme.use` (UiHost) :: `fun(name: string): nil`
+  Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua` and apply it.
 
 #### `smelt.transcript`
 

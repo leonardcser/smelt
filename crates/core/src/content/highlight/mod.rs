@@ -2,6 +2,7 @@
 
 use std::sync::LazyLock;
 use syntect::parsing::SyntaxSet;
+use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
 mod action_refs;
 pub mod diff;
@@ -41,15 +42,39 @@ pub fn warm_up_syntect() {
     LazyLock::force(&THEME_SET);
 }
 
-/// Pick the syntect theme variant matching the active `Theme`'s
-/// `is_light` flag. Reads from `crate::theme::active()` - the TUI
-/// publishes its theme there on every `apply` / `set`, so syntax
-/// highlighting follows light/dark without a separate global.
+/// Every syntax theme bundled by `two-face`, exposed with the exact names
+/// accepted by `ThemeSpec.syntax`.
+pub fn syntax_theme_names() -> impl Iterator<Item = &'static str> {
+    EmbeddedLazyThemeSet::theme_names()
+        .iter()
+        .map(|theme| theme.as_name())
+}
+
+pub fn syntax_theme_name_is_valid(name: &str) -> bool {
+    embedded_syntax_theme(name).is_some()
+}
+
+fn embedded_syntax_theme(name: &str) -> Option<EmbeddedThemeName> {
+    EmbeddedLazyThemeSet::theme_names()
+        .iter()
+        .copied()
+        .find(|theme| theme.as_name() == name)
+}
+
+/// Pick the syntect theme variant requested by the active `Theme`. When a
+/// colorscheme omits `syntax`, fall back to the historical Monokai dark/light
+/// pair keyed by the active theme's light flag.
 pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
-    if crate::theme::active().is_light() {
-        &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtendedLight]
+    let active = crate::theme::active();
+    if let Some(name) = active.syntax_theme() {
+        if let Some(theme) = embedded_syntax_theme(name) {
+            return &THEME_SET[theme];
+        }
+    }
+    if active.is_light() {
+        &THEME_SET[EmbeddedThemeName::MonokaiExtendedLight]
     } else {
-        &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended]
+        &THEME_SET[EmbeddedThemeName::MonokaiExtended]
     }
 }
 

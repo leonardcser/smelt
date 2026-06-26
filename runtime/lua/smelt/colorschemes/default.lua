@@ -2,10 +2,13 @@
 -- the binary's paint-before-bootstrap fallback and the live Lua-applied
 -- theme look identical.
 --
--- A colorscheme `return`s a `ThemeSpec` table: a flat map keyed by
--- highlight-group name (`SmeltAccent`, `Comment`, …) whose values are
--- either a `StyleDecl` table or a string referencing another group.
--- There's no `groups = { ... }` wrapper - top-level keys are groups.
+-- A colorscheme returns a `ThemeSpec` table:
+--   {
+--     name = "default",
+--     syntax = "Monokai Extended", -- optional bundled two-face syntax theme
+--     light = nil,                 -- nil means use terminal background detection
+--     groups = { ... },
+--   }
 --
 -- Color shape (anywhere a `fg = ...` or `bg = ...` appears):
 --   - `{ ansi = N }` for an ANSI 256-color slot.
@@ -28,8 +31,7 @@ end
 
 local accent = { ansi = 208 }
 
-return {
-  -- ── Base palette: groups that hold literal color values. ──────────
+local groups = {
   SmeltAccent         = fg(accent),          -- ember
   SmeltSlug           = fg({ ansi = 0 }),     -- pill fg; bg falls back to SmeltAccent in statusline.lua
   SmeltMuted          = fg({ ansi = 244 }),   -- "comment grey"
@@ -99,4 +101,10 @@ return {
   ErrorMsg            = fg({ ansi = 9 }),   -- bright red
   WarningMsg          = fg({ ansi = 11 }),  -- bright yellow
   GhostText           = { dim = true },
+}
+
+return {
+  name = "default",
+  syntax = "Monokai Extended",
+  groups = groups,
 }

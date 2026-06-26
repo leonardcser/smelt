@@ -839,11 +839,14 @@ Style table for a single highlight group. Every field is optional - unset fields
 
 ### `smelt.theme.ThemeSpec`
 
-Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is just a group.
+Colorscheme table with optional metadata and a required `groups` map. `syntax` selects a bundled two-face syntax theme for code highlighting. `light` marks the palette as light or dark; omit it to use terminal background detection. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is a group.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `[string]` | `string | smelt.theme.StyleDecl` |  | Style table or alias string for the group named by the key. |
+| `name` | `string` |  | Display name for this colorscheme. |
+| `syntax` | `string` |  | Bundled syntect/two-face syntax theme name for code highlighting. |
+| `light` | `boolean` |  | Whether this colorscheme is light. Omit to use terminal background detection. |
+| `groups` | `table<string, string | smelt.theme.StyleDecl>` | yes | Highlight groups keyed by group name. |
 
 ### `smelt.tools.PermissionDefaults`
 

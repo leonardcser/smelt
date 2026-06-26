@@ -150,6 +150,7 @@ pub fn names_since(from_idx: usize) -> Vec<String> {
 pub struct Theme {
     styles: HashMap<HlGroup, Style>,
     is_light: bool,
+    syntax_theme: Option<String>,
 }
 
 impl Theme {
@@ -195,6 +196,14 @@ impl Theme {
 
     pub fn set_light(&mut self, light: bool) {
         self.is_light = light;
+    }
+
+    pub fn syntax_theme(&self) -> Option<&str> {
+        self.syntax_theme.as_deref()
+    }
+
+    pub fn set_syntax_theme(&mut self, name: Option<String>) {
+        self.syntax_theme = name;
     }
 
     /// Iterator over `(HlGroup, &Style)` for every group set on this theme.

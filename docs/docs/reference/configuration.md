@@ -316,10 +316,11 @@ through as-is and validated against the schema's allowed-choice list (if any).
 
 The task slug color is session-specific; change it with `/color`.
 
-A full colorscheme is a `ThemeSpec`: a flat Lua table keyed by highlight-group
-name (`SmeltAccent`, `Comment`, `SmeltDiffAddBg`, …) whose values are either a
-`StyleDecl` table (`{ fg = ..., bold = true }`) or a string referencing another
-group in the same spec. Built-in colorschemes live at
+A full colorscheme is a `ThemeSpec`: a Lua table with optional `name`,
+`syntax`, and `light` metadata plus a required `groups` table. `groups` is keyed
+by highlight-group name (`SmeltAccent`, `Comment`, `SmeltDiffAddBg`, …) whose
+values are either a `StyleDecl` table (`{ fg = ..., bold = true }`) or a string
+referencing another group in the same spec. Built-in colorschemes live at
 `runtime/lua/smelt/colorschemes/<name>.lua`; custom ones drop in at
 `~/.config/smelt/lua/smelt/colorschemes/<name>.lua` and load via
 `smelt.theme.use("<name>")`. See the

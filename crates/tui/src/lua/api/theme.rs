@@ -1,14 +1,14 @@
 //! `smelt.theme` bindings - apply a colorscheme spec, read/write
 //! individual groups, snapshot the resolved theme.
 //!
-//! A colorscheme is a `ThemeSpec` table: a map from highlight-group
-//! names to either a `StyleDecl` table (`{ fg = ..., bold = true }`) or
-//! a string referencing another group (`"SmeltMuted"`). Pass the table
-//! to `apply()` or have `runtime/lua/smelt/colorschemes/<name>.lua`
-//! return one and call `theme.use("<name>")`.
+//! A colorscheme is a `ThemeSpec` table with optional metadata and a required
+//! `groups` map. Pass the table to `apply()` or have
+//! `runtime/lua/smelt/colorschemes/<name>.lua` return one and call
+//! `theme.use("<name>")`.
 
 use crate::theme::{compile, StyleDecl, ThemeSpec};
 use mlua::prelude::*;
+use smelt_core::content::highlight::syntax_theme_names;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::style::{Color, Style};
@@ -20,10 +20,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "theme",
         "Apply, read, and override the active colorscheme. Highlight \
 groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). \
-The full colorscheme is described by a `ThemeSpec` table whose `groups` \
-map keys are highlight-group names and whose values are either a \
-`StyleDecl` table or a string referencing another group in the spec. \
-UiHost-only.",
+A `ThemeSpec` has optional `name`, `syntax`, and `light` metadata plus a \
+required `groups` map. UiHost-only.",
         Tier::UiHost,
     )?;
 
@@ -108,6 +106,30 @@ resolve to an empty table.",
 plugins flip glyphs or contrast levels based on the current palette.",
         &[],
         |_, ()| Ok(smelt_core::theme::active().is_light()),
+    )?;
+
+    m.fn_(
+        "syntax_theme",
+        "Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.",
+        &[],
+        |_, ()| {
+            Ok(smelt_core::theme::active()
+                .syntax_theme()
+                .map(str::to_string))
+        },
+    )?;
+
+    m.fn_(
+        "syntax_theme_names",
+        "Return all bundled syntect/two-face syntax theme names accepted by `ThemeSpec.syntax`.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let out = lua.create_table()?;
+            for name in syntax_theme_names() {
+                out.push(name)?;
+            }
+            Ok(out)
+        },
     )?;
 
     Ok(())

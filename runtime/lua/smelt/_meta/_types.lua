@@ -575,9 +575,12 @@
 ---@field crossedout? boolean Strikethrough.
 ---@field reverse? boolean Reverse video.
 
---- Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is just a group.
+--- Colorscheme table with optional metadata and a required `groups` map. `syntax` selects a bundled two-face syntax theme for code highlighting. `light` marks the palette as light or dark; omit it to use terminal background detection. Every themable color (foreground, background, diff row and inline fills, scrollbar colors, mode indicators) is a group.
 ---@class smelt.theme.ThemeSpec
----@field [string] string | smelt.theme.StyleDecl Style table or alias string for the group named by the key.
+---@field name? string Display name for this colorscheme.
+---@field syntax? string Bundled syntect/two-face syntax theme name for code highlighting.
+---@field light? boolean Whether this colorscheme is light. Omit to use terminal background detection.
+---@field groups table<string, string | smelt.theme.StyleDecl> Highlight groups keyed by group name.
 
 --- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 ---@class smelt.tools.PermissionDefaults

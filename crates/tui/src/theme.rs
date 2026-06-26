@@ -4,9 +4,10 @@
 //!
 //! Architecture
 //! ------------
-//! - A colorscheme lives in Lua as a `ThemeSpec` table: a flat map
-//!   keyed by highlight-group name. Diff backgrounds, scrollbar colors,
-//!   mode indicators - they're all just groups.
+//! - A colorscheme lives in Lua as a `ThemeSpec` table with optional
+//!   `name`, `syntax`, and `light` metadata plus a required `groups` table.
+//!   Diff backgrounds, scrollbar colors, mode indicators - they're all just
+//!   groups.
 //! - `ThemeSpec`, `StyleDecl`, and `ColorDecl` round-trip through mlua
 //!   with full IDE completion. `ColorDecl` is recursive (its `dark` /
 //!   `light` branches are themselves `ColorDecl`s) so the `FromLua` and
@@ -267,26 +268,29 @@ impl FromLua for ColorDecl {
     }
 }
 
-/// Full colorscheme description: a flat map keyed by highlight-group
-/// name (nvim conventions: `Comment`, `Visual`, `SmeltAccent`, …) with
-/// either a `StyleDecl` table or a string referencing another group
-/// in the same spec as the value. Compile via [`compile`] to produce
-/// a runtime `Theme`. Every themable color lives here - there are no
-/// special-case fields. The diff renderer's row and inline fills are
-/// `SmeltDiffAddBg` / `SmeltDiffDelBg` and
+/// Full colorscheme description. `name`, `syntax`, and `light` are metadata;
+/// `groups` is keyed by highlight-group name (nvim conventions: `Comment`,
+/// `Visual`, `SmeltAccent`, …) with either a `StyleDecl` table or a string
+/// referencing another group in the same spec as the value. Compile via
+/// [`compile`] to produce a runtime `Theme`. Every themable color lives in
+/// `groups` - there are no special-case group fields. The diff renderer's row
+/// and inline fills are `SmeltDiffAddBg` / `SmeltDiffDelBg` and
 /// `SmeltDiffAddInlineBg` / `SmeltDiffDelInlineBg` groups, scrollbar colors are
 /// `SmeltScrollbarTrack` / `…Thumb`, and so on.
 #[derive(Debug, Default, Clone)]
 pub struct ThemeSpec {
+    pub name: Option<String>,
     pub groups: HashMap<String, GroupDecl>,
+    pub syntax_theme: Option<String>,
+    pub is_light: Option<bool>,
 }
 
 impl ThemeSpec {
-    const DOC: &'static str = "Flat map keyed by highlight-group name \
-(`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a \
-`StyleDecl` table or a string referencing another group in the same \
-spec. Every themable color (foreground, background, diff row and inline fills, \
-scrollbar colors, mode indicators) is just a group.";
+    const DOC: &'static str = "Colorscheme table with optional metadata and a \
+required `groups` map. `syntax` selects a bundled two-face syntax theme for \
+code highlighting. `light` marks the palette as light or dark; omit it to use \
+terminal background detection. Every themable color (foreground, background, \
+diff row and inline fills, scrollbar colors, mode indicators) is a group.";
 }
 
 impl LuaType for ThemeSpec {
@@ -296,14 +300,32 @@ impl LuaType for ThemeSpec {
         record_class(LuaClassDecl {
             name: "smelt.theme.ThemeSpec",
             doc: Self::DOC,
-            fields: vec![LuaClassField {
-                // `[string]` is the LuaCATS index-signature key - emitted as
-                // `---@field [string] V` so any group name typechecks.
-                name: "[string]",
-                ty: "string | smelt.theme.StyleDecl".into(),
-                optional: true,
-                doc: "Style table or alias string for the group named by the key.",
-            }],
+            fields: vec![
+                LuaClassField {
+                    name: "name",
+                    ty: "string".into(),
+                    optional: true,
+                    doc: "Display name for this colorscheme.",
+                },
+                LuaClassField {
+                    name: "syntax",
+                    ty: "string".into(),
+                    optional: true,
+                    doc: "Bundled syntect/two-face syntax theme name for code highlighting.",
+                },
+                LuaClassField {
+                    name: "light",
+                    ty: "boolean".into(),
+                    optional: true,
+                    doc: "Whether this colorscheme is light. Omit to use terminal background detection.",
+                },
+                LuaClassField {
+                    name: "groups",
+                    ty: "table<string, string | smelt.theme.StyleDecl>".into(),
+                    optional: false,
+                    doc: "Highlight groups keyed by group name.",
+                },
+            ],
         });
         "smelt.theme.ThemeSpec".to_string()
     }
@@ -339,12 +361,31 @@ impl FromLua for ThemeSpec {
                 });
             }
         };
+        let name = t.get::<Option<String>>("name")?;
+        let syntax_theme = t.get::<Option<String>>("syntax")?;
+        let is_light = t.get::<Option<bool>>("light")?;
+        if let Some(name) = syntax_theme.as_deref() {
+            if !smelt_core::content::highlight::syntax_theme_name_is_valid(name) {
+                return Err(LuaError::FromLuaConversionError {
+                    from: "string",
+                    to: "smelt.theme.ThemeSpec".into(),
+                    message: Some(format!("unknown syntax theme `{name}`")),
+                });
+            }
+        }
+
+        let group_table: LuaTable = t.get("groups")?;
         let mut groups = HashMap::new();
-        for pair in t.pairs::<String, LuaValue>() {
+        for pair in group_table.pairs::<String, LuaValue>() {
             let (name, v) = pair?;
             groups.insert(name, GroupDecl::from_lua(v, lua)?);
         }
-        Ok(Self { groups })
+        Ok(Self {
+            name,
+            groups,
+            syntax_theme,
+            is_light,
+        })
     }
 }
 
@@ -356,8 +397,10 @@ impl FromLua for ThemeSpec {
 /// group entries to the referenced group's style. Cycles and dangling
 /// references are reported as `Err`.
 pub fn compile(spec: &ThemeSpec, is_light: bool) -> Result<Theme, String> {
+    let is_light = spec.is_light.unwrap_or(is_light);
     let mut theme = Theme::new();
     theme.set_light(is_light);
+    theme.set_syntax_theme(spec.syntax_theme.clone());
 
     let mut resolving: Vec<String> = Vec::new();
     let mut resolved: HashMap<String, Style> = HashMap::new();
@@ -677,6 +720,41 @@ mod tests {
     }
 
     #[test]
+    fn theme_spec_metadata_controls_syntax_and_light_flag() {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load(
+                r#"{
+                    name = "mocha-test",
+                    syntax = "Catppuccin Mocha",
+                    light = true,
+                    groups = {
+                        Normal = { fg = { ansi = 15 } },
+                    },
+                }"#,
+            )
+            .eval()
+            .unwrap();
+        let spec = ThemeSpec::from_lua(value, &lua).unwrap();
+        let theme = compile(&spec, false).unwrap();
+        assert_eq!(spec.name.as_deref(), Some("mocha-test"));
+        assert_eq!(theme.syntax_theme(), Some("Catppuccin Mocha"));
+        assert!(theme.is_light());
+        assert_eq!(theme.get("Normal").fg, Some(Color::AnsiValue(15)));
+    }
+
+    #[test]
+    fn theme_spec_rejects_unknown_syntax_theme() {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load(r#"{ syntax = "No Such Theme", groups = { Normal = {} } }"#)
+            .eval()
+            .unwrap();
+        let err = ThemeSpec::from_lua(value, &lua).unwrap_err();
+        assert!(err.to_string().contains("No Such Theme"), "got: {err}");
+    }
+
+    #[test]
     fn baked_default_light_branch() {
         let spec = baked_default_spec();
         let dark = compile(&spec, false).unwrap();
@@ -689,7 +767,12 @@ mod tests {
     fn compile_reports_dangling_reference() {
         let mut groups = HashMap::new();
         groups.insert("Anchor".into(), GroupDecl::Ref("Missing".into()));
-        let spec = ThemeSpec { groups };
+        let spec = ThemeSpec {
+            name: None,
+            groups,
+            syntax_theme: None,
+            is_light: None,
+        };
         let err = compile(&spec, false).unwrap_err();
         assert!(err.contains("Missing"), "got: {err}");
     }
@@ -699,7 +782,12 @@ mod tests {
         let mut groups = HashMap::new();
         groups.insert("A".into(), GroupDecl::Ref("B".into()));
         groups.insert("B".into(), GroupDecl::Ref("A".into()));
-        let spec = ThemeSpec { groups };
+        let spec = ThemeSpec {
+            name: None,
+            groups,
+            syntax_theme: None,
+            is_light: None,
+        };
         let err = compile(&spec, false).unwrap_err();
         assert!(err.contains("cyclic"), "got: {err}");
     }
@@ -719,7 +807,12 @@ mod tests {
         );
         groups.insert("Mid".into(), GroupDecl::Ref("Base".into()));
         groups.insert("Top".into(), GroupDecl::Ref("Mid".into()));
-        let spec = ThemeSpec { groups };
+        let spec = ThemeSpec {
+            name: None,
+            groups,
+            syntax_theme: None,
+            is_light: None,
+        };
         let theme = compile(&spec, false).unwrap();
         assert_eq!(theme.get("Top").fg, Some(Color::AnsiValue(42)));
         assert_eq!(theme.get("Mid").fg, Some(Color::AnsiValue(42)));

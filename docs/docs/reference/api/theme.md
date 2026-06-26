@@ -6,7 +6,9 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Apply, read, and override the active colorscheme. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). The full colorscheme is described by a `ThemeSpec` table whose `groups` map keys are highlight-group names and whose values are either a `StyleDecl` table or a string referencing another group in the spec. UiHost-only.
+This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+
+Apply, read, and override the active colorscheme. Highlight groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). A `ThemeSpec` has optional `name`, `syntax`, and `light` metadata plus a required `groups` map. UiHost-only.
 
 ## `smelt.theme.apply`
 
@@ -16,6 +18,8 @@ fun(spec: smelt.theme.ThemeSpec): nil
 
 Types: [`smelt.theme.ThemeSpec`](types.md#smeltthemethemespec)
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Compile `spec` against the current light/dark setting and install it as the active theme. String-valued group entries are resolved at compile time; cycles and dangling references raise a runtime error.
 
 ## `smelt.theme.get`
@@ -24,7 +28,19 @@ Compile `spec` against the current light/dark setting and install it as the acti
 fun(group: string): table
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Read the resolved `StyleDecl` for `group`. Unknown groups resolve to an empty table.
+
+## `smelt.theme.info`
+
+```lua
+fun(name: string): table?
+```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return metadata for a built-in colorscheme by display name or module slug.
 
 ## `smelt.theme.is_light`
 
@@ -32,7 +48,19 @@ Read the resolved `StyleDecl` for `group`. Unknown groups resolve to an empty ta
 fun(): boolean
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Return `true` if the active theme is a light theme. Lets plugins flip glyphs or contrast levels based on the current palette.
+
+## `smelt.theme.list`
+
+```lua
+fun(): table[]
+```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Return built-in colorschemes as `{ name, module, syntax, light, detail? }` rows.
 
 ## `smelt.theme.set`
 
@@ -42,6 +70,8 @@ fun(group: string, style: smelt.theme.StyleDecl): nil
 
 Types: [`smelt.theme.StyleDecl`](types.md#smeltthemestyledecl)
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Override a single highlight group's style. `style` is a `StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override sticks until the next `apply()` or `use()` call.
 
 ## `smelt.theme.snapshot`
@@ -50,7 +80,29 @@ Override a single highlight group's style. `style` is a `StyleDecl` table (`{ fg
 fun(): table
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
+
+## `smelt.theme.syntax_theme`
+
+```lua
+fun(): string?
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.
+
+## `smelt.theme.syntax_theme_names`
+
+```lua
+fun(): table
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return all bundled syntect/two-face syntax theme names accepted by `ThemeSpec.syntax`.
 
 ## `smelt.theme.use`
 
@@ -58,9 +110,9 @@ Snapshot every group currently set on the active theme into a `{ group = StyleDe
 fun(name: string): nil
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua`
-and apply it. The file must `return` a `ThemeSpec` table: a `groups`
-map keyed by highlight-group name with either a `StyleDecl` table or
-a string reference as its value (see `smelt.theme.apply`). Drop
-custom colorschemes alongside `default.lua`.
+and apply it. `name` may be either a module slug (`catppuccin-mocha`) or
+the display syntax theme name (`Catppuccin Mocha`).
 
