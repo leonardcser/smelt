@@ -1,11 +1,12 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
-
-
-
-
+* read_file /tmp/smelt-storybook-nonexistent-session-93e4220e873c5539
+            8e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20
+            260618-083946-virtual-transcript-performance/plan.md:1-80
+  0 lines
 
 ──────────────────────────────────────────────────────────────────────
  read_file: /tmp/smelt-storybook-nonexistent-session-93e4220e873c553

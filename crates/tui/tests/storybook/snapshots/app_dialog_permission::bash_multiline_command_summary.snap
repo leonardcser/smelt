@@ -1,10 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
-
-
-
+* bash for f in *.rs; do
+    rustfmt "$f"
+  done
 
 
 

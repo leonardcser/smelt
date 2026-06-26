@@ -111,7 +111,7 @@ app_story!(edit_file_tool_states, |ctx| {
             ("new_string", json!("new")),
         ],
     );
-    ctx.tool_call(
+    ctx.tool_call_with_metadata(
         "edit_file",
         &[
             ("file_path", json!("src/lib.rs")),
@@ -127,6 +127,11 @@ app_story!(edit_file_tool_states, |ctx| {
             ),
         ],
         "ok",
+        json!({
+            "old_content": "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}",
+            "new_content": "fn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}",
+            "path": "src/lib.rs",
+        }),
         Some(7),
     );
     ctx.tool_call_with_metadata(
@@ -157,6 +162,55 @@ app_story!(edit_file_tool_states, |ctx| {
     ctx.assert_snapshot_named("expanded");
     ctx.run_lua("smelt.transcript.fold_all('close')");
     ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(edit_file_rejected_without_speculative_diff, |ctx| {
+    ctx.set_viewport(84, 18);
+    ctx.tool_rejected(
+        "edit_file",
+        &[
+            ("file_path", json!("src/lib.rs")),
+            ("old_string", json!("fn missing()")),
+            ("new_string", json!("fn replaced()")),
+        ],
+        "read_file must be called before edit_file",
+        true,
+        protocol::StyledLines::empty(),
+        Some(1),
+    );
+    ctx.tool_rejected(
+        "edit_file",
+        &[
+            ("file_path", json!("src/blocked.rs")),
+            ("old_string", json!("old")),
+            ("new_string", json!("new")),
+        ],
+        "The user's permission settings blocked this tool call.",
+        false,
+        protocol::StyledLines::empty(),
+        Some(1),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(edit_file_success_uses_output_metadata_diff, |ctx| {
+    ctx.set_viewport(84, 14);
+    ctx.tool_call_with_metadata(
+        "edit_file",
+        &[
+            ("file_path", json!("src/lib.rs")),
+            ("old_string", json!("old")),
+            ("new_string", json!("new")),
+        ],
+        "ok",
+        json!({
+            "old_content": "old\n",
+            "new_content": "new\n",
+            "path": "src/lib.rs",
+        }),
+        Some(1),
+    );
+    ctx.assert_snapshot();
 });
 
 app_story!(edit_notebook_tool_states, |ctx| {

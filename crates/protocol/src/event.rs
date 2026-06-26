@@ -196,8 +196,14 @@ pub struct ToolEvaluation {
 /// `UiCommand::PermissionDecision`.
 ///
 /// Event ordering within a turn:
-///   Ready → (Thinking* → Text* → ToolCallDraft* → ToolStarted → ToolOutput* → ToolFinished)*
+///   Ready → (Thinking* → Text* → ToolCallDraft* → tool-lifecycle)*
 ///         → TurnComplete | TurnError
+///
+/// tool-lifecycle is one of:
+///   ToolRejected
+///   RequestPermission → approved: ToolStarted → ToolOutput* → ToolFinished
+///   RequestPermission → denied: no further engine event
+///   ToolStarted → ToolOutput* → ToolFinished
 ///
 /// ProcessCompleted can arrive at any time (including between turns).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +263,18 @@ pub enum EngineEvent {
     /// A tool call has finished.
     ToolFinished {
         call_id: String,
+        result: ToolOutcome,
+        elapsed_ms: Option<u64>,
+    },
+
+    /// A tool call failed or was blocked before execution. Carries the full
+    /// call shape so the UI can render one terminal block without first showing
+    /// a pending or preview state.
+    ToolRejected {
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+        summary: StyledLines,
         result: ToolOutcome,
         elapsed_ms: Option<u64>,
     },

@@ -263,6 +263,33 @@ impl AppStoryCtx {
         });
     }
 
+    pub fn tool_rejected(
+        &mut self,
+        tool_name: &str,
+        args: &[(&str, serde_json::Value)],
+        content: &str,
+        is_error: bool,
+        summary: protocol::StyledLines,
+        elapsed_ms: Option<u64>,
+    ) {
+        let call_id = self.next_call_id(tool_name);
+        self.engine(EngineEvent::ToolRejected {
+            call_id,
+            tool_name: tool_name.into(),
+            args: args
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+            summary,
+            result: ToolOutcome {
+                content: content.into(),
+                is_error,
+                metadata: None,
+            },
+            elapsed_ms,
+        });
+    }
+
     fn next_call_id(&mut self, tool_name: &str) -> String {
         self.call_counter += 1;
         format!("{tool_name}-{}", self.call_counter)

@@ -1,9 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
-
-
+* glob **/*.rs in crates/tui/tests
+  0 files
 
 
 

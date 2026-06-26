@@ -1695,6 +1695,76 @@ impl<'a> Turn<'a> {
         }
     }
 
+    fn send_tool_started_for_call(
+        event_tx: &mpsc::UnboundedSender<EngineEvent>,
+        tc: &protocol::ToolCall,
+        args: &HashMap<String, Value>,
+    ) {
+        let _ = event_tx.send(EngineEvent::ToolStarted {
+            call_id: tc.id.clone(),
+            tool_name: tc.function.name.clone(),
+            args: args.clone(),
+        });
+    }
+
+    fn emit_tool_started_for_call(&self, tc: &protocol::ToolCall, args: &HashMap<String, Value>) {
+        Self::send_tool_started_for_call(self.event_tx, tc, args);
+    }
+
+    fn send_tool_dispatch_for_call(
+        event_tx: &mpsc::UnboundedSender<EngineEvent>,
+        request_id: u64,
+        tc: &protocol::ToolCall,
+        args: &HashMap<String, Value>,
+    ) {
+        Self::send_tool_started_for_call(event_tx, tc, args);
+        let _ = event_tx.send(EngineEvent::ToolDispatch {
+            request_id,
+            call_id: tc.id.clone(),
+            tool_name: tc.function.name.clone(),
+            args: args.clone(),
+        });
+    }
+
+    fn send_tool_rejected_for_call(
+        event_tx: &mpsc::UnboundedSender<EngineEvent>,
+        tc: &protocol::ToolCall,
+        args: &HashMap<String, Value>,
+        summary: protocol::StyledLines,
+        result: ToolOutcome,
+        elapsed_ms: Option<u64>,
+    ) {
+        let _ = event_tx.send(EngineEvent::ToolRejected {
+            call_id: tc.id.clone(),
+            tool_name: tc.function.name.clone(),
+            args: args.clone(),
+            summary,
+            result,
+            elapsed_ms,
+        });
+    }
+
+    fn emit_tool_rejected_for_call(
+        &self,
+        tc: &protocol::ToolCall,
+        args: &HashMap<String, Value>,
+        summary: protocol::StyledLines,
+        result: ToolOutcome,
+        elapsed_ms: Option<u64>,
+    ) {
+        Self::send_tool_rejected_for_call(self.event_tx, tc, args, summary, result, elapsed_ms);
+    }
+
+    fn blocked_tool_outcome() -> ToolOutcome {
+        ToolOutcome {
+            content: "The user's permission settings blocked this tool call. \
+                      Try a different approach or ask the user for guidance."
+                .to_string(),
+            is_error: false,
+            metadata: None,
+        }
+    }
+
     fn classify_tools<'b>(&mut self, tool_calls: &'b [protocol::ToolCall]) -> ToolExecutionPlan<'b>
     where
         'a: 'b,
@@ -1724,11 +1794,6 @@ impl<'a> Turn<'a> {
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
             let tool_start = self.config.clock.instant_now();
-            self.emit(EngineEvent::ToolStarted {
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                args: args.clone(),
-            });
 
             let tool = self.tools.iter().find(|pt| {
                 pt.name == tc.function.name
@@ -1770,20 +1835,24 @@ impl<'a> Turn<'a> {
                         is_error: true,
                         metadata: None,
                     };
-                    self.emit(EngineEvent::ToolFinished {
-                        call_id: tc.id.clone(),
-                        result: outcome.clone(),
-                        elapsed_ms: Some(self.elapsed_ms_since(tool_start)),
-                    });
+                    self.emit_tool_rejected_for_call(
+                        tc,
+                        &args,
+                        protocol::StyledLines::empty(),
+                        outcome.clone(),
+                        Some(self.elapsed_ms_since(tool_start)),
+                    );
                     plan.inline_outcomes.push((tc.id.clone(), outcome));
                     continue;
                 }
             };
 
             let protocol::ToolEvaluation { decision, metadata } = evaluation;
+            let summary = metadata.summary.clone();
             let idx = plan.slots.len();
             match decision {
                 Decision::Allow => {
+                    self.emit_tool_started_for_call(tc, &args);
                     plan.slots.push(ToolSlot {
                         tc,
                         args,
@@ -1793,18 +1862,8 @@ impl<'a> Turn<'a> {
                     plan.ready.push(idx);
                 }
                 Decision::Deny => {
-                    let outcome = ToolOutcome {
-                        content: "The user's permission settings blocked this tool call. \
-                                  Try a different approach or ask the user for guidance."
-                            .to_string(),
-                        is_error: false,
-                        metadata: None,
-                    };
-                    self.emit(EngineEvent::ToolFinished {
-                        call_id: tc.id.clone(),
-                        result: outcome.clone(),
-                        elapsed_ms: None,
-                    });
+                    let outcome = Self::blocked_tool_outcome();
+                    self.emit_tool_rejected_for_call(tc, &args, summary, outcome.clone(), None);
                     plan.inline_outcomes.push((tc.id.clone(), outcome));
                 }
                 Decision::Error(ref err) => {
@@ -1813,19 +1872,10 @@ impl<'a> Turn<'a> {
                         is_error: true,
                         metadata: None,
                     };
-                    self.emit(EngineEvent::ToolFinished {
-                        call_id: tc.id.clone(),
-                        result: outcome.clone(),
-                        elapsed_ms: None,
-                    });
+                    self.emit_tool_rejected_for_call(tc, &args, summary, outcome.clone(), None);
                     plan.inline_outcomes.push((tc.id.clone(), outcome));
                 }
                 Decision::Ask => {
-                    let summary = if metadata.summary.is_empty() {
-                        protocol::StyledLines::from_plain(&tc.function.name)
-                    } else {
-                        metadata.summary
-                    };
                     let request_id = next_request_id();
                     self.emit(EngineEvent::RequestPermission {
                         request_id,
@@ -1939,6 +1989,11 @@ impl<'a> Turn<'a> {
                             let (idx, _) = plan.pending_perms.swap_remove(pos);
                             if approved {
                                 plan.slots[idx].confirm_msg = message;
+                                Self::send_tool_started_for_call(
+                                    self.event_tx,
+                                    plan.slots[idx].tc,
+                                    &plan.slots[idx].args,
+                                );
                                 let fut = dispatcher
                                     .dispatch(
                                         &plan.slots[idx].tc.function.name,
@@ -1979,12 +2034,12 @@ impl<'a> Turn<'a> {
                                     outstanding -= 1;
                                 } else {
                                     let rid = next_request_id();
-                                    let _ = self.event_tx.send(EngineEvent::ToolDispatch {
-                                        request_id: rid,
-                                        call_id: pending.tc.id.clone(),
-                                        tool_name: pending.tc.function.name.clone(),
-                                        args: pending.args.clone(),
-                                    });
+                                    Self::send_tool_dispatch_for_call(
+                                        self.event_tx,
+                                        rid,
+                                        pending.tc,
+                                        &pending.args,
+                                    );
                                     plan.pending_tools.push((
                                         rid,
                                         pending.tc.id.clone(),
@@ -2036,14 +2091,12 @@ impl<'a> Turn<'a> {
                                         outstanding -= 1;
                                     } else {
                                         let rid = next_request_id();
-                                        let _ = self
-                                            .event_tx
-                                            .send(EngineEvent::ToolDispatch {
-                                                request_id: rid,
-                                                call_id: pending.tc.id.clone(),
-                                                tool_name: pending.tc.function.name.clone(),
-                                                args: pending.args.clone(),
-                                            });
+                                        Self::send_tool_dispatch_for_call(
+                                            self.event_tx,
+                                            rid,
+                                            pending.tc,
+                                            &pending.args,
+                                        );
                                         plan.pending_tools.push((
                                             rid,
                                             pending.tc.id.clone(),
@@ -2052,22 +2105,18 @@ impl<'a> Turn<'a> {
                                     }
                                 }
                                 Decision::Deny => {
-                                    let denial = "The user's permission settings blocked \
-                                                  this tool call. Try a different approach \
-                                                  or ask the user for guidance."
-                                        .to_string();
                                     let tool_start = pending.tool_start;
                                     let elapsed_ms = Some(elapsed_ms_since(tool_start));
-                                    let outcome = ToolOutcome {
-                                        content: denial,
-                                        is_error: false,
-                                        metadata: None,
-                                    };
-                                    let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                                        call_id: pending.tc.id.clone(),
-                                        result: outcome.clone(),
+                                    let outcome = Self::blocked_tool_outcome();
+                                    let summary = metadata.summary.clone();
+                                    Self::send_tool_rejected_for_call(
+                                        self.event_tx,
+                                        pending.tc,
+                                        &pending.args,
+                                        summary,
+                                        outcome.clone(),
                                         elapsed_ms,
-                                    });
+                                    );
                                     tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
                                     outstanding -= 1;
                                 }
@@ -2079,22 +2128,20 @@ impl<'a> Turn<'a> {
                                         is_error: true,
                                         metadata: None,
                                     };
-                                    let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                                        call_id: pending.tc.id.clone(),
-                                        result: outcome.clone(),
+                                    let summary = metadata.summary.clone();
+                                    Self::send_tool_rejected_for_call(
+                                        self.event_tx,
+                                        pending.tc,
+                                        &pending.args,
+                                        summary,
+                                        outcome.clone(),
                                         elapsed_ms,
-                                    });
+                                    );
                                     tool_results.push((pending.tc.id.clone(), outcome, elapsed_ms));
                                     outstanding -= 1;
                                 }
                                 Decision::Ask => {
-                                    let summary = if metadata.summary.is_empty() {
-                                        protocol::StyledLines::from_plain(
-                                            &pending.tc.function.name,
-                                        )
-                                    } else {
-                                        metadata.summary.clone()
-                                    };
+                                    let summary = metadata.summary.clone();
                                     let rid = next_request_id();
                                     let _ = self
                                         .event_tx
@@ -2272,12 +2319,7 @@ impl<'a> Turn<'a> {
                 ("cancelled".to_string(), true, None)
             } else {
                 let request_id = next_request_id();
-                let _ = self.event_tx.send(EngineEvent::ToolDispatch {
-                    request_id,
-                    call_id: tc.id.clone(),
-                    tool_name: tc.function.name.clone(),
-                    args: args.clone(),
-                });
+                Self::send_tool_dispatch_for_call(self.event_tx, request_id, tc, args);
                 match self.wait_for_tool_result(request_id).await {
                     Some((c, e, m)) => (c, e, m),
                     None => {

@@ -4,6 +4,8 @@ assertion_line: 516
 expression: frame.styles_text()
 ---
 dim: 80 28
+  0   0   1 fg=AnsiValue(208)
+  0   1  10 attrs=dim
  12   0  80 fg=AnsiValue(208)
  13   1   9 fg=AnsiValue(208)
  14   0  80 fg=AnsiValue(244)

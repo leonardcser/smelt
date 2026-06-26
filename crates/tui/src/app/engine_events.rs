@@ -37,6 +37,94 @@ impl TuiApp {
         self.publish_visible_token_usage(usage);
     }
 
+    fn resolve_tool_summary_for_engine_event(
+        &self,
+        tool_name: &str,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+        summary: protocol::StyledLines,
+    ) -> protocol::StyledLines {
+        if !summary.is_empty() {
+            return summary;
+        }
+        let summary =
+            crate::app::history::ToolSummaryResolver::new(&self.lua).resolve(tool_name, args);
+        if summary.is_empty() {
+            protocol::StyledLines::from_plain(tool_name)
+        } else {
+            summary
+        }
+    }
+
+    fn begin_tool_block_for_engine_event(
+        &mut self,
+        pending: &mut Vec<PendingTool>,
+        call_id: String,
+        tool_name: String,
+        summary: protocol::StyledLines,
+        args: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        if pending.iter().any(|p| p.call_id == call_id) {
+            return;
+        }
+        self.flush_streaming_thinking();
+        self.flush_streaming_text();
+        if !self.promote_tool_draft(
+            call_id.clone(),
+            tool_name.clone(),
+            summary.clone(),
+            args.clone(),
+        ) {
+            self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
+        }
+        self.core.signals.emit_dyn(
+            "tool_start",
+            std::rc::Rc::new(smelt_core::signals::ToolStart {
+                tool: tool_name.clone(),
+                args: args.clone(),
+            }),
+        );
+        self.pump_lua();
+        pending.push(PendingTool {
+            call_id,
+            name: tool_name,
+        });
+    }
+
+    fn finish_tool_for_engine_event(
+        &mut self,
+        pending: &mut Vec<PendingTool>,
+        call_id: String,
+        result: protocol::ToolOutcome,
+        elapsed_ms: Option<u64>,
+        status: ToolStatus,
+    ) {
+        let mut finished_tool_name: Option<String> = None;
+        let mut finished_is_error = false;
+        if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
+            let removed = pending.remove(idx);
+            finished_tool_name = Some(removed.name.clone());
+            finished_is_error = result.is_error;
+            let output = Some(Box::new(ToolOutput {
+                content: result.content,
+                is_error: result.is_error,
+                metadata: result.metadata,
+            }));
+            let elapsed = elapsed_ms.map(Duration::from_millis);
+            self.finish_tool(&call_id, status, output, elapsed);
+        }
+        if let Some(tool_name) = finished_tool_name {
+            self.core.signals.emit_dyn(
+                "tool_end",
+                std::rc::Rc::new(smelt_core::signals::ToolEnd {
+                    tool: tool_name,
+                    is_error: finished_is_error,
+                    elapsed_ms,
+                }),
+            );
+            self.pump_lua();
+        }
+    }
+
     /// Route an `EngineEvent` through the correct branch of the agent
     /// state machine. When a turn is active, delegates to
     /// `handle_engine_event` + `dispatch_control` and discards the turn on
@@ -210,37 +298,12 @@ impl TuiApp {
                 tool_name,
                 args,
             } => {
-                // The engine contract is one ToolStarted per call_id per turn.
-                // A duplicate would double-push transcript blocks, active
-                // tools, and pending entries - drop it instead of corrupting
-                // state.
-                if pending.iter().any(|p| p.call_id == call_id) {
-                    return SessionControl::Continue;
-                }
-                self.flush_streaming_thinking();
-                self.flush_streaming_text();
-                let summary = crate::app::history::ToolSummaryResolver::new(&self.lua)
-                    .resolve(&tool_name, &args);
-                if !self.promote_tool_draft(
-                    call_id.clone(),
-                    tool_name.clone(),
-                    summary.clone(),
-                    args.clone(),
-                ) {
-                    self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
-                }
-                self.core.signals.emit_dyn(
-                    "tool_start",
-                    std::rc::Rc::new(smelt_core::signals::ToolStart {
-                        tool: tool_name.clone(),
-                        args: args.clone(),
-                    }),
+                let summary = self.resolve_tool_summary_for_engine_event(
+                    &tool_name,
+                    &args,
+                    protocol::StyledLines::empty(),
                 );
-                self.pump_lua();
-                pending.push(PendingTool {
-                    call_id,
-                    name: tool_name,
-                });
+                self.begin_tool_block_for_engine_event(pending, call_id, tool_name, summary, args);
                 SessionControl::Continue
             }
             EngineEvent::ToolFinished {
@@ -248,38 +311,37 @@ impl TuiApp {
                 result,
                 elapsed_ms,
             } => {
-                let mut finished_tool_name: Option<String> = None;
-                let mut finished_is_error = false;
-                if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
-                    let removed = pending.remove(idx);
-                    {
-                        finished_tool_name = Some(removed.name.clone());
-                        finished_is_error = result.is_error;
-                        let status = if result.is_error {
-                            ToolStatus::Err
-                        } else {
-                            ToolStatus::Ok
-                        };
-                        let output = Some(Box::new(ToolOutput {
-                            content: result.content,
-                            is_error: result.is_error,
-                            metadata: result.metadata,
-                        }));
-                        let elapsed = elapsed_ms.map(Duration::from_millis);
-                        self.finish_tool(&call_id, status, output, elapsed);
-                    }
-                }
-                if let Some(tool_name) = finished_tool_name {
-                    self.core.signals.emit_dyn(
-                        "tool_end",
-                        std::rc::Rc::new(smelt_core::signals::ToolEnd {
-                            tool: tool_name,
-                            is_error: finished_is_error,
-                            elapsed_ms,
-                        }),
-                    );
-                    self.pump_lua();
-                }
+                let status = if result.is_error {
+                    ToolStatus::Err
+                } else {
+                    ToolStatus::Ok
+                };
+                self.finish_tool_for_engine_event(pending, call_id, result, elapsed_ms, status);
+                SessionControl::Continue
+            }
+            EngineEvent::ToolRejected {
+                call_id,
+                tool_name,
+                args,
+                summary,
+                result,
+                elapsed_ms,
+            } => {
+                let summary =
+                    self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
+                self.begin_tool_block_for_engine_event(
+                    pending,
+                    call_id.clone(),
+                    tool_name,
+                    summary,
+                    args,
+                );
+                let status = if result.is_error {
+                    ToolStatus::Err
+                } else {
+                    ToolStatus::Denied
+                };
+                self.finish_tool_for_engine_event(pending, call_id, result, elapsed_ms, status);
                 SessionControl::Continue
             }
             EngineEvent::RequestPermission {
@@ -289,15 +351,26 @@ impl TuiApp {
                 args,
                 approval_patterns,
                 summary,
-            } => SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
-                call_id,
-                tool_name,
-                args,
-                approval_candidates: approval_patterns,
-                grant_options: Vec::new(),
-                summary,
-                request_id,
-            })),
+            } => {
+                let summary =
+                    self.resolve_tool_summary_for_engine_event(&tool_name, &args, summary);
+                self.begin_tool_block_for_engine_event(
+                    pending,
+                    call_id.clone(),
+                    tool_name.clone(),
+                    summary.clone(),
+                    args.clone(),
+                );
+                SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
+                    call_id,
+                    tool_name,
+                    args,
+                    approval_candidates: approval_patterns,
+                    grant_options: Vec::new(),
+                    summary,
+                    request_id,
+                }))
+            }
             EngineEvent::Retrying { delay_ms, attempt } => {
                 // The retry restarts the turn from the last committed
                 // message - any partial streaming text/thinking captured

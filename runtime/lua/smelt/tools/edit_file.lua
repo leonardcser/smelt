@@ -89,12 +89,7 @@ local function draft_preview(args, block)
     return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
   end
 
-  return smelt.layout.diff({
-    old = old_string,
-    new = new_string,
-    path = path,
-    anchor = old_string,
-  })
+  return nil
 end
 
 transcript_defaults.__tool_body_renderers.edit_file = function(block)
@@ -109,7 +104,7 @@ transcript_defaults.__tool_body_renderers.edit_file = function(block)
       args.old_string or ""
     )
   end
-  return planned_diff(args)
+  return nil
 end
 
 transcript_defaults.__tool_collapsed_details.edit_file = function(block)

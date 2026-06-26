@@ -54,6 +54,19 @@ fn done_sse() -> String {
     ])
 }
 
+fn single_tool_sse(tool_name: &str) -> String {
+    sse(vec![
+        r#"{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}"#.to_string(),
+        format!(
+            r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"tool_use","id":"call-1","name":"{tool_name}","input":{{}}}}}}"#,
+        ),
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#.to_string(),
+        r#"{"type":"content_block_stop","index":0}"#.to_string(),
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+        r#"{"type":"message_stop"}"#.to_string(),
+    ])
+}
+
 fn sse(events: Vec<String>) -> String {
     let mut body = String::new();
     for ev in events {
@@ -130,12 +143,144 @@ async fn run_server(listener: TcpListener) {
     }
 }
 
+async fn respond_sse(mut sock: tokio::net::TcpStream, body: String) {
+    let mut buf = [0u8; 8192];
+    let mut accumulated: Vec<u8> = Vec::new();
+    loop {
+        let n = match sock.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        if n == 0 {
+            return;
+        }
+        accumulated.extend_from_slice(&buf[..n]);
+        if accumulated.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = sock.write_all(header.as_bytes()).await;
+    let _ = sock.write_all(body.as_bytes()).await;
+    let _ = sock.flush().await;
+}
+
+async fn run_one_response_server(listener: TcpListener, body: String) {
+    let Ok((sock, _)) = listener.accept().await else {
+        return;
+    };
+    respond_sse(sock, body).await;
+}
+
 #[derive(Debug)]
 struct HostReport {
     evals: usize,
     dispatches: usize,
     completed: bool,
     turn_error: Option<String>,
+}
+
+#[tokio::test]
+async fn lua_tool_evaluation_error_rejects_without_started_flash() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_one_response_server(
+        listener,
+        single_tool_sse(TOOL_NAME),
+    ));
+
+    let config = EngineConfig {
+        system_prompt_override: Some("test system".into()),
+        ..EngineConfig::new(
+            ApiConfig {
+                base: format!("http://{addr}"),
+                key: "test-key".into(),
+                key_env: "TEST_KEY".into(),
+                provider_type: "anthropic-compatible".into(),
+                model_config: ModelConfig::default(),
+            },
+            "test-model",
+            PathBuf::from("/tmp"),
+            Arc::new(engine::clock::RealClock),
+        )
+    };
+
+    let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
+    drop(handle.take_host_rx());
+    while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
+
+    let tool = ToolDef {
+        name: TOOL_NAME.into(),
+        description: "probe".into(),
+        parameters: serde_json::json!({"type":"object","properties":{}}),
+        modes: None,
+        execution_mode: ToolExecutionMode::Concurrent,
+        override_core: false,
+        hooks: ToolHookFlags {
+            approval_patterns: false,
+            preflight: true,
+        },
+        headless: true,
+    };
+
+    handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
+        turn_id: 1,
+        input: protocol::StartTurnInput::user(Content::text("go"), None),
+        mode: AgentMode::normal(),
+        model: "test-model".into(),
+        reasoning_effort: ReasoningEffort::Off,
+        history: protocol::ModelHistorySource::items(Vec::new()),
+        api_base: None,
+        api_key: None,
+        session_id: "sess".into(),
+        session_dir: PathBuf::from("/tmp"),
+        model_config_overrides: None,
+        permission_overrides: None,
+        system_prompt: Some("test system".into()),
+        tools: vec![tool],
+    })));
+
+    let mut saw_started = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for ToolRejected"
+        );
+        match tokio::time::timeout(Duration::from_millis(100), handle.recv()).await {
+            Ok(Some(EngineEvent::ToolEvaluationRequest { request_id, .. })) => {
+                handle.send(UiCommand::ToolEvaluationResponse {
+                    request_id,
+                    evaluation: protocol::ToolEvaluation {
+                        decision: protocol::Decision::Error("read the file first".into()),
+                        metadata: ToolMetadata::default(),
+                    },
+                });
+            }
+            Ok(Some(EngineEvent::ToolStarted { .. })) => saw_started = true,
+            Ok(Some(EngineEvent::ToolDispatch { .. })) => panic!("rejected tool was dispatched"),
+            Ok(Some(EngineEvent::ToolRejected {
+                call_id,
+                tool_name,
+                result,
+                ..
+            })) => {
+                assert!(!saw_started, "ToolStarted arrived before ToolRejected");
+                assert_eq!(call_id, "call-1");
+                assert_eq!(tool_name, TOOL_NAME);
+                assert!(result.is_error);
+                assert_eq!(result.content, "read the file first");
+                break;
+            }
+            Ok(Some(EngineEvent::TurnError { message, .. })) => panic!("turn errored: {message}"),
+            Ok(Some(_)) | Ok(None) | Err(_) => {}
+        }
+    }
+
+    server.abort();
 }
 
 #[tokio::test]
