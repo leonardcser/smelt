@@ -76,8 +76,10 @@ pub(crate) fn put_object(
     let _perf = perf::begin("store:object:put");
     let hash = sha256_hex(bytes);
     if let Some(meta) = object_meta(conn, &hash)? {
-        let bytes = object_bytes(conn, &meta)?;
-        return Ok(StoredObject { meta, bytes });
+        return Ok(StoredObject {
+            meta,
+            bytes: bytes.to_vec(),
+        });
     }
 
     let (codec, stored_bytes) = encode_object(bytes, compression)?;
@@ -108,11 +110,64 @@ pub(crate) fn put_object(
 }
 
 pub(crate) fn object(conn: &Connection, hash: &str) -> Result<Option<StoredObject>> {
-    let Some(meta) = object_meta(conn, hash)? else {
+    let Some((meta, stored_bytes)) = object_row(conn, hash)? else {
         return Ok(None);
     };
-    let bytes = object_bytes(conn, &meta)?;
+    let bytes = decode_and_verify_object(&meta, &stored_bytes)?;
     Ok(Some(StoredObject { meta, bytes }))
+}
+
+pub(crate) fn object_bytes_by_hash(conn: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {
+    let Some((meta, stored_bytes)) = object_row(conn, hash)? else {
+        return Ok(None);
+    };
+    decode_and_verify_object(&meta, &stored_bytes).map(Some)
+}
+
+fn object_row(conn: &Connection, hash: &str) -> Result<Option<(ObjectMeta, Vec<u8>)>> {
+    conn.query_row(
+        "SELECT hash, kind, codec, raw_size, stored_size, bytes
+         FROM objects
+         WHERE hash = ?1",
+        [hash],
+        |row| {
+            let codec: String = row.get(2)?;
+            let raw_size: i64 = row.get(3)?;
+            let stored_size: i64 = row.get(4)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                codec,
+                raw_size,
+                stored_size,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(|(hash, kind, codec, raw_size, stored_size, bytes)| {
+        Ok((
+            object_meta_from_parts(hash, kind, codec, raw_size, stored_size)?,
+            bytes,
+        ))
+    })
+    .transpose()
+}
+
+fn object_meta_from_parts(
+    hash: String,
+    kind: String,
+    codec: String,
+    raw_size: i64,
+    stored_size: i64,
+) -> Result<ObjectMeta> {
+    Ok(ObjectMeta {
+        hash,
+        kind,
+        codec: ObjectCodec::from_str(&codec)?,
+        raw_size: nonnegative_u64(raw_size, "raw_size")?,
+        stored_size: nonnegative_u64(stored_size, "stored_size")?,
+    })
 }
 
 pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<ObjectMeta>> {
@@ -136,25 +191,23 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
     )
     .optional()?
     .map(|(hash, kind, codec, raw_size, stored_size)| {
-        Ok(ObjectMeta {
-            hash,
-            kind,
-            codec: ObjectCodec::from_str(&codec)?,
-            raw_size: nonnegative_u64(raw_size, "raw_size")?,
-            stored_size: nonnegative_u64(stored_size, "stored_size")?,
-        })
+        object_meta_from_parts(hash, kind, codec, raw_size, stored_size)
     })
     .transpose()
 }
 
 pub(crate) fn object_bytes(conn: &Connection, meta: &ObjectMeta) -> Result<Vec<u8>> {
-    let _perf = perf::begin("store:object:hydrate_bytes");
     let stored_bytes: Vec<u8> = conn.query_row(
         "SELECT bytes FROM objects WHERE hash = ?1",
         [&meta.hash],
         |row| row.get(0),
     )?;
-    let bytes = decode_object(meta.codec, &stored_bytes, meta.raw_size)?;
+    decode_and_verify_object(meta, &stored_bytes)
+}
+
+fn decode_and_verify_object(meta: &ObjectMeta, stored_bytes: &[u8]) -> Result<Vec<u8>> {
+    let _perf = perf::begin("store:object:hydrate_bytes");
+    let bytes = decode_object(meta.codec, stored_bytes, meta.raw_size)?;
     let decoded_hash = sha256_hex(&bytes);
     if decoded_hash != meta.hash {
         return Err(StoreError::Integrity(format!(

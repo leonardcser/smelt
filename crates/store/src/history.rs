@@ -1070,6 +1070,7 @@ pub(crate) fn search_transcript_candidate_page(
                 bound,
                 inclusive,
                 direction,
+                query,
                 page_size,
             },
         )?;
@@ -1082,14 +1083,12 @@ pub(crate) fn search_transcript_candidate_page(
         bound = batch.last().map(|row| row.block_idx);
         inclusive = false;
         for row in batch {
-            if row.text.contains(query) {
-                out.push(TranscriptSearchCandidate {
-                    block_idx: row.block_idx,
-                    history_idx: row.history_idx,
-                });
-                if out.len() >= limit {
-                    break;
-                }
+            out.push(TranscriptSearchCandidate {
+                block_idx: row.block_idx,
+                history_idx: row.history_idx,
+            });
+            if out.len() >= limit {
+                break;
             }
         }
         if out.len() >= limit || fetched < page_size {
@@ -1116,7 +1115,6 @@ pub(crate) fn search_transcript_candidate_page(
 struct TranscriptCandidateRow {
     block_idx: u64,
     history_idx: Option<u64>,
-    text: String,
 }
 
 fn search_driver_term(conn: &Connection, terms: &[String]) -> Result<String> {
@@ -1162,6 +1160,7 @@ struct TranscriptCandidateBatchQuery<'a> {
     bound: Option<u64>,
     inclusive: bool,
     direction: TranscriptSearchDirection,
+    query: &'a str,
     page_size: usize,
 }
 
@@ -1192,15 +1191,16 @@ fn search_transcript_candidate_batch(
         .collect::<Vec<_>>()
         .join(" ");
     let sql = format!(
-        "SELECT s.block_idx, s.history_idx, s.text
+        "SELECT s.block_idx, s.history_idx
          FROM transcript_search_terms d
          JOIN transcript_search s ON s.block_idx = d.block_idx
          WHERE d.term = ? {bound_filter} {exists_filters}
+           AND instr(s.text, ?) > 0
          ORDER BY d.block_idx {order}
          LIMIT ?"
     );
     let mut values =
-        Vec::with_capacity(2 + query.other_terms.len() + usize::from(query.bound.is_some()));
+        Vec::with_capacity(3 + query.other_terms.len() + usize::from(query.bound.is_some()));
     values.push(SqlValue::from(query.driver.to_string()));
     if let Some(bound) = query.bound {
         values.push(SqlValue::from(checked_i64(
@@ -1214,6 +1214,7 @@ fn search_transcript_candidate_batch(
             .iter()
             .map(|term| SqlValue::from((*term).to_string())),
     );
+    values.push(SqlValue::from(query.query.to_string()));
     values.push(SqlValue::from(checked_i64(
         query.page_size as u64,
         "search_candidate_page_size",
@@ -1224,7 +1225,6 @@ fn search_transcript_candidate_batch(
         Ok(TranscriptCandidateRow {
             block_idx: row.get::<_, i64>(0)? as u64,
             history_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
-            text: row.get(2)?,
         })
     })?;
     let out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1519,7 +1519,7 @@ pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Res
                 .and_then(|value| value.get("hash"))
                 .and_then(Value::as_str)
             {
-                if let Some(bytes) = object_bytes_by_hash(conn, hash)? {
+                if let Some(bytes) = object::object_bytes_by_hash(conn, hash)? {
                     *value = serde_json::from_slice(&bytes)?;
                 }
                 return Ok(());
@@ -1538,22 +1538,55 @@ pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Res
     Ok(())
 }
 
-pub(crate) fn object_bytes_by_hash(conn: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {
-    let Some(meta) = object::object_meta(conn, hash)? else {
-        return Ok(None);
-    };
-    object::object_bytes(conn, &meta).map(Some)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub(crate) fn insert_json_object(
-    conn: &Connection,
-    value: &mut Value,
-    key: &str,
-    hash: &str,
-) -> Result<()> {
-    let Some(bytes) = object_bytes_by_hash(conn, hash)? else {
-        return Ok(());
-    };
-    value[key] = serde_json::from_slice(&bytes)?;
-    Ok(())
+    #[test]
+    fn transcript_search_candidate_plan_uses_term_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let details = query_plan_details(
+            &conn,
+            "SELECT s.block_idx, s.history_idx
+             FROM transcript_search_terms d
+             JOIN transcript_search s ON s.block_idx = d.block_idx
+             WHERE d.term = ?1
+               AND instr(s.text, ?2) > 0
+             ORDER BY d.block_idx ASC
+             LIMIT ?3",
+            rusqlite::params!["abc", "abcdef", 64_i64],
+        );
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH d USING COVERING INDEX")),
+            "{details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH s USING INTEGER PRIMARY KEY")),
+            "{details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE")),
+            "{details:#?}"
+        );
+    }
+
+    fn query_plan_details<P: rusqlite::Params>(
+        conn: &Connection,
+        sql: &str,
+        params: P,
+    ) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map(params, |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
 }

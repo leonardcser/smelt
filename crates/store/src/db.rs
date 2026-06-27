@@ -14,7 +14,9 @@ use crate::history::{
 use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
-use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
+use crate::request_audit::{
+    self, RequestAuditPayloads, RequestAuditQuery, RequestAuditStats, RequestAuditSummary,
+};
 use crate::schema;
 use crate::session_snapshot::{
     self, SessionDelta, SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes,
@@ -274,6 +276,10 @@ impl SessionDb {
         query: &RequestAuditQuery,
     ) -> Result<Vec<RequestAuditSummary>> {
         request_audit::request_attempts(&self.conn, query)
+    }
+
+    pub fn request_audit_stats(&self) -> Result<RequestAuditStats> {
+        request_audit::request_stats(&self.conn)
     }
 
     pub fn request_payloads(
@@ -1011,6 +1017,25 @@ mod tests {
             .search_transcript_candidates("needle")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn transcript_search_filters_exact_substring_in_sql() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.replace_transcript_descriptor_records(&[
+            transcript_record(0, "false-positive", "aba gap bab"),
+            transcript_record(1, "exact", "xx abab yy"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            db.search_transcript_candidates("abab").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 1,
+                history_idx: None,
+            }]
+        );
     }
 
     #[test]
@@ -2219,6 +2244,22 @@ mod tests {
             Some(1)
         );
         assert_eq!(attempts[0].cost_usd, Some(0.000123));
+        let stats = db.request_audit_stats().unwrap();
+        assert_eq!(stats.request_count, 1);
+        assert_eq!(stats.streaming_count, 1);
+        assert_eq!(stats.raw_response_count, 1);
+        assert_eq!(stats.total_prompt_tokens, 10);
+        assert_eq!(stats.total_completion_tokens, 5);
+        assert_eq!(stats.total_cache_read_tokens, 2);
+        assert_eq!(stats.total_cache_write_tokens, 1);
+        assert_eq!(stats.total_reasoning_tokens, 3);
+        assert_eq!(stats.total_elapsed_ms, 250);
+        assert_eq!(stats.latest_timestamp_ms, Some(1000));
+        assert_eq!(stats.first_request_ms, Some(1000));
+        assert_eq!(stats.latest_provider_kind.as_deref(), Some("openai"));
+        assert_eq!(stats.latest_model.as_deref(), Some("model-a"));
+        assert_eq!(stats.latest_context_tokens, Some(20));
+        assert_eq!(stats.max_context_tokens, Some(20));
 
         let payloads = db.request_payloads(id).unwrap().unwrap();
         assert_eq!(payloads.body.unwrap(), body);

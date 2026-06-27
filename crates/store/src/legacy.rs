@@ -127,7 +127,7 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
 
     for row in rows {
         let (
-            id,
+            _id,
             body_hash,
             response_hash,
             error_hash,
@@ -180,18 +180,28 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             "attempt": attempt,
             "background": background != 0,
         });
-        if body_hash.is_some() {
-            if let Some(body) =
-                request_audit::request_payloads(conn, id)?.and_then(|payloads| payloads.body)
-            {
+        let payloads = if body_hash.is_some() || response_hash.is_some() || error_hash.is_some() {
+            Some(request_audit::request_payloads_from_hashes(
+                conn,
+                body_hash.as_deref(),
+                response_hash.as_deref(),
+                error_hash.as_deref(),
+            )?)
+        } else {
+            None
+        };
+        if let Some(payloads) = payloads {
+            if let Some(body) = payloads.body {
                 value["body"] = body;
             }
-        }
-        if let Some(hash) = response_hash {
-            history::insert_json_object(conn, &mut value, "response", &hash)?;
-        }
-        if let Some(hash) = error_hash {
-            history::insert_json_object(conn, &mut value, "error", &hash)?;
+            if let Some(response) = payloads.response {
+                value["response"] = response;
+            }
+            if let Some(error) = payloads.error {
+                value["error"] = error;
+            } else if let Some(summary) = error_summary {
+                value["error"] = json!({ "message": summary });
+            }
         } else if let Some(summary) = error_summary {
             value["error"] = json!({ "message": summary });
         }

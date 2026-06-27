@@ -25,7 +25,7 @@ pub use meta::{SessionMeta, SessionState, WriterLease};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
-    RequestAuditSummary,
+    RequestAuditStats, RequestAuditSummary,
 };
 pub use schema::SCHEMA_VERSION;
 pub use session_snapshot::{

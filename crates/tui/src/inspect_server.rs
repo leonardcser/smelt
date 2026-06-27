@@ -3,7 +3,6 @@
 //! Serves an embedded single-page application plus a small read-only JSON
 //! API backed by `smelt_core::session` and `smelt_store`.
 
-use protocol::TokenUsage;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -264,26 +263,7 @@ struct SessionListItem {
     request_stats: RequestStats,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-struct RequestStats {
-    request_count: u64,
-    error_count: u64,
-    streaming_count: u64,
-    raw_response_count: u64,
-    total_cost_usd: f64,
-    total_elapsed_ms: u64,
-    total_prompt_tokens: u64,
-    total_completion_tokens: u64,
-    total_cache_read_tokens: u64,
-    total_cache_write_tokens: u64,
-    total_reasoning_tokens: u64,
-    latest_timestamp_ms: Option<u64>,
-    first_request_ms: Option<u64>,
-    latest_provider_kind: Option<String>,
-    latest_model: Option<String>,
-    latest_context_tokens: Option<u32>,
-    max_context_tokens: Option<u32>,
-}
+type RequestStats = smelt_store::RequestAuditStats;
 
 #[derive(Debug, Clone, Serialize)]
 struct SessionSummary {
@@ -694,86 +674,9 @@ fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
 
 fn request_stats_for_session(id: &str) -> RequestStats {
     let db_path = session_dir(id).join("session.db");
-    if let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) {
-        if let Ok(attempts) = db.query_request_attempts(&smelt_store::RequestAuditQuery {
-            limit: u32::MAX,
-            order: smelt_store::RequestAuditOrder::OldestFirst,
-            ..Default::default()
-        }) {
-            let mut stats = RequestStats::default();
-            for attempt in attempts {
-                stats.record_summary(&attempt);
-            }
-            return stats;
-        }
-    }
-    RequestStats::default()
-}
-
-impl RequestStats {
-    fn record_summary(&mut self, entry: &smelt_store::RequestAuditSummary) {
-        self.request_count += 1;
-        if entry.error_summary.is_some() {
-            self.error_count += 1;
-        }
-        if entry.stream {
-            self.streaming_count += 1;
-        }
-        if entry.response_hash.is_some() {
-            self.raw_response_count += 1;
-        }
-        self.total_cost_usd += entry.cost_usd.unwrap_or(0.0);
-        if let Some(completed_at) = entry.completed_at {
-            self.total_elapsed_ms += completed_at.saturating_sub(entry.started_at) as u64;
-        }
-        if let Some(usage) = entry.usage.as_ref() {
-            self.add_usage(usage);
-            if usage.context_tokens.is_some() {
-                self.latest_context_tokens = usage.context_tokens;
-            }
-            self.max_context_tokens = max_opt(self.max_context_tokens, usage.context_tokens);
-        }
-        self.first_request_ms = min_opt(self.first_request_ms, Some(entry.started_at as u64));
-        self.latest_timestamp_ms =
-            max_opt_u64(self.latest_timestamp_ms, Some(entry.started_at as u64));
-        self.latest_provider_kind = entry.provider.clone();
-        self.latest_model = entry.model.clone();
-    }
-
-    fn add_usage(&mut self, usage: &TokenUsage) {
-        self.total_prompt_tokens += u64::from(usage.prompt_tokens.unwrap_or(0));
-        self.total_completion_tokens += u64::from(usage.completion_tokens.unwrap_or(0));
-        self.total_cache_read_tokens += u64::from(usage.cache_read_tokens.unwrap_or(0));
-        self.total_cache_write_tokens += u64::from(usage.cache_write_tokens.unwrap_or(0));
-        self.total_reasoning_tokens += u64::from(usage.reasoning_tokens.unwrap_or(0));
-    }
-}
-
-fn min_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
-}
-
-fn max_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
-}
-
-fn max_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
+    smelt_store::SessionDb::open_read_only(&db_path)
+        .and_then(|db| db.request_audit_stats())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

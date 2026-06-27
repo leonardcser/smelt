@@ -92,6 +92,27 @@ pub struct RequestAuditSummary {
     pub tokens_per_sec: Option<f64>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct RequestAuditStats {
+    pub request_count: u64,
+    pub error_count: u64,
+    pub streaming_count: u64,
+    pub raw_response_count: u64,
+    pub total_cost_usd: f64,
+    pub total_elapsed_ms: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    pub total_cache_read_tokens: u64,
+    pub total_cache_write_tokens: u64,
+    pub total_reasoning_tokens: u64,
+    pub latest_timestamp_ms: Option<u64>,
+    pub first_request_ms: Option<u64>,
+    pub latest_provider_kind: Option<String>,
+    pub latest_model: Option<String>,
+    pub latest_context_tokens: Option<u32>,
+    pub max_context_tokens: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestAuditPayloads {
     pub body: Option<Value>,
@@ -444,6 +465,86 @@ pub(crate) fn request_attempts(
         .map_err(Into::into)
 }
 
+const LATEST_REQUEST_MODEL_SQL: &str = "SELECT provider, model
+     FROM request_attempts
+     ORDER BY started_at DESC, id DESC
+     LIMIT 1";
+
+const LATEST_CONTEXT_TOKENS_SQL: &str = "SELECT s.context_tokens
+     FROM request_attempts a
+     JOIN request_stats s ON s.request_attempt_id = a.id
+     WHERE s.context_tokens IS NOT NULL
+     ORDER BY a.started_at DESC, a.id DESC
+     LIMIT 1";
+
+pub(crate) fn request_stats(conn: &Connection) -> Result<RequestAuditStats> {
+    let mut stats = conn.query_row(
+        "SELECT COUNT(a.id),
+                COALESCE(SUM(CASE WHEN a.error_summary IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN a.stream != 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN a.response_hash IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(s.total_cost_micros), 0),
+                COALESCE(SUM(CASE
+                    WHEN a.completed_at IS NOT NULL THEN MAX(a.completed_at - a.started_at, 0)
+                    ELSE 0
+                END), 0),
+                COALESCE(SUM(s.input_tokens), 0),
+                COALESCE(SUM(s.output_tokens), 0),
+                COALESCE(SUM(s.cached_input_tokens), 0),
+                COALESCE(SUM(s.cache_write_tokens), 0),
+                COALESCE(SUM(s.reasoning_tokens), 0),
+                MIN(a.started_at),
+                MAX(a.started_at),
+                MAX(s.context_tokens)
+         FROM request_attempts a
+         LEFT JOIN request_stats s ON s.request_attempt_id = a.id",
+        [],
+        |row| {
+            let total_cost_micros: i64 = row.get(4)?;
+            Ok(RequestAuditStats {
+                request_count: nonnegative_u64(row.get(0)?),
+                error_count: nonnegative_u64(row.get(1)?),
+                streaming_count: nonnegative_u64(row.get(2)?),
+                raw_response_count: nonnegative_u64(row.get(3)?),
+                total_cost_usd: total_cost_micros as f64 / 1_000_000.0,
+                total_elapsed_ms: nonnegative_u64(row.get(5)?),
+                total_prompt_tokens: nonnegative_u64(row.get(6)?),
+                total_completion_tokens: nonnegative_u64(row.get(7)?),
+                total_cache_read_tokens: nonnegative_u64(row.get(8)?),
+                total_cache_write_tokens: nonnegative_u64(row.get(9)?),
+                total_reasoning_tokens: nonnegative_u64(row.get(10)?),
+                first_request_ms: row.get::<_, Option<i64>>(11)?.map(nonnegative_u64),
+                latest_timestamp_ms: row.get::<_, Option<i64>>(12)?.map(nonnegative_u64),
+                max_context_tokens: row
+                    .get::<_, Option<i64>>(13)?
+                    .map(|value| nonnegative_u64(value) as u32),
+                latest_provider_kind: None,
+                latest_model: None,
+                latest_context_tokens: None,
+            })
+        },
+    )?;
+
+    if let Some((provider, model)) = conn
+        .query_row(LATEST_REQUEST_MODEL_SQL, [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?
+    {
+        stats.latest_provider_kind = provider;
+        stats.latest_model = model;
+    }
+    stats.latest_context_tokens = conn
+        .query_row(LATEST_CONTEXT_TOKENS_SQL, [], |row| row.get::<_, i64>(0))
+        .optional()?
+        .map(|value| nonnegative_u64(value) as u32);
+    Ok(stats)
+}
+
+fn nonnegative_u64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
 fn legacy_record(value: &Value) -> Result<RequestAuditRecord> {
     let started_at = value
         .get("timestamp_ms")
@@ -512,11 +613,26 @@ pub(crate) fn request_payloads(
     let Some((body_hash, response_hash, error_hash)) = hashes else {
         return Ok(None);
     };
-    Ok(Some(RequestAuditPayloads {
-        body: read_request_body(conn, body_hash.as_deref())?,
-        response: read_json_object(conn, response_hash.as_deref())?,
-        error: read_json_object(conn, error_hash.as_deref())?,
-    }))
+    request_payloads_from_hashes(
+        conn,
+        body_hash.as_deref(),
+        response_hash.as_deref(),
+        error_hash.as_deref(),
+    )
+    .map(Some)
+}
+
+pub(crate) fn request_payloads_from_hashes(
+    conn: &Connection,
+    body_hash: Option<&str>,
+    response_hash: Option<&str>,
+    error_hash: Option<&str>,
+) -> Result<RequestAuditPayloads> {
+    Ok(RequestAuditPayloads {
+        body: read_request_body(conn, body_hash)?,
+        response: read_json_object(conn, response_hash)?,
+        error: read_json_object(conn, error_hash)?,
+    })
 }
 
 fn json_size<T: serde::Serialize>(value: &T) -> Result<u64> {
@@ -791,10 +907,9 @@ fn read_json_object(conn: &Connection, hash: Option<&str>) -> Result<Option<Valu
     let Some(hash) = hash else {
         return Ok(None);
     };
-    let Some(meta) = object::object_meta(conn, hash)? else {
+    let Some(bytes) = object::object_bytes_by_hash(conn, hash)? else {
         return Ok(None);
     };
-    let bytes = object::object_bytes(conn, &meta)?;
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
@@ -906,4 +1021,39 @@ fn push_i64(
         values.push(Box::new(checked_i64(value, field)?));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_stats_latest_queries_use_started_at_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+
+        for sql in [LATEST_REQUEST_MODEL_SQL, LATEST_CONTEXT_TOKENS_SQL] {
+            let details = query_plan_details(&conn, sql);
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("request_attempts_started_at_idx")),
+                "{sql}\n{details:#?}"
+            );
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.contains("USE TEMP B-TREE")),
+                "{sql}\n{details:#?}"
+            );
+        }
+    }
+
+    fn query_plan_details(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
 }
