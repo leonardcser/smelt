@@ -50,7 +50,7 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 | `hl_eol` | `boolean` |  | Extend the highlight past the last column to fill the EOL. |
 | `on_cursor_row` | `boolean` |  | Paint only on the window's cursor row. Decorates the selected list item without re-rendering on every move. |
 | `virt_text` | `string` |  | Virtual-text chunk to render alongside the line. |
-| `virt_text_hl` | `string` |  | Theme group applied to the virt-text chunk. |
+| `virt_text_hl` | `string` |  | Theme group applied to the virt-text chunk. `fg`, `bg`, and text attributes below can further override it. |
 | `virt_text_pos` | [smelt.buf.VirtTextPos](types.md#smeltbufvirttextpos) |  | Where the virt-text appears relative to the line. |
 | `selectable` | `boolean` |  | If false, the range is skipped by mouse selection. |
 | `yank_as` | `string` |  | Override the yanked string when the user copies this range. |

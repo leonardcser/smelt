@@ -148,7 +148,8 @@ pub struct LuaMarkOpts {
 
     /// Virtual-text chunk to render alongside the line.
     pub virt_text: Option<String>,
-    /// Theme group applied to the virt-text chunk.
+    /// Theme group applied to the virt-text chunk. `fg`, `bg`, and text
+    /// attributes below can further override it.
     pub virt_text_hl: Option<String>,
     /// Where the virt-text appears relative to the line.
     pub virt_text_pos: Option<LuaVirtTextPos>,
@@ -727,7 +728,7 @@ fn set_extmark(
     });
 
     let mut payload_opts = if let Some(text) = opts.virt_text.clone() {
-        let mut o = ExtmarkOpts::virt_text(text, opts.virt_text_hl.clone());
+        let mut o = ExtmarkOpts::virt_text(text, build_virt_text_hl(&opts));
         if let Some(pos) = opts.virt_text_pos {
             o = o.with_virt_pos(pos.into());
         }
@@ -768,6 +769,44 @@ fn set_extmark(
     })
     .map(|eid: ExtmarkId| eid.0 as u64)
     .unwrap_or(0)
+}
+
+fn build_virt_text_hl(opts: &LuaMarkOpts) -> Option<String> {
+    if opts.fg.is_none()
+        && opts.bg.is_none()
+        && opts.bold.is_none()
+        && opts.dim.is_none()
+        && opts.italic.is_none()
+        && opts.reverse.is_none()
+    {
+        return opts.virt_text_hl.clone();
+    }
+
+    let mut style = match opts.virt_text_hl.as_deref() {
+        Some(name) => crate::lua::with_app(|app| app.ui.theme().get(name)),
+        None => smelt_core::style::Style::default(),
+    };
+    if let Some(c) = &opts.fg {
+        style.fg = c.resolve_fg();
+    }
+    if let Some(c) = &opts.bg {
+        style.bg = c.resolve_bg();
+    }
+    if let Some(b) = opts.bold {
+        style.bold = b;
+    }
+    if let Some(b) = opts.dim {
+        style.dim = b;
+    }
+    if let Some(b) = opts.italic {
+        style.italic = b;
+    }
+    if let Some(b) = opts.reverse {
+        style.reverse = b;
+    }
+
+    let group = smelt_core::theme::intern_anonymous_style(style);
+    smelt_core::theme::name_of(group)
 }
 
 fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_edit::SpanStyle {

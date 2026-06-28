@@ -35,7 +35,7 @@
 ---@field hl_eol? boolean Extend the highlight past the last column to fill the EOL.
 ---@field on_cursor_row? boolean Paint only on the window's cursor row. Decorates the selected list item without re-rendering on every move.
 ---@field virt_text? string Virtual-text chunk to render alongside the line.
----@field virt_text_hl? string Theme group applied to the virt-text chunk.
+---@field virt_text_hl? string Theme group applied to the virt-text chunk. `fg`, `bg`, and text attributes below can further override it.
 ---@field virt_text_pos? smelt.buf.VirtTextPos Where the virt-text appears relative to the line.
 ---@field selectable? boolean If false, the range is skipped by mouse selection.
 ---@field yank_as? string Override the yanked string when the user copies this range.
