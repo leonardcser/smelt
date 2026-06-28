@@ -23,9 +23,10 @@ smelt.cmd.register("rewind", function(args)
     })
 
     local picked = smelt.dialog.open({
-      title  = "rewind",
-      height = "50%",
-      panels = { { leaf = options_leaf } },
+      title      = "rewind",
+      max_height = "100%",
+      min_height = 0,
+      panels     = { { leaf = options_leaf } },
     })
 
     if not picked or not picked.index then return end
