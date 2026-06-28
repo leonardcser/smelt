@@ -232,9 +232,12 @@ smelt.events.on("session_started", close_all)
 
 smelt.signal.subscribe("transcript_navigation_generation", refresh)
 
-smelt.signal.subscribe("cursor_pos", function()
+local function refresh_if_transcript_focused()
   if smelt.focus() == "transcript" then refresh() end
-end)
+end
+
+smelt.signal.subscribe("cursor_pos", refresh_if_transcript_focused)
+smelt.signal.subscribe("viewport_pos", refresh_if_transcript_focused)
 
 -- Jump to bottom when the user submits a message so the new turn is visible.
 smelt.events.on("input_submit", function()

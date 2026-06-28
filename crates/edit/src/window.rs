@@ -97,6 +97,82 @@ enum MouseEndpointMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewportMetrics {
+    pub scroll_top: RowIndex,
+    pub total_rows: RowIndex,
+    pub viewport_rows: u16,
+    pub max_scroll: RowIndex,
+    pub scroll_pct: u8,
+    pub thumb_size: u16,
+    pub thumb_top: u16,
+    pub max_thumb_top: u16,
+}
+
+impl ViewportMetrics {
+    pub fn new(scroll_top: RowIndex, total_rows: RowIndex, viewport_rows: u16) -> Self {
+        let viewport_rows = viewport_rows.max(1);
+        let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
+        let scroll_top = scroll_top.min(max_scroll);
+        let thumb_size = Self::thumb_size_for(total_rows, viewport_rows);
+        let max_thumb_top = viewport_rows.saturating_sub(thumb_size);
+        let thumb_top = Self::thumb_top_for_scroll(scroll_top, max_scroll, max_thumb_top);
+        let scroll_pct = Self::scroll_pct(scroll_top, max_scroll);
+        Self {
+            scroll_top,
+            total_rows,
+            viewport_rows,
+            max_scroll,
+            scroll_pct,
+            thumb_size,
+            thumb_top,
+            max_thumb_top,
+        }
+    }
+
+    fn thumb_size_for(total_rows: RowIndex, viewport_rows: u16) -> u16 {
+        let rows = viewport_rows as u128;
+        let total = total_rows.max(1) as u128;
+        ((rows * rows) / total).clamp(1, viewport_rows as u128) as u16
+    }
+
+    fn thumb_top_for_scroll(scroll_top: RowIndex, max_scroll: RowIndex, max_thumb_top: u16) -> u16 {
+        if max_thumb_top == 0 || max_scroll == 0 {
+            return 0;
+        }
+        ((scroll_top as u128 * max_thumb_top as u128 + max_scroll as u128 / 2) / max_scroll as u128)
+            as u16
+    }
+
+    fn scroll_pct(scroll_top: RowIndex, max_scroll: RowIndex) -> u8 {
+        ((u128::from(scroll_top) * 100 + u128::from(max_scroll) / 2)
+            .checked_div(u128::from(max_scroll))
+            .unwrap_or(100)
+            .min(100)) as u8
+    }
+
+    pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
+        let half = self.thumb_size / 2;
+        rel_row.saturating_sub(half).min(self.max_thumb_top)
+    }
+
+    pub fn scroll_from_thumb_top(&self, thumb_top: u16) -> RowIndex {
+        if self.max_thumb_top == 0 || self.max_scroll == 0 {
+            return 0;
+        }
+        let thumb_top = thumb_top.min(self.max_thumb_top);
+        let from_top = (thumb_top as u128 * self.max_scroll as u128
+            + self.max_thumb_top as u128 / 2)
+            / self.max_thumb_top as u128;
+        from_top.min(RowIndex::MAX as u128) as RowIndex
+    }
+
+    pub fn is_thumb_at(&self, row: u16) -> bool {
+        let thumb_end = self.thumb_top.saturating_add(self.thumb_size);
+        row >= self.thumb_top && row < thumb_end
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScrollbarState {
     pub col: u16,
     pub total_rows: RowIndex,
@@ -112,58 +188,12 @@ impl ScrollbarState {
         })
     }
 
-    fn max_scroll(&self) -> RowIndex {
-        self.total_rows
-            .saturating_sub(self.viewport_rows as RowIndex)
-    }
-
-    pub fn thumb_size(&self) -> u16 {
-        let rows = self.viewport_rows as u128;
-        let total = self.total_rows.max(1) as u128;
-        ((rows * rows) / total).clamp(1, self.viewport_rows as u128) as u16
-    }
-
-    pub fn max_thumb_top(&self) -> u16 {
-        self.viewport_rows.saturating_sub(self.thumb_size())
-    }
-
-    /// Click row → thumb top, centered on the click. Clamped to `[0, max_thumb_top()]`.
-    pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
-        let half = self.thumb_size() / 2;
-        rel_row.saturating_sub(half).min(self.max_thumb_top())
-    }
-
-    pub fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> RowIndex {
-        let max_thumb = self.max_thumb_top();
-        let max_scroll = self.max_scroll();
-        if max_thumb == 0 || max_scroll == 0 {
-            return 0;
-        }
-        let thumb_top = thumb_top.min(max_thumb);
-        let from_top =
-            (thumb_top as u128 * max_scroll as u128 + max_thumb as u128 / 2) / max_thumb as u128;
-        from_top.min(RowIndex::MAX as u128) as RowIndex
+    pub fn metrics(&self, scroll_top: RowIndex) -> ViewportMetrics {
+        ViewportMetrics::new(scroll_top, self.total_rows, self.viewport_rows)
     }
 
     pub(crate) fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
         col == self.col && row >= rect.top && row < rect.bottom()
-    }
-
-    /// Scroll offset → thumb top row (0-based). Inverse of `thumb_top_for_click`.
-    pub fn thumb_top_for_scroll(&self, scroll_top: RowIndex) -> u16 {
-        let max_thumb = self.max_thumb_top();
-        let max_scroll = self.max_scroll();
-        if max_thumb == 0 || max_scroll == 0 {
-            return 0;
-        }
-        let scroll = scroll_top.min(max_scroll);
-        ((scroll as u128 * max_thumb as u128 + max_scroll as u128 / 2) / max_scroll as u128) as u16
-    }
-
-    pub fn is_thumb_at(&self, scroll_top: RowIndex, row: u16) -> bool {
-        let thumb_top = self.thumb_top_for_scroll(scroll_top);
-        let thumb_end = thumb_top + self.thumb_size();
-        row >= thumb_top && row < thumb_end
     }
 }
 
@@ -3481,8 +3511,9 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     let track_style = Style::new().bg(track.bg.or(track.fg).unwrap_or(crate::grid::Color::Reset));
     let avail = height.saturating_sub(row_offset);
     let rows = bar.viewport_rows.min(avail);
+    let metrics = bar.metrics(viewport.scroll_top);
     for row in 0..rows {
-        let style = if bar.is_thumb_at(viewport.scroll_top, row) {
+        let style = if metrics.is_thumb_at(row) {
             thumb_style
         } else {
             track_style
@@ -3528,6 +3559,35 @@ mod tests {
     use crate::Theme;
     use crossterm::event::KeyCode;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn viewport_metrics_track_scroll_percent() {
+        assert_eq!(ViewportMetrics::new(0, 100, 20).scroll_pct, 0);
+        assert_eq!(ViewportMetrics::new(40, 100, 20).scroll_pct, 50);
+        assert_eq!(ViewportMetrics::new(80, 100, 20).scroll_pct, 100);
+        assert_eq!(ViewportMetrics::new(999, 100, 20).scroll_pct, 100);
+    }
+
+    #[test]
+    fn viewport_metrics_report_full_percent_when_content_fits() {
+        assert_eq!(ViewportMetrics::new(0, 0, 20).scroll_pct, 100);
+        assert_eq!(ViewportMetrics::new(0, 10, 20).scroll_pct, 100);
+        assert_eq!(ViewportMetrics::new(5, 10, 0).scroll_pct, 56);
+    }
+
+    #[test]
+    fn viewport_metrics_drive_scrollbar_geometry() {
+        let metrics = ViewportMetrics::new(40, 100, 20);
+        assert_eq!(metrics.max_scroll, 80);
+        assert_eq!(metrics.scroll_pct, 50);
+        assert_eq!(metrics.thumb_size, 4);
+        assert_eq!(metrics.max_thumb_top, 16);
+        assert_eq!(metrics.thumb_top, 8);
+        assert!(metrics.is_thumb_at(8));
+        assert!(metrics.is_thumb_at(11));
+        assert!(!metrics.is_thumb_at(12));
+        assert_eq!(metrics.scroll_from_thumb_top(metrics.thumb_top), 40);
+    }
 
     fn make_win() -> Window {
         Window::new(
@@ -3929,10 +3989,11 @@ mod tests {
     #[test]
     fn scrollbar_maps_rows_beyond_u16() {
         let bar = ScrollbarState::new(0, 1_000_000, 10).expect("overflowing scrollbar");
-        let bottom = bar.scroll_from_top_for_thumb(bar.max_thumb_top());
+        let metrics = bar.metrics(0);
+        let bottom = metrics.scroll_from_thumb_top(metrics.max_thumb_top);
         assert_eq!(bottom, 999_990);
-        assert_eq!(bar.thumb_top_for_scroll(999_990), bar.max_thumb_top());
-        assert_eq!(bar.thumb_top_for_scroll(500_000), 5);
+        assert_eq!(bar.metrics(999_990).thumb_top, metrics.max_thumb_top);
+        assert_eq!(bar.metrics(500_000).thumb_top, 5);
     }
 
     #[test]

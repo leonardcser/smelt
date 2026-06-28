@@ -398,6 +398,12 @@ pub struct WorkBusyEntry {
 pub struct CursorPos {
     pub line: u32,
     pub col: u32,
+}
+
+/// Payload for the `viewport_pos` signal. Tracks the focused window's scroll
+/// position through the full scrollable row extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ViewportPos {
     pub scroll_pct: u8,
 }
 
@@ -500,6 +506,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     event("turn_end"),
     event("turn_error"),
     event("turn_start"),
+    state("viewport_pos"),
     state("vim_mode"),
     state("vim_pending_input"),
     state("work_busy"),
@@ -604,6 +611,12 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         };
         let _ = t.set("line", p.line as i64);
         let _ = t.set("col", p.col as i64);
+        mlua::Value::Table(t)
+    });
+    signals.register_lua_projector::<ViewportPos, _>(|p, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
         let _ = t.set("scroll_pct", p.scroll_pct as i64);
         mlua::Value::Table(t)
     });
@@ -789,6 +802,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("prompt_resize_active", false);
     signals.declare("prompt_resize_chrome", String::new());
     signals.declare("cursor_pos", CursorPos::default());
+    signals.declare("viewport_pos", ViewportPos::default());
     signals.declare("transcript_navigation_generation", 0u64);
 
     signals.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {

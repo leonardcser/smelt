@@ -299,8 +299,9 @@ impl TuiApp {
         let viewport = win.viewport?;
         let bar = viewport.scrollbar?;
         let rel_row = row.saturating_sub(viewport.rect.top);
-        let numerator = u64::from(bar.thumb_top_for_click(rel_row));
-        let denominator = u64::from(bar.max_thumb_top().max(1));
+        let metrics = bar.metrics(0);
+        let numerator = u64::from(metrics.thumb_top_for_click(rel_row));
+        let denominator = u64::from(metrics.max_thumb_top.max(1));
         Some(TranscriptScrollIntent::ScrollbarFraction {
             numerator,
             denominator,

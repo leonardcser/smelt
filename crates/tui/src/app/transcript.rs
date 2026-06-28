@@ -6074,12 +6074,14 @@ mod document_tests {
         )
         .expect("sparse scrollbar");
 
+        let sparse_metrics = sparse_bar.metrics(0);
+        let full_metrics = full_bar.metrics(0);
         let mut previous = None;
         for rel_row in 0..viewport_rows {
             let request =
-                sparse_bar.scroll_from_top_for_thumb(sparse_bar.thumb_top_for_click(rel_row));
+                sparse_metrics.scroll_from_thumb_top(sparse_metrics.thumb_top_for_click(rel_row));
             let full_request =
-                full_bar.scroll_from_top_for_thumb(full_bar.thumb_top_for_click(rel_row));
+                full_metrics.scroll_from_thumb_top(full_metrics.thumb_top_for_click(rel_row));
             assert_eq!(
                 request, full_request,
                 "click row {rel_row} mapped differently"
@@ -6103,11 +6105,11 @@ mod document_tests {
             previous = Some(win.scroll_top());
         }
 
-        for thumb_top in 0..=sparse_bar.max_thumb_top() {
-            let request = sparse_bar.scroll_from_top_for_thumb(thumb_top);
+        for thumb_top in 0..=sparse_metrics.max_thumb_top {
+            let request = sparse_metrics.scroll_from_thumb_top(thumb_top);
             assert_eq!(
                 request,
-                full_bar.scroll_from_top_for_thumb(thumb_top),
+                full_metrics.scroll_from_thumb_top(thumb_top),
                 "thumb row {thumb_top} mapped differently"
             );
             win.scroll_to_preserving_cursor_screen_row(request, &buf, viewport_rows);
@@ -6118,7 +6120,7 @@ mod document_tests {
                 requested,
                 "thumb row {thumb_top} snapped after projection"
             );
-            let resolved_thumb = sparse_bar.thumb_top_for_scroll(win.scroll_top());
+            let resolved_thumb = sparse_bar.metrics(win.scroll_top()).thumb_top;
             assert!(
                 resolved_thumb.abs_diff(thumb_top) <= 1,
                 "thumb row {thumb_top} resolved to {resolved_thumb} for scroll {}",

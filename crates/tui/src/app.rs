@@ -1644,7 +1644,11 @@ impl TuiApp {
         self.publish_prompt_resize_state();
 
         let cursor = self.focused_cursor_pos();
+        let viewport = self.focused_viewport_pos();
         self.core.signals.publish_if_changed("cursor_pos", cursor);
+        self.core
+            .signals
+            .publish_if_changed("viewport_pos", viewport);
         self.core.signals.publish_if_changed(
             "transcript_navigation_generation",
             self.transcript.history().navigation_generation(),
@@ -1695,26 +1699,40 @@ impl TuiApp {
     }
 
     /// Cursor position of the focused window, published as `cursor_pos`.
-    /// Returns the default `(0, 0, 0)` when no focused window has lines.
+    /// Returns the default `(0, 0)` when no focused window has rows.
     fn focused_cursor_pos(&self) -> smelt_core::signals::CursorPos {
         let Some(w) = self.ui.focused_window() else {
             return smelt_core::signals::CursorPos::default();
         };
-        let total = self.ui.buf(w.buf).map(|b| b.line_count()).unwrap_or(0);
-        if total == 0 {
+        let Some(buf) = self.ui.buf(w.buf) else {
+            return smelt_core::signals::CursorPos::default();
+        };
+        if w.scroll_row_total(buf) == 0 {
             return smelt_core::signals::CursorPos::default();
         }
-        let line_idx = w.cursor_abs_row();
-        let col = w.cursor_col() as usize;
-        let scroll_pct = if total <= 1 {
-            100u8
-        } else {
-            ((line_idx * 100) / (total.saturating_sub(1) as u64)) as u8
-        };
         smelt_core::signals::CursorPos {
-            line: (line_idx as u32) + 1,
-            col: (col as u32) + 1,
-            scroll_pct: scroll_pct.min(100),
+            line: (w.cursor_abs_row() as u32) + 1,
+            col: (w.cursor_col() as u32) + 1,
+        }
+    }
+
+    /// Viewport position of the focused window, published as `viewport_pos`.
+    /// Row-backed transcript views report progress through their full logical extent.
+    fn focused_viewport_pos(&self) -> smelt_core::signals::ViewportPos {
+        let Some(w) = self.ui.focused_window() else {
+            return smelt_core::signals::ViewportPos::default();
+        };
+        let Some(buf) = self.ui.buf(w.buf) else {
+            return smelt_core::signals::ViewportPos::default();
+        };
+        let viewport_rows = w.viewport.map(|v| v.rect.height).unwrap_or(1);
+        let metrics = crate::smelt_edit::ViewportMetrics::new(
+            w.scroll_top(),
+            w.scroll_row_total(buf),
+            viewport_rows,
+        );
+        smelt_core::signals::ViewportPos {
+            scroll_pct: metrics.scroll_pct,
         }
     }
 

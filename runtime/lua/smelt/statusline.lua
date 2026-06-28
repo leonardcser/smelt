@@ -10,7 +10,7 @@
 -- The built-in `core` source reads engine state from signals plus
 -- `smelt.session.status()` for values that carry pending/stale markers
 -- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
--- `permission_pending`, `keymap_pending`, `vim_pending_input`, `cursor_pos`). Plugins extend the line by
+-- `permission_pending`, `keymap_pending`, `vim_pending_input`, `cursor_pos`, `viewport_pos`). Plugins extend the line by
 -- registering additional sources via `M.add(name, fn)`.
 
 local bar = require("smelt._bar")
@@ -160,9 +160,15 @@ local function core_compose()
   end
 
   local pos = signal("cursor_pos")
+  local viewport = signal("viewport_pos")
   if pos and pos.line and pos.line > 0 then
     items[#items + 1] = {
-      text = string.format("%d:%d %d%%", pos.line, pos.col or 1, pos.scroll_pct or 0),
+      text = string.format(
+        "%d:%d %d%%",
+        pos.line,
+        pos.col or 1,
+        (viewport and viewport.scroll_pct) or 0
+      ),
       style = { fg = "Comment" },
       priority = 3,
       align_right = true,

@@ -79,7 +79,7 @@ pub use window::{
     CursorScreenRowSelection, CursorShape, DocumentCommand, DocumentCopy, DocumentKeyResult,
     DocumentTextObject, DocumentViewExecutor, DocumentViewScreenRowRestore, DocumentViewState,
     DrawContext, EventCtx, MouseCtx, RowYankFlash, ScrollbarState, SplitConfig, VerticalScroll,
-    Window, WindowSurface, WindowViewport,
+    ViewportMetrics, Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -2352,11 +2352,11 @@ impl Ui {
             return;
         };
         let rel_row = row.saturating_sub(vp.rect.top);
-        let current_thumb_top = bar.thumb_top_for_scroll(win.scroll_top());
-        let thumb_grab_row = if bar.is_thumb_at(win.scroll_top(), rel_row) {
-            rel_row.saturating_sub(current_thumb_top)
+        let metrics = bar.metrics(win.scroll_top());
+        let thumb_grab_row = if metrics.is_thumb_at(rel_row) {
+            rel_row.saturating_sub(metrics.thumb_top)
         } else {
-            bar.thumb_size() / 2
+            metrics.thumb_size / 2
         };
         self.scrollbar_drag = Some(ScrollbarDrag {
             owner,
@@ -2370,10 +2370,11 @@ impl Ui {
         let drag = self.scrollbar_drag.filter(|drag| drag.owner == owner);
         let from_top = if let Some(drag) = drag {
             let rel_row = row.saturating_sub(drag.rect_top);
+            let metrics = drag.bar.metrics(0);
             let thumb_top = rel_row
                 .saturating_sub(drag.thumb_grab_row)
-                .min(drag.bar.max_thumb_top());
-            drag.bar.scroll_from_top_for_thumb(thumb_top)
+                .min(metrics.max_thumb_top);
+            metrics.scroll_from_thumb_top(thumb_top)
         } else {
             let Some(win) = self.wins.get(&owner) else {
                 return;
@@ -2385,8 +2386,9 @@ impl Ui {
                 return;
             };
             let rel_row = row.saturating_sub(vp.rect.top);
-            let thumb_top = bar.thumb_top_for_click(rel_row);
-            bar.scroll_from_top_for_thumb(thumb_top)
+            let metrics = bar.metrics(0);
+            let thumb_top = metrics.thumb_top_for_click(rel_row);
+            metrics.scroll_from_thumb_top(thumb_top)
         };
         let Some(win) = self.wins.get(&owner) else {
             return;
