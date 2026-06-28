@@ -2,7 +2,7 @@ use super::*;
 use crate::persist::{PersistAck, PersistFailure, PersistSaveKind};
 use protocol::{
     AssistantStep, Content, EngineEvent, HistoryAppend, HistoryAppendResult, HistoryItem, Role,
-    ToolInvocation, ToolOutcome,
+    TokenUsage, ToolInvocation, ToolOutcome,
 };
 use smelt_core::transcript_model::Block;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -109,6 +109,60 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
         loaded.history.last(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "final generation"
     ));
+}
+
+#[test]
+fn shutdown_flushes_descriptor_only_transcript_blocks() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+
+    app.app.push_block(Block::Thinking {
+        content: "descriptor-only interrupted thinking".into(),
+    });
+    app.app.save_session_and_flush();
+
+    let db = smelt_store::SessionDb::open_read_only(
+        smelt_core::session::dir_for_id(&session_id).join("session.db"),
+    )
+    .unwrap();
+    let rows = db.read_all_transcript_descriptor_records().unwrap();
+    assert!(
+        rows.iter().any(|row| row
+            .preview_text
+            .contains("descriptor-only interrupted thinking")),
+        "descriptor-only transcript block should be durable: {rows:#?}"
+    );
+}
+
+#[test]
+fn store_backed_resume_preserves_context_token_identity() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("token identity prompt")));
+        app.app.record_visible_token_usage(TokenUsage {
+            context_tokens: Some(1234),
+            ..Default::default()
+        });
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    let identity = resumed.app.active_context_token_identity();
+
+    assert_eq!(
+        resumed.app.core.session.display_context_tokens(),
+        Some(1234)
+    );
+    assert!(!resumed
+        .app
+        .core
+        .session
+        .display_context_tokens_stale(&identity));
 }
 
 #[test]

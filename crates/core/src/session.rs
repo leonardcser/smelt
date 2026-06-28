@@ -700,6 +700,10 @@ pub struct SessionMeta {
     #[serde(default)]
     pub context_tokens: Option<u32>,
     #[serde(default)]
+    pub context_token_identity: Option<ContextTokenIdentity>,
+    #[serde(default)]
+    pub display_context_token_identity: Option<ContextTokenIdentity>,
+    #[serde(default)]
     pub history_len: Option<usize>,
     #[serde(default)]
     pub checkpoint: Option<ContextCheckpoint>,
@@ -709,6 +713,16 @@ pub struct SessionMeta {
     pub text_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration: Option<SessionMigrationStatus>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SessionAccountingState {
+    #[serde(default)]
+    session_usage: TokenUsage,
+    #[serde(default)]
+    context_token_identity: Option<ContextTokenIdentity>,
+    #[serde(default)]
+    display_context_token_identity: Option<ContextTokenIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -796,6 +810,10 @@ impl From<&Session> for SessionJsonlMeta {
 
 impl SessionJsonlMeta {
     fn into_session(self, history: Vec<HistoryItem>) -> Session {
+        let display_context_token_identity = self
+            .display_context_token_identity
+            .clone()
+            .or_else(|| self.context_token_identity.clone());
         Session {
             id: self.id,
             title: self.title,
@@ -815,7 +833,7 @@ impl SessionJsonlMeta {
             context_tokens_history_len: self.context_tokens_history_len,
             context_token_identity: self.context_token_identity,
             display_context_tokens: self.display_context_tokens.or(self.context_tokens),
-            display_context_token_identity: self.display_context_token_identity,
+            display_context_token_identity,
             turn_metas: self.turn_metas,
             context_snapshots: self.context_snapshots,
             session_cost_usd: self.session_cost_usd,
@@ -872,6 +890,8 @@ impl Session {
             cwd: self.cwd.clone(),
             parent_id: self.parent_id.clone(),
             context_tokens: self.display_context_tokens(),
+            context_token_identity: self.context_token_identity.clone(),
+            display_context_token_identity: self.display_context_token_identity.clone(),
             history_len: Some(self.history.len()),
             checkpoint: self.checkpoint.clone(),
             text_bytes: Some(compute_text_bytes(&self.history)),
@@ -1485,6 +1505,31 @@ pub fn store_side_table_suffixes_from_session_at(
     })
 }
 
+fn accounting_state_from_session(session: &Session) -> SessionAccountingState {
+    SessionAccountingState {
+        session_usage: session.session_usage.clone(),
+        context_token_identity: session.context_token_identity.clone(),
+        display_context_token_identity: session.display_context_token_identity.clone(),
+    }
+}
+
+fn accounting_state_from_json(value: Option<Value>) -> SessionAccountingState {
+    let Some(value) = value else {
+        return SessionAccountingState::default();
+    };
+    if value
+        .as_object()
+        .is_some_and(|object| object.contains_key("session_usage"))
+    {
+        serde_json::from_value(value).unwrap_or_default()
+    } else {
+        SessionAccountingState {
+            session_usage: serde_json::from_value(value).unwrap_or_default(),
+            ..SessionAccountingState::default()
+        }
+    }
+}
+
 pub fn store_state_from_session(
     session: &Session,
     history_len: usize,
@@ -1501,7 +1546,9 @@ pub fn store_state_from_session(
             .map(|effort| effort.label().to_string()),
         model: session.model.clone(),
         parent_id: session.parent_id.clone(),
-        accounting_json: Some(serde_json::to_value(&session.session_usage)?),
+        accounting_json: Some(serde_json::to_value(accounting_state_from_session(
+            session,
+        ))?),
         checkpoint_json: session
             .checkpoint
             .as_ref()
@@ -1784,11 +1831,12 @@ fn session_from_store_snapshot(
     let metadata_snapshots = snapshots_from_values(snapshot.metadata_snapshots).unwrap_or_default();
     let context_snapshots =
         snapshots_from_values(snapshot.accounting_snapshots).unwrap_or_default();
-    let session_usage = state
-        .accounting_json
-        .clone()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
+    let accounting = accounting_state_from_json(state.accounting_json.clone());
+    let session_usage = accounting.session_usage.clone();
+    let context_token_identity = accounting.context_token_identity;
+    let display_context_token_identity = accounting
+        .display_context_token_identity
+        .or_else(|| context_token_identity.clone());
     let checkpoint = state
         .checkpoint_json
         .clone()
@@ -1818,12 +1866,12 @@ fn session_from_store_snapshot(
         context_tokens_history_len: state
             .context_tokens_history_len
             .and_then(|len| usize::try_from(len).ok()),
-        context_token_identity: None,
+        context_token_identity,
         display_context_tokens: state
             .display_context_tokens
             .and_then(|tokens| u32::try_from(tokens).ok())
             .or(context_tokens),
-        display_context_token_identity: None,
+        display_context_token_identity,
         turn_metas,
         context_snapshots,
         session_cost_usd: state.session_cost_usd,
@@ -1949,6 +1997,11 @@ fn sqlite_session_artifacts_look_current(
     let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) else {
         return false;
     };
+    let accounting = accounting_state_from_json(state.accounting_json.clone());
+    let context_token_identity = accounting.context_token_identity;
+    let display_context_token_identity = accounting
+        .display_context_token_identity
+        .or_else(|| context_token_identity.clone());
     meta.id == state.id
         && meta.title == state.title
         && meta.slug == state.slug
@@ -1965,6 +2018,8 @@ fn sqlite_session_artifacts_look_current(
             == state
                 .display_context_tokens
                 .and_then(|tokens| u32::try_from(tokens).ok())
+        && meta.context_token_identity == context_token_identity
+        && meta.display_context_token_identity == display_context_token_identity
         && meta.history_len == Some(state.history_len as usize)
         && meta.text_bytes.is_some()
 }
@@ -2807,18 +2862,25 @@ fn load_meta_sidecar(path: &Path, contents: &str, mode: MetaLoadMode) -> Option<
         return Some(meta);
     }
 
-    let checkpoint_field_present = serde_json::from_str::<Value>(contents)
+    let sidecar_fields = serde_json::from_str::<Value>(contents)
         .ok()
-        .and_then(|value| {
-            value
-                .as_object()
-                .map(|object| object.contains_key("checkpoint"))
-        })
-        .unwrap_or(false);
+        .and_then(|value| value.as_object().cloned());
+    let checkpoint_field_present = sidecar_fields
+        .as_ref()
+        .is_some_and(|object| object.contains_key("checkpoint"));
+    let token_identity_fields_present = sidecar_fields.as_ref().is_some_and(|object| {
+        object.contains_key("context_token_identity")
+            && object.contains_key("display_context_token_identity")
+    });
     if meta.text_bytes.is_none() {
         backfill_text_bytes(path, &mut meta);
     }
-    if enrich_meta_from_db(path, &mut meta, checkpoint_field_present) {
+    if enrich_meta_from_db(
+        path,
+        &mut meta,
+        checkpoint_field_present,
+        token_identity_fields_present,
+    ) {
         write_meta(path, &meta);
     }
     Some(meta)
@@ -2828,8 +2890,9 @@ fn enrich_meta_from_db(
     path: &Path,
     meta: &mut SessionMeta,
     checkpoint_field_present: bool,
+    token_identity_fields_present: bool,
 ) -> bool {
-    if meta.history_len.is_some() && checkpoint_field_present {
+    if meta.history_len.is_some() && checkpoint_field_present && token_identity_fields_present {
         return false;
     }
     let db_path = path.join("session.db");
@@ -2839,15 +2902,34 @@ fn enrich_meta_from_db(
     let Ok(Some(state)) = db.session_state() else {
         return false;
     };
+    let mut changed = false;
     if meta.history_len.is_none() {
         meta.history_len = Some(state.history_len as usize);
+        changed = true;
     }
     if !checkpoint_field_present {
         meta.checkpoint = state
             .checkpoint_json
             .and_then(|value| serde_json::from_value(value).ok());
+        changed = true;
     }
-    true
+    let accounting = accounting_state_from_json(state.accounting_json);
+    let context_token_identity = accounting.context_token_identity;
+    let display_context_token_identity = accounting
+        .display_context_token_identity
+        .or_else(|| context_token_identity.clone());
+    if !token_identity_fields_present {
+        changed = true;
+    }
+    if meta.context_token_identity.is_none() && context_token_identity.is_some() {
+        meta.context_token_identity = context_token_identity;
+        changed = true;
+    }
+    if meta.display_context_token_identity.is_none() && display_context_token_identity.is_some() {
+        meta.display_context_token_identity = display_context_token_identity;
+        changed = true;
+    }
+    changed
 }
 
 fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
@@ -2866,6 +2948,8 @@ fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
         cwd: None,
         parent_id: None,
         context_tokens: None,
+        context_token_identity: None,
+        display_context_token_identity: None,
         history_len: None,
         checkpoint: None,
         text_bytes: None,
@@ -2911,8 +2995,16 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
         .checkpoint_json
         .clone()
         .and_then(|value| serde_json::from_value(value).ok());
+    let accounting = accounting_state_from_json(state.accounting_json.clone());
     if let Some(meta_json) = db.meta("session_meta_json").ok().flatten() {
         if let Ok(meta) = serde_json::from_str::<SessionJsonlMeta>(&meta_json) {
+            let context_token_identity = meta
+                .context_token_identity
+                .or_else(|| accounting.context_token_identity.clone());
+            let display_context_token_identity = meta
+                .display_context_token_identity
+                .or_else(|| accounting.display_context_token_identity.clone())
+                .or_else(|| context_token_identity.clone());
             return Some(SessionMeta {
                 id: meta.id,
                 title: meta.title,
@@ -2926,6 +3018,8 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
                 cwd: meta.cwd,
                 parent_id: meta.parent_id,
                 context_tokens: meta.display_context_tokens.or(meta.context_tokens),
+                context_token_identity,
+                display_context_token_identity,
                 history_len: Some(state.history_len as usize),
                 checkpoint,
                 text_bytes,
@@ -2933,6 +3027,10 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
             });
         }
     }
+    let context_token_identity = accounting.context_token_identity;
+    let display_context_token_identity = accounting
+        .display_context_token_identity
+        .or_else(|| context_token_identity.clone());
     Some(SessionMeta {
         id: state.id,
         title: state.title,
@@ -2952,6 +3050,8 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
             .display_context_tokens
             .or(state.context_tokens)
             .and_then(|tokens| u32::try_from(tokens).ok()),
+        context_token_identity,
+        display_context_token_identity,
         history_len: Some(state.history_len as usize),
         checkpoint,
         text_bytes,
@@ -4465,6 +4565,8 @@ mod tests {
             cwd: None,
             parent_id: None,
             context_tokens: None,
+            context_token_identity: None,
+            display_context_token_identity: None,
             history_len: None,
             checkpoint: None,
             text_bytes: None,

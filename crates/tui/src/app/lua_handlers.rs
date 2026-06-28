@@ -352,6 +352,10 @@ impl TuiApp {
             session.parent_id = meta.parent_id;
             session.checkpoint = meta.checkpoint.clone();
             session.display_context_tokens = meta.context_tokens;
+            session.context_token_identity = meta.context_token_identity.clone();
+            session.display_context_token_identity = meta
+                .display_context_token_identity
+                .or(meta.context_token_identity);
             self.load_store_backed_session(
                 session,
                 transcript,

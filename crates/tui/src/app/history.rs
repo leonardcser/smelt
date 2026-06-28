@@ -60,6 +60,8 @@ pub(crate) fn live_session_for_test(
             cwd: None,
             parent_id: None,
             context_tokens: None,
+            context_token_identity: None,
+            display_context_token_identity: None,
             history_len: Some(persisted_history_len),
             checkpoint,
             text_bytes: None,
@@ -1937,19 +1939,41 @@ impl TuiApp {
         self.core.session.model = Some(self.current_model_key());
     }
 
+    fn session_journal_has_unflushed_work(&self) -> bool {
+        if self.ephemeral() || self.session_access.is_read_only() {
+            return false;
+        }
+        if self.session_persist.pending_save.is_some() || self.session_persist.save_pending {
+            return true;
+        }
+        let live_history_dirty = self
+            .live_session
+            .as_ref()
+            .and_then(|live| live.dirty.history_from)
+            .is_some();
+        self.session_persist.session_dirty
+            || self.session_persist.dirty_history_from.is_some()
+            || live_history_dirty
+            || self.transcript.history().descriptor_dirty_from().is_some()
+            || (!self.session_persist.store_ready && self.session_history_len() > 0)
+            || (!self.session_persist.descriptors_persisted
+                && !self.transcript.history().is_empty())
+    }
+
     /// Save the current session, then block until all persistence work triggered by
-    /// that save has either completed or stopped scheduling follow-up writes.
+    /// that save has either completed or the journal can no longer make progress.
     pub(crate) fn save_session_and_flush(&mut self) {
         self.save_session();
-        for _ in 0..8 {
+        for _ in 0..64 {
             self.flush_persist();
-            if self.session_persist.pending_save.is_none() && !self.session_persist.save_pending {
+            if !self.session_journal_has_unflushed_work() {
                 break;
             }
             if self.session_persist.pending_save.is_none() {
                 self.save_session();
             }
         }
+        self.flush_persist();
     }
 
     /// Block until all queued persist writes complete. Call before reading session files from disk.

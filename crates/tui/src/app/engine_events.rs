@@ -50,6 +50,7 @@ impl TuiApp {
                     self.core
                         .session
                         .record_context_tokens(tokens, self.active_context_token_identity());
+                    self.mark_session_dirty();
                     self.context_tokens_updated_this_turn = true;
                     if self.active_provider_supports_mid_turn_reasoning_changes() {
                         self.sync_reasoning_effort_applied();
