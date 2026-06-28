@@ -130,6 +130,21 @@ impl TuiApp {
             HostCall::RecoverFromContextLimit { messages, reply } => {
                 self.dispatch_recover_from_context_limit(messages, reply);
             }
+            HostCall::RequestAudit {
+                session_dir,
+                entry,
+                payload_mode,
+            } => {
+                if !self.ephemeral() && !self.session_access.is_read_only() {
+                    self.persister
+                        .append_request_audit(crate::persist::PersistRequestAudit {
+                            session_id: self.core.session.id.clone(),
+                            session_dir,
+                            entry: *entry,
+                            payload_mode,
+                        });
+                }
+            }
             HostCall::PrepareRequest {
                 messages,
                 estimated_tokens,

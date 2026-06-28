@@ -2091,6 +2091,12 @@ impl TuiApp {
             match report {
                 crate::persist::PersistReport::Saved(ack) => self.ack_persist_save(ack),
                 crate::persist::PersistReport::Failed(err) => self.fail_persist_save(err),
+                crate::persist::PersistReport::RequestAuditFailed(err) => {
+                    self.notify_warn(format!(
+                        "request audit write failed for session {}: {}",
+                        err.session_id, err.message
+                    ));
+                }
             }
         }
     }
@@ -2893,6 +2899,7 @@ impl TuiApp {
                 .signals
                 .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
             app.drain_signals_pending();
+            app.drain_host_calls();
             app.stop_background_processes();
             app.save_session_and_flush();
         });

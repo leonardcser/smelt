@@ -23,31 +23,22 @@ fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn open_request_audit_db(
-    session_dir: &Path,
-    mode: crate::RequestAuditMode,
-) -> Result<Option<smelt_store::SessionDb>, smelt_store::StoreError> {
-    if mode.payload_mode().is_none() {
-        return Ok(None);
-    }
-    let db_path = session_dir.join("session.db");
-    if !db_path.is_file() {
-        return Ok(None);
-    }
-    smelt_store::SessionDb::open(db_path).map(Some)
-}
-
-fn append_request_audit_to_existing_session(
+fn dispatch_request_audit(
+    host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
     session_dir: &Path,
     ctx: crate::request_log::RequestContext,
     info: &crate::provider::RequestAttemptInfo<'_>,
     pricing: &crate::pricing::ResolvedPricing,
     mode: crate::RequestAuditMode,
-) -> Result<(), smelt_store::StoreError> {
-    if let Some(db) = open_request_audit_db(session_dir, mode)? {
-        let _ = crate::request_log::append(&db, ctx, info, pricing, mode)?;
-    }
-    Ok(())
+) {
+    let Some((entry, payload_mode)) = crate::request_log::entry(ctx, info, pricing, mode) else {
+        return;
+    };
+    let _ = host_tx.send(crate::host::HostCall::RequestAudit {
+        session_dir: session_dir.to_path_buf(),
+        entry: Box::new(entry),
+        payload_mode,
+    });
 }
 
 fn last_note_kind(items: &[HistoryItem]) -> Option<protocol::HistoryNoteKind> {
@@ -197,6 +188,7 @@ pub(crate) async fn engine_task(
                             http_client: &client,
                             dispatcher: &*dispatcher,
                             event_tx: &event_tx,
+                            host_tx: &host_tx,
                             bg_cancel: bg_cancel.clone(),
                         };
                         let _ = dispatch_background_cmd(other, &ctx);
@@ -310,6 +302,7 @@ pub(crate) struct BackgroundCtx<'a> {
     pub http_client: &'a reqwest::Client,
     pub dispatcher: &'a dyn ToolDispatcher,
     pub event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
+    pub host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
     pub bg_cancel: crate::cancel::CancellationToken,
 }
 
@@ -354,6 +347,7 @@ pub(crate) fn dispatch_background_cmd(
                     visible_retries,
                 },
                 ctx.event_tx,
+                ctx.host_tx,
                 ctx.bg_cancel.clone(),
             );
             None
@@ -368,6 +362,7 @@ fn spawn_engine_ask(
     dispatcher: &dyn ToolDispatcher,
     task: AskTask,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
+    host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
     cancel: crate::cancel::CancellationToken,
 ) {
     let AskTask {
@@ -411,6 +406,7 @@ fn spawn_engine_ask(
     let tx = event_tx.clone();
     let cache_ttl_long = config.cache_ttl_long;
     let audit_mode = config.request_audit;
+    let audit_host_tx = host_tx.clone();
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
         let log_session_dir = session_dir.clone();
@@ -463,7 +459,6 @@ fn spawn_engine_ask(
                 opts.on_delta = Some(&on_delta);
             }
             let log_pricing = pricing.clone();
-            let audit_tx = tx.clone();
             let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
                 let resolved = crate::pricing::resolve(
                     info.model,
@@ -479,17 +474,14 @@ fn spawn_engine_ask(
                     history_len: None,
                     background: true,
                 };
-                if let Err(err) = append_request_audit_to_existing_session(
+                dispatch_request_audit(
+                    &audit_host_tx,
                     &log_session_dir,
                     ctx,
                     &info,
                     &resolved,
                     audit_mode,
-                ) {
-                    let _ = audit_tx.send(EngineEvent::RequestAuditError {
-                        message: format!("request audit write failed: {err}"),
-                    });
-                }
+                );
             };
             opts.on_attempt = Some(&on_attempt);
             provider
@@ -1270,6 +1262,7 @@ impl<'a> Turn<'a> {
             http_client: self.http_client,
             dispatcher: self.dispatcher,
             event_tx: self.event_tx,
+            host_tx: self.host_tx,
             bg_cancel: self.bg_cancel.clone(),
         }
     }
@@ -1962,6 +1955,7 @@ impl<'a> Turn<'a> {
             http_client: self.http_client,
             dispatcher,
             event_tx: self.event_tx,
+            host_tx: self.host_tx,
             bg_cancel: self.bg_cancel.clone(),
         };
         let mut deferred: Vec<UiCommand> = Vec::new();
@@ -2514,7 +2508,7 @@ impl<'a> Turn<'a> {
                 self.provider.model_config(),
             );
             let session_dir = self.session_dir.clone();
-            let event_tx = self.event_tx.clone();
+            let audit_host_tx = self.host_tx.clone();
             let turn_id = self.turn_id;
             let history_len = self.history.len();
             let audit_mode = self.config.request_audit;
@@ -2533,17 +2527,14 @@ impl<'a> Turn<'a> {
                     history_len: Some(history_len),
                     background: false,
                 };
-                if let Err(err) = append_request_audit_to_existing_session(
+                dispatch_request_audit(
+                    &audit_host_tx,
                     &session_dir,
                     ctx,
                     &info,
                     &pricing,
                     audit_mode,
-                ) {
-                    let _ = event_tx.send(EngineEvent::RequestAuditError {
-                        message: format!("request audit write failed: {err}"),
-                    });
-                }
+                );
             };
             let opts = ChatOptions {
                 cancel: &self.cancel,
@@ -2722,16 +2713,6 @@ impl PricingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn open_request_audit_db_skips_missing_database() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let db = open_request_audit_db(dir.path(), crate::RequestAuditMode::Full).unwrap();
-
-        assert!(db.is_none());
-        assert!(!dir.path().join("session.db").exists());
-    }
 
     #[test]
     fn load_model_history_reads_requested_store_range() {

@@ -2,7 +2,19 @@
 
 use protocol::request_log::{RequestError, RequestLogEntry, RequestResponse};
 
+/// Build one request audit entry and choose its storage payload mode.
+pub fn entry(
+    ctx: RequestContext,
+    info: &crate::provider::RequestAttemptInfo<'_>,
+    pricing: &crate::pricing::ResolvedPricing,
+    mode: crate::RequestAuditMode,
+) -> Option<(RequestLogEntry, smelt_store::RequestAuditPayloadMode)> {
+    mode.payload_mode()
+        .map(|payload_mode| (build_entry(ctx, info, pricing), payload_mode))
+}
+
 /// Append one request attempt to the session's SQLite request audit.
+#[cfg(test)]
 pub fn append(
     db: &smelt_store::SessionDb,
     ctx: RequestContext,
@@ -10,10 +22,9 @@ pub fn append(
     pricing: &crate::pricing::ResolvedPricing,
     mode: crate::RequestAuditMode,
 ) -> Result<Option<i64>, smelt_store::StoreError> {
-    let Some(payload_mode) = mode.payload_mode() else {
+    let Some((entry, payload_mode)) = entry(ctx, info, pricing, mode) else {
         return Ok(None);
     };
-    let entry = build_entry(ctx, info, pricing);
     db.append_request_attempt(&entry, payload_mode).map(Some)
 }
 

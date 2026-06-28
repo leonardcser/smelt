@@ -263,12 +263,14 @@ impl SessionDb {
         entry: &protocol::request_log::RequestLogEntry,
         payload_mode: request_audit::RequestAuditPayloadMode,
     ) -> Result<i64> {
-        request_audit::append_request_attempt(
-            &self.conn,
-            entry,
-            self.object_compression,
-            payload_mode,
-        )
+        self.immediate_transaction(|conn| {
+            request_audit::append_request_attempt(
+                conn,
+                entry,
+                self.object_compression,
+                payload_mode,
+            )
+        })
     }
 
     pub fn query_request_attempts(

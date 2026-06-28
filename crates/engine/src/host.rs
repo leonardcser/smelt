@@ -12,6 +12,7 @@
 //! HashMap on the engine, no `*Response` variants on `UiCommand`.
 
 use protocol::Message;
+use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
@@ -46,6 +47,15 @@ pub enum HostCall {
     RecoverFromContextLimit {
         messages: Vec<Message>,
         reply: oneshot::Sender<HostRequestDecision>,
+    },
+
+    /// Append a provider request audit row through the host's session
+    /// persistence worker. The worker owns the session database writer, so
+    /// audit writes stay ordered with history and metadata saves.
+    RequestAudit {
+        session_dir: PathBuf,
+        entry: Box<protocol::request_log::RequestLogEntry>,
+        payload_mode: smelt_store::RequestAuditPayloadMode,
     },
 
     /// Engine is about to send a model request. The host may replace

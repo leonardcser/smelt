@@ -45,6 +45,19 @@ pub(crate) struct PersistMetadataRequest {
     pub(crate) side_tables: smelt_store::SessionSideTableSuffixes,
 }
 
+pub(crate) struct PersistRequestAudit {
+    pub(crate) session_id: String,
+    pub(crate) session_dir: PathBuf,
+    pub(crate) entry: protocol::request_log::RequestLogEntry,
+    pub(crate) payload_mode: smelt_store::RequestAuditPayloadMode,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PersistRequestAuditFailure {
+    pub(crate) session_id: String,
+    pub(crate) message: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PersistSaveKind {
     History,
@@ -70,11 +83,13 @@ pub(crate) struct PersistFailure {
 pub(crate) enum PersistReport {
     Saved(PersistAck),
     Failed(PersistFailure),
+    RequestAuditFailed(PersistRequestAuditFailure),
 }
 
 enum Cmd {
     Save(Box<PersistRequest>),
     SaveMetadata(Box<PersistMetadataRequest>),
+    AppendRequestAudit(Box<PersistRequestAudit>),
     Flush(Sender<()>),
 }
 
@@ -108,6 +123,12 @@ impl Persister {
     pub(crate) fn save_metadata(&self, req: PersistMetadataRequest) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::SaveMetadata(Box::new(req)));
+        }
+    }
+
+    pub(crate) fn append_request_audit(&self, req: PersistRequestAudit) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::AppendRequestAudit(Box::new(req)));
         }
     }
 
@@ -171,6 +192,13 @@ fn worker_loop(rx: Receiver<Cmd>, reports: Sender<PersistReport>) {
             Cmd::SaveMetadata(req) => {
                 report_metadata_result(write_metadata(&req, &mut db_cache), &req, &reports);
             }
+            Cmd::AppendRequestAudit(req) => {
+                report_request_audit_result(
+                    write_request_audit(&req, &mut db_cache),
+                    &req,
+                    &reports,
+                );
+            }
             Cmd::Flush(done) => {
                 let _ = done.send(());
             }
@@ -218,6 +246,21 @@ fn report_metadata_result(
         }),
     };
     let _ = reports.send(report);
+}
+
+fn report_request_audit_result(
+    result: Result<i64, String>,
+    req: &PersistRequestAudit,
+    reports: &Sender<PersistReport>,
+) {
+    if let Err(message) = result {
+        let _ = reports.send(PersistReport::RequestAuditFailed(
+            PersistRequestAuditFailure {
+                session_id: req.session_id.clone(),
+                message,
+            },
+        ));
+    }
 }
 
 fn record_save_report(save_report: &smelt_store::SessionSaveReport) {
@@ -324,6 +367,21 @@ fn write_metadata(
     smelt_core::session::write_db_meta_sidecar(&req.session_dir)
         .map_err(|err| format!("write session metadata: {err}"))?;
     Ok(save_report)
+}
+
+fn write_request_audit(
+    req: &PersistRequestAudit,
+    db_cache: &mut PersistDbCache,
+) -> Result<i64, String> {
+    let _perf = smelt_perf::perf::begin("persist:request_audit");
+    std::fs::create_dir_all(&req.session_dir)
+        .map_err(|err| format!("create session directory: {err}"))?;
+    let db_path = req.session_dir.join("session.db");
+    let db = db_cache
+        .db(&db_path)
+        .map_err(|err| format!("open session database: {err}"))?;
+    db.append_request_attempt(&req.entry, req.payload_mode)
+        .map_err(|err| err.to_string())
 }
 
 fn write_blobs(
@@ -447,5 +505,53 @@ mod tests {
         assert_eq!(row.block_idx, 303);
         assert_eq!(row.history_idx, None);
         assert_eq!(row.origin_json, None);
+    }
+
+    #[test]
+    fn request_audit_is_written_by_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let persister = Persister::spawn();
+        persister.append_request_audit(PersistRequestAudit {
+            session_id: "session-a".into(),
+            session_dir: dir.path().to_path_buf(),
+            payload_mode: smelt_store::RequestAuditPayloadMode::Summary,
+            entry: protocol::request_log::RequestLogEntry {
+                request_id: 42,
+                kind: "turn".into(),
+                turn_id: Some(42),
+                ask_id: None,
+                history_len: Some(1),
+                timestamp_ms: 1000,
+                provider_kind: "openai".into(),
+                api_base: "https://api.example.test".into(),
+                model: "model-a".into(),
+                url: "https://api.example.test/v1/chat/completions".into(),
+                http_status: Some(200),
+                body: serde_json::json!({"model": "model-a"}),
+                prompt_cache_key: None,
+                stream: true,
+                system_prompt: None,
+                messages: None,
+                tools: None,
+                response: None,
+                usage: None,
+                cost_usd: None,
+                tokens_per_sec: None,
+                elapsed_ms: Some(250),
+                attempt: 1,
+                error: None,
+                background: false,
+            },
+        });
+
+        persister.flush();
+        assert!(persister.drain_reports().is_empty());
+
+        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+        let attempts = db
+            .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].request_id.as_deref(), Some("42"));
     }
 }
