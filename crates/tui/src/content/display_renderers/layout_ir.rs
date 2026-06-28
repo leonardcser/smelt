@@ -1854,7 +1854,7 @@ fn emit_buffer_row_clipped(
     let mut highlights = buf.highlights_at(row as usize);
     highlights.sort_by_key(|h| h.col_start);
 
-    let chars: Vec<char> = text.chars().collect();
+    let text_width = display_width_u16(text);
     let mut emitted_cols: u16 = 0;
     let mut col_idx: u16 = 0;
 
@@ -1865,36 +1865,35 @@ fn emit_buffer_row_clipped(
             continue;
         }
         if h.col_start > col_idx {
-            let plain: String = chars[col_idx as usize..h.col_start as usize]
-                .iter()
-                .collect();
+            let end = h.col_start.min(text_width);
+            let plain = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
             let style = style_overlay.map(|overlay| overlay_style(None, overlay));
             let used = emit_clipped(
                 out,
-                &plain,
+                plain,
                 style,
                 SpanMeta::default(),
                 max_cols,
                 emitted_cols,
             );
             emitted_cols = emitted_cols.saturating_add(used);
-            col_idx = h.col_start;
+            col_idx = end;
             if emitted_cols >= max_cols {
                 return emitted_cols;
             }
         }
-        let end = h.col_end.min(chars.len() as u16);
+        let end = h.col_end.min(text_width);
         if end <= col_idx {
             continue;
         }
-        let segment: String = chars[col_idx as usize..end as usize].iter().collect();
+        let segment = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
         let style = overlay_style(
             Some(theme_clone.resolve(h.hl)),
             style_overlay.unwrap_or_default(),
         );
         let used = emit_clipped(
             out,
-            &segment,
+            segment,
             Some(style),
             h.meta.clone(),
             max_cols,
@@ -1906,12 +1905,12 @@ fn emit_buffer_row_clipped(
             return emitted_cols;
         }
     }
-    if (col_idx as usize) < chars.len() && emitted_cols < max_cols {
-        let tail: String = chars[col_idx as usize..].iter().collect();
+    if col_idx < text_width && emitted_cols < max_cols {
+        let tail = smelt_buffer::text::slice_cells(text, col_idx as usize, text_width as usize);
         let style = style_overlay.map(|overlay| overlay_style(None, overlay));
         let used = emit_clipped(
             out,
-            &tail,
+            tail,
             style,
             SpanMeta::default(),
             max_cols,
@@ -1973,7 +1972,9 @@ fn emit_clipped(
 mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
-    use smelt_core::content::block_layout::{CapKeep, CapMarker, CapSpec, LayoutLeaf, TextSpec};
+    use smelt_core::content::block_layout::{
+        CapKeep, CapMarker, CapSpec, LayoutLeaf, LineSpec, RowPrefixSpec, TextSpec,
+    };
 
     fn render_lines(layout: &LayoutIr, width: u16) -> Vec<String> {
         let theme = Theme::default();
@@ -2006,6 +2007,35 @@ mod tests {
         assert_eq!(emitted, 10);
         assert_eq!(display_width(line), 10);
         assert_eq!(line, "abcdefghi\u{7f}");
+    }
+
+    #[test]
+    fn replaying_temp_rows_with_wide_chars_uses_display_columns() {
+        let layout = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                spans: vec![
+                    protocol::StyledSpan {
+                        text: "aaaaaaaaaaaaaaaaaaaaaaaaaaa界界".into(),
+                        ..Default::default()
+                    },
+                    protocol::StyledSpan {
+                        text: "x".into(),
+                        hl: Some("accent".into()),
+                        ..Default::default()
+                    },
+                ],
+                hl_group: None,
+            }))),
+            spec: RowPrefixSpec {
+                first: Vec::new(),
+                rest: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            render_lines(&layout, 80),
+            vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaa界界x"]
+        );
     }
 
     #[test]

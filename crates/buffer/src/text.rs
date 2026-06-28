@@ -34,6 +34,16 @@ pub fn cell_to_byte(line: &str, cell: usize) -> usize {
     exact.unwrap_or(line.len())
 }
 
+/// Slice a string by terminal display columns.
+///
+/// Endpoints are converted through [`cell_to_byte`] and then passed through
+/// [`slice`], so ranges clamp to the string and always land on UTF-8 boundaries.
+pub fn slice_cells(s: &str, start: usize, end: usize) -> &str {
+    let start = cell_to_byte(s, start);
+    let end = cell_to_byte(s, end);
+    slice(s, start..end)
+}
+
 /// Build byte offsets for the start of each line in `lines.join("\n")`.
 pub fn line_start_offsets(lines: &[String]) -> Vec<usize> {
     let mut v = Vec::with_capacity(lines.len());
@@ -325,6 +335,14 @@ mod tests {
             let cell = byte_to_cell(s, pos);
             assert_eq!(cell_to_byte(s, cell), pos, "{s:?}");
         }
+    }
+
+    #[test]
+    fn slice_cells_uses_display_columns_and_safe_boundaries() {
+        assert_eq!(slice_cells("a界界x", 1, 5), "界界");
+        assert_eq!(slice_cells("a界界x", 2, 4), "界");
+        assert_eq!(slice_cells("abc", 2, 99), "c");
+        assert_eq!(slice_cells("abc", 3, 2), "");
     }
 
     // ── char_pos / byte_of_char ───────────────────────────────────────────

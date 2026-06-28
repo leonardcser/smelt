@@ -649,7 +649,7 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut LineBuilder) {
             continue;
         }
         if h.col_start > col_idx {
-            let plain = slice_cells(text, col_idx, h.col_start).to_string();
+            let plain = text::slice_cells(text, col_idx as usize, h.col_start as usize).to_string();
             out.print(&plain);
             col_idx = h.col_start;
         }
@@ -657,21 +657,15 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut LineBuilder) {
         if end <= col_idx {
             continue;
         }
-        let segment = slice_cells(text, col_idx, end).to_string();
+        let segment = text::slice_cells(text, col_idx as usize, end as usize).to_string();
         let style = out.theme.resolve(h.hl);
         out.append_resolved_span(&segment, style, h.meta.clone());
         col_idx = end;
     }
     if (col_idx as usize) < display_width(text) {
-        let tail = slice_cells(text, col_idx, display_width(text) as u16).to_string();
+        let tail = text::slice_cells(text, col_idx as usize, display_width(text)).to_string();
         out.print(&tail);
     }
-}
-
-fn slice_cells(s: &str, start: u16, end: u16) -> &str {
-    let start = text::cell_to_byte(s, start as usize);
-    let end = text::cell_to_byte(s, end as usize);
-    text::slice(s, start..end)
 }
 
 impl<'a> LineBuilder<'a> {
@@ -734,7 +728,8 @@ pub mod test_util {
                         continue;
                     }
                     if h.col_start > col {
-                        let plain = slice_cells(&text, col, h.col_start).to_string();
+                        let plain = text::slice_cells(&text, col as usize, h.col_start as usize)
+                            .to_string();
                         spans.push(TestSpan {
                             text: plain,
                             style: Style::default(),
@@ -746,7 +741,7 @@ pub mod test_util {
                     if end <= col {
                         continue;
                     }
-                    let segment = slice_cells(&text, col, end).to_string();
+                    let segment = text::slice_cells(&text, col as usize, end as usize).to_string();
                     let style = theme.resolve(h.hl);
                     spans.push(TestSpan {
                         text: segment,
@@ -756,7 +751,7 @@ pub mod test_util {
                     col = end;
                 }
                 if col < width {
-                    let tail = slice_cells(&text, col, width).to_string();
+                    let tail = text::slice_cells(&text, col as usize, width as usize).to_string();
                     spans.push(TestSpan {
                         text: tail,
                         style: Style::default(),
