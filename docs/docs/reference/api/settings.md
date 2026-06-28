@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.transcript` is a Lua table for transcript display preferences. UiHost-only.
+Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. UiHost-only.
 
 ## `smelt.settings.schema`
 

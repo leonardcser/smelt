@@ -8,6 +8,14 @@
 
 Terminal integration helpers. UiHost-only.
 
+## `smelt.terminal.bell`
+
+```lua
+fun(): boolean
+```
+
+Ring the terminal bell (BEL). Returns false when no interactive terminal is attached.
+
 ## `smelt.terminal.clear_title`
 
 ```lua
@@ -23,6 +31,14 @@ fun(): table
 ```
 
 Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.
+
+## `smelt.terminal.osc9_notify`
+
+```lua
+fun(message: string, opts: table?): boolean
+```
+
+Post an OSC 9 terminal notification with `message`. Pass `{ dcs_passthrough = true }` inside tmux to wrap the notification for tmux passthrough. Control characters are stripped from messages before writing.
 
 ## `smelt.terminal.set_title`
 

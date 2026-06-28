@@ -14,11 +14,70 @@ use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
+struct TableSettingDecl {
+    key: &'static str,
+    init: fn(&Lua) -> LuaResult<mlua::Table>,
+}
+
+const TABLE_SETTINGS: &[TableSettingDecl] = &[
+    TableSettingDecl {
+        key: "notifications",
+        init: init_notifications_settings,
+    },
+    TableSettingDecl {
+        key: "transcript",
+        init: init_transcript_settings,
+    },
+];
+
+fn table_setting_decl(key: &str) -> Option<&'static TableSettingDecl> {
+    TABLE_SETTINGS.iter().find(|decl| decl.key == key)
+}
+
+fn init_notifications_settings(lua: &Lua) -> LuaResult<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("turn_end", false)?;
+    table.set("method", "auto")?;
+    Ok(table)
+}
+
+fn init_transcript_settings(lua: &Lua) -> LuaResult<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("view", lua.create_table()?)?;
+    table.set("limits", lua.create_table()?)?;
+    Ok(table)
+}
+
 fn unknown_key_err(key: &str) -> LuaError {
-    let names: Vec<&str> = SETTINGS.iter().map(|d| d.key).collect();
+    let mut names: Vec<&str> = SETTINGS.iter().map(|d| d.key).collect();
+    names.extend(TABLE_SETTINGS.iter().map(|decl| decl.key));
     LuaError::external(format!(
         "smelt.settings: unknown key `{key}`; known keys are {names:?}"
     ))
+}
+
+fn apply_setting(
+    shared: &Arc<crate::lua::LuaShared>,
+    key: String,
+    parsed: SettingValue,
+) -> LuaResult<()> {
+    let applied = crate::lua::try_with_app(|app| {
+        let mut s = app.core.config.settings.clone();
+        if s.set(&key, &parsed).is_err() {
+            return false;
+        }
+        app.set_settings(s);
+        true
+    })
+    .unwrap_or(false);
+    if !applied {
+        let mut overrides = shared
+            .settings_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        overrides.insert(key, parsed);
+    }
+    Ok(())
 }
 
 fn setting_to_lua(lua: &Lua, value: &SettingValue) -> LuaResult<mlua::Value> {
@@ -66,13 +125,12 @@ pub(super) fn register(
         lua,
         smelt,
         "settings",
-        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.transcript` is a Lua table for transcript display preferences. UiHost-only.",
+        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. UiHost-only.",
         Tier::UiHost,
     )?;
-    let transcript = lua.create_table()?;
-    transcript.set("view", lua.create_table()?)?;
-    transcript.set("limits", lua.create_table()?)?;
-    settings_tbl.tbl.raw_set("transcript", transcript)?;
+    for decl in TABLE_SETTINGS {
+        settings_tbl.tbl.raw_set(decl.key, (decl.init)(lua)?)?;
+    }
     let mt_tbl = lua.create_table()?;
     let mt = LuaMod::extend(lua, mt_tbl.clone(), "smelt.settings", Tier::UiHost);
 
@@ -98,55 +156,67 @@ pub(super) fn register(
         mt.private_fn(
             "__newindex",
             &["_", "key", "value"],
-            move |_, (_, key, value): (mlua::Value, String, mlua::Value)| -> LuaResult<()> {
-                let parsed = lua_to_setting(&key, value)?;
-                let applied = crate::lua::try_with_app(|app| {
-                    let mut s = app.core.config.settings.clone();
-                    if s.set(&key, &parsed).is_err() {
-                        return false;
+            move |_, (table, key, value): (mlua::Table, String, mlua::Value)| -> LuaResult<()> {
+                if setting_decl(&key).is_none() {
+                    if table_setting_decl(&key).is_some() {
+                        let mlua::Value::Table(_) = &value else {
+                            return Err(LuaError::external(format!(
+                                "smelt.settings.{key}: expected table, got {}",
+                                value.type_name()
+                            )));
+                        };
+                        table.raw_set(key, value)?;
+                        return Ok(());
                     }
-                    app.set_settings(s);
-                    true
-                })
-                .unwrap_or(false);
-                if !applied {
-                    let mut overrides = shared
-                        .settings_overrides
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    overrides.insert(key, parsed);
+                    return Err(unknown_key_err(&key));
                 }
-                Ok(())
+                let parsed = lua_to_setting(&key, value)?;
+                apply_setting(&shared, key, parsed)
             },
         )?;
     }
 
     mt.private_fn(
         "__pairs",
-        &["_"],
-        |lua, _: mlua::Value| -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
-            let next = lua.create_function(|lua, (_, prev): (mlua::Value, mlua::Value)| {
+        &["settings"],
+        |lua, settings: mlua::Table| -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
+            let next = lua.create_function(move |lua, (_, prev): (mlua::Value, mlua::Value)| {
                 let prev_key = match prev {
                     mlua::Value::String(s) => Some(s.to_string_lossy().to_string()),
                     _ => None,
                 };
+                let mut keys: Vec<String> =
+                    SETTINGS.iter().map(|decl| decl.key.to_string()).collect();
+                keys.extend(TABLE_SETTINGS.iter().map(|decl| decl.key.to_string()));
+                keys.sort_by_key(|key| {
+                    SETTINGS
+                        .iter()
+                        .position(|decl| decl.key == key.as_str())
+                        .unwrap_or(SETTINGS.len())
+                });
+
                 let idx = match prev_key {
                     None => 0,
-                    Some(k) => match SETTINGS.iter().position(|d| d.key == k.as_str()) {
+                    Some(k) => match keys.iter().position(|key| key == &k) {
                         Some(i) => i + 1,
-                        None => SETTINGS.len(),
+                        None => keys.len(),
                     },
                 };
-                if idx >= SETTINGS.len() {
+                if idx >= keys.len() {
                     return Ok((mlua::Value::Nil, mlua::Value::Nil));
                 }
-                let decl = &SETTINGS[idx];
-                let value = crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings));
-                let v = match value {
-                    Some(ref val) => setting_to_lua(lua, val)?,
-                    None => mlua::Value::Nil,
-                };
-                Ok((mlua::Value::String(lua.create_string(decl.key)?), v))
+                let key = &keys[idx];
+                if let Some(decl) = setting_decl(key) {
+                    let value =
+                        crate::lua::try_with_app(|app| (decl.read)(&app.core.config.settings));
+                    let v = match value {
+                        Some(ref val) => setting_to_lua(lua, val)?,
+                        None => mlua::Value::Nil,
+                    };
+                    return Ok((mlua::Value::String(lua.create_string(key)?), v));
+                }
+                let v = settings.raw_get::<mlua::Value>(key.as_str())?;
+                Ok((mlua::Value::String(lua.create_string(key)?), v))
             })?;
             Ok((next, mlua::Value::Nil, mlua::Value::Nil))
         },

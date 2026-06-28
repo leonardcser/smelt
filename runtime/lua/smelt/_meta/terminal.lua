@@ -7,6 +7,10 @@
 ---@class smelt.terminal
 local terminal = {}
 
+--- Ring the terminal bell (BEL). Returns false when no interactive terminal is attached.
+---@type fun(): boolean
+terminal.bell = nil
+
 --- Clear the terminal window/tab title using OSC 0 with an empty payload.
 ---@type fun(): boolean
 terminal.clear_title = nil
@@ -14,6 +18,10 @@ terminal.clear_title = nil
 --- Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.
 ---@type fun(): table
 terminal.info = nil
+
+--- Post an OSC 9 terminal notification with `message`. Pass `{ dcs_passthrough = true }` inside tmux to wrap the notification for tmux passthrough. Control characters are stripped from messages before writing.
+---@type fun(message: string, opts: table?): boolean
+terminal.osc9_notify = nil
 
 --- Set the terminal window/tab title using OSC 0. Pass nil to clear it. Control characters are stripped from titles before writing.
 ---@type fun(title: string?): boolean

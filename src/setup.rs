@@ -472,6 +472,12 @@ fn default_config_lua() -> String {
         ));
     }
 
+    lua.push_str("-- Terminal notification preferences.\n");
+    lua.push_str("smelt.settings.notifications = {\n");
+    lua.push_str("  turn_end = false,\n");
+    lua.push_str("  method = \"auto\", -- possible: auto, osc9, bel\n");
+    lua.push_str("}\n\n");
+
     lua.push_str("-- Transcript display settings\n");
     lua.push_str("-- Fold-state values: \"collapsed\", \"peek\", \"expanded\".\n");
     lua.push_str("-- Set a group to false to disable that built-in grouping.\n");

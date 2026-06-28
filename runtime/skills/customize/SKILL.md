@@ -450,6 +450,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click reveals it with one row of gap so repeated clicks walk back. |
 | `smelt.plugins.terminal_title` | Static terminal window/tab title. |
 | `smelt.plugins.title` | Session title plugin. |
+| `smelt.plugins.turn_notifications` | Optional terminal desktop notification when an agent turn ends. |
 | `smelt.plugins.upgrade` | Autoupgrade plugin. |
 | `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |
 
@@ -1616,10 +1617,14 @@ Metatable-backed proxy table for preferences.
 
 Terminal integration helpers.
 
+- `smelt.terminal.bell` :: `fun(): boolean`
+  Ring the terminal bell (BEL).
 - `smelt.terminal.clear_title` :: `fun(): boolean`
   Clear the terminal window/tab title using OSC 0 with an empty payload.
 - `smelt.terminal.info` :: `fun(): table`
   Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.
+- `smelt.terminal.osc9_notify` :: `fun(message: string, opts: table?): boolean`
+  Post an OSC 9 terminal notification with `message`.
 - `smelt.terminal.set_title` :: `fun(title: string?): boolean`
   Set the terminal window/tab title using OSC 0.
 - `smelt.terminal.size` :: `fun(): table`

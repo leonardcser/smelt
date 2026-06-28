@@ -486,6 +486,23 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
             smelt.settings.show_slug = not original
             assert(smelt.settings.show_slug == not original)
             smelt.settings.show_slug = original
+            assert(type(smelt.settings.notifications) == "table")
+            assert(smelt.settings.notifications.turn_end == false)
+            assert(smelt.settings.notifications.method == "auto")
+            smelt.settings.notifications = { turn_end = false, method = "auto" }
+            smelt.settings.notifications.turn_end = true
+            smelt.settings.notifications.method = "bel"
+            assert(smelt.settings.notifications.turn_end == true)
+            assert(smelt.settings.notifications.method == "bel")
+            smelt.settings.notifications = { turn_end = false, method = "osc9" }
+            assert(smelt.settings.notifications.turn_end == false)
+            assert(smelt.settings.notifications.method == "osc9")
+            smelt.settings.notifications = { turn_end = false, method = "auto" }
+            local seen_notifications = false
+            for key in pairs(smelt.settings) do
+              if key == "notifications" then seen_notifications = true end
+            end
+            assert(seen_notifications)
             local schema = smelt.settings.schema()
             assert(#schema > 0)
             assert(type(schema[1].key) == "string")

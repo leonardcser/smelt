@@ -492,7 +492,9 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     event("session_ended"),
     state("session_epoch"),
     event("session_started"),
+    state("session_slug"),
     state("session_title"),
+    state("settings_terminal_title"),
     event("shutdown"),
     state("spinner_frame"),
     event("stream_delta"),
@@ -790,7 +792,9 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("cwd_worktree", String::new());
     signals.declare("cwd_worktree_path", String::new());
     signals.declare("session_epoch", 0u64);
+    signals.declare("session_slug", String::new());
     signals.declare("session_title", seeds.session_title);
+    signals.declare("settings_terminal_title", true);
     signals.declare("branch", seeds.branch);
     signals.declare("history_epoch", 0u64);
     signals.declare("input_epoch", 0u64);
@@ -1322,6 +1326,15 @@ mod tests {
             }),
         );
         signals.set_dyn(
+            "turn_end",
+            Rc::new(TurnEnd {
+                cancelled: true,
+                continuation_token: Some(9),
+                error_kind: Some("quota".into()),
+                retry_at_ms: Some(123_000),
+            }),
+        );
+        signals.set_dyn(
             "confirm_resolved",
             Rc::new(ConfirmResolved {
                 handle_id: 7,
@@ -1366,6 +1379,15 @@ mod tests {
         match signals.get_lua("turn_error", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<String>("message").unwrap(), "boom");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        match signals.get_lua("turn_end", &lua) {
+            mlua::Value::Table(t) => {
+                assert!(t.get::<bool>("cancelled").unwrap());
+                assert_eq!(t.get::<i64>("continuation_token").unwrap(), 9);
+                assert_eq!(t.get::<String>("error_kind").unwrap(), "quota");
+                assert_eq!(t.get::<i64>("retry_at_ms").unwrap(), 123_000);
             }
             other => panic!("expected Table, got {other:?}"),
         }
