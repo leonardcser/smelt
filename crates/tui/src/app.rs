@@ -133,6 +133,7 @@ pub(crate) struct PendingSessionSave {
     pub(crate) session_id: String,
     pub(crate) kind: crate::persist::PersistSaveKind,
     pub(crate) dirty_generation: u64,
+    pub(crate) descriptor_dirty_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +166,10 @@ impl SessionPersistState {
 
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+        self.bump_dirty_generation();
+    }
+
+    pub(crate) fn bump_dirty_generation(&mut self) {
         self.dirty_generation = self.dirty_generation.saturating_add(1);
     }
 

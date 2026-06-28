@@ -912,6 +912,9 @@ pub struct BlockHistory {
     navigation_generation: u64,
     /// Earliest transcript order index whose persisted descriptor may be stale.
     descriptor_dirty_from: Option<usize>,
+    /// Bumped when a persisted descriptor may have changed. Unlike `generation`,
+    /// this ignores display-only status changes.
+    descriptor_dirty_generation: u64,
 }
 
 impl BlockHistory {
@@ -930,6 +933,7 @@ impl BlockHistory {
             order_generation: 0,
             navigation_generation: 0,
             descriptor_dirty_from: None,
+            descriptor_dirty_generation: 0,
         }
     }
 
@@ -969,11 +973,16 @@ impl BlockHistory {
         self.descriptor_dirty_from
     }
 
+    pub fn descriptor_dirty_generation(&self) -> u64 {
+        self.descriptor_dirty_generation
+    }
+
     pub fn clear_descriptor_dirty(&mut self) {
         self.descriptor_dirty_from = None;
     }
 
     fn mark_descriptor_dirty_from(&mut self, idx: usize) {
+        self.descriptor_dirty_generation = self.descriptor_dirty_generation.wrapping_add(1);
         self.descriptor_dirty_from = Some(
             self.descriptor_dirty_from
                 .map_or(idx, |current| current.min(idx)),
@@ -1703,6 +1712,23 @@ mod tests {
             "rewrite must not change order"
         );
         assert_ne!(history.generation(), g0, "rewrite must bump generation");
+    }
+
+    #[test]
+    fn status_changes_do_not_bump_descriptor_dirty_generation() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "hello".into(),
+        });
+        history.clear_descriptor_dirty();
+        let generation = history.generation();
+        let descriptor_generation = history.descriptor_dirty_generation();
+
+        history.set_status(id, Status::Streaming);
+
+        assert_ne!(history.generation(), generation);
+        assert_eq!(history.descriptor_dirty_generation(), descriptor_generation);
+        assert_eq!(history.descriptor_dirty_from(), None);
     }
 
     #[test]

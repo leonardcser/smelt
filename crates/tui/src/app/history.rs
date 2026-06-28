@@ -802,6 +802,12 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn bump_session_dirty_generation(&mut self) {
+        if !self.session_access.is_read_only() {
+            self.session_persist.bump_dirty_generation();
+        }
+    }
+
     fn mark_history_dirty_from(&mut self, idx: usize) {
         if !self.session_access.is_read_only() {
             self.session_persist.mark_history_dirty_from(idx);
@@ -1415,6 +1421,7 @@ impl TuiApp {
         if let Some(live) = &mut self.live_session {
             let idx = live.append_history(item);
             self.core.session.checkpoint = live.checkpoint.clone();
+            self.bump_session_dirty_generation();
             return idx;
         }
         let idx = self.core.session.history.len();
@@ -1427,6 +1434,7 @@ impl TuiApp {
     pub(crate) fn session_truncate_from(&mut self, index: usize) {
         if let Some(live) = &mut self.live_session {
             live.truncate_from(index);
+            self.bump_session_dirty_generation();
             return;
         }
         self.core.session.history.truncate(index);
@@ -1556,6 +1564,7 @@ impl TuiApp {
             session_id,
             kind,
             dirty_generation: self.session_persist.dirty_generation,
+            descriptor_dirty_generation: self.transcript.history().descriptor_dirty_generation(),
         });
         Some(save_id)
     }
@@ -1576,7 +1585,10 @@ impl TuiApp {
         if matches!(ack.kind, crate::persist::PersistSaveKind::History) {
             self.session_persist.descriptors_persisted = true;
         }
-        if pending.dirty_generation == self.session_persist.dirty_generation {
+        if pending.dirty_generation == self.session_persist.dirty_generation
+            && pending.descriptor_dirty_generation
+                == self.transcript.history().descriptor_dirty_generation()
+        {
             self.session_persist.mark_clean();
             if matches!(ack.kind, crate::persist::PersistSaveKind::History) {
                 self.transcript.history_mut().clear_descriptor_dirty();
@@ -1600,6 +1612,9 @@ impl TuiApp {
         }
         self.session_persist.reset_unpersisted();
         self.session_persist.mark_history_dirty_from(0);
+        if let Some(live) = self.live_session.as_mut() {
+            live.dirty.history_from = Some(0);
+        }
         self.session_persist.save_pending = true;
         self.notify_error_sticky(format!(
             "failed to save session {}: {}",
