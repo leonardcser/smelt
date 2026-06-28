@@ -136,26 +136,13 @@ pub fn set_reasoning_effort(effort: ReasoningEffort) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier, Mutex, OnceLock};
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn with_test_state_dir<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", dir.path());
-        let result = f();
-        if let Some(old) = old {
-            std::env::set_var("XDG_STATE_HOME", old);
-        } else {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-        result
+        let _guard = crate::test_util::isolate_xdg_state(dir.path());
+        f()
     }
 
     #[test]

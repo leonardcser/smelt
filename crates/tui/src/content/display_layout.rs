@@ -317,12 +317,12 @@ impl DisplayModel {
                         cache_source_views,
                     });
                 }
-                RenderNode::Group { ref name, .. } => {
+                RenderNode::Group(ref group) => {
                     let snapshot =
                         group_snapshot_json(history, policy, index, &node, key.view_state);
                     jobs.push(CompileJob::Group {
                         id,
-                        name: name.clone(),
+                        name: group.name.clone(),
                         key: display_key,
                         view_state: key.view_state,
                         snapshot,
@@ -442,18 +442,11 @@ fn group_snapshot_json(
     node: &RenderNode,
     view_state: ViewState,
 ) -> serde_json::Value {
-    let RenderNode::Group {
-        id,
-        name,
-        bucket,
-        child_range,
-        child_ids,
-        ..
-    } = node
-    else {
+    let RenderNode::Group(group) = node else {
         return serde_json::Value::Null;
     };
-    let children: Vec<_> = child_range
+    let children: Vec<_> = group
+        .child_range
         .clone()
         .filter_map(|block_index| {
             let id = *history.order.get(block_index)?;
@@ -464,15 +457,15 @@ fn group_snapshot_json(
         .collect();
     serde_json::json!({
         "kind": "group",
-        "id": id,
+        "id": group.id,
         "index": node_index,
-        "group_kind": name,
-        "name": name,
-        "bucket": bucket,
+        "group_kind": group.name,
+        "name": group.name,
+        "bucket": group.bucket,
         "view_state": view_state_label(view_state),
         "children": children,
-        "child_ids": child_ids,
-        "child_count": child_ids.len(),
+        "child_ids": group.child_ids,
+        "child_count": group.child_ids.len(),
     })
 }
 

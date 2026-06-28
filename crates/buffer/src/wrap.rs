@@ -8,19 +8,30 @@
 /// At least one chunk is always returned (even for empty input).
 pub fn wrap_line_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::new();
+    visit_line_ranges(line, width, |start, end| out.push((start, end)));
+    out
+}
+
+/// Visit wrapped byte ranges for `line` without allocating the range list.
+pub fn visit_line_ranges(line: &str, width: usize, mut visit: impl FnMut(usize, usize)) -> usize {
+    let mut count = 0usize;
+    let mut visit_counted = |start, end| {
+        count += 1;
+        visit(start, end);
+    };
     if line.is_empty() {
-        out.push((0, 0));
-        return out;
+        visit_counted(0, 0);
+        return count;
     }
     if width == 0 {
-        out.push((0, line.len()));
-        return out;
+        visit_counted(0, line.len());
+        return count;
     }
     let mut logical_start = 0usize;
     loop {
         let rel = line[logical_start..].find('\n');
         let logical_end = rel.map(|p| logical_start + p).unwrap_or(line.len());
-        wrap_logical(line, logical_start, logical_end, width, &mut out);
+        wrap_logical(line, logical_start, logical_end, width, &mut visit_counted);
         match rel {
             Some(p) => {
                 logical_start = logical_start + p + 1; // skip '\n'
@@ -29,20 +40,30 @@ pub fn wrap_line_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
                 }
                 if logical_start == line.len() {
                     // Trailing newline → final empty logical line.
-                    out.push((logical_start, logical_start));
+                    visit_counted(logical_start, logical_start);
                     break;
                 }
             }
             None => break,
         }
     }
-    out
+    count
 }
 
-fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Vec<(usize, usize)>) {
+pub fn count_line_ranges(line: &str, width: usize) -> usize {
+    visit_line_ranges(line, width, |_, _| {})
+}
+
+fn wrap_logical(
+    line: &str,
+    start: usize,
+    end: usize,
+    width: usize,
+    visit: &mut impl FnMut(usize, usize),
+) {
     use unicode_width::UnicodeWidthStr;
     if start == end {
-        out.push((start, end));
+        visit(start, end);
         return;
     }
     let bytes = line.as_bytes();
@@ -67,7 +88,7 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
         if col + total_w > width && col > 0 {
             let current = &line[chunk_start..chunk_end];
             if !(word_w > width && current.chars().all(|ch| ch == ' ')) {
-                out.push((chunk_start, chunk_end));
+                visit(chunk_start, chunk_end);
                 chunk_start = word_start;
                 col = 0;
             }
@@ -79,7 +100,7 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
                 let end_idx = idx + ch.len_utf8();
                 let cw = UnicodeWidthStr::width(&line[idx..end_idx]);
                 if col + cw > width && col > 0 {
-                    out.push((chunk_start, chunk_end));
+                    visit(chunk_start, chunk_end);
                     chunk_start = idx;
                     col = 0;
                 }
@@ -94,7 +115,7 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
         if at_space {
             // Append the space (may force a wrap if it overflows; rare with width≥1).
             if col + 1 > width && col > 0 {
-                out.push((chunk_start, chunk_end));
+                visit(chunk_start, chunk_end);
                 chunk_start = word_end + 1;
                 chunk_end = word_end + 1;
                 col = 0;
@@ -108,7 +129,7 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
             break;
         }
     }
-    out.push((chunk_start, chunk_end));
+    visit(chunk_start, chunk_end);
 }
 
 /// Wrap `line` to `width` display columns, breaking at word boundaries.
@@ -188,6 +209,30 @@ mod wrap_tests {
         let r = wrap_line_ranges(s, 3);
         let chunks: Vec<&str> = r.iter().map(|(a, b)| &s[*a..*b]).collect();
         assert_eq!(chunks, vec!["\0\0\0", "\0x"]);
+    }
+
+    #[test]
+    fn count_line_ranges_matches_ranges() {
+        for (line, width) in [
+            ("", 10),
+            ("a\nb", 10),
+            ("hello world", 7),
+            ("abcdefghij", 4),
+        ] {
+            assert_eq!(
+                count_line_ranges(line, width),
+                wrap_line_ranges(line, width).len()
+            );
+        }
+    }
+
+    #[test]
+    fn visit_line_ranges_matches_ranges() {
+        let line = "the quick brown fox";
+        let mut visited = Vec::new();
+        let count = visit_line_ranges(line, 10, |start, end| visited.push((start, end)));
+        assert_eq!(count, visited.len());
+        assert_eq!(visited, wrap_line_ranges(line, 10));
     }
 
     #[test]

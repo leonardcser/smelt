@@ -237,6 +237,21 @@ impl Block {
         )
     }
 
+    pub fn row_estimate_text(&self) -> Option<BlockText<'_>> {
+        match self {
+            Block::User { text, .. }
+            | Block::ProcessStatus { text, .. }
+            | Block::Text { content: text }
+            | Block::Thinking { content: text }
+            | Block::Compacted { summary: text }
+            | Block::CompactionPreview { summary: text }
+            | Block::CodeLine { content: text, .. } => Some(BlockText::Plain(text)),
+            Block::Mode { text, icon, .. } => Some(BlockText::Prefixed { prefix: icon, text }),
+            Block::Exec { command, output } => Some(BlockText::Exec { command, output }),
+            Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
+        }
+    }
+
     /// Stable content hash of this block. Two blocks with the same
     /// content hash produce identical `LayoutIr` for the same
     /// `LayoutKey` and `ToolState`. For `ToolCall`, `ToolState` (status
@@ -381,6 +396,13 @@ pub enum Status {
     Streaming,
     #[default]
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockText<'a> {
+    Plain(&'a str),
+    Prefixed { prefix: &'a str, text: &'a str },
+    Exec { command: &'a str, output: &'a str },
 }
 
 /// Cache key for a block's per-frame layout. When content changes, the new
@@ -574,6 +596,21 @@ impl TranscriptBlockDescriptor {
             Self::CompactionPreview { summary } => Block::CompactionPreview {
                 summary: summary.clone(),
             },
+        }
+    }
+
+    pub fn row_estimate_text(&self) -> Option<BlockText<'_>> {
+        match self {
+            Self::User { text, .. }
+            | Self::ProcessStatus { text, .. }
+            | Self::Thinking { content: text }
+            | Self::Text { content: text }
+            | Self::CodeLine { content: text, .. }
+            | Self::Compacted { summary: text }
+            | Self::CompactionPreview { summary: text } => Some(BlockText::Plain(text)),
+            Self::Mode { text, icon, .. } => Some(BlockText::Prefixed { prefix: icon, text }),
+            Self::Exec { command, output } => Some(BlockText::Exec { command, output }),
+            Self::ToolDraft { .. } | Self::ToolCall { .. } => None,
         }
     }
 
@@ -873,6 +910,13 @@ impl BlockEntry {
         self.kind() != "compaction_preview" && !self.is_tool_draft()
     }
 
+    fn row_estimate_text(&self) -> Option<BlockText<'_>> {
+        match self {
+            Self::Materialized(block) => block.row_estimate_text(),
+            Self::Descriptor(block) => block.descriptor.row_estimate_text(),
+        }
+    }
+
     fn raw_text(&self) -> Option<String> {
         match self {
             Self::Materialized(block) => block.raw_text(),
@@ -1030,6 +1074,12 @@ impl BlockHistory {
 
     pub fn block(&self, id: BlockId) -> Option<&Block> {
         self.entries.get(&id).map(BlockEntry::block)
+    }
+
+    pub fn row_estimate_text(&self, id: BlockId) -> Option<BlockText<'_>> {
+        self.entries
+            .get(&id)
+            .and_then(BlockEntry::row_estimate_text)
     }
 
     pub fn raw_text(&self, id: BlockId) -> Option<String> {
@@ -1555,16 +1605,18 @@ impl BlockHistory {
         }
     }
 
+    pub fn sidecar_hash(&self, id: BlockId) -> u64 {
+        self.tool_call_id(id)
+            .and_then(|call_id| self.tool_display_hashes.get(call_id).copied())
+            .unwrap_or(0)
+    }
+
     /// Substitute the actual per-block content and sidecar hash into a base
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
-        let sidecar_hash = self
-            .tool_call_id(id)
-            .and_then(|call_id| self.tool_display_hashes.get(call_id).copied())
-            .unwrap_or(0);
         LayoutKey {
             content_hash: self.content_hash(id),
-            sidecar_hash,
+            sidecar_hash: self.sidecar_hash(id),
             ..base
         }
     }
@@ -1636,25 +1688,31 @@ fn gap_between_parts(
 }
 
 fn entry_starts_with_thinking_title(entry: &BlockEntry) -> bool {
-    if entry.kind() != "thinking" {
-        return false;
-    }
-    entry.raw_text().is_some_and(|content| {
-        content
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .and_then(crate::content::markdown_stream::thinking_title)
-            .is_some()
-    })
+    let content = match entry {
+        BlockEntry::Materialized(Block::Thinking { content })
+        | BlockEntry::Descriptor(LazyBlock {
+            descriptor: TranscriptBlockDescriptor::Thinking { content },
+            ..
+        }) => content,
+        _ => return false,
+    };
+    content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .and_then(crate::content::markdown_stream::thinking_title)
+        .is_some()
 }
 
 fn entry_ends_with_heading(entry: &BlockEntry) -> bool {
-    if entry.kind() != "assistant" {
-        return false;
-    }
-    entry
-        .raw_text()
-        .is_some_and(|content| crate::content::markdown_ir::ends_with_heading(&content))
+    let content = match entry {
+        BlockEntry::Materialized(Block::Text { content })
+        | BlockEntry::Descriptor(LazyBlock {
+            descriptor: TranscriptBlockDescriptor::Text { content },
+            ..
+        }) => content,
+        _ => return false,
+    };
+    crate::content::markdown_ir::ends_with_heading(content)
 }
 
 fn starts_with_thinking_title(block: &Block) -> bool {
@@ -1772,6 +1830,8 @@ mod tests {
         );
         assert_ne!(history.content_hash(id), 0);
         assert_eq!(history.materialized_lazy_blocks(), 0);
+        assert_eq!(history.row_estimate_text(id), None);
+        assert_eq!(history.materialized_lazy_blocks(), 0);
 
         assert!(matches!(history.block(id), Some(Block::ToolCall { .. })));
         assert_eq!(history.materialized_lazy_blocks(), 1);
@@ -1813,6 +1873,12 @@ mod tests {
 
         let restored = BlockHistory::from_descriptor_records(records);
         assert_eq!(restored.len(), 2);
+        assert_eq!(restored.materialized_lazy_blocks(), 0);
+        let user_id = restored.order[0];
+        assert_eq!(
+            restored.row_estimate_text(user_id),
+            Some(BlockText::Plain("hello"))
+        );
         assert_eq!(restored.materialized_lazy_blocks(), 0);
         let tool_id = restored.order[1];
         assert_eq!(restored.tool_name(tool_id), Some("bash"));

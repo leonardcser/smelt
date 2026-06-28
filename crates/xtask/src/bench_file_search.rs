@@ -1,4 +1,4 @@
-use std::process::Command;
+use crate::bench_support::{run_cargo_test_benchmark, CargoTestBenchmark};
 
 pub fn run(args: Vec<String>) {
     let mut runs = String::from("10");
@@ -35,26 +35,19 @@ pub fn run(args: Vec<String>) {
         }
     }
 
-    let mut cmd = Command::new("cargo");
-    cmd.args(["test", "-p", "smelt-core"]);
-    if release {
-        cmd.arg("--release");
-    }
-    cmd.args([
-        "workspace_file_search_benchmark_suite",
-        "--",
-        "--ignored",
-        "--nocapture",
-        "--test-threads=1",
-    ]);
-    cmd.env("SMELT_FILE_SEARCH_BENCH_RUNS", &runs);
-    cmd.env("SMELT_FILE_SEARCH_BENCH_ENTRIES", &entries);
-    cmd.env(
-        "SMELT_FILE_SEARCH_BENCH_INCLUDE_DIRS",
-        if include_dirs { "1" } else { "0" },
-    );
+    let mut env = vec![
+        ("SMELT_FILE_SEARCH_BENCH_RUNS".to_string(), runs.clone()),
+        (
+            "SMELT_FILE_SEARCH_BENCH_ENTRIES".to_string(),
+            entries.clone(),
+        ),
+        (
+            "SMELT_FILE_SEARCH_BENCH_INCLUDE_DIRS".to_string(),
+            if include_dirs { "1" } else { "0" }.to_string(),
+        ),
+    ];
     if let Some(queries) = queries {
-        cmd.env("SMELT_FILE_SEARCH_BENCH_QUERIES", queries);
+        env.push(("SMELT_FILE_SEARCH_BENCH_QUERIES".to_string(), queries));
     }
 
     eprintln!(
@@ -64,13 +57,14 @@ pub fn run(args: Vec<String>) {
         entries,
         include_dirs
     );
-    let status = cmd.status().unwrap_or_else(|e| {
-        eprintln!("bench-file-search: failed to run cargo test: {e}");
-        std::process::exit(1);
+    run_cargo_test_benchmark(CargoTestBenchmark {
+        package: "smelt-core",
+        test_filter: "workspace_file_search_benchmark_suite",
+        release,
+        features: &[],
+        env,
+        bench_name: "bench-file-search",
     });
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
 }
 
 fn value(iter: &mut impl Iterator<Item = String>, flag: &str) -> String {

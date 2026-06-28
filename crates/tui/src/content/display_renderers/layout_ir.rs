@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::markdown::{measure_markdown_inner_with_options, render_markdown_inner_with_options};
 use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
 use smelt_core::buffer::SpanMeta;
@@ -378,6 +380,22 @@ fn measure_ir_leaf(
     }
 }
 
+fn expand_tabs(line: &str) -> Cow<'_, str> {
+    if line.contains('\t') {
+        Cow::Owned(line.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(line)
+    }
+}
+
+fn wrap_plain_line_ranges(line: &str, width: u16) -> Vec<(usize, usize)> {
+    smelt_buffer::wrap::wrap_line_ranges(line, width as usize)
+}
+
+fn count_plain_line_ranges(line: &str, width: u16) -> u16 {
+    smelt_buffer::wrap::count_line_ranges(line, width as usize).min(u16::MAX as usize) as u16
+}
+
 fn render_text_spec(
     out: &mut LineBuilder,
     spec: &TextSpec,
@@ -390,18 +408,21 @@ fn render_text_spec(
     let mut seen = 0u16;
     let mut rows = 0u16;
     'outer: for line in spec.content.lines() {
-        let expanded = line.replace('\t', "    ");
+        let expanded = expand_tabs(line);
         let ansi_wrapped = spec.ansi.then(|| wrap_ansi(&expanded, width as usize));
         let plain_ranges;
         let ranges: &[(usize, usize)] = if let Some((_, ranges, _)) = &ansi_wrapped {
             ranges
         } else {
-            let line = InlineLine::new(vec![InlineRun::new(
-                expanded.clone(),
-                (),
-                BreakPolicy::BreakOnSpaces,
-            )]);
-            plain_ranges = line.wrap_plain_ranges(width as usize);
+            let line_rows = count_plain_line_ranges(&expanded, width);
+            if line_rows > 1 {
+                out.mark_wrapped();
+            }
+            if seen.saturating_add(line_rows) <= row_start {
+                seen = seen.saturating_add(line_rows);
+                continue;
+            }
+            plain_ranges = wrap_plain_line_ranges(&expanded, width);
             &plain_ranges
         };
         if ranges.len() > 1 {
@@ -443,17 +464,12 @@ fn measure_text_spec(spec: &TextSpec, width: u16) -> u16 {
     spec.content
         .lines()
         .map(|line| {
-            let expanded = line.replace('\t', "    ");
+            let expanded = expand_tabs(line);
             if spec.ansi {
                 let (_, ranges, _) = wrap_ansi(&expanded, width as usize);
                 ranges.len() as u16
             } else {
-                let line = InlineLine::new(vec![InlineRun::new(
-                    expanded,
-                    (),
-                    BreakPolicy::BreakOnSpaces,
-                )]);
-                line.wrap_plain_ranges(width as usize).len() as u16
+                count_plain_line_ranges(&expanded, width)
             }
         })
         .sum()

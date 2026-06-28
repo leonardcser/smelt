@@ -1,9 +1,25 @@
 /// Stable hash of a serializable value. Serializes through `serde_json::Value`
-/// first so map keys are sorted, then hashes the resulting bytes with seahash.
+/// first so map keys are sorted, then streams JSON bytes into seahash.
 pub fn hash_serializable<T: serde::Serialize>(value: &T) -> u64 {
+    struct HashWriter(seahash::SeaHasher);
+
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::hash::Hasher::write(&mut self.0, buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-    let bytes = serde_json::to_vec(&value).unwrap_or_default();
-    seahash::hash(&bytes)
+    let mut writer = HashWriter(seahash::SeaHasher::new());
+    if serde_json::to_writer(&mut writer, &value).is_err() {
+        return seahash::hash(&[]);
+    }
+    std::hash::Hasher::finish(&writer.0)
 }
 
 pub fn format_duration(secs: u64) -> String {
@@ -62,6 +78,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_serializable_matches_buffered_json_hash() {
+        let value = serde_json::json!({
+            "z": [3, 2, 1],
+            "a": { "nested": true },
+        });
+        let json = serde_json::to_value(&value).unwrap();
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        assert_eq!(hash_serializable(&value), seahash::hash(&bytes));
+    }
 
     #[test]
     fn formats_seconds_only() {

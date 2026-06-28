@@ -2,6 +2,7 @@
 
 mod bench_file_search;
 mod bench_store_compression;
+mod bench_support;
 mod bench_transcript_layout;
 mod fuzz;
 mod gen_file_icons;

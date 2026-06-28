@@ -144,27 +144,130 @@ pub fn ends_with_heading(source: &str) -> bool {
 }
 
 fn parse_last_markdown_block_kind(source: &str) -> Option<MarkdownTextKind> {
-    let options = markdown_options();
-    let mut text_stack: Vec<TagEnd> = Vec::new();
-    let mut last = None;
+    let mut previous_adjacent: Option<(&str, bool)> = None;
+    let mut adjacent_candidate: Option<(&str, bool)> = None;
+    let mut last_non_empty: Option<(&str, bool)> = None;
+    let mut fence: Option<(char, usize)> = None;
 
-    for (event, _) in Parser::new_ext(source, options).into_offset_iter() {
-        match event {
-            Event::Start(tag) if markdown_text_kind(&tag).is_some() => {
-                text_stack.push(tag_end_for_text(&tag));
+    for line in source.lines() {
+        let body = strip_markdown_indent(line.trim_end());
+        let blank = body.trim().is_empty();
+        let current = if let Some((marker, len)) = fence {
+            if is_closing_fence(body, marker, len) {
+                fence = None;
             }
-            Event::Start(Tag::CodeBlock(_) | Tag::Table(_)) | Event::Rule => {
-                last = Some(MarkdownTextKind::Paragraph);
-            }
-            Event::End(end) if text_stack.last().is_some_and(|open| *open == end) => {
-                text_stack.pop();
-                last = tag_end_markdown_text_kind(end).or(last);
-            }
-            _ => {}
+            (!blank).then_some((line, true))
+        } else if let Some(open) = opening_fence(body) {
+            fence = Some(open);
+            Some((line, true))
+        } else {
+            (!blank).then_some((line, false))
+        };
+
+        if let Some(current) = current {
+            previous_adjacent = adjacent_candidate;
+            last_non_empty = Some(current);
+            adjacent_candidate = Some(current);
+        } else {
+            adjacent_candidate = None;
         }
     }
 
-    last
+    let (line, in_code) = last_non_empty?;
+    if in_code {
+        return Some(MarkdownTextKind::Paragraph);
+    }
+    if is_atx_heading(line) {
+        return Some(MarkdownTextKind::Heading);
+    }
+    if is_setext_underline(line)
+        && previous_adjacent.is_some_and(|(previous, in_code)| {
+            !in_code && !is_thematic_break(previous) && !is_atx_heading(previous)
+        })
+    {
+        return Some(MarkdownTextKind::Heading);
+    }
+    Some(MarkdownTextKind::Paragraph)
+}
+
+fn strip_markdown_indent(line: &str) -> &str {
+    let spaces = line.bytes().take_while(|b| *b == b' ').take(3).count();
+    &line[spaces..]
+}
+
+fn opening_fence(line: &str) -> Option<(char, usize)> {
+    let marker = line.as_bytes().first().copied()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let len = line.bytes().take_while(|b| *b == marker).count();
+    (len >= 3).then_some((marker as char, len))
+}
+
+fn is_closing_fence(line: &str, marker: char, open_len: usize) -> bool {
+    let marker = marker as u8;
+    if line.as_bytes().first().copied() != Some(marker) {
+        return false;
+    }
+    let len = line.bytes().take_while(|b| *b == marker).count();
+    len >= open_len && line[len..].trim().is_empty()
+}
+
+fn is_atx_heading(line: &str) -> bool {
+    let line = strip_markdown_indent(line.trim_end());
+    let hashes = line.bytes().take_while(|b| *b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+    line.as_bytes()
+        .get(hashes)
+        .is_none_or(|b| b.is_ascii_whitespace())
+}
+
+fn is_setext_underline(line: &str) -> bool {
+    let line = strip_markdown_indent(line.trim_end());
+    let mut marker = None;
+    let mut saw_marker = false;
+    for b in line.bytes() {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b != b'=' && b != b'-' {
+            return false;
+        }
+        if let Some(marker) = marker {
+            if b != marker {
+                return false;
+            }
+        } else {
+            marker = Some(b);
+        }
+        saw_marker = true;
+    }
+    saw_marker
+}
+
+fn is_thematic_break(line: &str) -> bool {
+    let line = strip_markdown_indent(line.trim_end());
+    let mut marker = None;
+    let mut markers = 0usize;
+    for b in line.bytes() {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b != b'-' && b != b'_' && b != b'*' {
+            return false;
+        }
+        if let Some(marker) = marker {
+            if b != marker {
+                return false;
+            }
+        } else {
+            marker = Some(b);
+        }
+        markers += 1;
+    }
+    markers >= 3
 }
 
 fn markdown_options() -> Options {
@@ -325,16 +428,6 @@ fn tag_end_for_text(tag: &Tag<'_>) -> TagEnd {
         Tag::BlockQuote(kind) => TagEnd::BlockQuote(*kind),
         Tag::List(start) => TagEnd::List(start.is_some()),
         _ => unreachable!("only text container tags are converted"),
-    }
-}
-
-fn tag_end_markdown_text_kind(end: TagEnd) -> Option<MarkdownTextKind> {
-    match end {
-        TagEnd::Paragraph => Some(MarkdownTextKind::Paragraph),
-        TagEnd::Heading(_) => Some(MarkdownTextKind::Heading),
-        TagEnd::BlockQuote(_) => Some(MarkdownTextKind::BlockQuote),
-        TagEnd::List(_) => Some(MarkdownTextKind::List),
-        _ => None,
     }
 }
 
@@ -591,9 +684,12 @@ mod tests {
     }
 
     #[test]
-    fn ends_with_heading_uses_parser_classification() {
+    fn ends_with_heading_matches_markdown_tail_blocks() {
         assert!(ends_with_heading("Paragraph\n\n# Tail\n"));
+        assert!(ends_with_heading("Paragraph\n---\n"));
+        assert!(!ends_with_heading("Paragraph\n\n---\n"));
         assert!(!ends_with_heading("# Not tail\n\nParagraph"));
+        assert!(!ends_with_heading("> # Quoted heading\n"));
         assert!(!ends_with_heading("```markdown\n# Not heading\n```"));
     }
 

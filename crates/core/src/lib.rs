@@ -3,6 +3,10 @@
 // from downstream consumers.
 extern crate self as smelt_core;
 
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
+
 pub mod app_config;
 pub mod commands;
 pub mod config;

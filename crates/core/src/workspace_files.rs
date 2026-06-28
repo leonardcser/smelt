@@ -194,7 +194,7 @@ struct ProjectState {
 struct FileEntry {
     path: String,
     lower_path: String,
-    lower_file_name: String,
+    lower_file_name_start: usize,
     padded_path: String,
     kind: ItemKind,
 }
@@ -1287,13 +1287,14 @@ fn adjusted_score(
     if entry.lower_path == query_lower {
         score += 50_000;
     }
-    if entry.lower_file_name == query_lower {
+    let lower_file_name = entry.lower_file_name();
+    if lower_file_name == query_lower {
         score += 30_000;
     }
     if entry.lower_path.starts_with(query_lower) {
         score += 15_000;
     }
-    if entry.lower_file_name.starts_with(query_lower) {
+    if lower_file_name.starts_with(query_lower) {
         score += 10_000;
     }
     if entry
@@ -1361,15 +1362,19 @@ fn exact_path_item(root: &Path, query: &str, include_dirs: bool) -> Option<Item>
 impl FileEntry {
     fn new(path: String, kind: ItemKind) -> Self {
         let lower_path = path.to_lowercase();
-        let lower_file_name = path.rsplit('/').next().unwrap_or(&path).to_lowercase();
+        let lower_file_name_start = lower_path.rfind('/').map(|idx| idx + 1).unwrap_or(0);
         let padded_path = crate::fuzzy::pad_for_simd(&path);
         Self {
             path,
             lower_path,
-            lower_file_name,
+            lower_file_name_start,
             padded_path,
             kind,
         }
+    }
+
+    fn lower_file_name(&self) -> &str {
+        &self.lower_path[self.lower_file_name_start..]
     }
 }
 
@@ -2071,7 +2076,7 @@ mod tests {
             for run in 0..runs {
                 let sample = run_file_search_bench_sample(&entries, &query, include_dirs);
                 eprintln!(
-                    "FILE_SEARCH_BENCH_SAMPLE query={} run={} entries={} matched={} first_path={} total_ms={:.3} rank_ms={:.3} items_ms={:.3}",
+                    "FILE_SEARCH_BENCH_SAMPLE query={} run={} entries={} matched={} first_path={} total_ms={:.3} rank_ms={:.3} items_ms={:.3} allocs={} bytes_allocated={} peak_bytes={}",
                     query,
                     run + 1,
                     entries.len(),
@@ -2080,6 +2085,9 @@ mod tests {
                     sample.total_ms,
                     sample.rank_ms,
                     sample.items_ms,
+                    sample.allocs,
+                    sample.bytes_allocated,
+                    sample.peak_bytes,
                 );
                 samples.push(sample);
             }
@@ -2094,6 +2102,9 @@ mod tests {
         total_ms: f64,
         rank_ms: f64,
         items_ms: f64,
+        allocs: u64,
+        bytes_allocated: u64,
+        peak_bytes: usize,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -2238,6 +2249,8 @@ mod tests {
         query: &str,
         include_dirs: bool,
     ) -> FileSearchBenchSample {
+        smelt_perf::alloc::set_enabled(true);
+        let alloc_start = smelt_perf::alloc::snapshot();
         let total_start = std::time::Instant::now();
         let rank_start = std::time::Instant::now();
         let ranked = rank_entries_window(query, entries, include_dirs, &HashMap::new(), 0, 200);
@@ -2260,6 +2273,8 @@ mod tests {
             .first()
             .map(|item| item.path.clone())
             .unwrap_or_else(|| "-".to_string());
+        let alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
+        smelt_perf::alloc::set_enabled(false);
 
         FileSearchBenchSample {
             matched,
@@ -2267,6 +2282,9 @@ mod tests {
             total_ms,
             rank_ms,
             items_ms,
+            allocs: alloc.allocs,
+            bytes_allocated: alloc.bytes_allocated,
+            peak_bytes: alloc.peak_bytes,
         }
     }
 
@@ -2309,7 +2327,7 @@ mod tests {
             items.display(),
         );
         eprintln!(
-            "FILE_SEARCH_BENCH_SUMMARY query={} runs={} entries={} include_dirs={} matched={} first_path={} total_mean_ms={:.3} total_stddev_ms={:.3} total_min_ms={:.3} total_max_ms={:.3} rank_mean_ms={:.3} rank_stddev_ms={:.3} items_mean_ms={:.3} items_stddev_ms={:.3}",
+            "FILE_SEARCH_BENCH_SUMMARY query={} runs={} entries={} include_dirs={} matched={} first_path={} total_mean_ms={:.3} total_stddev_ms={:.3} total_min_ms={:.3} total_max_ms={:.3} rank_mean_ms={:.3} rank_stddev_ms={:.3} items_mean_ms={:.3} items_stddev_ms={:.3} allocs={} bytes_allocated={} peak_bytes={}",
             query,
             samples.len(),
             entries,
@@ -2324,6 +2342,9 @@ mod tests {
             rank.stddev,
             items.mean,
             items.stddev,
+            sample.allocs,
+            sample.bytes_allocated,
+            sample.peak_bytes,
         );
     }
 

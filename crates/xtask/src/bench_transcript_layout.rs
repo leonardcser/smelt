@@ -1,4 +1,4 @@
-use std::process::Command;
+use crate::bench_support::{run_cargo_test_benchmark, CargoTestBenchmark};
 
 fn take_required_arg(iter: &mut impl Iterator<Item = String>, name: &str) -> String {
     iter.next().unwrap_or_else(|| {
@@ -16,13 +16,26 @@ fn take_positive_usize_arg(iter: &mut impl Iterator<Item = String>, name: &str) 
     value
 }
 
-fn cargo_tui_test(release: bool) -> Command {
-    let mut cmd = Command::new("cargo");
-    cmd.args(["test", "-p", "smelt-tui", "--features", "harness"]);
-    if release {
-        cmd.arg("--release");
-    }
-    cmd
+fn transcript_bench_env(env: Vec<(&'static str, String)>) -> Vec<(String, String)> {
+    env.into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+fn run_tui_bench(
+    bench_name: &'static str,
+    test_filter: &'static str,
+    release: bool,
+    env: Vec<(&'static str, String)>,
+) {
+    run_cargo_test_benchmark(CargoTestBenchmark {
+        package: "smelt-tui",
+        test_filter,
+        release,
+        features: &["harness"],
+        env: transcript_bench_env(env),
+        bench_name,
+    });
 }
 
 pub fn run(args: Vec<String>) {
@@ -107,35 +120,27 @@ pub fn run(args: Vec<String>) {
         }
     }
 
-    let mut cmd = cargo_tui_test(release);
-    cmd.args([
-        "transcript_layout_",
-        "--",
-        "--ignored",
-        "--nocapture",
-        "--test-threads=1",
-    ]);
-    cmd.env("SMELT_TRANSCRIPT_BENCH_RUNS", &runs);
+    let mut env = vec![("SMELT_TRANSCRIPT_BENCH_RUNS", runs.clone())];
     if let Some(workloads) = workloads {
-        cmd.env("SMELT_TRANSCRIPT_BENCH_WORKLOADS", workloads);
+        env.push(("SMELT_TRANSCRIPT_BENCH_WORKLOADS", workloads));
     }
     if skip_nav {
-        cmd.env("SMELT_TRANSCRIPT_BENCH_SKIP_NAV", "1");
+        env.push(("SMELT_TRANSCRIPT_BENCH_SKIP_NAV", "1".to_string()));
     }
     if search {
-        cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH", "1");
+        env.push(("SMELT_TRANSCRIPT_BENCH_SEARCH", "1".to_string()));
     }
     if let Some(bytes) = &search_bytes {
-        cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes);
+        env.push(("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes.clone()));
     }
     if no_warmup {
-        cmd.env("SMELT_TRANSCRIPT_BENCH_NO_WARMUP", "1");
+        env.push(("SMELT_TRANSCRIPT_BENCH_NO_WARMUP", "1".to_string()));
     }
     if hot_path {
-        cmd.env("SMELT_TRANSCRIPT_HOT_PATH", "1");
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH", "1".to_string()));
     }
     if let Some(history_len) = hot_path_history {
-        cmd.env("SMELT_TRANSCRIPT_HOT_PATH_HISTORY", history_len);
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH_HISTORY", history_len));
     }
 
     eprintln!(
@@ -143,68 +148,51 @@ pub fn run(args: Vec<String>) {
         if release { "release" } else { "test/debug" },
         runs
     );
-    let status = cmd.status().unwrap_or_else(|e| {
-        eprintln!("bench-transcript-layout: failed to run cargo test: {e}");
-        std::process::exit(1);
-    });
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    run_tui_bench(
+        "bench-transcript-layout",
+        "transcript_layout_",
+        release,
+        env,
+    );
 
     if resume {
-        let mut cmd = cargo_tui_test(release);
-        cmd.args([
-            "transcript_true_resume_benchmark_suite",
-            "--",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ]);
+        let mut env = Vec::new();
         if let Some(bytes) = &resume_bytes {
-            cmd.env("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES", bytes);
+            env.push(("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES", bytes.clone()));
         }
         eprintln!(
             "running transcript resume benchmark: profile={}",
             if release { "release" } else { "test/debug" },
         );
-        let status = cmd.status().unwrap_or_else(|e| {
-            eprintln!("bench-transcript-layout: failed to run resume cargo test: {e}");
-            std::process::exit(1);
-        });
-        if !status.success() {
-            std::process::exit(status.code().unwrap_or(1));
-        }
+        run_tui_bench(
+            "bench-transcript-resume",
+            "transcript_true_resume_benchmark_suite",
+            release,
+            env,
+        );
     }
     if resumed_wheel {
-        let mut cmd = cargo_tui_test(release);
-        cmd.args([
-            "transcript_resumed_wheel_scroll_benchmark_suite",
-            "--",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ]);
+        let mut env = Vec::new();
         let wheel_bytes = resume_bytes.clone().or(search_bytes.clone());
         if let Some(bytes) = wheel_bytes {
-            cmd.env("SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES", bytes);
+            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES", bytes));
         }
         if let Some(frames) = resumed_wheel_frames {
-            cmd.env("SMELT_TRANSCRIPT_RESUMED_WHEEL_FRAMES", frames);
+            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_FRAMES", frames));
         }
         if let Some(ticks) = resumed_wheel_ticks {
-            cmd.env("SMELT_TRANSCRIPT_RESUMED_WHEEL_TICKS", ticks);
+            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_TICKS", ticks));
         }
         eprintln!(
             "running transcript resumed wheel benchmark: profile={}",
             if release { "release" } else { "test/debug" },
         );
-        let status = cmd.status().unwrap_or_else(|e| {
-            eprintln!("bench-transcript-layout: failed to run resumed wheel cargo test: {e}");
-            std::process::exit(1);
-        });
-        if !status.success() {
-            std::process::exit(status.code().unwrap_or(1));
-        }
+        run_tui_bench(
+            "bench-transcript-resumed-wheel",
+            "transcript_resumed_wheel_scroll_benchmark_suite",
+            release,
+            env,
+        );
     }
 }
 

@@ -15,7 +15,7 @@ use crate::smelt_edit::{
 use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::content::highlight::InlineOptions;
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{BlockHistory, BlockId, BlockText, LayoutKey, ViewState};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -929,16 +929,12 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
     if let Some(text) = tool_output {
         return estimate_text_rows(text, width);
     }
-    match history.block(id) {
-        Some(Block::User { text, .. })
-        | Some(Block::ProcessStatus { text, .. })
-        | Some(Block::Text { content: text })
-        | Some(Block::Thinking { content: text })
-        | Some(Block::Compacted { summary: text })
-        | Some(Block::CompactionPreview { summary: text })
-        | Some(Block::CodeLine { content: text, .. }) => estimate_text_rows(text, width),
-        Some(Block::Mode { text, icon, .. }) => estimate_text_rows_with_prefix(icon, text, width),
-        Some(Block::Exec { command, output }) => {
+    match history.row_estimate_text(id) {
+        Some(BlockText::Plain(text)) => estimate_text_rows(text, width),
+        Some(BlockText::Prefixed { prefix, text }) => {
+            estimate_text_rows_with_prefix(prefix, text, width)
+        }
+        Some(BlockText::Exec { command, output }) => {
             let command_rows = estimate_text_rows_with_prefix("$ ", command, width);
             if output.is_empty() {
                 command_rows
@@ -946,7 +942,7 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
                 command_rows.saturating_add(estimate_text_rows(output, width))
             }
         }
-        Some(Block::ToolDraft { .. }) | Some(Block::ToolCall { .. }) | None => 1,
+        None => 1,
     }
 }
 
@@ -958,7 +954,8 @@ fn estimate_node_height(
 ) -> RowIndex {
     let rows = match plan.node(index) {
         Some(RenderNode::Block { id, .. }) => estimate_block_text_rows(history, *id, key.width),
-        Some(RenderNode::Group { child_ids, .. }) => child_ids
+        Some(RenderNode::Group(group)) => group
+            .child_ids
             .iter()
             .map(|id| estimate_block_text_rows(history, *id, key.width))
             .sum::<RowIndex>()
@@ -1760,8 +1757,8 @@ impl TranscriptProjection {
                     start,
                     rows,
                 }),
-                Some(RenderNode::Group { child_ids, .. }) => {
-                    layout.extend(child_ids.iter().copied().map(|id| LayoutEntry {
+                Some(RenderNode::Group(group)) => {
+                    layout.extend(group.child_ids.iter().copied().map(|id| LayoutEntry {
                         id,
                         start,
                         rows,
@@ -1983,7 +1980,7 @@ impl TranscriptProjection {
                     .block_kind(*id)
                     .filter(|block_kind| *block_kind == kind)
                     .map(|_| (index, RenderNodeId::Block(*id))),
-                RenderNode::Group { .. } => None,
+                RenderNode::Group(_) => None,
             })
             .collect();
         if targets.is_empty() {
@@ -2798,8 +2795,8 @@ impl TranscriptProjection {
         let node = self.node_at_row(lua, history, width, row)?;
         match self.render_plan.node(node.index)? {
             RenderNode::Block { id, .. } => Some(*id),
-            RenderNode::Group { child_ids, .. } if forward => child_ids.first().copied(),
-            RenderNode::Group { child_ids, .. } => child_ids.last().copied(),
+            RenderNode::Group(group) if forward => group.child_ids.first().copied(),
+            RenderNode::Group(group) => group.child_ids.last().copied(),
         }
     }
 
@@ -4115,7 +4112,7 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group { child_ids, .. }, crate::content::render_plan::RenderNode::Block { .. }] if child_ids.len() == 2
+            [crate::content::render_plan::RenderNode::Group(group), crate::content::render_plan::RenderNode::Block { .. }] if group.child_ids.len() == 2
         ));
         assert!(grouped
             .iter()
@@ -4280,7 +4277,7 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group { child_ids, .. }] if child_ids.len() == 3
+            [crate::content::render_plan::RenderNode::Group(group)] if group.child_ids.len() == 3
         ));
         let child_rows: Vec<_> = rows
             .iter()
@@ -4318,7 +4315,7 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group { name, child_ids, .. }] if name == "read_file_batch" && child_ids.len() == 2
+            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "read_file_batch" && group.child_ids.len() == 2
         ));
         assert!(
             rows.iter().any(|line| line == "* read_file ×2"),
@@ -4420,7 +4417,7 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group { name, child_ids, .. }] if name == "read_file_batch" && child_ids.as_slice() == [first, second]
+            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "read_file_batch" && group.child_ids.as_slice() == [first, second]
         ));
         assert_eq!(layout.len(), 2);
         assert_eq!(layout[0].0, first);
@@ -4481,10 +4478,10 @@ mod tests {
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
             [
-                crate::content::render_plan::RenderNode::Group { name: first, child_ids: first_children, .. },
+                crate::content::render_plan::RenderNode::Group(first_group),
                 crate::content::render_plan::RenderNode::Block { .. },
-                crate::content::render_plan::RenderNode::Group { name: second, child_ids: second_children, .. },
-            ] if first == "grep_batch" && first_children.len() == 2 && second == "glob_batch" && second_children.len() == 2
+                crate::content::render_plan::RenderNode::Group(second_group),
+            ] if first_group.name == "grep_batch" && first_group.child_ids.len() == 2 && second_group.name == "glob_batch" && second_group.child_ids.len() == 2
         ));
         assert!(rows.iter().any(|line| line == "* grep ×2"));
         assert!(rows.iter().any(|line| line == "  \"RenderNode\""));
@@ -4539,8 +4536,8 @@ mod tests {
             [
                 crate::content::render_plan::RenderNode::Block { .. },
                 crate::content::render_plan::RenderNode::Block { .. },
-                crate::content::render_plan::RenderNode::Group { name, child_ids, .. },
-            ] if name == "read_file_batch" && child_ids.len() == 2
+                crate::content::render_plan::RenderNode::Group(group),
+            ] if group.name == "read_file_batch" && group.child_ids.len() == 2
         ));
         assert!(rows.iter().any(|line| line.starts_with("* read_file ×2")));
     }
@@ -4580,7 +4577,7 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group { name, child_ids, .. }] if name == "read_file_batch" && child_ids.len() == 3
+            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "read_file_batch" && group.child_ids.len() == 3
         ));
         assert!(
             rows.iter()
@@ -4620,9 +4617,9 @@ mod tests {
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
             [
-                crate::content::render_plan::RenderNode::Group { name, child_ids, .. },
+                crate::content::render_plan::RenderNode::Group(group),
                 crate::content::render_plan::RenderNode::Block { .. },
-            ] if name == "background_process_completed" && child_ids.len() == 2
+            ] if group.name == "background_process_completed" && group.child_ids.len() == 2
         ));
         assert!(
             rows.iter()
@@ -6381,6 +6378,8 @@ mod tests {
         no_cache_ms: f64,
         allocs: u64,
         bytes_allocated: u64,
+        alloc_current_bytes: usize,
+        alloc_peak_bytes: usize,
         visible_rows: usize,
         copied_rows: RowIndex,
         appended_rows: RowIndex,
@@ -6955,14 +6954,11 @@ mod tests {
             resized.total_rows,
         )
         .expect("benchmark transcript should contain selectable display text");
-        let mut copy_projection = TranscriptProjection::new();
-        copy_projection.set_inline_options(cold.inline_options().clone());
-        copy_projection.reset_counters();
+        copy_probe.reset_counters();
         let copy_start = std::time::Instant::now();
-        let copied =
-            copy_projection.copy_range(&lua, &mut transcript.history, 72, &theme, copy_range);
+        let copied = copy_probe.copy_range(&lua, &mut transcript.history, 72, &theme, copy_range);
         let copy_ms = elapsed_ms(copy_start.elapsed());
-        let copy_counters = copy_projection.counters();
+        let copy_counters = copy_probe.counters();
 
         let mut no_cache = TranscriptProjection::new();
         let mut no_cache_buf = Buffer::new(crate::smelt_edit::BufId(80), Default::default());
@@ -7072,6 +7068,8 @@ mod tests {
             no_cache_ms,
             allocs: first_alloc.allocs,
             bytes_allocated: first_alloc.bytes_allocated,
+            alloc_current_bytes: first_alloc.current_bytes,
+            alloc_peak_bytes: first_alloc.peak_bytes,
             visible_rows: visible.rows.len(),
             copied_rows: copy_range
                 .end
@@ -7160,7 +7158,7 @@ mod tests {
             no_cache.display(),
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} copy_mean_ms={:.3} copy_stddev_ms={:.3} append_mean_ms={:.3} append_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} visible_rows={} copied_rows={} appended_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
+            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} copy_mean_ms={:.3} copy_stddev_ms={:.3} append_mean_ms={:.3} append_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} alloc_current_bytes={} alloc_peak_bytes={} visible_rows={} copied_rows={} appended_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
             workload.name,
             samples.len(),
             sample.input_bytes,
@@ -7185,6 +7183,8 @@ mod tests {
             no_cache.stddev,
             sample.allocs,
             sample.bytes_allocated,
+            sample.alloc_current_bytes,
+            sample.alloc_peak_bytes,
             sample.visible_rows,
             sample.copied_rows,
             sample.appended_rows,
@@ -7193,7 +7193,7 @@ mod tests {
             first.max,
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_JSON {{\"type\":\"layout_summary\",\"workload\":\"{}\",\"runs\":{},\"input_bytes\":{},\"generated_bytes\":{},\"blocks\":{},\"rows\":{},\"first_mean_ms\":{:.3},\"first_stddev_ms\":{:.3},\"resize_mean_ms\":{:.3},\"resize_stddev_ms\":{:.3},\"theme_mean_ms\":{:.3},\"theme_stddev_ms\":{:.3},\"scroll12_mean_ms\":{:.3},\"scroll12_stddev_ms\":{:.3},\"visible_mean_ms\":{:.3},\"visible_stddev_ms\":{:.3},\"copy_mean_ms\":{:.3},\"copy_stddev_ms\":{:.3},\"append_mean_ms\":{:.3},\"append_stddev_ms\":{:.3},\"no_cache_mean_ms\":{:.3},\"no_cache_stddev_ms\":{:.3},\"allocs\":{},\"bytes_allocated\":{},\"visible_rows\":{},\"copied_rows\":{},\"appended_rows\":{},\"scroll_materialized_rows\":{},\"first_min_ms\":{:.3},\"first_max_ms\":{:.3}}}",
+            "TRANSCRIPT_LAYOUT_BENCH_JSON {{\"type\":\"layout_summary\",\"workload\":\"{}\",\"runs\":{},\"input_bytes\":{},\"generated_bytes\":{},\"blocks\":{},\"rows\":{},\"first_mean_ms\":{:.3},\"first_stddev_ms\":{:.3},\"resize_mean_ms\":{:.3},\"resize_stddev_ms\":{:.3},\"theme_mean_ms\":{:.3},\"theme_stddev_ms\":{:.3},\"scroll12_mean_ms\":{:.3},\"scroll12_stddev_ms\":{:.3},\"visible_mean_ms\":{:.3},\"visible_stddev_ms\":{:.3},\"copy_mean_ms\":{:.3},\"copy_stddev_ms\":{:.3},\"append_mean_ms\":{:.3},\"append_stddev_ms\":{:.3},\"no_cache_mean_ms\":{:.3},\"no_cache_stddev_ms\":{:.3},\"allocs\":{},\"bytes_allocated\":{},\"alloc_current_bytes\":{},\"alloc_peak_bytes\":{},\"visible_rows\":{},\"copied_rows\":{},\"appended_rows\":{},\"scroll_materialized_rows\":{},\"first_min_ms\":{:.3},\"first_max_ms\":{:.3}}}",
             workload.name,
             samples.len(),
             sample.input_bytes,
@@ -7218,6 +7218,8 @@ mod tests {
             no_cache.stddev,
             sample.allocs,
             sample.bytes_allocated,
+            sample.alloc_current_bytes,
+            sample.alloc_peak_bytes,
             sample.visible_rows,
             sample.copied_rows,
             sample.appended_rows,
@@ -7273,7 +7275,7 @@ mod tests {
             for run in 0..runs {
                 let sample = run_transcript_bench_sample(workload);
                 eprintln!(
-                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} append_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={}",
+                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} append_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} alloc_current_bytes={} alloc_peak_bytes={}",
                     workload.name,
                     run + 1,
                     sample.input_bytes,
@@ -7290,6 +7292,8 @@ mod tests {
                     sample.no_cache_ms,
                     sample.allocs,
                     sample.bytes_allocated,
+                    sample.alloc_current_bytes,
+                    sample.alloc_peak_bytes,
                 );
                 samples.push(sample);
             }

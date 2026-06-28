@@ -24,26 +24,83 @@ pub(crate) type NodeLayoutKey = LayoutKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RenderNode {
-    Block {
-        id: BlockId,
-        block_index: usize,
-    },
-    Group {
-        id: u64,
-        name: String,
-        bucket: String,
-        child_range: Range<usize>,
-        child_ids: Vec<BlockId>,
-        default_view_state: ViewState,
-    },
+    Block { id: BlockId, block_index: usize },
+    Group(Box<RenderGroupNode>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderGroupNode {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) bucket: String,
+    pub(crate) child_range: Range<usize>,
+    pub(crate) child_ids: Vec<BlockId>,
+    pub(crate) default_view_state: ViewState,
 }
 
 impl RenderNode {
     pub(crate) fn id(&self) -> RenderNodeId {
         match self {
             Self::Block { id, .. } => RenderNodeId::Block(*id),
-            Self::Group { id, .. } => RenderNodeId::Group(*id),
+            Self::Group(group) => RenderNodeId::Group(group.id),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RenderNodeIndex {
+    blocks: Vec<(BlockId, usize)>,
+    groups: HashMap<u64, usize>,
+}
+
+impl RenderNodeIndex {
+    fn for_nodes(nodes: &[RenderNode]) -> Self {
+        let mut index = Self {
+            blocks: Vec::with_capacity(nodes.len()),
+            groups: HashMap::new(),
+        };
+        for (node_index, node) in nodes.iter().enumerate() {
+            match node.id() {
+                RenderNodeId::Block(id) => index.blocks.push((id, node_index)),
+                RenderNodeId::Group(id) => {
+                    index.groups.insert(id, node_index);
+                }
+            }
+        }
+        index.blocks.sort_unstable_by_key(|(id, _)| *id);
+        index
+    }
+
+    fn insert(&mut self, id: RenderNodeId, node_index: usize) {
+        match id {
+            RenderNodeId::Block(id) => match self.blocks.binary_search_by_key(&id, |(id, _)| *id) {
+                Ok(pos) => self.blocks[pos] = (id, node_index),
+                Err(pos) => self.blocks.insert(pos, (id, node_index)),
+            },
+            RenderNodeId::Group(id) => {
+                self.groups.insert(id, node_index);
+            }
+        }
+    }
+
+    fn get(&self, id: RenderNodeId) -> Option<usize> {
+        match id {
+            RenderNodeId::Block(id) => self
+                .blocks
+                .binary_search_by_key(&id, |(id, _)| *id)
+                .ok()
+                .map(|pos| self.blocks[pos].1),
+            RenderNodeId::Group(id) => self.groups.get(&id).copied(),
+        }
+    }
+
+    fn contains(&self, id: RenderNodeId) -> bool {
+        self.get(id).is_some()
+    }
+
+    fn truncate_from(&mut self, index: usize) {
+        self.blocks.retain(|(_, node_index)| *node_index < index);
+        self.groups.retain(|_, node_index| *node_index < index);
     }
 }
 
@@ -136,15 +193,11 @@ impl TranscriptDefaultViewPolicy {
                         .and_then(|kind| self.block_kinds.get(kind).copied())
                 })
                 .unwrap_or(ViewState::Expanded),
-            RenderNode::Group {
-                name,
-                default_view_state,
-                ..
-            } => self
+            RenderNode::Group(group) => self
                 .groups
-                .get(name)
+                .get(&group.name)
                 .copied()
-                .unwrap_or(*default_view_state),
+                .unwrap_or(group.default_view_state),
         }
     }
 
@@ -348,8 +401,8 @@ pub(crate) struct RenderPlan {
     pub(crate) group_generation: u64,
     pub(crate) group_cache_key: Option<u64>,
     pub(crate) nodes: Vec<RenderNode>,
-    index_by_id: HashMap<RenderNodeId, usize>,
-    index_by_block_id: HashMap<BlockId, usize>,
+    node_index: RenderNodeIndex,
+    grouped_block_index_by_id: HashMap<BlockId, usize>,
     pub(crate) fingerprint: u64,
     append_prefix: Option<RenderPlanPrefix>,
 }
@@ -363,8 +416,8 @@ impl RenderPlan {
             group_generation: 0,
             group_cache_key: None,
             nodes: Vec::new(),
-            index_by_id: HashMap::new(),
-            index_by_block_id: HashMap::new(),
+            node_index: RenderNodeIndex::default(),
+            grouped_block_index_by_id: HashMap::new(),
             fingerprint: 0,
             append_prefix: None,
         }
@@ -411,26 +464,17 @@ impl RenderPlan {
             let _perf = smelt_perf::perf::begin("transcript:render_plan:build_nodes");
             build_nodes(history, groups)
         };
-        let index_by_id = {
-            let _perf = smelt_perf::perf::begin("transcript:render_plan:index_by_id");
-            nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| (node.id(), index))
-                .collect()
+        let node_index = {
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:node_index");
+            RenderNodeIndex::for_nodes(&nodes)
         };
-        let mut index_by_block_id = HashMap::new();
+        let mut grouped_block_index_by_id = HashMap::new();
         {
-            let _perf = smelt_perf::perf::begin("transcript:render_plan:index_by_block_id");
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:grouped_block_index");
             for (index, node) in nodes.iter().enumerate() {
-                match node {
-                    RenderNode::Block { id, .. } => {
-                        index_by_block_id.insert(*id, index);
-                    }
-                    RenderNode::Group { child_ids, .. } => {
-                        for id in child_ids {
-                            index_by_block_id.insert(*id, index);
-                        }
+                if let RenderNode::Group(group) = node {
+                    for id in &group.child_ids {
+                        grouped_block_index_by_id.insert(*id, index);
                     }
                 }
             }
@@ -446,8 +490,8 @@ impl RenderPlan {
             group_generation,
             group_cache_key,
             nodes,
-            index_by_id,
-            index_by_block_id,
+            node_index,
+            grouped_block_index_by_id,
             fingerprint,
             append_prefix: None,
         }
@@ -464,7 +508,7 @@ impl RenderPlan {
             && self
                 .nodes
                 .iter()
-                .any(|node| matches!(node, RenderNode::Group { .. }))
+                .any(|node| matches!(node, RenderNode::Group(_)))
         {
             return None;
         }
@@ -535,34 +579,20 @@ impl RenderPlan {
 
     fn push_node(&mut self, node: RenderNode) {
         let index = self.nodes.len();
-        self.index_by_id.insert(node.id(), index);
-        match &node {
-            RenderNode::Block { id, .. } => {
-                self.index_by_block_id.insert(*id, index);
-            }
-            RenderNode::Group { child_ids, .. } => {
-                for id in child_ids {
-                    self.index_by_block_id.insert(*id, index);
-                }
+        self.node_index.insert(node.id(), index);
+        if let RenderNode::Group(group) = &node {
+            for id in &group.child_ids {
+                self.grouped_block_index_by_id.insert(*id, index);
             }
         }
         self.nodes.push(node);
     }
 
     fn truncate_from(&mut self, index: usize) {
-        for node in self.nodes.drain(index..) {
-            self.index_by_id.remove(&node.id());
-            match node {
-                RenderNode::Block { id, .. } => {
-                    self.index_by_block_id.remove(&id);
-                }
-                RenderNode::Group { child_ids, .. } => {
-                    for id in child_ids {
-                        self.index_by_block_id.remove(&id);
-                    }
-                }
-            }
-        }
+        self.nodes.truncate(index);
+        self.node_index.truncate_from(index);
+        self.grouped_block_index_by_id
+            .retain(|_, node_index| *node_index < index);
     }
 
     fn refresh_fingerprint(&mut self, history: &BlockHistory) {
@@ -612,21 +642,23 @@ impl RenderPlan {
     }
 
     pub(crate) fn contains_id(&self, id: RenderNodeId) -> bool {
-        self.index_by_id.contains_key(&id)
+        self.node_index.contains(id)
     }
 
     pub(crate) fn index_of(&self, id: RenderNodeId) -> Option<usize> {
-        self.index_by_id.get(&id).copied()
+        self.node_index.get(id)
     }
 
     pub(crate) fn index_for_block(&self, id: BlockId) -> Option<usize> {
-        self.index_by_block_id.get(&id).copied()
+        self.node_index
+            .get(RenderNodeId::Block(id))
+            .or_else(|| self.grouped_block_index_by_id.get(&id).copied())
     }
 
     pub(crate) fn block_ids_for_node(&self, index: usize) -> Option<Vec<BlockId>> {
         match self.nodes.get(index)? {
             RenderNode::Block { id, .. } => Some(vec![*id]),
-            RenderNode::Group { child_ids, .. } => Some(child_ids.clone()),
+            RenderNode::Group(group) => Some(group.child_ids.clone()),
         }
     }
 
@@ -678,25 +710,19 @@ impl RenderPlan {
                 content_hash: history.content_hash(*id),
                 sidecar_hash: block_sidecar_hash(history, *id),
             }),
-            RenderNode::Group {
-                id,
-                name,
-                bucket,
-                child_range,
-                child_ids,
-                ..
-            } => Some(LayoutKey {
+            RenderNode::Group(group) => Some(LayoutKey {
                 width: base_key.width,
                 view_state,
                 content_hash: smelt_core::utils::hash_serializable(&GroupContentKey {
-                    id: *id,
-                    name,
-                    bucket,
+                    id: group.id,
+                    name: &group.name,
+                    bucket: &group.bucket,
                     group_generation: self.group_generation,
                     group_cache_key: self.group_cache_key,
                     view_state,
-                    child_ids,
-                    child_view_states: child_range
+                    child_ids: &group.child_ids,
+                    child_view_states: group
+                        .child_range
                         .clone()
                         .filter_map(|block_index| {
                             let id = *history.order.get(block_index)?;
@@ -706,7 +732,8 @@ impl RenderPlan {
                             ))
                         })
                         .collect(),
-                    child_hashes: child_range
+                    child_hashes: group
+                        .child_range
                         .clone()
                         .filter_map(|block_index| {
                             history
@@ -716,7 +743,7 @@ impl RenderPlan {
                         })
                         .collect(),
                 }),
-                sidecar_hash: group_sidecar_hash(history, child_range.clone()),
+                sidecar_hash: group_sidecar_hash(history, group.child_range.clone()),
             }),
         }
     }
@@ -738,7 +765,7 @@ impl RenderPlan {
     fn node_start_block_index(&self, index: usize) -> Option<usize> {
         match self.nodes.get(index)? {
             RenderNode::Block { block_index, .. } => Some(*block_index),
-            RenderNode::Group { child_range, .. } => Some(child_range.start),
+            RenderNode::Group(group) => Some(group.child_range.start),
         }
     }
 
@@ -845,14 +872,14 @@ fn build_nodes_from(
             bucket: &bucket,
             first_child: child_ids[0],
         });
-        nodes.push(RenderNode::Group {
+        nodes.push(RenderNode::Group(Box::new(RenderGroupNode {
             id,
             name: spec.name.clone(),
             bucket,
             child_range: index..end,
             child_ids,
             default_view_state: view_state(spec.default_view.as_deref()),
-        });
+        })));
         index = end;
     }
     nodes
@@ -993,7 +1020,7 @@ fn node_fingerprint(history: &BlockHistory, node: &RenderNode) -> u64 {
         RenderNode::Block { id, .. } => {
             hash_values([history.content_hash(*id), block_sidecar_hash(history, *id)])
         }
-        RenderNode::Group { child_range, .. } => group_sidecar_hash(history, child_range.clone()),
+        RenderNode::Group(group) => group_sidecar_hash(history, group.child_range.clone()),
     }
 }
 
@@ -1014,11 +1041,7 @@ fn hash_values(values: impl IntoIterator<Item = u64>) -> u64 {
 }
 
 fn block_sidecar_hash(history: &BlockHistory, id: BlockId) -> u64 {
-    history
-        .tool_call_id(id)
-        .and_then(|call_id| history.tool_state(call_id))
-        .map(smelt_core::ToolState::display_hash)
-        .unwrap_or(0)
+    history.sidecar_hash(id)
 }
 
 #[cfg(test)]
@@ -1177,12 +1200,7 @@ mod tests {
         assert_eq!(plan.nodes.len(), 2);
         assert!(matches!(
             &plan.nodes[0],
-            RenderNode::Group {
-                name,
-                bucket,
-                child_range,
-                ..
-            } if name == "background-processes" && bucket == "0" && child_range == &(0..2)
+            RenderNode::Group(group) if group.name == "background-processes" && group.bucket == "0" && group.child_range == (0..2)
         ));
         assert!(matches!(
             plan.nodes[1],
@@ -1235,7 +1253,7 @@ mod tests {
 
         assert!(matches!(
             plan.nodes.as_slice(),
-            [RenderNode::Group { name, child_range, .. }] if name == "low-min" && child_range == &(0..2)
+            [RenderNode::Group(group)] if group.name == "low-min" && group.child_range == (0..2)
         ));
     }
 
@@ -1341,7 +1359,7 @@ mod tests {
 
         assert!(prune_required);
         assert!(
-            matches!(plan.nodes.as_slice(), [RenderNode::Group { child_range, .. }] if child_range == &(0..3))
+            matches!(plan.nodes.as_slice(), [RenderNode::Group(group)] if group.child_range == (0..3))
         );
     }
 
@@ -1396,14 +1414,14 @@ mod tests {
             .groups
             .insert("tools".to_string(), ViewState::Expanded);
         let transcript = smelt_core::content::transcript::Transcript::new();
-        let node = RenderNode::Group {
+        let node = RenderNode::Group(Box::new(RenderGroupNode {
             id: 1,
             name: "tools".into(),
             bucket: "tools".into(),
             child_range: 0..0,
             child_ids: Vec::new(),
             default_view_state: ViewState::Collapsed,
-        };
+        }));
 
         assert_eq!(
             policy.node_default_view_state(&transcript.history, &node),
