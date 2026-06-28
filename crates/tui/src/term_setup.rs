@@ -16,6 +16,7 @@ use smelt_term::{TerminalSession, TerminalSessionBuilder};
 /// normal screen on drop, even if the run loop panics.
 pub struct TuiTerminal {
     session: TerminalSession<BufWriter<Stdout>>,
+    title_touched: bool,
     // Terminal state is a process-wide resource; the guard must not migrate
     // between threads while it's alive.
     _not_send: std::marker::PhantomData<*const ()>,
@@ -26,8 +27,27 @@ impl TuiTerminal {
         let session = tui_session_builder().enter_stdout()?;
         Ok(Self {
             session,
+            title_touched: false,
             _not_send: std::marker::PhantomData,
         })
+    }
+
+    pub fn write_control_sequence(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.session.write_control_sequence(bytes)
+    }
+
+    pub fn set_title_sequence(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.title_touched = true;
+        self.write_control_sequence(bytes)
+    }
+
+    pub fn clear_title_sequence(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.title_touched = false;
+        self.write_control_sequence(bytes)
+    }
+
+    pub fn size(&self) -> io::Result<(u16, u16)> {
+        self.session.size()
     }
 
     /// Hand the terminal to a child process for the duration of `f`, then
@@ -48,6 +68,14 @@ impl TuiTerminal {
         F: FnOnce() -> R,
     {
         self.session.suspend(f)
+    }
+}
+
+impl Drop for TuiTerminal {
+    fn drop(&mut self) {
+        if self.title_touched {
+            let _ = self.session.write_control_sequence(b"\x1b]0;\x07");
+        }
     }
 }
 

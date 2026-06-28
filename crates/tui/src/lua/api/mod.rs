@@ -24,6 +24,7 @@ mod render;
 mod search;
 mod session;
 mod settings;
+mod terminal;
 mod text;
 pub(crate) mod theme;
 mod transcript;
@@ -120,6 +121,7 @@ impl LuaRuntime {
         permissions::register(lua, &smelt, shared)?;
         session::register(lua, &smelt)?;
         settings::register(lua, &smelt, shared)?;
+        terminal::register(lua, &smelt)?;
         transcript::register(lua, &smelt)?;
         vim::register(lua, &smelt)?;
 

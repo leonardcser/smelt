@@ -448,6 +448,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.process_control` | Ctrl-G: move a foreground bash command to the background registry. |
 | `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click reveals it with one row of gap so repeated clicks walk back. |
+| `smelt.plugins.terminal_title` | Static terminal window/tab title. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.upgrade` | Autoupgrade plugin. |
 | `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |
@@ -483,6 +484,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `file_icons` | `bool` | `false` | Show Nerd Font file-type icons before inline-code paths that point at existing files. |
 | `file_icon_colors` | `bool` | `true` | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled. |
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
+| `terminal_title` | `bool` | `true` | Keep the terminal window/tab title in sync with the current session title. |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `redact_secrets` | `bool` | `false` | Scrub detected secrets from user input and tool results before they reach the LLM. |
 | `auto_reload` | `bool` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/,  completers/, tools/, dialogs/, runtime overrides) and dispatch  `/reload` when any of them changes. Prompt inputs such as  AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
@@ -1609,6 +1611,19 @@ Metatable-backed proxy table for preferences.
 
 - `smelt.settings.schema` :: `fun(): table`
   Return the settings schema as an array of `{ key, kind, choices? }` rows.
+
+#### `smelt.terminal`
+
+Terminal integration helpers.
+
+- `smelt.terminal.clear_title` :: `fun(): boolean`
+  Clear the terminal window/tab title using OSC 0 with an empty payload.
+- `smelt.terminal.info` :: `fun(): table`
+  Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.
+- `smelt.terminal.set_title` :: `fun(title: string?): boolean`
+  Set the terminal window/tab title using OSC 0.
+- `smelt.terminal.size` :: `fun(): table`
+  Return the current terminal size as `{ width, height }` in cells.
 
 #### `smelt.text`
 

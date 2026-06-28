@@ -162,6 +162,11 @@ impl<W: Write> TerminalSession<W> {
         &mut self.writer
     }
 
+    pub fn write_control_sequence(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writer.write_all(bytes)?;
+        self.writer.flush()
+    }
+
     pub fn size(&self) -> io::Result<(u16, u16)> {
         terminal::size()
     }

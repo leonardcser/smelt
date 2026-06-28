@@ -31,6 +31,12 @@ set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120
 
 ## Conventions
 
+### Branding and style
+
+Use `smelt` in lowercase for product copy, terminal titles, command output, docs,
+and UI labels. Use capitalized `Smelt` only when grammar requires a proper noun at
+the beginning of a sentence.
+
 ### Compatibility debt
 
 Mark removable compatibility code with `COMPAT(<id>)` and add the id to

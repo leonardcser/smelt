@@ -1632,6 +1632,18 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("task_label", task_label);
+        self.core.signals.publish_if_changed(
+            "session_title",
+            self.core.session.title.clone().unwrap_or_default(),
+        );
+        self.core.signals.publish_if_changed(
+            "session_slug",
+            self.core.session.slug.clone().unwrap_or_default(),
+        );
+        self.core.signals.publish_if_changed(
+            "settings_terminal_title",
+            self.core.config.settings.terminal_title,
+        );
 
         let running_procs = self.core.processes.running_count() as u32;
         self.core

@@ -92,6 +92,7 @@ nav = [
     { "`smelt.skills`" = "reference/api/skills.md" },
     { "`smelt.state`" = "reference/api/state.md" },
     { "`smelt.task`" = "reference/api/task.md" },
+    { "`smelt.terminal`" = "reference/api/terminal.md" },
     { "`smelt.text`" = "reference/api/text.md" },
     { "`smelt.theme`" = "reference/api/theme.md" },
     { "`smelt.tick`" = "reference/api/tick.md" },

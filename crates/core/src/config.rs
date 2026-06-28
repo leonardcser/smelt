@@ -213,6 +213,8 @@ settings! {
     file_icon_colors:      Bool   = true;
     /// Task-slug label in status bar.
     show_slug:             Bool   = true;
+    /// Keep the terminal window/tab title in sync with the current session title.
+    terminal_title:        Bool   = true;
     /// Downgrade `Allow` to `Ask` for paths outside the workspace.
     restrict_to_workspace: Bool   = true;
     /// Scrub detected secrets from user input and tool results before they reach the LLM.
