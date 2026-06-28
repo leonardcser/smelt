@@ -398,6 +398,7 @@ pub struct WorkBusyEntry {
 pub struct CursorPos {
     pub line: u32,
     pub col: u32,
+    pub scroll_pct: u8,
 }
 
 /// Payload for the `viewport_pos` signal. Tracks the focused window's scroll
@@ -611,6 +612,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         };
         let _ = t.set("line", p.line as i64);
         let _ = t.set("col", p.col as i64);
+        let _ = t.set("scroll_pct", p.scroll_pct as i64);
         mlua::Value::Table(t)
     });
     signals.register_lua_projector::<ViewportPos, _>(|p, lua| {

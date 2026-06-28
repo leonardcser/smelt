@@ -144,10 +144,11 @@ impl ViewportMetrics {
     }
 
     fn scroll_pct(scroll_top: RowIndex, max_scroll: RowIndex) -> u8 {
-        ((u128::from(scroll_top) * 100 + u128::from(max_scroll) / 2)
-            .checked_div(u128::from(max_scroll))
-            .unwrap_or(100)
-            .min(100)) as u8
+        if max_scroll == 0 {
+            return 0;
+        }
+        ((u128::from(scroll_top) * 100 + u128::from(max_scroll) / 2) / u128::from(max_scroll))
+            .min(100) as u8
     }
 
     pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
@@ -3569,9 +3570,9 @@ mod tests {
     }
 
     #[test]
-    fn viewport_metrics_report_full_percent_when_content_fits() {
-        assert_eq!(ViewportMetrics::new(0, 0, 20).scroll_pct, 100);
-        assert_eq!(ViewportMetrics::new(0, 10, 20).scroll_pct, 100);
+    fn viewport_metrics_report_zero_percent_when_content_fits() {
+        assert_eq!(ViewportMetrics::new(0, 0, 20).scroll_pct, 0);
+        assert_eq!(ViewportMetrics::new(0, 10, 20).scroll_pct, 0);
         assert_eq!(ViewportMetrics::new(5, 10, 0).scroll_pct, 56);
     }
 

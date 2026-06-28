@@ -1704,7 +1704,7 @@ impl TuiApp {
     }
 
     /// Cursor position of the focused window, published as `cursor_pos`.
-    /// Returns the default `(0, 0)` when no focused window has rows.
+    /// Returns the default `(0, 0, 0)` when no focused window has lines.
     fn focused_cursor_pos(&self) -> smelt_core::signals::CursorPos {
         let Some(w) = self.ui.focused_window() else {
             return smelt_core::signals::CursorPos::default();
@@ -1712,12 +1712,20 @@ impl TuiApp {
         let Some(buf) = self.ui.buf(w.buf) else {
             return smelt_core::signals::CursorPos::default();
         };
-        if w.scroll_row_total(buf) == 0 {
+        let total = buf.line_count();
+        if total == 0 {
             return smelt_core::signals::CursorPos::default();
         }
+        let line_idx = w.cursor_abs_row();
+        let scroll_pct = if total <= 1 {
+            100u8
+        } else {
+            ((line_idx * 100) / (total.saturating_sub(1) as u64)).min(100) as u8
+        };
         smelt_core::signals::CursorPos {
-            line: (w.cursor_abs_row() as u32) + 1,
+            line: (line_idx as u32) + 1,
             col: (w.cursor_col() as u32) + 1,
+            scroll_pct,
         }
     }
 

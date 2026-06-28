@@ -162,12 +162,16 @@ local function core_compose()
   local pos = signal("cursor_pos")
   local viewport = signal("viewport_pos")
   if pos and pos.line and pos.line > 0 then
+    local scroll_pct = pos.scroll_pct or 0
+    if smelt.focus() == "transcript" and viewport and viewport.scroll_pct then
+      scroll_pct = viewport.scroll_pct
+    end
     items[#items + 1] = {
       text = string.format(
         "%d:%d %d%%",
         pos.line,
         pos.col or 1,
-        (viewport and viewport.scroll_pct) or 0
+        scroll_pct
       ),
       style = { fg = "Comment" },
       priority = 3,
