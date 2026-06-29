@@ -141,6 +141,7 @@ and lifted into this shape automatically.
 | `label` | `string` | yes | Row text after the dim ` N. ` numbering. |
 | `description` | `string` |  | Optional second row, rendered dim. |
 | `key` | `string` |  | Optional chord that triggers this item (defaults to its 1-based index for items 1..9). |
+| `disabled` | `boolean` |  | Render dimmed and skip selection/submission when true. |
 
 ### `smelt.dialog.MenuOpts`
 
@@ -175,6 +176,7 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | `border` | `table` |  | Top border style override; defaults to `{ top = "SmeltAccent" }`. |
 | `resizable` | `boolean` |  | Set `false` to disable the default top-edge resize handle. |
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Dialog-level key bindings (merged with built-ins). |
+| `close_with_q` | `boolean` |  | Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input. |
 | `on_submit` | `fun(ctx: any):` |  | any Handler invoked on Enter; default resolves with the focused leaf. |
 | `on_dismiss` | `fun():` |  | nil Handler invoked when the dialog is dismissed. |
 | `on_close` | `fun(ctx: any):` |  | nil Handler invoked once whenever the dialog resolves or closes. |

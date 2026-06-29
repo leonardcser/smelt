@@ -98,6 +98,7 @@
 ---@field label string Row text after the dim ` N. ` numbering.
 ---@field description? string Optional second row, rendered dim.
 ---@field key? string Optional chord that triggers this item (defaults to its 1-based index for items 1..9).
+---@field disabled? boolean Render dimmed and skip selection/submission when true.
 
 --- Options accepted by `smelt.dialog.menu`.
 ---@class smelt.dialog.MenuOpts
@@ -124,6 +125,7 @@
 ---@field border? table Top border style override; defaults to `{ top = "SmeltAccent" }`.
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
+---@field close_with_q? boolean Bind `q` to close for read-only/list dialogs. Leave false for dialogs that accept text input.
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
 ---@field on_close? fun(ctx: any): nil Handler invoked once whenever the dialog resolves or closes.
