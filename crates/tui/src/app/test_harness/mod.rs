@@ -4,7 +4,7 @@
 //! structured `Action` log plus snapshots of inspectable state.
 //!
 //! Side effects are contained by pointing every `$HOME`/XDG path at a
-//! process-wide tempdir.
+//! managed per-process directory under `/tmp/smelt-fuzz-harness`.
 
 #![allow(dead_code)]
 
@@ -14,9 +14,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, Ke
 use engine::clock::VirtualClock;
 use engine::EngineHandle;
 use protocol::{AgentMode, EngineEvent, ReasoningEffort, UiCommand};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
-use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 pub use crate::event_source::SourceEvent;
@@ -339,9 +339,9 @@ fn cmdline_text(app: &TuiApp) -> String {
     line.get(1..).unwrap_or(&line).to_string()
 }
 
-// ── Process-wide tempdir for $HOME and XDG vars ─────────────────────
+// ── Process-wide managed directories for $HOME and XDG vars ─────────────
 
-static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
+static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
 static TEST_HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) fn test_home_guard() -> MutexGuard<'static, ()> {
@@ -351,6 +351,13 @@ pub(crate) fn test_home_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+pub(super) fn managed_harness_dir(kind: &str) -> PathBuf {
+    let dir = harness_root(kind).join(process_dir_name());
+    cleanup_stale_harness_dirs(kind, &dir);
+    std::fs::create_dir_all(&dir).expect("create managed harness dir");
+    dir
+}
+
 /// Initialize `$HOME` + XDG env vars on first call, then wipe the
 /// directory's contents on every call so each `TestApp::build` starts
 /// against an empty filesystem. Without this, session / history / state
@@ -358,14 +365,10 @@ pub(crate) fn test_home_guard() -> MutexGuard<'static, ()> {
 /// of nondeterminism for libFuzzer, which runs every iteration in the
 /// same process.
 fn reset_test_home() {
-    let dir = TEST_HOME.get_or_init(|| TempDir::new().expect("create test $HOME tempdir"));
-    // On macOS `TempDir::new()` returns a path under `/var/folders/…` which
-    // `canonicalize` resolves to `/private/var/folders/…`. `AppStoryCtx::new`
-    // canonicalizes `HOME` before setting cwd, so the actual cwd directory
-    // lives under the canonical path. If we don't canonicalize here, we try
-    // to preserve the wrong `cwd` path and delete the real one, breaking
-    // `std::env::current_dir()` for every subsequent test.
-    let home = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+    let dir = TEST_HOME.get_or_init(|| managed_harness_dir("home"));
+    // `AppStoryCtx::new` canonicalizes `HOME` before setting cwd, so keep env
+    // vars on the same canonical path that the app will use.
+    let home = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
     // SAFETY: env vars are set to the same constant path on every call;
     // concurrent reads from other threads see a stable value.
     std::env::set_var("HOME", &home);
@@ -374,8 +377,8 @@ fn reset_test_home() {
     std::env::set_var("XDG_CACHE_HOME", home.join("cache"));
     std::env::set_var("XDG_DATA_HOME", home.join("data"));
     // Wipe everything in `home` so the next scenario sees an empty
-    // filesystem. We can't `remove_dir_all` `home` itself (it'd drop the
-    // tempdir backing path), so iterate one level down.
+    // filesystem. We can't `remove_dir_all` `home` itself because the current
+    // process reuses it across fuzz inputs.
     //
     // Keep a stable `cwd` directory under HOME. The scripted RuntimeEnv
     // uses it as the app cwd so story snapshots render `~/cwd`.
@@ -393,5 +396,69 @@ fn reset_test_home() {
                 std::fs::remove_file(&path)
             };
         }
+    }
+}
+
+fn harness_root(kind: &str) -> PathBuf {
+    std::env::temp_dir().join("smelt-fuzz-harness").join(kind)
+}
+
+fn process_dir_name() -> String {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let exe: String = exe
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("p{}-{exe}", std::process::id())
+}
+
+fn cleanup_stale_harness_dirs(kind: &str, current_dir: &Path) {
+    let root = harness_root(kind);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current_dir {
+            continue;
+        }
+        let Some(pid) = entry.file_name().to_str().and_then(process_dir_pid) else {
+            continue;
+        };
+        if !process_is_alive(pid) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn process_dir_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('p')?;
+    let digits = rest.split_once('-')?.0;
+    digits.parse().ok()
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
     }
 }

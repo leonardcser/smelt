@@ -7,6 +7,16 @@ use engine::provider::{
 };
 
 #[derive(Debug)]
+struct ExpectedSummary {
+    ok: bool,
+    content_len: usize,
+    reasoning_len: usize,
+    text_deltas: usize,
+    thinking_deltas: usize,
+    tool_arg_deltas: usize,
+}
+
+#[derive(Debug)]
 enum Event {
     Raw(String),
     ChatText(String),
@@ -101,7 +111,7 @@ fn short_string(u: &mut Unstructured<'_>, max: usize) -> arbitrary::Result<Strin
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn event_json(event: Event) -> serde_json::Value {
+fn event_json(event: &Event) -> serde_json::Value {
     match event {
         Event::Raw(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({"raw": s})),
         Event::ChatText(text) => serde_json::json!({"choices":[{"delta":{"content":text}}]}),
@@ -134,6 +144,108 @@ fn event_json(event: Event) -> serde_json::Value {
     }
 }
 
+fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
+    let mut summary = ExpectedSummary {
+        ok: false,
+        content_len: 0,
+        reasoning_len: 0,
+        text_deltas: 0,
+        thinking_deltas: 0,
+        tool_arg_deltas: 0,
+    };
+    match wire % 3 {
+        0 => {
+            for event in events {
+                match event {
+                    Event::ChatText(text) if !text.is_empty() => {
+                        summary.content_len += text.len();
+                        summary.text_deltas += 1;
+                    }
+                    Event::ChatThinking(text) if !text.is_empty() => {
+                        summary.reasoning_len += text.len();
+                        summary.thinking_deltas += 1;
+                    }
+                    Event::ChatTool { args, .. } if !args.is_empty() => {
+                        summary.tool_arg_deltas += 1;
+                    }
+                    Event::ChatDone => summary.ok = true,
+                    _ => {}
+                }
+            }
+        }
+        1 => {
+            let mut active_tools = std::collections::HashSet::new();
+            for event in events {
+                match event {
+                    Event::OpenAiText(text) if !text.is_empty() => {
+                        summary.content_len += text.len();
+                        summary.text_deltas += 1;
+                    }
+                    Event::OpenAiThinking(text) if !text.is_empty() => {
+                        summary.reasoning_len += text.len();
+                        summary.thinking_deltas += 1;
+                    }
+                    Event::OpenAiToolStart { item, .. } if !item.is_empty() => {
+                        active_tools.insert(item.as_str());
+                    }
+                    Event::OpenAiToolArgs { item, args }
+                        if !args.is_empty() && active_tools.contains(item.as_str()) =>
+                    {
+                        summary.tool_arg_deltas += 1;
+                    }
+                    Event::OpenAiDone => summary.ok = true,
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            let mut active_tools = std::collections::HashSet::new();
+            for event in events {
+                match event {
+                    Event::AnthropicText(text) if !text.is_empty() => {
+                        summary.content_len += text.len();
+                        summary.text_deltas += 1;
+                    }
+                    Event::AnthropicThinking { text, .. } if !text.is_empty() => {
+                        summary.reasoning_len += text.len();
+                        summary.thinking_deltas += 1;
+                    }
+                    Event::AnthropicToolStart { idx, .. } => {
+                        active_tools.insert(*idx);
+                    }
+                    Event::AnthropicToolArgs { idx, args }
+                        if !args.is_empty() && active_tools.contains(idx) =>
+                    {
+                        summary.tool_arg_deltas += 1;
+                    }
+                    Event::AnthropicDone => summary.ok = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    if !summary.ok {
+        summary.content_len = 0;
+        summary.reasoning_len = 0;
+    }
+    summary
+}
+
+fn assert_controlled_summary(actual: &engine::provider::FuzzProviderSummary, expected: ExpectedSummary) {
+    assert_eq!(actual.ok, expected.ok, "provider stream completion status changed");
+    assert_eq!(actual.content_len, expected.content_len, "provider stream content length changed");
+    assert_eq!(actual.reasoning_len, expected.reasoning_len, "provider stream reasoning length changed");
+    assert_eq!(actual.text_deltas, expected.text_deltas, "provider stream text delta count changed");
+    assert_eq!(
+        actual.thinking_deltas, expected.thinking_deltas,
+        "provider stream thinking delta count changed"
+    );
+    assert_eq!(
+        actual.tool_arg_deltas, expected.tool_arg_deltas,
+        "provider stream tool argument delta count changed"
+    );
+}
+
 fuzz_target!(|input: Input| {
     let mut sse_buf = String::new();
     let mut drained = Vec::new();
@@ -149,8 +261,13 @@ fuzz_target!(|input: Input| {
         let _ = fuzz_parse_provider_response(input.wire, ev);
     }
 
+    let controlled: Vec<_> = input.events.iter().map(event_json).collect();
+    let expected = expected_stream_summary(input.wire, &input.events);
+    let controlled_summary = fuzz_parse_provider_stream(input.wire, &controlled);
+    assert_controlled_summary(&controlled_summary, expected);
+
     let mut events = drained;
-    events.extend(input.events.into_iter().map(event_json));
+    events.extend(controlled);
     let summary = fuzz_parse_provider_stream(input.wire, &events);
     assert!(summary.content_len <= 4096 * events.len().max(1));
 });

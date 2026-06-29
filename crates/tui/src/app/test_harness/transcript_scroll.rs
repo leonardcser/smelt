@@ -29,6 +29,8 @@ pub enum TranscriptScrollProbeCommand {
     JumpBottom,
 }
 
+static SPARSE_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone, Copy, Debug)]
 struct UserDeltaAnchor {
     sign: i8,
@@ -51,16 +53,24 @@ impl TranscriptScrollProbeState {
 }
 
 struct SparseTranscriptFixture {
-    session_dir: tempfile::TempDir,
+    session_dir: std::path::PathBuf,
 }
 
 impl SparseTranscriptFixture {
-    fn new(session_dir: tempfile::TempDir) -> Self {
+    fn new(session_dir: std::path::PathBuf) -> Self {
+        let _ = std::fs::remove_dir_all(&session_dir);
+        std::fs::create_dir_all(&session_dir).expect("create transcript fixture dir");
         Self { session_dir }
     }
 
     fn path(&self) -> &std::path::Path {
-        self.session_dir.path()
+        &self.session_dir
+    }
+}
+
+impl Drop for SparseTranscriptFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.session_dir);
     }
 }
 
@@ -75,7 +85,10 @@ impl TestApp {
         let width = width.clamp(32, 140);
         let height = height.clamp(8, 40);
         let records = heterogeneous_resume_records(descriptor_count);
-        let fixture = SparseTranscriptFixture::new(tempfile::tempdir().expect("session dir"));
+        let fixture_id = SPARSE_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fixture = SparseTranscriptFixture::new(
+            managed_harness_dir("transcript-scroll").join(format!("fixture-{fixture_id}")),
+        );
         crate::persist::write_transcript_descriptor_suffix(fixture.path(), 0, &records)
             .expect("write descriptor suffix");
         let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(

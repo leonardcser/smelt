@@ -258,18 +258,69 @@ fn transcript_probe(app: &mut TestApp, kind: u8, row: u16, count: u8) {
     let row = row % 256;
     let count = count % 32;
     let snippet = match kind % 10 {
-        0 => format!("pcall(function() return smelt.transcript.rows({row}, {count}) end)"),
-        1 => format!("pcall(function() return smelt.transcript.node_at_row({row}) end)"),
-        2 => format!("pcall(function() return smelt.transcript.loaded_block_at_row({row}) end)"),
-        3 => "pcall(function() return smelt.transcript.loaded_blocks_expensive() end)".to_string(),
-        4 => "pcall(function() return smelt.transcript.visible_blocks() end)".to_string(),
-        5 => "pcall(function() return smelt.transcript.loaded_text_expensive() end)".to_string(),
-        6 => format!("pcall(function() return smelt.transcript.fold_at_row({row}, 'toggle') end)"),
-        7 => "pcall(function() return smelt.transcript.fold_kind('thinking', 'toggle') end)".to_string(),
-        8 => "pcall(function() return smelt.transcript.fold_all('open') end)".to_string(),
-        _ => format!("pcall(function() return smelt.win.transcript():reveal({row}, {{ top_padding = 1 }}) end)"),
+        0 => format!(
+            r#"
+            local rows = smelt.transcript.rows({row}, {count})
+            assert(type(rows) == "table", "rows() did not return a table")
+            assert(#rows <= {count}, "rows() returned more rows than requested")
+            for _, line in ipairs(rows) do
+              assert(type(line) == "string", "rows() returned a non-string row")
+            end
+            "#
+        ),
+        1 => format!(
+            r#"
+            local node = smelt.transcript.node_at_row({row})
+            if node ~= nil then
+              assert(type(node) == "table", "node_at_row() returned a non-table node")
+              assert(type(node.first_row) == "number", "node is missing first_row")
+              assert(type(node.rows) == "number", "node is missing rows")
+              assert(node.rows >= 0, "node has negative rows")
+              assert(node.first_row <= {row} and {row} < node.first_row + math.max(node.rows, 1), "node does not contain requested row")
+            end
+            "#
+        ),
+        2 => format!(
+            r#"
+            local block = smelt.transcript.loaded_block_at_row({row})
+            if block ~= nil then
+              assert(type(block) == "table", "loaded_block_at_row() returned a non-table block")
+              assert(type(block.first_row) == "number", "block is missing first_row")
+              assert(type(block.rows) == "number", "block is missing rows")
+              assert(block.rows >= 0, "block has negative rows")
+              assert(block.first_row <= {row} and {row} < block.first_row + math.max(block.rows, 1), "block does not contain requested row")
+            end
+            "#
+        ),
+        3 => block_snapshot_probe("loaded_blocks_expensive"),
+        4 => block_snapshot_probe("visible_blocks"),
+        5 => "assert(type(smelt.transcript.loaded_text_expensive()) == \"string\")".to_string(),
+        6 => format!(
+            "assert(type(smelt.transcript.fold_at_row({row}, 'toggle')) == \"boolean\")"
+        ),
+        7 => "assert(type(smelt.transcript.fold_kind('thinking', 'toggle')) == \"boolean\")".to_string(),
+        8 => "smelt.transcript.fold_all('open')".to_string(),
+        _ => format!("smelt.win.transcript():reveal({row}, {{ top_padding = 1 }})"),
     };
-    let _ = app.run_lua(&snippet);
+    assert!(app.run_lua(&snippet), "transcript probe failed: {snippet}");
+}
+
+fn block_snapshot_probe(name: &str) -> String {
+    format!(
+        r#"
+        local blocks = smelt.transcript.{name}()
+        assert(type(blocks) == "table", "{name}() did not return a table")
+        local prev_first_row = -1
+        for _, block in ipairs(blocks) do
+          assert(type(block) == "table", "{name}() returned a non-table block")
+          assert(type(block.first_row) == "number", "block is missing first_row")
+          assert(type(block.rows) == "number", "block is missing rows")
+          assert(block.first_row >= prev_first_row, "blocks are not ordered by first_row")
+          assert(block.rows >= 0, "block has negative rows")
+          prev_first_row = block.first_row
+        end
+        "#
+    )
 }
 
 fn call_id(id: u8) -> String {

@@ -2382,11 +2382,13 @@ impl SessionDocument {
         match mutation {
             SessionMutation::AppendTranscriptBlock { block } => {
                 transcript.push(block);
-                applied = true;
+                applied = transcript.history().descriptor_dirty_generation() != before_generation
+                    || transcript.history().descriptor_dirty_from() != before_dirty_from;
             }
             SessionMutation::InsertCheckpointMarker { block_index, block } => {
                 transcript.insert_checkpoint_marker_at(block_index, block);
-                applied = true;
+                applied = transcript.history().descriptor_dirty_generation() != before_generation
+                    || transcript.history().descriptor_dirty_from() != before_dirty_from;
             }
             SessionMutation::RemoveUnoriginatedTranscriptBlockAt { block_index } => {
                 applied = transcript.remove_unoriginated_at(block_index).is_some();
@@ -3257,9 +3259,29 @@ mod tests {
             },
         );
 
+        assert!(result.applied);
         assert!(result.transcript_dirty);
         assert!(!transcript.history().is_empty());
         assert_eq!(transcript.history().descriptor_dirty_from(), Some(0));
+    }
+
+    #[test]
+    fn empty_append_transcript_block_mutation_reports_noop() {
+        let mut transcript = TranscriptDocument::new();
+
+        let result = apply_transcript(
+            &mut transcript,
+            SessionMutation::AppendTranscriptBlock {
+                block: Block::Text {
+                    content: "  \n\t  ".into(),
+                },
+            },
+        );
+
+        assert!(!result.applied);
+        assert!(!result.transcript_dirty);
+        assert!(transcript.history().is_empty());
+        assert_eq!(transcript.history().descriptor_dirty_from(), None);
     }
 
     #[test]
