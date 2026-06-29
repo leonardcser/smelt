@@ -383,7 +383,9 @@ pub async fn run_streaming_with_shell(
                     let id =
                         detach_streaming_child(detach, child, stdout_reader, stderr_reader, output);
                     return StreamOutput {
-                        content: format!("moved to background as {id}"),
+                        content: format!(
+                            "moved to background as {id}, you'll be notified when it completes"
+                        ),
                         is_error: false,
                         timed_out: false,
                         background_id: Some(id),
@@ -419,7 +421,7 @@ pub async fn run_streaming_with_shell(
                         );
                         return StreamOutput {
                             content: format!(
-                                "timed out after {:.0}s; moved to background as {id}",
+                                "timed out after {:.0}s; moved to background as {id}, you'll be notified when it completes",
                                 config.timeout.as_secs_f64()
                             ),
                             is_error: false,
@@ -1098,6 +1100,7 @@ mod tests {
         let id = out.background_id.expect("detached process id");
         assert!(out.timed_out);
         assert!(!out.is_error);
+        assert!(out.content.contains("you'll be notified when it completes"));
         assert_eq!(registry.running_count(), 1);
         let snapshot = registry.snapshot_output(&id).unwrap();
         assert!(snapshot.running);

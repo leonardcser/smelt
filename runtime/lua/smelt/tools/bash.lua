@@ -91,7 +91,7 @@ function M.execute(args, ctx)
   if background then
     local proc_id = smelt.process.spawn_bg(command)
     return {
-      content = "started background process " .. proc_id,
+      content = "started background process " .. proc_id .. ", you'll be notified when it completes",
       is_error = false,
       metadata = { background_id = proc_id },
     }
@@ -124,7 +124,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
   default_allow = DEFAULT_ALLOW,
   subpattern_parser = "shell",
   description =
-  "Execute a non-interactive bash command and return its output. Commands time out after 2 minutes by default (configurable up to 10 minutes); by default, a still-running command is moved to the background on timeout. Use background=true to start it in the background immediately. When a command is in the background, use read_process_output to inspect it and stop_process to kill it. Do not poll a background command with read_process_output; you will be notified automatically when it completes. Do not use shell backgrounding (`&`) in the command string. For commands expected to produce very long output (e.g. test runners, build logs), pipe the output through `head`, `tail`, or `grep` to keep only the relevant parts and reduce context usage. The shell working directory does not persist between calls. `cd` inside a command is local to that invocation. Prefer absolute paths to avoid relying on the current directory. Do not run interactive commands (editors, pagers, interactive rebases, etc.); they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
+  "Execute a non-interactive bash command and return its output. Commands time out after 2 minutes by default (configurable up to 10 minutes); by default, a still-running command is moved to the background on timeout. Use background=true to start it in the background immediately. When a command is in the background, use read_process_output to inspect it and stop_process to kill it. Polling a background command with read_process_output is not necessary; you will be notified automatically when it completes. Do not use shell backgrounding (`&`) in the command string. For commands expected to produce very long output (e.g. test runners, build logs), pipe the output through `head`, `tail`, or `grep` to keep only the relevant parts and reduce context usage. The shell working directory does not persist between calls. `cd` inside a command is local to that invocation. Prefer absolute paths to avoid relying on the current directory. Do not run interactive commands (editors, pagers, interactive rebases, etc.); they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
   parameters = {
     type = "object",
     properties = {
