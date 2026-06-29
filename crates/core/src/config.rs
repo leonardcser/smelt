@@ -193,11 +193,7 @@ macro_rules! settings {
 settings! {
     /// Vi keybindings in the prompt.
     vim:                   Bool   = false;
-    /// Sync the prompt kill ring with the system clipboard. When off, kill and
-    /// yank (`C-k`, `C-y`, `C-u`, vim `y`/`p`) use a purely internal kill ring
-    /// and never read or write the OS clipboard - useful when the terminal
-    /// doesn't relay OSC 52 writes (so paste would otherwise grab stale OS
-    /// clipboard text). Cmd-V terminal paste still works regardless.
+    /// Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works.
     system_clipboard:      Bool   = true;
     /// Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless).
     auto_compact:          Bool   = true;
