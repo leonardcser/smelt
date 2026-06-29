@@ -2476,6 +2476,50 @@ mod tests {
         assert_eq!(input.win.vim_mode(), crate::smelt_edit::VimMode::Normal);
     }
 
+    /// With `system_clipboard` on, a sink whose `read()` returns stale external
+    /// text (the OSC 52 write never round-tripped) clobbers a fresh internal
+    /// kill on `C-y`. This is the bug `system_clipboard = false` avoids.
+    #[test]
+    fn yank_with_system_clipboard_is_clobbered_by_stale_external_read() {
+        let mut input = Harness::new();
+        let mut clipboard =
+            crate::smelt_edit::Clipboard::new(Box::new(ReadClipboard(Some("OUTSIDE".into()))));
+        input.buf.set_source("hello world".to_string());
+        input.win.set_cpos(6); // after "hello "
+        for action in [KeyAction::KillToEndOfLine, KeyAction::Yank] {
+            let mut ctx = PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            };
+            input
+                .state
+                .execute_key_action(&mut ctx, action, None, &mut clipboard);
+        }
+        // C-k put "world" in the ring, but C-y pulled the stale OS clipboard.
+        assert_eq!(input.buf.source(), "hello OUTSIDE");
+    }
+
+    /// A `NullSink` (what `system_clipboard = false` installs) reads `None`, so
+    /// the paste-sync never clobbers: `C-k` then `C-y` round-trips the internal
+    /// kill ring regardless of what the OS clipboard holds.
+    #[test]
+    fn yank_with_null_sink_round_trips_internal_kill_ring() {
+        let mut input = Harness::new();
+        let mut clipboard = crate::smelt_edit::Clipboard::null();
+        input.buf.set_source("hello world".to_string());
+        input.win.set_cpos(6); // after "hello "
+        for action in [KeyAction::KillToEndOfLine, KeyAction::Yank] {
+            let mut ctx = PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            };
+            input
+                .state
+                .execute_key_action(&mut ctx, action, None, &mut clipboard);
+        }
+        assert_eq!(input.buf.source(), "hello world");
+    }
+
     #[test]
     fn delete_selection_removes_attachments() {
         let mut input = Harness::new();

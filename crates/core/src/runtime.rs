@@ -2,7 +2,7 @@
 
 use super::{
     app_config::AppConfig, confirms::Confirms, engine_client::EngineClient, signals,
-    signals::Signals, timers::Timers, Osc52Sink, SystemSink,
+    signals::Signals, timers::Timers, NullSink, Osc52Sink, SystemSink,
 };
 use crate::process::ProcessRegistry;
 use crate::session::Session;
@@ -82,14 +82,14 @@ impl Core {
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
         let workspace_files = crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
+        // Read before the struct literal moves `config` into the field below.
+        let clipboard =
+            crate::Clipboard::new(clipboard_sink(frontend, config.settings.system_clipboard));
         Self {
             config,
             session: Session::new(env.pid(), env.cwd()),
             confirms,
-            clipboard: crate::Clipboard::new(match frontend {
-                FrontendKind::Tui => Box::new(Osc52Sink),
-                FrontendKind::Headless => Box::new(SystemSink),
-            }),
+            clipboard,
             timers: Timers::new(Arc::clone(&clock)),
             signals,
             engine: EngineClient::new(engine, confirms_flag),
@@ -103,5 +103,41 @@ impl Core {
             clock,
             env,
         }
+    }
+
+    /// Swap the clipboard sink to match the `system_clipboard` setting. Off
+    /// installs a [`NullSink`] so the kill ring stays purely internal (no OS
+    /// clipboard read/write); on restores the frontend's default sink. Called
+    /// when the setting changes at runtime; a no-op for headless.
+    pub fn set_system_clipboard_enabled(&mut self, enabled: bool) {
+        self.clipboard
+            .swap_sink(clipboard_sink(self.frontend, enabled));
+    }
+}
+
+/// Pick the clipboard sink for `frontend`. The TUI normally uses OSC 52 (works
+/// over SSH/tmux), but falls back to a no-op [`NullSink`] when the user turns
+/// off `system_clipboard`. Headless always uses the subprocess clipboard.
+fn clipboard_sink(frontend: FrontendKind, system_clipboard: bool) -> Box<dyn crate::Sink + Send> {
+    match frontend {
+        FrontendKind::Tui if system_clipboard => Box::new(Osc52Sink),
+        FrontendKind::Tui => Box::new(NullSink),
+        FrontendKind::Headless => Box::new(SystemSink),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Sink;
+
+    #[test]
+    fn tui_sink_without_system_clipboard_is_internal_only() {
+        // `system_clipboard = false` installs a `NullSink`: it never reads the
+        // OS clipboard (so the paste-sync can't clobber the internal kill ring)
+        // and its writes are no-ops.
+        let mut sink = clipboard_sink(FrontendKind::Tui, false);
+        assert_eq!(sink.read(), None);
+        assert!(sink.write("anything").is_ok());
     }
 }

@@ -550,9 +550,14 @@ impl TuiApp {
             self.core.config.settings.file_icons,
             self.core.config.settings.file_icon_colors,
         );
+        let old_system_clipboard = self.core.config.settings.system_clipboard;
         f(&mut self.core.config.settings);
         let file_icons = self.core.config.settings.file_icons;
         let file_icon_colors = self.core.config.settings.file_icon_colors;
+        let system_clipboard = self.core.config.settings.system_clipboard;
+        if system_clipboard != old_system_clipboard {
+            self.core.set_system_clipboard_enabled(system_clipboard);
+        }
         let vim = self.core.config.settings.vim;
         let prompt_win = self
             .ui
