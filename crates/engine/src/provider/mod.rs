@@ -426,9 +426,12 @@ fn effective_reasoning_effort(
     api_base: &str,
     model: &str,
 ) -> ReasoningEffort {
-    if requested != ReasoningEffort::Off
-        && reasoning_support_from_metadata(config, provider_type, api_base, model) == Some(false)
-    {
+    if requested == ReasoningEffort::Off {
+        return ReasoningEffort::Off;
+    }
+
+    let support = reasoning_support_from_metadata(config, provider_type, api_base, model);
+    if support == Some(false) || (provider_type == "openai-compatible" && support != Some(true)) {
         ReasoningEffort::Off
     } else {
         requested
@@ -910,6 +913,23 @@ fn apply_codex_request_headers(
     req
 }
 
+fn normalize_api_base(api_base: &str) -> String {
+    let mut base = api_base.trim().trim_end_matches('/');
+    for endpoint in ["/chat/completions", "/responses", "/messages"] {
+        if let Some(stripped) = base.strip_suffix(endpoint) {
+            base = stripped.trim_end_matches('/');
+            break;
+        }
+    }
+    base.to_string()
+}
+
+fn endpoint_url(api_base: &str, endpoint: &str) -> String {
+    let base = normalize_api_base(api_base);
+    let endpoint = endpoint.trim_start_matches('/');
+    format!("{base}/{endpoint}")
+}
+
 impl Provider {
     pub(crate) fn supports_mid_turn_reasoning_changes(&self) -> bool {
         self.kind.descriptor().mid_turn_reasoning_changes
@@ -922,7 +942,7 @@ impl Provider {
         client: Client,
         clock: std::sync::Arc<dyn crate::clock::Clock>,
     ) -> Self {
-        let api_base = api_base.trim_end_matches('/').to_string();
+        let api_base = normalize_api_base(&api_base);
         let kind = ProviderKind::from_config_and_url(provider_type, &api_base);
         let auth = kind.descriptor().auth;
         Self {
@@ -1052,12 +1072,12 @@ impl Provider {
 
         let (mut url, mut body) = match self.kind {
             ProviderKind::OpenAiCompatible => {
-                let url = format!("{}/chat/completions", self.api_base);
+                let url = endpoint_url(&self.api_base, "chat/completions");
                 let body = chat_completions::build_body(messages, tools, model, effort, &config);
                 (url, body)
             }
             ProviderKind::OpenAi => {
-                let url = format!("{}/responses", self.api_base);
+                let url = endpoint_url(&self.api_base, "responses");
                 let body = openai::build_body(messages, tools, model, effort, &config);
                 (url, body)
             }
@@ -1069,7 +1089,7 @@ impl Provider {
             ProviderKind::AnthropicCompatible
             | ProviderKind::Anthropic
             | ProviderKind::KimiCode => {
-                let url = format!("{}/messages", self.api_base);
+                let url = endpoint_url(&self.api_base, "messages");
                 let body =
                     anthropic::build_body(messages, tools, model, effort, &config, &opts.cache);
                 (url, body)
@@ -1896,6 +1916,72 @@ mod tests {
         assert_eq!(api_key_auth(ProviderKind::OpenAiCompatible, ""), None);
         assert_eq!(api_key_auth(ProviderKind::Codex, "key"), None);
         assert_eq!(api_key_auth(ProviderKind::Copilot, "key"), None);
+    }
+
+    #[test]
+    fn endpoint_url_accepts_base_or_full_endpoint() {
+        assert_eq!(
+            endpoint_url("https://api.cerebras.ai/v1", "chat/completions"),
+            "https://api.cerebras.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint_url(
+                "https://api.cerebras.ai/v1/chat/completions",
+                "chat/completions"
+            ),
+            "https://api.cerebras.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint_url("https://api.openai.com/v1/responses", "responses"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            endpoint_url("https://api.anthropic.com/v1/messages/", "messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn provider_normalizes_endpoint_shaped_api_base() {
+        let provider = Provider::new(
+            "https://api.cerebras.ai/v1/chat/completions".to_string(),
+            "token".to_string(),
+            "openai-compatible",
+            Client::new(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
+
+        assert_eq!(provider.api_base(), "https://api.cerebras.ai/v1");
+    }
+
+    #[test]
+    fn openai_compatible_reasoning_requires_explicit_support() {
+        let cfg = crate::config::ModelConfig::default();
+        assert_eq!(
+            effective_reasoning_effort(
+                ReasoningEffort::High,
+                &cfg,
+                "openai-compatible",
+                "https://api.cerebras.ai/v1",
+                "m"
+            ),
+            ReasoningEffort::Off
+        );
+
+        let cfg = crate::config::ModelConfig {
+            supports_reasoning: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_reasoning_effort(
+                ReasoningEffort::High,
+                &cfg,
+                "openai-compatible",
+                "https://api.cerebras.ai/v1",
+                "m"
+            ),
+            ReasoningEffort::High
+        );
     }
 
     #[test]

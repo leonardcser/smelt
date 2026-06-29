@@ -73,6 +73,32 @@ fn skill_backed_commands_submit_skill_body_and_focus() {
     assert!(text.contains("<skill name=\"reflect\" included_by=\"smelt\""));
 }
 
+#[test]
+fn custom_command_with_non_scalar_description_still_registers() {
+    let dir = tempfile::tempdir().unwrap();
+    let command_path = dir.path().join("security-audit.md");
+    std::fs::write(
+        &command_path,
+        "---\ndescription:\n  audit the repository for malicious code\n  and data exfiltration\ntools:\n  allow: [read_file, glob, grep]\n---\n\nAudit the repository",
+    )
+    .unwrap();
+
+    let mut app = TestApp::builder().with_vim(false).build();
+    let dir_lua = format!("{:?}", dir.path().display().to_string());
+    assert!(app.run_lua(&format!(
+        "require('smelt.commands.custom_commands').register_dir({dir_lua})"
+    )));
+    let command_registered = app
+        .app
+        .lua
+        .shared()
+        .commands
+        .lock()
+        .unwrap()
+        .contains_key("security-audit");
+    assert!(command_registered, "security-audit command should register");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn custom_command_shell_output_is_marked_as_smelt_context() {
     let dir = tempfile::tempdir().unwrap();

@@ -154,12 +154,20 @@ local function trim_for_desc(s)
   return s
 end
 
+local function frontmatter_string(v)
+  local t = type(v)
+  if t == "string" then return v end
+  if t == "number" or t == "boolean" then return tostring(v) end
+  return nil
+end
+
 local function file_desc(path)
   local content = read_file(path)
   if not content then return "" end
   local fm = smelt.parse.frontmatter(content)
-  if fm and fm.description and fm.description ~= "" then
-    return fm.description
+  local desc = fm and frontmatter_string(fm.description)
+  if desc and desc ~= "" then
+    return desc
   end
   -- Skip frontmatter manually for the body-fallback path.
   local _, body = smelt.parse.frontmatter(content)
@@ -195,7 +203,10 @@ local function build_overrides(fm)
   if not fm then return nil end
   local out = {}
   for k, v in pairs(fm) do
-    if RESERVED[k] then
+    if k == "description" then
+      local desc = frontmatter_string(v)
+      if desc then out[k] = desc end
+    elseif RESERVED[k] then
       out[k] = v
     elseif type(v) == "table" then
       out[k] = v

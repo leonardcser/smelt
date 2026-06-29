@@ -40,6 +40,19 @@ fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     }
 }
 
+fn sanitize_message_for_chat_completions(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(role) = obj.get("role").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let allowed: &[&str] = match role {
+        "system" | "user" => &["role", "content"],
+        "assistant" => &["role", "content", "tool_calls"],
+        "tool" => &["role", "content", "tool_call_id"],
+        _ => &["role", "content"],
+    };
+    obj.retain(|key, _| allowed.contains(&key.as_str()));
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -52,11 +65,6 @@ pub(super) fn build_body(
         .map(|m| {
             let mut v = serde_json::to_value(m).unwrap();
             if let Some(obj) = v.as_object_mut() {
-                obj.remove("is_error");
-                // Provider-shaped reasoning is only meaningful to the
-                // Anthropic / OpenAI Responses round-trip; chat-completions
-                // backends would reject the extra field.
-                obj.remove("reasoning_details");
                 if m.role == Role::Tool {
                     if let Some(s) = obj.get("content").and_then(|c| c.as_str()) {
                         let trimmed = trim_tool_output(s, MAX_TOOL_OUTPUT_LINES);
@@ -64,13 +72,7 @@ pub(super) fn build_body(
                     }
                 }
                 super::sanitize_tool_call_arguments(obj);
-                if effort != ReasoningEffort::Off
-                    && m.role == Role::Assistant
-                    && m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
-                    && !obj.contains_key("reasoning_content")
-                {
-                    obj.insert("reasoning_content".into(), serde_json::json!(""));
-                }
+                sanitize_message_for_chat_completions(obj);
             }
             v
         })
@@ -103,12 +105,6 @@ pub(super) fn build_body(
     let label = effort.label();
     if effort != ReasoningEffort::Off {
         body["reasoning_effort"] = serde_json::json!(label);
-        body["chat_template_kwargs"] = serde_json::json!({
-            "enable_thinking": true,
-            "reasoning_effort": label,
-        });
-    } else {
-        body["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
     }
 
     body
@@ -378,6 +374,17 @@ mod tests {
         tool_msg_opt(Some(call_id), output)
     }
 
+    fn message_keys(message: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = message
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|key| key.to_string())
+            .collect();
+        keys.sort();
+        keys
+    }
+
     // ---- build_body ----
 
     #[test]
@@ -424,6 +431,53 @@ mod tests {
     }
 
     #[test]
+    fn build_body_strips_internal_message_fields() {
+        let mut user_msg = user("hi");
+        user_msg.reasoning_content = Some("internal reasoning".into());
+        user_msg.tool_metadata = Some(json!({"summary": "internal display metadata"}));
+        user_msg.is_error = true;
+
+        let assistant = Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: Some("prior thinking".into()),
+            reasoning_details: None,
+            tool_calls: Some(vec![ToolCall::new(
+                "id".into(),
+                FunctionCall {
+                    name: "f".into(),
+                    arguments: "{}".into(),
+                },
+            )]),
+            tool_call_id: None,
+            is_error: true,
+            tool_metadata: Some(json!({"summary": "internal assistant metadata"})),
+        };
+
+        let mut tool = tool_msg("id", "ok");
+        tool.tool_metadata = Some(json!({"summary": "internal tool metadata"}));
+        tool.is_error = true;
+
+        let body = build_body(
+            &[user_msg, assistant, tool],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+        );
+
+        assert_eq!(message_keys(&body["messages"][0]), ["content", "role"]);
+        assert_eq!(message_keys(&body["messages"][1]), ["role", "tool_calls"]);
+        assert_eq!(
+            message_keys(&body["messages"][2]),
+            ["content", "role", "tool_call_id"]
+        );
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "id");
+        assert_eq!(body["messages"][2]["tool_call_id"], "id");
+        assert_eq!(body["messages"][2]["content"], "ok");
+    }
+
+    #[test]
     fn build_body_sanitizes_invalid_tool_call_arguments_to_empty_object_string() {
         let m = Message {
             role: Role::Assistant,
@@ -448,11 +502,11 @@ mod tests {
     }
 
     #[test]
-    fn build_body_preserves_tool_call_history_when_thinking_is_enabled_later() {
+    fn build_body_preserves_tool_call_history_without_reasoning_fields() {
         let assistant = Message {
             role: Role::Assistant,
             content: None,
-            reasoning_content: None,
+            reasoning_content: Some("prior thinking".into()),
 
             reasoning_details: None,
             tool_calls: Some(vec![ToolCall::new(
@@ -478,7 +532,7 @@ mod tests {
             ReasoningEffort::Low,
             &cfg(),
         );
-        assert_eq!(body["messages"][1]["reasoning_content"], "");
+        assert!(body["messages"][1].get("reasoning_content").is_none());
         assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "id");
         assert_eq!(body["messages"][2]["tool_call_id"], "id");
     }
@@ -542,19 +596,18 @@ mod tests {
     }
 
     #[test]
-    fn build_body_thinking_disabled_when_effort_off() {
+    fn build_body_omits_thinking_fields_when_effort_off() {
         let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
-        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(body.get("chat_template_kwargs").is_none());
         assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
-    fn build_body_thinking_enabled_when_effort_set() {
+    fn build_body_sets_reasoning_effort_when_effort_set() {
         let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::High, &cfg());
         let label = ReasoningEffort::High.label();
         assert_eq!(body["reasoning_effort"], label);
-        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
-        assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], label);
+        assert!(body.get("chat_template_kwargs").is_none());
     }
 
     // ---- parse_response ----
