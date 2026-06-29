@@ -1,0 +1,32 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ usage ────────────────────────────────────────────────────────────────────
+ cost $0.0000
+
+ Codex
+   plan plus
+   credits 12
+   usage limit resets 0 available
+   5h limit    |██████████████▋░░░|  82% used  resets Jan 01 01:00
+   7.0d limit  |████████▏░░░░░░░░░|  45% used  resets Jan 01 02:00
+
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1. Refresh usage
+  2. Redeem usage limit reset
+ ○ normal                                                             1:1 0%

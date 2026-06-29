@@ -159,6 +159,7 @@ function M.open(opts)
   action_leaf:key("tab", function() select_action(selected + 1) end)
   action_leaf:key("s-tab", function() select_action(selected - 1) end)
   action_leaf:key("esc", close)
+  if opts.close_with_q ~= false then action_leaf:key("q", close) end
   action_leaf:key("c-c", close)
   action_leaf:on("dismiss", close)
 

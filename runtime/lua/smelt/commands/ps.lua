@@ -139,8 +139,8 @@ local function show_logs(proc)
       { leaf = log_leaf,  height = "fill" },
     },
     focus      = log_leaf,
+    close_with_q = true,
     keymaps    = {
-      { key = "q",      on_press = close },
       { key = "<Esc>",  on_press = close },
       { key = "ctrl-r", hint = "^r: refresh", on_press = function() refresh() end },
     },

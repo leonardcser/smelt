@@ -688,8 +688,8 @@ local function open_changelog_dialog()
     min_height = "30%",
     max_height = "70%",
     panels     = { { leaf = leaf, height = "fill" } },
+    close_with_q = true,
     keymaps    = {
-      { key = "q",     on_press = function(ctx) ctx.close() end },
       { key = "<Esc>", on_press = function(ctx) ctx.close() end },
       { key = "r",     on_press = function(ctx)
           ctx.close()

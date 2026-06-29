@@ -442,15 +442,20 @@ local function open_usage()
     })
   end
 
-  local actions = { { label = "Refresh usage", action = "refresh" } }
-  if is_codex then
-    actions[#actions + 1] = {
-      label = "Redeem usage limit reset",
-      action = "redeem",
-    }
+  local function usage_actions()
+    local actions = { { label = "Refresh usage", action = "refresh" } }
+    if is_codex then
+      local known_empty = last_codex_reset_credits ~= nil and (tonumber(last_codex_reset_credits) or 0) <= 0
+      actions[#actions + 1] = {
+        label = "Redeem usage limit reset",
+        action = "redeem",
+        disabled = known_empty,
+      }
+    end
+    return actions
   end
 
-  local actions_leaf = smelt.dialog.menu(actions, {
+  local actions_leaf, actions_ctrl = smelt.dialog.menu(usage_actions(), {
     on_submit = function(ctx)
       local action = ctx.item and ctx.item.action
       if action == "refresh" then
@@ -473,10 +478,12 @@ local function open_usage()
       { leaf = actions_leaf, height = "fit", border = { style = "dashed", top = "Comment" } },
     },
     focus = actions_leaf,
+    close_with_q = true,
   })
 
   local callback = function(lines, fresh, error_message)
     render_dialog(buf, lines, fresh, error_message, title)
+    if actions_ctrl then actions_ctrl:set_items(usage_actions()) end
   end
 
   cache.subscribe(key, callback)

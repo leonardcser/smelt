@@ -132,9 +132,7 @@ smelt.cmd.register("btw", function(args)
       max_height = "70%",
       panels     = { { leaf = leaf, height = "fill" } },
       on_close   = stop_waiting,
-      keymaps = {
-        { key = "q", on_press = function(ctx) ctx.close() end },
-      },
+      close_with_q = true,
     })
   end)
 end, { desc = "ask a side question", args = { "<question>" } })

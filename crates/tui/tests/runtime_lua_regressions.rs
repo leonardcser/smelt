@@ -1,3 +1,4 @@
+const DIALOG_LUA: &str = include_str!("../../../runtime/lua/smelt/dialog.lua");
 const PS_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/ps.lua");
 const BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/_bar.lua");
 const PROMPT_BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/prompt_bar.lua");
@@ -60,6 +61,91 @@ fn install_notifications_preload(lua: &mlua::Lua) {
     )
     .exec()
     .expect("install notification module preload");
+}
+
+#[test]
+fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
+    let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
+    lua.load(
+        r#"
+        local next_buf_id = 0
+        local last_leaf = nil
+        smelt = {
+          __last_leaf = nil,
+          ns = function(name) return name end,
+          log = { error = function() end },
+          notify = __smelt_notify_stub(nil, nil),
+          buf = {
+            new = function()
+              next_buf_id = next_buf_id + 1
+              local buf = { id = next_buf_id, rows = {}, marks = {} }
+              function buf:lines(rows) self.rows = rows; return self end
+              function buf:clear_ns() return self end
+              function buf:mark(ns, row, col, opts)
+                self.marks[#self.marks + 1] = { ns = ns, row = row, col = col, opts = opts }
+                return self
+              end
+              function buf:styled(rows) self.rows = rows; return self end
+              function buf:source(text) self.text = text; return self end
+              function buf:readonly() return self end
+              return buf
+            end,
+          },
+          win = {
+            new = function(buf, opts)
+              local leaf = { buf = buf, opts = opts or {}, keys = {}, cursor_row = (opts and opts.initial_cursor) or 0 }
+              function leaf:key(key, fn) self.keys[key] = fn end
+              function leaf:cursor(row)
+                if row == nil then return self.cursor_row end
+                self.cursor_row = row
+              end
+              function leaf:on() end
+              function leaf:focus() end
+              function leaf:close() end
+              last_leaf = leaf
+              smelt.__last_leaf = leaf
+              return leaf
+            end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install dialog stubs");
+    lua.load(DIALOG_LUA).exec().expect("load dialog module");
+
+    let submitted: Vec<i64> = lua
+        .load(
+            r#"
+            local submitted = {}
+            local leaf, ctrl = smelt.dialog.menu({
+              { label = "Refresh" },
+              { label = "Redeem reset", disabled = true },
+              { label = "Cancel" },
+            }, {
+              on_submit = function(ctx) submitted[#submitted + 1] = ctx.index end,
+            })
+
+            ctrl:cursor(2)
+            local cursor_skips_disabled = ctrl:cursor()
+
+            leaf:cursor(1)
+            leaf.keys.enter()
+            local after_disabled_enter = #submitted
+
+            leaf.keys["2"]()
+            local after_disabled_digit = #submitted
+
+            leaf.keys.j()
+            leaf.keys.enter()
+            return { cursor_skips_disabled, after_disabled_enter, after_disabled_digit, submitted[1] or 0 }
+            "#,
+        )
+        .eval()
+        .expect("exercise disabled menu items");
+
+    assert_eq!(submitted, [3, 0, 0, 3]);
 }
 
 #[test]

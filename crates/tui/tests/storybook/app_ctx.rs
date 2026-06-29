@@ -381,6 +381,15 @@ impl AppStoryCtx {
         }
     }
 
+    /// Press a plain character key.
+    pub fn press_char(&mut self, ch: char) {
+        self.app.press(crossterm::event::KeyCode::Char(ch));
+        for _ in 0..4 {
+            self.app
+                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
+        }
+    }
+
     /// Promote the oldest queued next-turn message into the next-request queue.
     pub fn promote_next_queued_message(&mut self) {
         self.app.press(crossterm::event::KeyCode::Enter);
