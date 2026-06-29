@@ -475,6 +475,7 @@ impl TuiApp {
         if record && self.core.config.remember.model {
             state::set_selected_model(resolved.key.clone());
         }
+        self.warn_if_api_base_normalized();
         self.core.engine.send(UiCommand::SetModel {
             model: self.core.config.model.clone(),
             api_base: self.core.config.api_base.clone(),

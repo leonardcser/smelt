@@ -12,6 +12,29 @@ fn builds_a_fresh_test_app() {
 }
 
 #[test]
+fn api_base_endpoint_warning_is_persistent_and_deduped() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.provider_type = "openai-compatible".into();
+    app.app.core.config.api_base = "https://api.cerebras.ai/v1/chat/completions".into();
+
+    app.app.warn_if_api_base_normalized();
+    app.app.warn_if_api_base_normalized();
+
+    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    let entries: Vec<_> = messages
+        .entries()
+        .iter()
+        .filter(|entry| entry.full.contains("api_base includes /chat/completions"))
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, smelt_core::messages::MessageKind::Warning);
+    assert_eq!(entries[0].source, "config");
+    assert!(entries[0]
+        .full
+        .contains("using https://api.cerebras.ai/v1 instead"));
+}
+
+#[test]
 fn feed_one_records_alloc_delta_with_tick_near_zero() {
     let mut app = TestApp::builder().build();
     assert!(app.last_alloc_delta().is_none());

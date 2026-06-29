@@ -81,7 +81,7 @@ These need `--model` and an environment variable or config file:
     ```
 
     OpenRouter and other OpenAI-compatible services follow the same shape;
-    swap `--api-base` and the model name.
+    set `--api-base` to the provider's base URL and swap the model name.
 
 === ":simple-anthropic: Anthropic"
 

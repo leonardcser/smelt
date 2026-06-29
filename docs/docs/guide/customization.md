@@ -81,6 +81,9 @@ smelt.provider.register("openai", {
 })
 ```
 
+Use the provider's base URL for `api_base`, not a full request path such as
+`/chat/completions`, `/responses`, or `/messages`.
+
 Background features such as title generation, compaction, prediction, `/btw`,
 and `web_fetch` can use cheaper helper models while your main session uses a
 larger model:

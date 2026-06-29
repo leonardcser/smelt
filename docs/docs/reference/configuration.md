@@ -50,7 +50,7 @@ smelt.provider.register("openai", {
 | Field         | Description                                                                                                   |
 | ------------- | ------------------------------------------------------------------------------------------------------------- |
 | `type`        | `openai-compatible` (default), `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot`, `kimi-code` |
-| `api_base`    | API endpoint URL                                                                                              |
+| `api_base`    | API base URL, without `/chat/completions`, `/responses`, or `/messages`                                 |
 | `api_key_env` | Environment variable holding the API key (omit for OAuth-backed `codex`, `copilot`, and `kimi-code`)          |
 | `models`      | Array of model names (optional for OAuth-backed providers that fetch models via API)                          |
 

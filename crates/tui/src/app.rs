@@ -40,7 +40,7 @@ use smelt_core::FrontendKind;
 use std::sync::Arc;
 
 use crossterm::{event, terminal};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -268,6 +268,8 @@ pub struct TuiApp {
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
+    /// API base endpoint-shape warnings already surfaced this session.
+    pub(crate) api_base_normalization_warnings: HashSet<String>,
     startup_auth_error: Option<String>,
     /// Trust state for `<cwd>/.smelt/`; surfaced as a startup toast then dropped.
     pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
@@ -1475,6 +1477,7 @@ impl TuiApp {
             cancel_generation: 0,
             dispatching_turn_id: None,
             busy_stack: BusyStack::default(),
+            api_base_normalization_warnings: HashSet::new(),
             startup_auth_error,
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
@@ -2181,6 +2184,28 @@ impl TuiApp {
         );
     }
 
+    pub(crate) fn warn_if_api_base_normalized(&mut self) {
+        let Some(hint) = engine::provider::api_base_normalization_hint(&self.core.config.api_base)
+        else {
+            return;
+        };
+        let key = format!(
+            "{}\n{}\n{}",
+            self.core.config.provider_type, hint.original, hint.normalized
+        );
+        if !self.api_base_normalization_warnings.insert(key) {
+            return;
+        }
+        self.record_notice(
+            smelt_core::messages::MessageKind::Warning,
+            "config".into(),
+            format!(
+                "api_base includes /{}; using {} instead.\nSet api_base to the base URL to avoid ambiguity.",
+                hint.endpoint, hint.normalized
+            ),
+        );
+    }
+
     /// Append `body` to the persistent message log AND surface the first
     /// line of `body` as a toast clipped to the terminal width. Every
     /// user-visible toast in the TUI goes through here so `/messages`
@@ -2454,6 +2479,7 @@ impl TuiApp {
         if let Some(message) = self.startup_auth_error.take() {
             self.notify_error_sticky(message);
         }
+        self.warn_if_api_base_normalized();
 
         {
             let _guard = crate::lua::install_app_ptr(self);
