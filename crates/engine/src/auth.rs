@@ -188,7 +188,10 @@ where
 {
     let req = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(url),
-        "POST" => client.post(url).body(body.unwrap_or_default()),
+        "POST" => client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body.unwrap_or_default()),
         other => return Err(format!("unsupported authenticated request method: {other}")),
     };
     let resp = apply_auth(req.header("Accept", "application/json"))
@@ -487,6 +490,10 @@ mod tests {
         assert_eq!(resp.body, "done");
         let request = task.await.unwrap();
         assert!(request.starts_with("POST /auth-test HTTP/1.1"), "{request}");
+        assert!(
+            request.contains("content-type: application/json"),
+            "{request}"
+        );
         assert!(request.ends_with("payload"), "{request}");
     }
 

@@ -8,6 +8,7 @@
 
 local cache = require("smelt.commands.usage.cache")
 local bar = require("smelt.bar")
+local modal = require("smelt.modal")
 
 local DIM = { fg = "Comment" }
 local HEAD = { fg = "SmeltAccent", bold = true }
@@ -127,8 +128,9 @@ local function log_usage_error(provider, message, data)
   smelt.log.warn("usage_fetch_failed", data)
 end
 
-local function fetch_auth_json(provider, path)
-  local res, auth_err = smelt.auth.request(provider, { path = path })
+local function fetch_auth_json(provider, path, opts)
+  opts = opts or {}
+  local res, auth_err = smelt.auth.request(provider, { path = path, method = opts.method, body = opts.body })
   if not res then
     local msg = tostring(auth_err or "")
     if msg:find("not logged in", 1, true) then
@@ -191,6 +193,61 @@ end
 
 -- ── Codex usage ────────────────────────────────────────────────────────
 
+local last_codex_reset_credits = nil
+
+local function codex_reset_credit_count(payload)
+  local reset_credits = payload and payload.rate_limit_reset_credits
+  if type(reset_credits) ~= "table" then return nil end
+  return tonumber(reset_credits.available_count)
+end
+
+local function add_codex_reset_credit_line(lines, payload)
+  local count = codex_reset_credit_count(payload)
+  last_codex_reset_credits = count
+  if count == nil then return end
+  local label = count == 1 and "1 available" or tostring(count) .. " available"
+  lines[#lines + 1] = row(span("  usage limit resets ", DIM), span(label, VALUE))
+end
+
+local function redeem_request_id()
+  local millis = math.floor((os.clock() or 0) * 1000)
+  return string.format("smelt-%d-%d-%d", os.time(), millis, math.random(100000000, 999999999))
+end
+
+local function redeem_outcome(payload)
+  if type(payload) ~= "table" then return nil end
+  local code = payload.code or payload.outcome or payload.result
+  if type(code) ~= "string" then return nil end
+  return code:gsub("_", ""):lower()
+end
+
+local function consume_codex_reset_credit()
+  local body = smelt.json.encode({ redeem_request_id = redeem_request_id() })
+  local payload, kind, detail = fetch_auth_json("codex", "/wham/rate-limit-reset-credits/consume", {
+    method = "POST",
+    body = body,
+  })
+  if not payload then
+    return false, (ERROR_MESSAGES.codex[kind] or ERROR_MESSAGES.codex.default), detail
+  end
+
+  local outcome = redeem_outcome(payload)
+  if outcome == "reset" then
+    local windows = tonumber(payload.windows_reset)
+    if windows and windows > 0 then
+      return true, string.format("Redeemed reset credit. Reset %d usage window%s.", windows, windows == 1 and "" or "s")
+    end
+    return true, "Redeemed reset credit."
+  elseif outcome == "nothingtoreset" then
+    return true, "No current usage limit window can be reset."
+  elseif outcome == "nocredit" then
+    return false, "No usage limit reset credits are available."
+  elseif outcome == "alreadyredeemed" then
+    return true, "This reset request was already redeemed."
+  end
+  return false, "Unexpected reset response."
+end
+
 local function add_codex_rate_limits(rows, details, prefix)
   if type(details) ~= "table" then return end
   for _, spec in ipairs({ { key = "primary_window", secondary = false }, { key = "secondary_window", secondary = true } }) do
@@ -209,6 +266,7 @@ local function add_codex_rate_limits(rows, details, prefix)
 end
 
 local function codex_usage_lines()
+  last_codex_reset_credits = nil
   local payload, kind, detail = fetch_auth_json("codex", "/wham/usage")
   if not payload then
     return render_fetch_error("Codex", kind, detail, ERROR_MESSAGES.codex)
@@ -225,6 +283,7 @@ local function codex_usage_lines()
     local value = credits.unlimited and "unlimited" or credits.balance
     if value ~= nil then lines[#lines + 1] = row(span("  credits ", DIM), span(tostring(value), VALUE)) end
   end
+  add_codex_reset_credit_line(lines, payload)
 
   for _, extra in ipairs(payload.additional_rate_limits or {}) do
     if type(extra) == "table" then
@@ -338,11 +397,82 @@ local function open_usage()
   local provider, model, api_base = active_provider()
   local key = cache.key(provider, model)
   local title = provider_title(provider, model, api_base)
+  local is_codex = is_codex_provider(provider)
 
-  local handle, buf = smelt.dialog.viewer({
-    title      = "usage",
-    wrap       = false,
+  local buf = smelt.buf.new({ readonly = true })
+  local content_leaf = smelt.dialog.content({ buf = buf, wrap = false })
+
+  local function refresh_usage()
+    cache.refresh(key, function()
+      return fetch_provider_usage(provider, model, api_base)
+    end)
+  end
+
+  local function open_reset_confirmation()
+    local count = tonumber(last_codex_reset_credits or 0) or 0
+    if count <= 0 then
+      smelt.notify.info("No usage limit reset credits are available.", "usage")
+      return
+    end
+
+    modal.open({
+      title = "usage limit reset",
+      lines = {
+        { span("Redeem one Codex usage limit reset credit?", HEAD) },
+        { span("This spends one of your available reset credits.", DIM) },
+        { span("Available resets: ", DIM), span(tostring(count), VALUE) },
+      },
+      actions = {
+        { label = "Use a reset", value = "redeem" },
+        { label = "Cancel", value = "cancel" },
+      },
+      on_submit = function(value)
+        if value ~= "redeem" then return end
+        smelt.spawn(function()
+          local ok, message = consume_codex_reset_credit()
+          if ok then
+            smelt.notify.info(message, "usage")
+          else
+            smelt.notify.error(message, "usage")
+          end
+          last_codex_reset_credits = nil
+          refresh_usage()
+        end)
+      end,
+    })
+  end
+
+  local actions = { { label = "Refresh usage", action = "refresh" } }
+  if is_codex then
+    actions[#actions + 1] = {
+      label = "Redeem usage limit reset",
+      action = "redeem",
+    }
+  end
+
+  local actions_leaf = smelt.dialog.menu(actions, {
+    on_submit = function(ctx)
+      local action = ctx.item and ctx.item.action
+      if action == "refresh" then
+        refresh_usage()
+      elseif action == "redeem" then
+        open_reset_confirmation()
+      end
+    end,
+  })
+
+  local handle = smelt.dialog.open_handle({
+    title = "usage",
+    wrap = false,
     max_height = "50%",
+    min_height = 0,
+    panels = {
+      { leaf = content_leaf, height = "fit" },
+    },
+    bottom_panels = {
+      { leaf = actions_leaf, height = "fit", border = { style = "dashed", top = "Comment" } },
+    },
+    focus = actions_leaf,
   })
 
   local callback = function(lines, fresh, error_message)
@@ -354,9 +484,7 @@ local function open_usage()
   local entry = cache.get(key)
   render_dialog(buf, entry and entry.lines or nil, entry and not entry.refreshing, entry and entry.error, title)
 
-  cache.refresh(key, function()
-    return fetch_provider_usage(provider, model, api_base)
-  end)
+  refresh_usage()
 
   handle.win:on("close", function()
     cache.unsubscribe(key, callback)
