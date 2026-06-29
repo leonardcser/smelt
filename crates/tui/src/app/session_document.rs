@@ -1094,6 +1094,7 @@ impl MutationRecordTarget {
 #[derive(Default)]
 pub(crate) struct MutationResult {
     pub(crate) session_dirty: bool,
+    #[allow(dead_code)]
     pub(crate) transcript_dirty: bool,
     pub(crate) descriptors_unpersisted: bool,
     pub(crate) context_tokens_updated: bool,

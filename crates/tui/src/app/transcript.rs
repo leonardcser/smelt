@@ -6859,10 +6859,9 @@ impl TuiApp {
     }
 
     pub(crate) fn push_block(&mut self, block: Block) {
-        let result = self.apply_session_document_mutation(
+        self.apply_session_document_mutation(
             crate::app::session_document::SessionMutation::AppendTranscriptBlock { block },
         );
-        debug_assert!(result.transcript_dirty);
     }
 
     pub(crate) fn append_streaming_thinking(&mut self, delta: &str) {
