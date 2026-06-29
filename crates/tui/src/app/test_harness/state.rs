@@ -201,7 +201,7 @@ impl TestApp {
     /// Number of transcript blocks. Used by event invariants that assert
     /// a block was pushed (e.g. `ProcessCompleted`).
     pub fn transcript_block_count(&self) -> usize {
-        self.app.transcript.history().len()
+        self.app.session_document.transcript.history().len()
     }
 
     /// Number of confirm dialogs currently registered with the core. Used

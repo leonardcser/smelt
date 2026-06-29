@@ -336,31 +336,15 @@ impl TuiApp {
             .unwrap_or_else(|| {
                 crate::app::transcript::LoadedTranscript::empty_store(store_ref.session_dir.clone())
             });
-            let meta = header.meta.clone();
-            let mut session =
-                smelt_core::session::Session::new(self.core.env.pid(), self.core.env.cwd());
-            session.id = meta.id.clone();
-            session.title = meta.title;
-            session.slug = meta.slug;
-            session.first_user_message = meta.first_user_message;
-            session.created_at_ms = meta.created_at_ms;
-            session.updated_at_ms = meta.updated_at_ms;
-            session.mode = meta.mode;
-            session.reasoning_effort = meta.reasoning_effort;
-            session.model = meta.model;
-            session.cwd = meta.cwd;
-            session.parent_id = meta.parent_id;
-            session.checkpoint = meta.checkpoint.clone();
-            session.display_context_tokens = meta.context_tokens;
-            session.context_token_identity = meta.context_token_identity.clone();
-            session.display_context_token_identity = meta
-                .display_context_token_identity
-                .or(meta.context_token_identity);
-            self.load_store_backed_session(
-                session,
+            let document = crate::app::session_document::SessionDocument::from_store(
+                header,
+                store_ref,
                 transcript,
-                smelt_core::session_runtime::LiveSession::from_store(header, store_ref),
+                self.core.env.pid(),
+                self.core.env.cwd(),
             );
+            let document = document.into_store_backed();
+            self.load_store_backed_session(document);
             self.finish_transcript_turn();
             self.transcript_win_mut().follow_tail();
             return;

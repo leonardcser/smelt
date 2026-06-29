@@ -41,9 +41,11 @@ fn sparse_display_only_search_app(
         smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
     session.id = session_id.to_string();
     app.app.load_store_backed_session(
-        session,
-        loaded,
-        crate::app::history::live_session_for_test(session_id.to_string(), 200, None),
+        crate::app::session_document::StoreBackedSessionDocument::new(
+            session,
+            loaded,
+            crate::app::history::live_session_for_test(session_id.to_string(), 200, None),
+        ),
     );
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);

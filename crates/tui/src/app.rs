@@ -20,6 +20,7 @@ pub(crate) mod queue;
 pub(crate) mod render_loop;
 pub(crate) mod reveal;
 pub(crate) mod search;
+pub(crate) mod session_document;
 pub(crate) mod shell_panel;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
@@ -40,6 +41,7 @@ use smelt_core::FrontendKind;
 use std::sync::Arc;
 
 use crossterm::{event, terminal};
+use session_document::TuiSessionDocument;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -127,76 +129,10 @@ impl SessionAccess {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PendingSessionSave {
-    pub(crate) save_id: u64,
-    pub(crate) session_id: String,
-    pub(crate) kind: crate::persist::PersistSaveKind,
-    pub(crate) dirty_generation: u64,
-    pub(crate) descriptor_dirty_generation: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SessionPersistState {
-    pub(crate) save_pending: bool,
-    pub(crate) pending_save: Option<PendingSessionSave>,
-    pub(crate) next_save_id: u64,
-    pub(crate) dirty_generation: u64,
-    pub(crate) persisted_history_len: Option<usize>,
-    pub(crate) store_ready: bool,
-    pub(crate) descriptors_persisted: bool,
-    pub(crate) session_dirty: bool,
-    pub(crate) dirty_history_from: Option<usize>,
-}
-
-impl SessionPersistState {
-    fn new() -> Self {
-        Self {
-            save_pending: false,
-            pending_save: None,
-            next_save_id: 1,
-            dirty_generation: 0,
-            persisted_history_len: None,
-            store_ready: false,
-            descriptors_persisted: false,
-            session_dirty: false,
-            dirty_history_from: None,
-        }
-    }
-
-    pub(crate) fn mark_session_dirty(&mut self) {
-        self.session_dirty = true;
-        self.bump_dirty_generation();
-    }
-
-    pub(crate) fn bump_dirty_generation(&mut self) {
-        self.dirty_generation = self.dirty_generation.saturating_add(1);
-    }
-
-    pub(crate) fn mark_history_dirty_from(&mut self, idx: usize) {
-        self.mark_session_dirty();
-        self.dirty_history_from = Some(
-            self.dirty_history_from
-                .map_or(idx, |current| current.min(idx)),
-        );
-    }
-
-    pub(crate) fn mark_clean(&mut self) {
-        self.session_dirty = false;
-        self.dirty_history_from = None;
-    }
-
-    pub(crate) fn reset_unpersisted(&mut self) {
-        self.store_ready = false;
-        self.persisted_history_len = None;
-        self.descriptors_persisted = false;
-    }
-}
-
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
-    pub(crate) transcript: crate::app::transcript::TranscriptDocument,
+    pub(crate) session_document: TuiSessionDocument,
     pub(crate) document_render_cache: crate::app::document::DocumentRenderCache,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
     pub(crate) draft_tools: crate::app::drafts::ToolDraftController,
@@ -241,12 +177,10 @@ pub struct TuiApp {
     pub(crate) inspect_server: Arc<Mutex<Option<crate::inspect_server::Server>>>,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
-    pub(crate) session_persist: SessionPersistState,
     pub(crate) session_access: SessionAccess,
     pub(crate) session_persistence: SessionPersistence,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
-    pub(crate) live_session: Option<smelt_core::session_runtime::LiveSession>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
@@ -876,7 +810,7 @@ impl TuiApp {
     }
 
     pub(crate) fn has_visible_session_history(&self) -> bool {
-        if let Some(live) = &self.live_session {
+        if let Some(live) = &self.session_document.live_session {
             return live
                 .any_transcript_visible_before(live.history_len())
                 .unwrap_or_else(|_err| {
@@ -900,7 +834,9 @@ impl TuiApp {
     }
 
     pub(crate) fn has_resume_hint_messages(&self) -> bool {
-        !self.session_is_empty() || !self.transcript.is_empty() || self.live_session.is_some()
+        !self.session_is_empty()
+            || !self.session_document.transcript.is_empty()
+            || self.session_document.live_session.is_some()
     }
 
     pub fn shutdown_context(&self) -> ShutdownContext {
@@ -1013,7 +949,7 @@ impl TuiApp {
 
     pub(crate) fn mode_at_history_boundary(&self, hist_idx: usize) -> protocol::AgentMode {
         let fallback = self.core.session.mode.as_deref().unwrap_or("normal");
-        let mode = if let Some(live) = &self.live_session {
+        let mode = if let Some(live) = &self.session_document.live_session {
             live.effective_mode_at(hist_idx, fallback)
                 .unwrap_or_else(|_err| {
                     smelt_perf::perf::record_value("live_session:mode_scan_error", 1);
@@ -1424,7 +1360,7 @@ impl TuiApp {
         Self {
             core,
             lua,
-            transcript,
+            session_document: TuiSessionDocument::new(transcript),
             document_render_cache: crate::app::document::DocumentRenderCache::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
             draft_tools: crate::app::drafts::ToolDraftController::default(),
@@ -1458,11 +1394,9 @@ impl TuiApp {
             inspect_server: Arc::new(Mutex::new(None)),
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
-            session_persist: SessionPersistState::new(),
             session_access: SessionAccess::Owned,
             session_persistence,
             transient_render_requested: false,
-            live_session: None,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,
@@ -1671,7 +1605,10 @@ impl TuiApp {
             .publish_if_changed("viewport_pos", viewport);
         self.core.signals.publish_if_changed(
             "transcript_navigation_generation",
-            self.transcript.history().navigation_generation(),
+            self.session_document
+                .transcript
+                .history()
+                .navigation_generation(),
         );
 
         self.publish_work_signals();

@@ -111,14 +111,20 @@ fn display_only_resume_sets_resume_hint_state() {
     });
 
     app.app.load_store_backed_session(
-        session,
-        crate::app::transcript::LoadedTranscript::full(transcript),
-        crate::app::history::live_session_for_test("full-session".into(), 0, None),
+        crate::app::session_document::StoreBackedSessionDocument::new(
+            session,
+            crate::app::transcript::LoadedTranscript::full(transcript),
+            crate::app::history::live_session_for_test("full-session".into(), 0, None),
+        ),
     );
 
     assert!(app.app.core.session.history.is_empty());
     assert_eq!(
-        app.app.live_session.as_ref().map(|live| live.id()),
+        app.app
+            .session_document
+            .live_session
+            .as_ref()
+            .map(|live| live.id()),
         Some("full-session")
     );
     assert!(app.app.has_resume_hint_messages());
@@ -139,7 +145,7 @@ fn display_only_resume_sets_resume_hint_state() {
 #[test]
 fn shared_session_state_uses_resume_hint_message_state() {
     let mut app = TestApp::builder().build();
-    app.app.live_session = Some(crate::app::history::live_session_for_test(
+    app.app.session_document.live_session = Some(crate::app::history::live_session_for_test(
         "saved-session".into(),
         0,
         None,
@@ -877,10 +883,19 @@ fn transcript_interaction_trace_records_click_and_projection_events() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = row_document_transcript_app(80, false);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_interaction_events();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_interaction_events();
     app.render_silent();
-    app.app.transcript.take_scroll_trace_interaction_events();
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_interaction_events();
 
     let vp = app
         .app
@@ -899,7 +914,11 @@ fn transcript_interaction_trace_records_click_and_projection_events() {
     })));
     app.render_silent();
 
-    let events = app.app.transcript.take_scroll_trace_interaction_events();
+    let events = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_interaction_events();
     let kinds = events
         .iter()
         .map(|event| event.kind.as_str())
@@ -923,8 +942,14 @@ fn transcript_fast_scroll_jump_bottom_then_click_preserves_bottom_viewport() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(320, 78, 18);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_interaction_events();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_interaction_events();
 
     for _ in 0..180 {
         wheel_transcript(&mut app, MouseEventKind::ScrollUp);
@@ -963,13 +988,19 @@ fn transcript_fast_scroll_jump_bottom_then_click_preserves_bottom_viewport() {
         after_cursor,
         expected.row,
         "bottom click cursor resolved to wrong row after fast sparse scroll; trace={:#?}",
-        app.app.transcript.scroll_trace_interaction_events()
+        app.app
+            .session_document
+            .transcript
+            .scroll_trace_interaction_events()
     );
     assert_eq!(
         after_scroll,
         bottom_scroll,
         "bottom click teleported transcript after fast sparse scroll; trace={:#?}",
-        app.app.transcript.scroll_trace_interaction_events()
+        app.app
+            .session_document
+            .transcript
+            .scroll_trace_interaction_events()
     );
 }
 
@@ -982,11 +1013,17 @@ fn resumed_sparse_bottom_click_keeps_clicked_row_and_viewport() {
     app.app
         .transcript_win_mut()
         .set_vim_mode(crate::smelt_edit::VimMode::Normal);
-    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
 
     app.type_char('G');
     app.render_silent();
-    app.app.transcript.take_scroll_trace_interaction_events();
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_interaction_events();
 
     let vp = app
         .app
@@ -1022,13 +1059,19 @@ fn resumed_sparse_bottom_click_keeps_clicked_row_and_viewport() {
         app.app.transcript_win().scroll_top(),
         before_scroll,
         "mouse down should not scroll the resumed transcript; trace={:#?}",
-        app.app.transcript.scroll_trace_interaction_events()
+        app.app
+            .session_document
+            .transcript
+            .scroll_trace_interaction_events()
     );
     assert_eq!(
         transcript_row_cursor_row(&app),
         expected_row,
         "mouse down should put the cursor on the clicked transcript row; trace={:#?}",
-        app.app.transcript.scroll_trace_interaction_events()
+        app.app
+            .session_document
+            .transcript
+            .scroll_trace_interaction_events()
     );
 }
 
@@ -1036,7 +1079,13 @@ fn resumed_sparse_bottom_click_keeps_clicked_row_and_viewport() {
 fn resumed_heterogeneous_sparse_wheel_scroll_up_keeps_visible_records_monotonic() {
     let count = 260;
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
-    let loaded = app.app.transcript.history().descriptor_records().len();
+    let loaded = app
+        .app
+        .session_document
+        .transcript
+        .history()
+        .descriptor_records()
+        .len();
     assert!(
         loaded < count / 2,
         "resume test must stay sparse, loaded={loaded}, count={count}"
@@ -1199,6 +1248,7 @@ fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
 
 fn previous_user_descriptor_index(app: &TestApp) -> usize {
     app.app
+        .session_document
         .transcript
         .previous_navigation_block(Some("user"))
         .expect("previous user target")
@@ -1208,6 +1258,7 @@ fn previous_user_descriptor_index(app: &TestApp) -> usize {
 fn previous_user_record_index(app: &TestApp) -> usize {
     let target = app
         .app
+        .session_document
         .transcript
         .previous_navigation_block(Some("user"))
         .expect("previous user target");
@@ -1328,7 +1379,13 @@ fn resumed_sparse_tail_scroll_down_keeps_previous_user_target_stable() {
 fn resumed_sparse_near_tail_scroll_down_stays_incremental() {
     let count = 260;
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
-    let loaded = app.app.transcript.history().descriptor_records().len();
+    let loaded = app
+        .app
+        .session_document
+        .transcript
+        .history()
+        .descriptor_records()
+        .len();
     assert!(
         loaded < count / 2,
         "resume test must stay sparse, loaded={loaded}, count={count}"
@@ -1377,7 +1434,13 @@ fn resumed_sparse_near_tail_scroll_down_stays_incremental() {
 fn resumed_sparse_scroll_down_after_scroll_up_does_not_snap_to_tail() {
     let count = 260;
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(count, 78, 18);
-    let loaded = app.app.transcript.history().descriptor_records().len();
+    let loaded = app
+        .app
+        .session_document
+        .transcript
+        .history()
+        .descriptor_records()
+        .len();
     assert!(
         loaded < count / 2,
         "resume test must stay sparse, loaded={loaded}, count={count}"
@@ -1505,8 +1568,14 @@ impl TranscriptScrollReplay {
     }
 
     fn run(self, app: &mut TestApp) -> TranscriptScrollReplayReport {
-        app.app.transcript.set_scroll_trace_timings_enabled(true);
-        app.app.transcript.take_scroll_trace_frames();
+        app.app
+            .session_document
+            .transcript
+            .set_scroll_trace_timings_enabled(true);
+        app.app
+            .session_document
+            .transcript
+            .take_scroll_trace_frames();
         let mut report = TranscriptScrollReplayReport::default();
         for step in self.steps {
             match step {
@@ -1685,7 +1754,11 @@ enum TranscriptDragEdge {
 
 fn render_replay_frame(app: &mut TestApp, report: &mut TranscriptScrollReplayReport) {
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     report.descriptor_range_changed |= frames
         .iter()
         .any(|frame| frame.active_descriptor_range_before != frame.active_descriptor_range_after);
@@ -1699,14 +1772,17 @@ fn set_replay_trace_input(
     window_scroll_before: crate::smelt_edit::RowIndex,
 ) {
     let window_scroll_after_input = app.app.transcript_win().scroll_top();
-    app.app.transcript.set_next_scroll_trace_input(
-        crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput {
-            input_event_or_tick,
-            scroll_intent,
-            window_scroll_before,
-            window_scroll_after_input,
-        },
-    );
+    app.app
+        .session_document
+        .transcript
+        .set_next_scroll_trace_input(
+            crate::app::transcript_scroll_trace::TranscriptScrollTraceRenderInput {
+                input_event_or_tick,
+                scroll_intent,
+                window_scroll_before,
+                window_scroll_after_input,
+            },
+        );
 }
 
 fn transcript_content_point(app: &TestApp, rel_row: u16) -> (u16, u16) {
@@ -1869,12 +1945,22 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
 #[test]
 fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(340, 78, 18);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     let previous = reveal_user_block_via_lua(&mut app, "previous");
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("previous user reveal frame");
     assert_reveal_block_frame(frame, &previous);
     let lines = transcript_viewport_lines(&app);
@@ -1891,7 +1977,11 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
 
     let older = reveal_user_block_via_lua(&mut app, "previous");
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("older previous user reveal frame");
     assert_reveal_block_frame(frame, &older);
     let lines = transcript_viewport_lines(&app);
@@ -1916,11 +2006,18 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         "record-0291".to_string(),
     );
     app.render_silent();
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     let next = reveal_user_block_via_lua(&mut app, "next");
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("next user reveal frame");
     assert_reveal_block_frame(frame, &next);
     let lines = transcript_viewport_lines(&app);
@@ -2097,8 +2194,14 @@ fn run_transcript_key_burst(app: &mut TestApp, label: &str, key: TranscriptBurst
         .height
         .max(1);
     let before_scroll = app.app.transcript_win().scroll_top();
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     for _ in 0..BURST_EVENTS {
         key.press(app);
@@ -2111,7 +2214,11 @@ fn run_transcript_key_burst(app: &mut TestApp, label: &str, key: TranscriptBurst
     );
 
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     assert_local_scroll_frames_are_exact_and_fast(&frames);
     assert_user_delta_targets_exact_rows(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
@@ -2166,6 +2273,7 @@ fn jump_transcript_bottom(app: &mut TestApp) {
 fn jump_transcript_middle(app: &mut TestApp) {
     let descriptor = app
         .app
+        .session_document
         .transcript
         .descriptor_total_count()
         .expect("sparse descriptor count")
@@ -2423,8 +2531,14 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     prepare_transcript_burst_app(&mut app);
     jump_transcript_bottom(&mut app);
 
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     app.type_char('g');
     app.type_char('g');
     for _ in 0..80 {
@@ -2437,7 +2551,11 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     );
 
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     assert_local_scroll_frames_are_exact_and_fast(&frames);
     assert_user_delta_targets_exact_rows(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
@@ -2458,8 +2576,14 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
 #[test]
 fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     let initial_record = first_visible_record_index(&app).expect("initial visible record");
     start_transcript_edge_drag(&mut app, TranscriptDragEdge::Top);
@@ -2467,7 +2591,12 @@ fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
     for _ in 0..900 {
         if app.app.tick_drag_autoscroll_with_transcript_intent() {
             app.render_silent();
-            frames.extend(app.app.transcript.take_scroll_trace_frames());
+            frames.extend(
+                app.app
+                    .session_document
+                    .transcript
+                    .take_scroll_trace_frames(),
+            );
         }
     }
     finish_transcript_drag(&mut app);
@@ -2489,8 +2618,14 @@ fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
         r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
     ));
     app.render_silent();
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     let initial_record = first_visible_record_index(&app).expect("initial visible record");
     assert!(
@@ -2511,7 +2646,12 @@ fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
             transcript_viewport_lines(&app)
         );
         app.render_silent();
-        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        frames.extend(
+            app.app
+                .session_document
+                .transcript
+                .take_scroll_trace_frames(),
+        );
         let current = first_visible_record_index(&app).unwrap_or_else(|| {
             panic!(
                 "bottom-edge drag tick {tick} rendered no visible record marker: lines={:?}",
@@ -2583,8 +2723,14 @@ fn transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks() {
         r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
     ));
     app.render_silent();
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     start_transcript_edge_drag(&mut app, TranscriptDragEdge::Bottom);
     let mut frames = Vec::new();
@@ -2597,12 +2743,22 @@ fn transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks() {
         app.render_silent();
         let after_tick_scroll = app.app.transcript_win().scroll_top();
         let after_tick_lines = transcript_viewport_lines(&app);
-        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        frames.extend(
+            app.app
+                .session_document
+                .transcript
+                .take_scroll_trace_frames(),
+        );
 
         app.render_silent();
         let after_idle_scroll = app.app.transcript_win().scroll_top();
         let after_idle_lines = transcript_viewport_lines(&app);
-        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        frames.extend(
+            app.app
+                .session_document
+                .transcript
+                .take_scroll_trace_frames(),
+        );
         assert_eq!(
             after_idle_scroll, after_tick_scroll,
             "no-input render after bottom-edge drag tick {tick} changed the resolved scroll row: before_scroll={before_scroll}, after_tick_scroll={after_tick_scroll}, after_idle_scroll={after_idle_scroll}, frames={frames:?}"
@@ -2723,8 +2879,14 @@ fn transcript_cursor_down_at_lower_edge_moves_one_visible_row_per_step() {
     state.selection_anchor = None;
     app.app.transcript_win_mut().set_document_view_state(state);
     app.render_silent();
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     let mut frames = Vec::new();
     for step in 0..160 {
@@ -2746,7 +2908,12 @@ fn transcript_cursor_down_at_lower_edge_moves_one_visible_row_per_step() {
             now,
         );
         app.render_silent();
-        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        frames.extend(
+            app.app
+                .session_document
+                .transcript
+                .take_scroll_trace_frames(),
+        );
 
         let after_lines = transcript_viewport_lines(&app);
         let after = app.app.transcript_win().document_view_state();
@@ -2785,11 +2952,17 @@ fn transcript_cursor_down_scroll_crosses_sparse_windows_without_locking() {
     app.app
         .transcript_win_mut()
         .set_vim_mode(crate::smelt_edit::VimMode::Normal);
-    app.app.transcript.set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
     for _ in 0..180 {
         wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
         app.render_silent();
-        app.app.transcript.take_scroll_trace_frames();
+        app.app
+            .session_document
+            .transcript
+            .take_scroll_trace_frames();
     }
     let start = first_visible_record_index(&app).expect("initial visible record");
     let start_row = app.app.transcript_win().scroll_top();
@@ -2810,7 +2983,10 @@ fn transcript_cursor_down_scroll_crosses_sparse_windows_without_locking() {
     state.selection_anchor = None;
     app.app.transcript_win_mut().set_document_view_state(state);
     app.render_silent();
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let mut latest = start;
     let mut frames = Vec::new();
 
@@ -2829,7 +3005,12 @@ fn transcript_cursor_down_scroll_crosses_sparse_windows_without_locking() {
             now,
         );
         app.render_silent();
-        frames.extend(app.app.transcript.take_scroll_trace_frames());
+        frames.extend(
+            app.app
+                .session_document
+                .transcript
+                .take_scroll_trace_frames(),
+        );
         let current = first_visible_record_index(&app).unwrap_or_else(|| {
             panic!(
                 "cursor-down step {step} rendered no visible record marker: lines={:?}",
@@ -2872,8 +3053,14 @@ fn transcript_cursor_down_scroll_crosses_sparse_windows_without_locking() {
 #[test]
 fn transcript_scrollbar_click_preserves_fraction_intent() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     let (row, column, _, _) = transcript_scrollbar_point(&app, 3);
     app.feed_one(SourceEvent::Term(Event::Mouse(
@@ -2885,7 +3072,11 @@ fn transcript_scrollbar_click_preserves_fraction_intent() {
         },
     )));
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("scrollbar render frame");
 
     assert!(
@@ -2901,8 +3092,14 @@ fn transcript_scrollbar_click_preserves_fraction_intent() {
 #[test]
 fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     app.app.submit_search(
         crate::app::TRANSCRIPT_WIN,
@@ -2910,7 +3107,11 @@ fn transcript_scroll_search_jump_preserves_semantic_scroll_intent() {
         "record-0150".to_string(),
     );
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("search jump render frame");
 
     assert!(
@@ -2986,12 +3187,22 @@ fn transcript_search_jump_keeps_cursor_on_heterogeneous_match_start_after_render
 #[test]
 fn transcript_wheel_preserves_user_delta_intent() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("wheel render frame");
 
     assert_eq!(
@@ -3009,8 +3220,14 @@ fn transcript_wheel_preserves_user_delta_intent() {
 #[test]
 fn transcript_drag_autoscroll_preserves_user_delta_intent() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(160, 78, 18);
-    app.app.transcript.set_scroll_trace_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     start_transcript_edge_drag(&mut app, TranscriptDragEdge::Top);
     assert!(
@@ -3018,7 +3235,11 @@ fn transcript_drag_autoscroll_preserves_user_delta_intent() {
         "transcript edge drag should request a semantic scroll tick"
     );
     app.render_silent();
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let frame = frames.first().expect("drag autoscroll render frame");
     let state = app.app.transcript_win().document_view_state();
 
@@ -3063,7 +3284,8 @@ fn resumed_transcript_app_from_records(
     .expect("tail transcript");
     let mut app = TestApp::builder().build();
     app.set_terminal_size(width, height);
-    app.app.transcript = crate::app::transcript::TranscriptDocument::from_loaded_transcript(loaded);
+    app.app.session_document.transcript =
+        crate::app::transcript::TranscriptDocument::from_loaded_transcript(loaded);
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
     app.app.transcript_win_mut().follow_tail();

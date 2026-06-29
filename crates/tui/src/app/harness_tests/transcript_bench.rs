@@ -511,7 +511,10 @@ fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 100, 32)
         .expect("load sparse bench transcript tail");
     app.app.clear_transcript();
-    app.app.transcript.replace_loaded_transcript(loaded);
+    app.app
+        .session_document
+        .transcript
+        .replace_loaded_transcript(loaded);
     app.app.handle_resize(100, 32);
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -530,6 +533,7 @@ fn prepare_burst_bench_position(app: &mut TestApp, position: BurstBenchPosition)
         BurstBenchPosition::Middle => {
             let descriptor = app
                 .app
+                .session_document
                 .transcript
                 .descriptor_total_count()
                 .expect("sparse descriptor count")
@@ -606,8 +610,14 @@ fn measure_transcript_burst_operation(
         .height
         .max(1);
     let before_scroll = app.app.transcript_win().scroll_top();
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     smelt_perf::perf::clear();
     let start = std::time::Instant::now();
     for _ in 0..BURST_EVENTS {
@@ -620,7 +630,11 @@ fn measure_transcript_burst_operation(
     );
     app.render_silent();
     let ms = elapsed_ms(start.elapsed());
-    let frames = app.app.transcript.take_scroll_trace_frames();
+    let frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let max_input_rows = key.max_rows_per_event(viewport_rows);
     let max_projection_delta = max_input_rows
         .saturating_mul(BURST_EVENTS as crate::smelt_edit::RowIndex)
@@ -652,7 +666,10 @@ fn measure_transcript_burst_operation_without_trace(
 
     prepare_burst_bench_position(app, position);
     let before_scroll = app.app.transcript_win().scroll_top();
-    app.app.transcript.set_scroll_trace_enabled(false);
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(false);
     smelt_perf::perf::clear();
     let start = std::time::Instant::now();
     for _ in 0..BURST_EVENTS {
@@ -728,7 +745,10 @@ fn measure_transcript_copy_operation(
 }
 
 fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f64, f64, f64) {
-    app.app.transcript.set_scroll_trace_enabled(false);
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_enabled(false);
     smelt_perf::perf::clear();
     let rare_start = std::time::Instant::now();
     app.app.submit_search(
@@ -795,8 +815,14 @@ fn run_resumed_wheel_scroll_bench_sample(
     install_sparse_resume_bench_transcript(&mut app);
     app.type_char('G');
     app.render_silent();
-    app.app.transcript.set_scroll_trace_timings_enabled(true);
-    app.app.transcript.take_scroll_trace_frames();
+    app.app
+        .session_document
+        .transcript
+        .set_scroll_trace_timings_enabled(true);
+    app.app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
 
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
@@ -810,7 +836,11 @@ fn run_resumed_wheel_scroll_bench_sample(
     let ms = elapsed_ms(start.elapsed());
     let snapshot = smelt_perf::perf::snapshot();
     smelt_perf::perf::set_enabled(false);
-    let trace_frames = app.app.transcript.take_scroll_trace_frames();
+    let trace_frames = app
+        .app
+        .session_document
+        .transcript
+        .take_scroll_trace_frames();
     let descriptor_loads = perf_duration_count(&snapshot, "store:transcript:read_descriptor_slice");
     let descriptor_load_us = duration_total_us(&snapshot, "store:transcript:read_descriptor_slice");
     let row_rebuilds = perf_duration_count(&snapshot, "transcript:prepare_row_index:rebuild_index");
@@ -1694,7 +1724,7 @@ fn saved_hot_path_app(
 
     app.app.load_session(session);
     app.app.restore_screen();
-    app.app.session_persist.store_ready = false;
+    app.app.session_document.mark_session_unpersisted();
     app.app.save_session();
     app.app.flush_persist();
     app
@@ -1979,7 +2009,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         16,
     );
     assert!(
-        app.app.session_persist.save_pending,
+        app.app.session_document.is_save_queued(),
         "{} did not defer completion metadata for the next save point",
         sample.operation
     );

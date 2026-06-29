@@ -86,7 +86,7 @@ impl TestApp {
         .expect("tail transcript");
 
         self.set_terminal_size(width, height);
-        self.app.transcript = TranscriptDocument::from_loaded_transcript(loaded);
+        self.app.session_document.transcript = TranscriptDocument::from_loaded_transcript(loaded);
         self.app.app_focus = AppFocus::Content;
         self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         self.app.transcript_win_mut().set_vim_enabled(true);
@@ -94,19 +94,29 @@ impl TestApp {
             .transcript_win_mut()
             .set_vim_mode(crate::smelt_edit::VimMode::Normal);
         self.app.transcript_win_mut().follow_tail();
-        self.app.transcript.set_scroll_trace_enabled(true);
+        self.app
+            .session_document
+            .transcript
+            .set_scroll_trace_enabled(true);
         self.transcript_scroll_probe = TranscriptScrollProbeState {
             fixture: Some(fixture),
             ..TranscriptScrollProbeState::default()
         };
         self.render_silent();
-        self.app.transcript.take_scroll_trace_frames();
+        self.app
+            .session_document
+            .transcript
+            .take_scroll_trace_frames();
     }
 
     pub fn transcript_scroll_probe_render(&mut self) {
         self.transcript_scroll_probe.keep_fixture_alive();
         self.render_silent();
-        let frames = self.app.transcript.take_scroll_trace_frames();
+        let frames = self
+            .app
+            .session_document
+            .transcript
+            .take_scroll_trace_frames();
         assert_transcript_scroll_probe_frames(&mut self.transcript_scroll_probe, &frames);
         self.assert_invariants();
     }
@@ -284,6 +294,7 @@ impl TestApp {
     pub fn transcript_scroll_probe_reveal_descriptor(&mut self, descriptor_index: usize) {
         let total = self
             .app
+            .session_document
             .transcript
             .descriptor_total_count()
             .unwrap_or(1)
@@ -297,6 +308,7 @@ impl TestApp {
     pub fn transcript_scroll_probe_search_record(&mut self, descriptor_index: usize) {
         let total = self
             .app
+            .session_document
             .transcript
             .descriptor_total_count()
             .unwrap_or(1)

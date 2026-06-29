@@ -2343,7 +2343,7 @@ mod tests {
         app.press(KeyCode::Enter);
 
         assert!(app.agent_running());
-        let history = app.app.transcript.history();
+        let history = app.app.session_document.transcript.history();
         let users = history
             .order
             .iter()

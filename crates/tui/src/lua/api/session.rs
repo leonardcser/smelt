@@ -514,7 +514,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set("cost", session.session_cost_usd)?;
                 let history_count = app.session_history_len();
                 out.set("history_count", history_count)?;
-                if app.live_session.is_some() {
+                if app.session_document.live_session.is_some() {
                     out.set("message_count", history_count)?;
                     out.set("message_count_approximate", true)?;
                 } else {

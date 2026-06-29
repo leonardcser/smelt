@@ -1,7 +1,7 @@
 use super::*;
 
 fn user_blocks(app: &TestApp) -> Vec<(String, Vec<String>)> {
-    let history = app.app.transcript.history();
+    let history = app.app.session_document.transcript.history();
     history
         .order
         .iter()

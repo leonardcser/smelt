@@ -122,19 +122,19 @@ impl TuiApp {
             let history = self.model_history_source();
             return self.dispatch_turn(content, history, None);
         }
-        if self.core.session.first_user_message.is_none() {
-            self.core.session.first_user_message = Some(text.clone().into_owned());
-            self.core
-                .session
-                .snapshot_metadata_at(self.session_history_len() + 1);
-            self.mark_session_dirty();
-        }
-        let history = self.commit_request_history_item(
+        let first_user_message = self
+            .core
+            .session
+            .first_user_message
+            .is_none()
+            .then(|| text.clone().into_owned());
+        let history = self.commit_request_history_item_with_first_user(
             protocol::history_item_from_user_content(content.clone()),
             Some(Block::User {
                 text: display.to_string(),
                 image_labels: content.image_labels(),
             }),
+            first_user_message,
         );
         let rewind_block_idx = self.user_turns().last().map(|(idx, _)| *idx);
         self.publish_turn_input(submitted);
@@ -178,14 +178,7 @@ impl TuiApp {
     fn persist_model_history_source(&mut self, history: &protocol::ModelHistorySource) {
         if matches!(history, protocol::ModelHistorySource::Store { .. })
             && history.requested_len() > 0
-            && (self.session_persist.session_dirty
-                || self
-                    .live_session
-                    .as_ref()
-                    .is_some_and(|live| live.dirty.history_from.is_some())
-                || !self.session_persist.store_ready
-                || !self.session_persist.descriptors_persisted
-                || self.transcript.history().descriptor_dirty_from().is_some())
+            && self.session_document_has_unflushed_work()
         {
             self.save_session();
             self.flush_persist();
@@ -340,14 +333,13 @@ impl TuiApp {
         self.prepare_user_visible_turn();
 
         let history = if !evaluated.is_empty() {
-            if self.core.session.first_user_message.is_none() {
-                self.core.session.first_user_message = Some(display.clone());
-                self.core
-                    .session
-                    .snapshot_metadata_at(self.session_history_len() + 1);
-                self.mark_session_dirty();
-            }
-            self.commit_request_history_item(
+            let first_user_message = self
+                .core
+                .session
+                .first_user_message
+                .is_none()
+                .then(|| display.clone());
+            self.commit_request_history_item_with_first_user(
                 protocol::HistoryItem::user_with_display(
                     Content::text(evaluated.clone()),
                     display.clone(),
@@ -356,6 +348,7 @@ impl TuiApp {
                     text: display.clone(),
                     image_labels: vec![],
                 }),
+                first_user_message,
             )
         } else {
             self.show_user_message(&display, vec![]);
@@ -653,17 +646,26 @@ impl TuiApp {
         if meta.display_tps.is_none() {
             meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
         }
-        self.mark_session_dirty();
-        self.core
-            .session
-            .turn_metas
-            .push((self.session_history_len(), meta));
+        {
+            let _perf = smelt_perf::perf::begin("tui:finish_turn:document_state");
+            let history_len = self.session_history_len();
+            let snapshot_context = !self.session_is_read_only();
+            let update_context_token_history_len =
+                snapshot_context && self.context_tokens_updated_this_turn;
+            if snapshot_context {
+                self.context_tokens_updated_this_turn = false;
+            }
+            self.apply_session_document_mutation(
+                crate::app::session_document::SessionMutation::FinishTurnState {
+                    history_len,
+                    meta,
+                    snapshot_context,
+                    update_context_token_history_len,
+                },
+            );
+        }
         if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
-        }
-        {
-            let _perf = smelt_perf::perf::begin("tui:finish_turn:snapshot_context");
-            self.snapshot_context();
         }
         if matches!(end, TurnEnd::Complete) {
             self.schedule_session_save();
@@ -1175,7 +1177,7 @@ mod tests {
     use super::*;
 
     fn process_status_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        let history = app.app.transcript.history();
+        let history = app.app.session_document.transcript.history();
         history
             .order
             .iter()
@@ -1188,7 +1190,7 @@ mod tests {
     }
 
     fn user_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        let history = app.app.transcript.history();
+        let history = app.app.session_document.transcript.history();
         history
             .order
             .iter()
@@ -1264,7 +1266,7 @@ mod tests {
         app.app.restore_screen();
         app.app.ensure_current_context_note();
         app.app.apply_pending_history_appends_for_request();
-        app.app.session_persist.store_ready = false;
+        app.app.session_document.mark_session_unpersisted();
         app.app.save_session();
         app.app.flush_persist();
         app

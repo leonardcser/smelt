@@ -184,7 +184,7 @@ impl TuiApp {
     }
 
     fn transcript_search_text_for_entry(&self, entry: &TranscriptSearchLayoutEntry) -> String {
-        let history = self.transcript.history();
+        let history = self.session_document.transcript.history();
         let mut text = String::new();
         for id in &entry.block_ids {
             let Some(descriptor) = history.descriptor(*id) else {
@@ -224,19 +224,23 @@ impl TuiApp {
         };
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
-        let _ = self.transcript.activate_descriptor_window_for_block_idx(
-            width,
-            block_idx,
-            viewport_rows,
-        );
+        let _ = self
+            .session_document
+            .transcript
+            .activate_descriptor_window_for_block_idx(width, block_idx, viewport_rows);
     }
 
     fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
-        let Some(start) = self.transcript.history().descriptor_dirty_from() else {
+        let Some(start) = self
+            .session_document
+            .transcript
+            .history()
+            .descriptor_dirty_from()
+        else {
             return Vec::new();
         };
         let _perf = smelt_perf::perf::begin("search:transcript:dirty_candidate_scan");
-        let history = self.transcript.history();
+        let history = self.session_document.transcript.history();
         let mut scanned = 0u64;
         let mut out = Vec::new();
         for id in history.order.iter().skip(start.min(history.order.len())) {
@@ -283,6 +287,7 @@ impl TuiApp {
         let dirty_blocks = self.dirty_transcript_candidate_blocks(query);
         let width = self.transcript_width() as u16;
         let origin_block = self
+            .session_document
             .transcript
             .block_id_at_or_before_row(
                 &self.lua,
@@ -296,7 +301,7 @@ impl TuiApp {
             SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
         };
         let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
-        let descriptors_persisted = self.session_persist.descriptors_persisted;
+        let descriptors_persisted = self.session_document.descriptors_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
                 .search_transcript_candidate_page(query, origin_block, store_direction, limit)
@@ -364,6 +369,7 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("search:transcript:candidate_layout");
             match candidate_blocks {
                 Some(candidate_blocks) => self
+                    .session_document
                     .transcript
                     .materialize_exact_loaded_search_layout_for_blocks(
                         &self.lua,
@@ -371,6 +377,7 @@ impl TuiApp {
                         candidate_blocks,
                     ),
                 None => self
+                    .session_document
                     .transcript
                     .materialize_exact_loaded_search_layout(&self.lua, width),
             }
@@ -434,6 +441,7 @@ impl TuiApp {
         smelt_perf::perf::record_value("search:transcript:candidates", candidates.len() as u64);
         let width = self.transcript_width() as u16;
         let total_rows = self
+            .session_document
             .transcript
             .approximate_scrollbar_total_rows(&self.lua, width)
             .max(indexed_total_rows);
@@ -598,7 +606,10 @@ impl TuiApp {
         }
         let row = origin.row.min(session.total_rows.saturating_sub(1));
         let width = self.transcript_width() as u16;
-        let anchor = self.transcript.search_anchor_at_row(&self.lua, width, row);
+        let anchor = self
+            .session_document
+            .transcript
+            .search_anchor_at_row(&self.lua, width, row);
         let key = match (anchor, direction) {
             (
                 crate::app::transcript::TranscriptSearchAnchor::EstimatedRow(_),
@@ -799,7 +810,8 @@ impl TuiApp {
         direction: SearchDirection,
     ) -> Option<u64> {
         let width = self.transcript_width() as u16;
-        self.transcript
+        self.session_document
+            .transcript
             .block_id_at_or_before_row(
                 &self.lua,
                 width,
@@ -822,12 +834,12 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let viewport_rows = self.transcript_search_viewport_rows();
-        let _ = self.transcript.activate_descriptor_window_for_block_idx(
-            width,
-            block_idx,
-            viewport_rows,
-        );
+        let _ = self
+            .session_document
+            .transcript
+            .activate_descriptor_window_for_block_idx(width, block_idx, viewport_rows);
         let layout = self
+            .session_document
             .transcript
             .materialize_exact_loaded_search_layout_for_blocks(&self.lua, width, &[block_idx]);
         let theme = self.ui.theme().clone();
@@ -840,14 +852,17 @@ impl TuiApp {
             if entry.rows == 0 {
                 continue;
             }
-            let found = self.transcript.search_matches_for_row_range(
-                &self.lua,
-                width,
-                &theme,
-                entry.first_row,
-                entry.rows,
-                query,
-            );
+            let found = self
+                .session_document
+                .transcript
+                .search_matches_for_row_range(
+                    &self.lua,
+                    width,
+                    &theme,
+                    entry.first_row,
+                    entry.rows,
+                    query,
+                );
             merge_transcript_matches(&mut session.matches, found);
         }
         smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
@@ -887,6 +902,7 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         let found = self
+            .session_document
             .transcript
             .search_matches_for_row_range(&self.lua, width, &theme, first_row, rows, query);
         merge_transcript_matches(&mut session.matches, found);

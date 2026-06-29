@@ -19,7 +19,7 @@ impl TuiApp {
     /// transition. Cacheable prompt inputs stay stable; the model learns the
     /// new cwd through a context note instead.
     pub(crate) fn change_cwd(&mut self, path: std::path::PathBuf) -> Result<(), String> {
-        let cwd = self.set_process_and_runtime_cwd(path)?;
+        let cwd = self.set_process_and_runtime_cwd(path, true)?;
         self.refresh_workspace_permissions(&cwd);
         self.sync_inline_options();
         self.publish_cwd_change();
@@ -33,18 +33,18 @@ impl TuiApp {
     pub(crate) fn restore_session_cwd(&mut self, cwd: Option<&str>) -> SessionCwdRestore {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
             if !self.session_is_read_only() {
-                self.core.session.cwd = Some(self.cwd.clone());
+                self.apply_session_cwd(self.cwd.clone(), false);
             }
             return SessionCwdRestore::Missing;
         };
         if cwd == self.cwd {
             if !self.session_is_read_only() {
-                self.core.session.cwd = Some(self.cwd.clone());
+                self.apply_session_cwd(self.cwd.clone(), false);
             }
             return SessionCwdRestore::Current;
         }
 
-        match self.set_process_and_runtime_cwd(std::path::PathBuf::from(cwd)) {
+        match self.set_process_and_runtime_cwd(std::path::PathBuf::from(cwd), false) {
             Ok(path) => {
                 self.refresh_workspace_permissions(&path);
                 self.sync_inline_options();
@@ -56,7 +56,7 @@ impl TuiApp {
             Err(err) => {
                 let fallback = self.cwd.clone();
                 if !self.session_is_read_only() {
-                    self.core.session.cwd = Some(fallback.clone());
+                    self.apply_session_cwd(fallback.clone(), false);
                 }
                 SessionCwdRestore::Fallback {
                     requested: cwd.to_string(),
@@ -70,6 +70,7 @@ impl TuiApp {
     fn set_process_and_runtime_cwd(
         &mut self,
         path: std::path::PathBuf,
+        mark_session_dirty: bool,
     ) -> Result<std::path::PathBuf, String> {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         std::env::set_current_dir(&path).map_err(|e| format!("set cwd {}: {e}", path.display()))?;
@@ -78,7 +79,7 @@ impl TuiApp {
         self.cwd = cwd.to_string_lossy().into_owned();
         self.core.env.set_cwd(cwd.clone());
         if !self.session_is_read_only() {
-            self.core.session.cwd = Some(self.cwd.clone());
+            self.apply_session_cwd(self.cwd.clone(), mark_session_dirty);
         }
         self.refresh_cwd_status();
         self.core
@@ -102,6 +103,15 @@ impl TuiApp {
         let branch = engine::paths::git_branch(&cwd).unwrap_or_default();
         self.core.signals.publish_if_changed("branch", branch);
         Ok(cwd)
+    }
+
+    fn apply_session_cwd(&mut self, cwd: String, mark_dirty: bool) {
+        let mutation = if mark_dirty {
+            crate::app::session_document::SessionMutation::SetCwd { cwd }
+        } else {
+            crate::app::session_document::SessionMutation::RestoreCwd { cwd }
+        };
+        self.apply_session_document_mutation(mutation);
     }
 
     fn refresh_workspace_permissions(&mut self, cwd: &std::path::Path) {
@@ -129,7 +139,6 @@ impl TuiApp {
         });
         if !self.session_is_read_only() {
             self.ensure_current_context_note();
-            self.mark_session_dirty();
             self.save_session();
         }
     }

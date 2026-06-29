@@ -326,7 +326,7 @@ fn loading_session_restores_persisted_cwd() {
         app.app.core.signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
     );
-    assert!(app.app.live_session.is_none());
+    assert!(app.app.session_document.live_session.is_none());
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
         protocol::UiCommand::SetCwd { cwd } if cwd == expected
@@ -342,9 +342,15 @@ fn loading_session_restores_persisted_cwd() {
     let transcript = smelt_core::content::transcript::Transcript::new();
 
     app.app.load_store_backed_session(
-        display_session,
-        crate::app::transcript::LoadedTranscript::full(transcript),
-        crate::app::history::live_session_for_test("full-display-only-cwd-session".into(), 0, None),
+        crate::app::session_document::StoreBackedSessionDocument::new(
+            display_session,
+            crate::app::transcript::LoadedTranscript::full(transcript),
+            crate::app::history::live_session_for_test(
+                "full-display-only-cwd-session".into(),
+                0,
+                None,
+            ),
+        ),
     );
 
     assert_eq!(app.app.cwd, display_expected);
@@ -354,7 +360,11 @@ fn loading_session_restores_persisted_cwd() {
     );
     assert_eq!(app.app.core.env.cwd(), display_target);
     assert_eq!(
-        app.app.live_session.as_ref().map(|live| live.id()),
+        app.app
+            .session_document
+            .live_session
+            .as_ref()
+            .map(|live| live.id()),
         Some("full-display-only-cwd-session")
     );
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(

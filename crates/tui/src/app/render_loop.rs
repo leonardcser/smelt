@@ -164,14 +164,15 @@ impl TuiApp {
 
         let _p = smelt_perf::perf::begin("compositor:render_flush");
         let now = self.core.clock.instant_now();
-        self.parser
-            .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::SyncActiveToolElapsed { now },
+        );
         self.sync_transcript_renderer_generation();
 
         // Split-borrow app fields so the render-prep hook can materialize the
         // transcript through the generic `Ui` path while paint callbacks still
         // invoke Lua without borrowing all of `self`.
-        let transcript = &mut self.transcript;
+        let transcript = &mut self.session_document.transcript;
         let notification = &mut self.notification;
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;

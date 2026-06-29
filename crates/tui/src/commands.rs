@@ -469,7 +469,7 @@ impl TuiApp {
         self.core.config.provider_type = resolved.provider_type.clone();
         self.core.config.model_config = (&resolved.config).into();
         if record {
-            self.mark_session_dirty();
+            self.update_session_persist_metadata();
         }
         let api_key = self.resolve_api_key().unwrap_or_default();
         if record && self.core.config.remember.model {
@@ -488,9 +488,22 @@ impl TuiApp {
                 .set_dyn("model", std::rc::Rc::new(self.core.config.model.clone()));
         }
         let identity = self.active_context_token_identity();
-        self.core
-            .session
-            .clear_context_tokens_baseline_if_mismatched(&identity);
+        if record {
+            self.apply_session_document_mutation(
+                crate::app::session_document::SessionMutation::ClearContextTokensBaselineIfMismatched {
+                    identity,
+                },
+            );
+        } else {
+            let _ = self.session_document.apply(
+                &mut self.core.session,
+                &mut self.parser,
+                false,
+                crate::app::session_document::SessionMutation::ClearContextTokensBaselineIfMismatched {
+                    identity,
+                },
+            );
+        }
         self.refresh_context_window();
     }
 
@@ -580,7 +593,7 @@ impl TuiApp {
         // Publish new mode before Lua/tool snapshots for future requests.
         if old != mode {
             if record {
-                self.mark_session_dirty();
+                self.update_session_persist_metadata();
             }
             self.core
                 .signals
@@ -612,7 +625,7 @@ impl TuiApp {
         }
         self.core.config.reasoning_effort = effort;
         if record {
-            self.mark_session_dirty();
+            self.update_session_persist_metadata();
         }
         if record && self.core.config.remember.reasoning_effort {
             state::set_reasoning_effort(effort);
@@ -649,7 +662,7 @@ mod tests {
     }
 
     fn mode_blocks(app: &crate::app::TuiApp) -> Vec<&str> {
-        let history = app.transcript.history();
+        let history = app.session_document.transcript.history();
         history
             .order
             .iter()

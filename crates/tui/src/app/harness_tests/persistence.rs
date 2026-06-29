@@ -87,6 +87,25 @@ fn saved_one_row_session(guard: &std::sync::MutexGuard<'static, ()>) -> String {
 }
 
 #[test]
+fn metadata_only_title_update_persists_after_clean_history_save() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.app.save_session_and_flush();
+    app.app
+        .set_session_title("Renamed session".into(), "renamed-session".into(), None);
+    app.app.save_session_and_flush();
+
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.title.as_deref(), Some("Renamed session"));
+    assert_eq!(loaded.slug.as_deref(), Some("renamed-session"));
+    assert_eq!(loaded.history.len(), 1);
+}
+
+#[test]
 fn shutdown_flushes_latest_generation_after_in_flight_save() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -94,12 +113,12 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
     app.app
         .session_append_history(HistoryItem::user(Content::text("first generation")));
     app.app.save_session();
-    assert!(app.app.session_persist.pending_save.is_some());
+    assert!(app.app.session_document.has_pending_save());
 
     app.app
         .session_append_history(HistoryItem::user(Content::text("final generation")));
     app.app.save_session();
-    assert!(app.app.session_persist.save_pending);
+    assert!(app.app.session_document.is_save_queued());
 
     app.app.save_session_and_flush();
 
@@ -272,7 +291,7 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
         let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
         resumed.app.load_session_by_id(&session_id);
         assert_eq!(resumed.app.core.session.id, session_id);
-        assert!(resumed.app.live_session.is_some());
+        assert!(resumed.app.session_document.live_session.is_some());
         resumed
             .app
             .session_append_history(HistoryItem::user(Content::text(format!("cycle {cycle}"))));
@@ -356,14 +375,14 @@ fn resuming_session_with_active_writer_lease_is_read_only() {
 }
 
 fn fake_pending_history_save(app: &mut TestApp, save_id: u64, history_len: usize) {
-    app.app.session_persist.pending_save = Some(crate::app::PendingSessionSave {
+    let generation = app.app.session_document.current_generation_for_test();
+    app.app.session_document.set_pending_save_for_test(
         save_id,
-        session_id: app.app.core.session.id.clone(),
-        kind: PersistSaveKind::History,
-        dirty_generation: app.app.session_persist.dirty_generation,
-        descriptor_dirty_generation: app.app.transcript.history().descriptor_dirty_generation(),
-    });
-    app.app.session_persist.persisted_history_len = Some(history_len);
+        app.app.core.session.id.clone(),
+        PersistSaveKind::History,
+        generation,
+        history_len,
+    );
 }
 
 #[test]
@@ -373,7 +392,7 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.live_session.is_some());
+    assert!(resumed.app.session_document.live_session.is_some());
     let before_len = resumed.app.session_history_len();
     fake_pending_history_save(&mut resumed, 700, before_len);
 
@@ -383,6 +402,7 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
     assert_eq!(
         resumed
             .app
+            .session_document
             .live_session
             .as_ref()
             .unwrap()
@@ -401,6 +421,7 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
     assert_eq!(
         resumed
             .app
+            .session_document
             .live_session
             .as_ref()
             .unwrap()
@@ -426,7 +447,7 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.live_session.is_some());
+    assert!(resumed.app.session_document.live_session.is_some());
     let before_len = resumed.app.session_history_len();
     fake_pending_history_save(&mut resumed, 701, before_len);
 
@@ -435,6 +456,7 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
     });
     assert!(resumed
         .app
+        .session_document
         .transcript
         .history()
         .descriptor_dirty_from()
@@ -450,6 +472,7 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
     assert!(
         resumed
             .app
+            .session_document
             .transcript
             .history()
             .descriptor_dirty_from()
@@ -477,7 +500,7 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.live_session.is_some());
+    assert!(resumed.app.session_document.live_session.is_some());
     let before_len = resumed.app.session_history_len();
     fake_pending_history_save(&mut resumed, 703, before_len);
 
@@ -487,6 +510,7 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
     }));
     assert!(resumed
         .app
+        .session_document
         .transcript
         .history()
         .descriptor_dirty_from()
@@ -502,6 +526,7 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
     assert!(
         resumed
             .app
+            .session_document
             .transcript
             .history()
             .descriptor_dirty_from()
@@ -563,6 +588,7 @@ fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
     assert!(
         resumed
             .app
+            .session_document
             .transcript
             .history()
             .descriptor_dirty_from()
@@ -608,6 +634,7 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
     assert_eq!(
         resumed
             .app
+            .session_document
             .live_session
             .as_ref()
             .unwrap()

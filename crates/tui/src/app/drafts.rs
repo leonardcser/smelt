@@ -284,17 +284,20 @@ impl TuiApp {
         args: HashMap<String, serde_json::Value>,
     ) -> bool {
         let stream_id = self.draft_tools.stream_id_for_call(&call_id);
-        let promoted = self.parser.promote_tool_draft(
-            self.transcript.history_mut(),
-            stream_id.as_deref(),
-            ToolStart {
-                call_id,
-                name: tool_name,
-                summary,
-                args,
-            },
-            self.core.clock.instant_now(),
-        );
+        let promoted = self
+            .apply_session_document_mutation(
+                crate::app::session_document::SessionMutation::PromoteToolDraft {
+                    stream_id: stream_id.clone(),
+                    start: ToolStart {
+                        call_id,
+                        name: tool_name,
+                        summary,
+                        args,
+                    },
+                    now: self.core.clock.instant_now(),
+                },
+            )
+            .applied;
         if promoted {
             if let Some(stream_id) = stream_id {
                 self.draft_tools.remove_by_stream_id(&stream_id);
@@ -305,7 +308,9 @@ impl TuiApp {
 
     pub(crate) fn clear_tool_drafts(&mut self) {
         self.draft_tools.clear();
-        self.parser.clear_tool_drafts(self.transcript.history_mut());
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::ClearToolDrafts,
+        );
     }
 
     pub(crate) fn flush_due_tool_drafts(&mut self) -> bool {
@@ -329,16 +334,17 @@ impl TuiApp {
         let args = snapshot.args;
         let summary = crate::app::history::ToolSummaryResolver::new(&self.lua)
             .resolve_with_context(&name, &args, snapshot.finished);
-        self.parser.upsert_tool_draft(
-            self.transcript.history_mut(),
-            ToolDraftUpdate {
-                stream_id: snapshot.stream_id,
-                call_id: snapshot.call_id,
-                name,
-                summary,
-                args,
-                raw_arguments: snapshot.raw_arguments,
-                finished: snapshot.finished,
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::UpsertToolDraft {
+                update: ToolDraftUpdate {
+                    stream_id: snapshot.stream_id,
+                    call_id: snapshot.call_id,
+                    name,
+                    summary,
+                    args,
+                    raw_arguments: snapshot.raw_arguments,
+                    finished: snapshot.finished,
+                },
             },
         );
     }

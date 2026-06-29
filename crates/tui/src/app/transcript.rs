@@ -6859,38 +6859,52 @@ impl TuiApp {
     }
 
     pub(crate) fn push_block(&mut self, block: Block) {
-        self.transcript.push(block);
+        let result = self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::AppendTranscriptBlock { block },
+        );
+        debug_assert!(result.transcript_dirty);
     }
 
     pub(crate) fn append_streaming_thinking(&mut self, delta: &str) {
-        self.parser
-            .append_streaming_thinking(self.transcript.history_mut(), delta);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::AppendStreamingThinking {
+                delta: delta.to_string(),
+            },
+        );
     }
 
     pub(crate) fn flush_streaming_thinking(&mut self) {
-        self.parser
-            .flush_streaming_thinking(self.transcript.history_mut());
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FlushStreamingThinking,
+        );
     }
 
     pub(crate) fn append_streaming_text(&mut self, delta: &str) {
-        self.parser
-            .append_streaming_text(self.transcript.history_mut(), delta);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::AppendStreamingText {
+                delta: delta.to_string(),
+            },
+        );
     }
 
     pub(crate) fn flush_streaming_text(&mut self) {
-        self.parser
-            .flush_streaming_text(self.transcript.history_mut());
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FlushStreamingText,
+        );
     }
 
     pub(crate) fn update_compaction_preview(&mut self, summary: String) {
         let follow_tail = self.transcript_win().is_following_tail();
-        let existing = self.transcript.compaction_preview_id();
-        let Some(id) = self.transcript.set_compaction_preview(summary) else {
+        let existing = self.session_document.transcript.compaction_preview_id();
+        let result = self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::UpdateCompactionPreview { summary },
+        );
+        let Some(id) = result.block_id else {
             return;
         };
         if existing.is_none() {
             let width = self.transcript_width() as u16;
-            self.transcript.fold_node(
+            self.session_document.transcript.fold_node(
                 &self.lua,
                 width,
                 crate::content::render_plan::RenderNodeId::Block(id),
@@ -6904,7 +6918,9 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) {
-        self.transcript.clear_compaction_preview();
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::ClearCompactionPreview,
+        );
     }
 
     pub(crate) fn start_tool(
@@ -6915,32 +6931,41 @@ impl TuiApp {
         args: HashMap<String, serde_json::Value>,
     ) {
         let now = self.core.clock.instant_now();
-        self.parser.start_tool(
-            self.transcript.history_mut(),
-            call_id,
-            name,
-            summary,
-            args,
-            now,
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::StartTool {
+                call_id,
+                name,
+                summary,
+                args,
+                now,
+            },
         );
     }
 
     pub(crate) fn start_exec(&mut self, command: String) {
-        self.parser
-            .start_exec(self.transcript.history_mut(), command);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::StartExec { command },
+        );
     }
 
     pub(crate) fn append_exec_output(&mut self, chunk: &str) {
-        self.parser
-            .append_exec_output(self.transcript.history_mut(), chunk);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::AppendExecOutput {
+                chunk: chunk.to_string(),
+            },
+        );
     }
 
     pub(crate) fn finish_exec(&mut self, exit_code: Option<i32>) {
-        self.parser.finish_exec(exit_code);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FinishExec { exit_code },
+        );
     }
 
     pub(crate) fn finalize_exec(&mut self) {
-        self.parser.finalize_exec(self.transcript.history_mut());
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FinalizeExec,
+        );
     }
 
     pub(crate) fn has_active_exec(&self) -> bool {
@@ -6948,19 +6973,32 @@ impl TuiApp {
     }
 
     pub(crate) fn append_active_output(&mut self, call_id: &str, chunk: &str) {
-        self.parser
-            .append_active_output(self.transcript.history_mut(), call_id, chunk);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::AppendActiveToolOutput {
+                call_id: call_id.to_string(),
+                chunk: chunk.to_string(),
+            },
+        );
     }
 
     pub(crate) fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         let now = self.core.clock.instant_now();
-        self.parser
-            .set_active_status(self.transcript.history_mut(), call_id, status, now);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::SetActiveToolStatus {
+                call_id: call_id.to_string(),
+                status,
+                now,
+            },
+        );
     }
 
     pub(crate) fn set_active_user_message(&mut self, call_id: &str, msg: String) {
-        self.parser
-            .set_active_user_message(self.transcript.history_mut(), call_id, msg);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::SetActiveToolUserMessage {
+                call_id: call_id.to_string(),
+                message: msg,
+            },
+        );
     }
 
     pub(crate) fn finish_tool(
@@ -6971,18 +7009,19 @@ impl TuiApp {
         engine_elapsed: Option<Duration>,
     ) {
         let now = self.core.clock.instant_now();
-        self.parser.finish_tool(
-            self.transcript.history_mut(),
-            call_id,
-            status,
-            output,
-            engine_elapsed,
-            now,
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FinishTool {
+                call_id: call_id.to_string(),
+                status,
+                output,
+                engine_elapsed,
+                now,
+            },
         );
     }
 
     pub(crate) fn has_transcript_content(&mut self) -> bool {
-        !self.transcript.is_empty()
+        !self.session_document.transcript.is_empty()
     }
 
     /// Explicit loaded transcript materialization for APIs/tests that request the
@@ -6995,7 +7034,9 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        self.transcript.build_rows(&self.lua, tw, &theme)
+        self.session_document
+            .transcript
+            .build_rows(&self.lua, tw, &theme)
     }
 
     fn capture_transcript_view_anchors(&mut self, width: u16) -> TranscriptViewAnchors {
@@ -7021,11 +7062,15 @@ impl TuiApp {
                     .and_then(|index| transcript.matches.get(index).copied()),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
-            .map(|matched| self.transcript.search_range_anchor(matched));
+            .map(|matched| {
+                self.session_document
+                    .transcript
+                    .search_range_anchor(matched)
+            });
         TranscriptViewAnchors {
             following_tail,
             scroll_top: (!following_tail).then(|| {
-                self.transcript.position_anchor(
+                self.session_document.transcript.position_anchor(
                     &self.lua,
                     width,
                     crate::smelt_edit::DocPosition {
@@ -7034,35 +7079,50 @@ impl TuiApp {
                     },
                 )
             }),
-            cursor: Some(self.transcript.position_anchor(&self.lua, width, cursor)),
-            selection_anchor: selection_anchor
-                .map(|position| self.transcript.position_anchor(&self.lua, width, position)),
-            drag_endpoint: drag_endpoint
-                .map(|position| self.transcript.position_anchor(&self.lua, width, position)),
+            cursor: Some(
+                self.session_document
+                    .transcript
+                    .position_anchor(&self.lua, width, cursor),
+            ),
+            selection_anchor: selection_anchor.map(|position| {
+                self.session_document
+                    .transcript
+                    .position_anchor(&self.lua, width, position)
+            }),
+            drag_endpoint: drag_endpoint.map(|position| {
+                self.session_document
+                    .transcript
+                    .position_anchor(&self.lua, width, position)
+            }),
             search_current,
         }
     }
 
     fn restore_transcript_view_anchors(&mut self, width: u16, anchors: TranscriptViewAnchors) {
         let scroll_top = anchors.scroll_top.map(|anchor| {
-            self.transcript
+            self.session_document
+                .transcript
                 .resolve_position_anchor(&self.lua, width, anchor)
                 .row
         });
         let cursor = anchors.cursor.map(|anchor| {
-            self.transcript
+            self.session_document
+                .transcript
                 .resolve_position_anchor(&self.lua, width, anchor)
         });
         let selection_anchor = anchors.selection_anchor.map(|anchor| {
-            self.transcript
+            self.session_document
+                .transcript
                 .resolve_position_anchor(&self.lua, width, anchor)
         });
         let drag_endpoint = anchors.drag_endpoint.map(|anchor| {
-            self.transcript
+            self.session_document
+                .transcript
                 .resolve_position_anchor(&self.lua, width, anchor)
         });
         let search_current = anchors.search_current.map(|anchor| {
-            self.transcript
+            self.session_document
+                .transcript
                 .resolve_search_range_anchor(&self.lua, width, anchor)
         });
 
@@ -7128,7 +7188,9 @@ impl TuiApp {
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.node_metadata_at_row(&self.lua, width, row)
+        self.session_document
+            .transcript
+            .node_metadata_at_row(&self.lua, width, row)
     }
 
     pub(crate) fn fold_transcript_node_at_row(
@@ -7141,6 +7203,7 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
         let changed = self
+            .session_document
             .transcript
             .fold_node_at_row(&self.lua, width, row, action, activation);
         if changed {
@@ -7157,7 +7220,10 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
-        let changed = self.transcript.fold_node(&self.lua, width, id, action);
+        let changed = self
+            .session_document
+            .transcript
+            .fold_node(&self.lua, width, id, action);
         if changed {
             self.restore_transcript_view_anchors(width, anchors);
         }
@@ -7171,7 +7237,10 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
-        let changed = self.transcript.fold_all(&self.lua, width, action);
+        let changed = self
+            .session_document
+            .transcript
+            .fold_all(&self.lua, width, action);
         if changed {
             self.restore_transcript_view_anchors(width, anchors);
         }
@@ -7187,6 +7256,7 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let anchors = self.capture_transcript_view_anchors(width);
         let changed = self
+            .session_document
             .transcript
             .fold_block_kind(&self.lua, width, kind, action);
         if changed {
@@ -7223,13 +7293,14 @@ impl TuiApp {
     /// while `block_id` is the stable block identity. Returns empty when no
     /// projection has run yet.
     pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
-        self.transcript.visible_block_snapshots()
+        self.session_document.transcript.visible_block_snapshots()
     }
 
     pub(crate) fn loaded_transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript
+        self.session_document
+            .transcript
             .materialize_block_snapshots(&self.lua, width)
     }
 
@@ -7250,7 +7321,9 @@ impl TuiApp {
         role: Option<&str>,
     ) -> Option<TranscriptNavigationBlock> {
         self.sync_transcript_renderer_generation();
-        self.transcript.previous_navigation_block(role)
+        self.session_document
+            .transcript
+            .previous_navigation_block(role)
     }
 
     pub(crate) fn next_transcript_navigation_block(
@@ -7258,7 +7331,7 @@ impl TuiApp {
         role: Option<&str>,
     ) -> Option<TranscriptNavigationBlock> {
         self.sync_transcript_renderer_generation();
-        self.transcript.next_navigation_block(role)
+        self.session_document.transcript.next_navigation_block(role)
     }
 
     pub(crate) fn reveal_transcript_descriptor_block(
@@ -7275,14 +7348,18 @@ impl TuiApp {
             .map(|viewport| viewport.rect.height)
             .unwrap_or(1)
             .max(1);
-        let Some(reveal) = self.transcript.descriptor_block_reveal_position(
-            &self.lua,
-            width,
-            descriptor_index,
-            0,
-            top_padding,
-            viewport_rows,
-        ) else {
+        let Some(reveal) = self
+            .session_document
+            .transcript
+            .descriptor_block_reveal_position(
+                &self.lua,
+                width,
+                descriptor_index,
+                0,
+                top_padding,
+                viewport_rows,
+            )
+        else {
             return false;
         };
         let window_scroll_before = self.transcript_scroll_top();
@@ -7313,15 +7390,19 @@ impl TuiApp {
 
     pub(crate) fn finish_transcript_turn(&mut self) {
         let _perf = smelt_perf::perf::begin("render:finish_turn");
-        self.parser
-            .finalize_active_tools(self.transcript.history_mut());
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FinalizeActiveTools,
+        );
     }
 
     pub(crate) fn set_agent_blocked_paused(&mut self, paused: bool) {
         let now = self.core.clock.instant_now();
         self.working.set_paused(paused);
-        self.parser
-            .set_active_tools_paused(self.transcript.history(), paused, now);
+        self.parser.set_active_tools_paused(
+            self.session_document.transcript.history(),
+            paused,
+            now,
+        );
     }
 
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
@@ -7388,19 +7469,21 @@ impl TuiApp {
         if replace_note_kind != Some(protocol::HistoryNoteKind::ModeChange) {
             return false;
         }
-        let history = self.transcript.history();
+        let history = self.session_document.transcript.history();
         let Some(id) = history.order.last().copied() else {
             return false;
         };
         if !matches!(history.block(id), Some(Block::Mode { .. })) {
             return false;
         }
-        self.transcript.history_mut().rewrite(id, block);
-        true
+        let result = self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::RewriteTranscriptBlock { id, block },
+        );
+        result.applied
     }
 
     fn remove_last_mode_block(&mut self) {
-        let history = self.transcript.history();
+        let history = self.session_document.transcript.history();
         let Some((idx, id)) = history.order.iter().copied().enumerate().next_back() else {
             return;
         };
@@ -7410,14 +7493,14 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
-        self.transcript.drain_finished_blocks()
+        self.session_document.transcript.drain_finished_blocks()
     }
 
     /// No-op: width changes invalidate the cache implicitly on next paint.
     pub(crate) fn invalidate_for_width(&mut self, _width: u16) {}
 
     pub(crate) fn invalidate_for_theme(&mut self) {
-        self.transcript.invalidate_theme();
+        self.session_document.transcript.invalidate_theme();
         self.resume_preview_cache.invalidate_theme();
     }
 
@@ -7434,7 +7517,9 @@ impl TuiApp {
 
     pub(crate) fn sync_inline_options(&mut self) {
         let options = self.inline_options();
-        self.transcript.set_inline_options(options.clone());
+        self.session_document
+            .transcript
+            .set_inline_options(options.clone());
         self.resume_preview_cache.set_inline_options(options);
     }
 
@@ -7445,7 +7530,8 @@ impl TuiApp {
             &self.lua,
             &inline_options,
         );
-        self.transcript
+        self.session_document
+            .transcript
             .invalidate_renderer_if_changed(generation, cache_key);
         self.resume_preview_cache
             .invalidate_renderer_if_changed(generation, cache_key);
@@ -7471,16 +7557,22 @@ impl TuiApp {
 
     pub(crate) fn clear_transcript(&mut self) {
         self.pending_history_appends.clear();
-        self.transcript.history_mut().clear();
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::ClearTranscript,
+        );
         self.parser.clear();
     }
 
     pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
-        self.transcript.user_turns()
+        self.session_document.transcript.user_turns()
     }
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
-        self.transcript.truncate_to(block_idx);
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::TruncateTranscriptTo {
+                block_index: block_idx,
+            },
+        );
         self.parser.clear_tools();
     }
 

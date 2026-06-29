@@ -45,16 +45,17 @@ impl TuiApp {
 
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         if !self.session_is_read_only() {
-            if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
-                if tokens > 0 {
-                    self.core
-                        .session
-                        .record_context_tokens(tokens, self.active_context_token_identity());
-                    self.mark_session_dirty();
-                    self.context_tokens_updated_this_turn = true;
-                    if self.active_provider_supports_mid_turn_reasoning_changes() {
-                        self.sync_reasoning_effort_applied();
-                    }
+            let identity = self.active_context_token_identity();
+            let result = self.apply_session_document_mutation(
+                crate::app::session_document::SessionMutation::RecordTokenUsage {
+                    usage: usage.clone(),
+                    identity,
+                },
+            );
+            if result.context_tokens_updated {
+                self.context_tokens_updated_this_turn = true;
+                if self.active_provider_supports_mid_turn_reasoning_changes() {
+                    self.sync_reasoning_effort_applied();
                 }
             }
         }
@@ -213,9 +214,12 @@ impl TuiApp {
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 if !self.session_is_read_only() {
-                    self.mark_session_dirty();
-                    self.core.session.session_cost_usd += cost;
-                    self.core.session.session_usage.accumulate(&usage);
+                    self.apply_session_document_mutation(
+                        crate::app::session_document::SessionMutation::AccumulateUsage {
+                            usage: usage.clone(),
+                            cost_usd: cost,
+                        },
+                    );
                 }
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()

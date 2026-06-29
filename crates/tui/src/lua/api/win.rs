@@ -489,7 +489,7 @@ impl mlua::UserData for LuaWin {
                             let numeric_at_bottom = top >= max;
                             let semantic_needs_tail_repin = if this.id == crate::app::TRANSCRIPT_WIN
                             {
-                                app.transcript.needs_tail_repin()
+                                app.session_document.transcript.needs_tail_repin()
                             } else {
                                 false
                             };

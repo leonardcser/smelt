@@ -107,7 +107,12 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
     );
 
     app.app.dispatch_engine_event(response);
-    assert!(app.app.transcript.compaction_preview_id().is_none());
+    assert!(app
+        .app
+        .session_document
+        .transcript
+        .compaction_preview_id()
+        .is_none());
 }
 
 #[test]
@@ -134,11 +139,12 @@ fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
 
     let preview_id = app
         .app
+        .session_document
         .transcript
         .compaction_preview_id()
         .expect("compaction preview id");
     assert!(matches!(
-        app.app.transcript.history().block(preview_id),
+        app.app.session_document.transcript.history().block(preview_id),
         Some(smelt_core::transcript_model::Block::CompactionPreview { summary })
             if summary == "# Goal\nstream the summary"
     ));
