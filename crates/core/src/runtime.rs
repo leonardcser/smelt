@@ -106,9 +106,9 @@ impl Core {
     }
 
     /// Swap the clipboard sink to match the `system_clipboard` setting. Off
-    /// installs a [`NullSink`] so the kill ring stays purely internal (no OS
-    /// clipboard read/write); on restores the frontend's default sink. Called
-    /// when the setting changes at runtime; a no-op for headless.
+    /// installs a [`NullSink`] for the TUI so the kill ring stays purely
+    /// internal (no OS clipboard read/write); on restores the frontend's
+    /// default sink. Headless always keeps the subprocess clipboard sink.
     pub fn set_system_clipboard_enabled(&mut self, enabled: bool) {
         self.clipboard
             .swap_sink(clipboard_sink(self.frontend, enabled));
@@ -129,7 +129,6 @@ fn clipboard_sink(frontend: FrontendKind, system_clipboard: bool) -> Box<dyn cra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Sink;
 
     #[test]
     fn tui_sink_without_system_clipboard_is_internal_only() {
