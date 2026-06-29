@@ -408,6 +408,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bundled_syntax_set_supports_typescript_react_extensions() {
+        for ext in ["ts", "tsx", "jsx"] {
+            let syntax = SYNTAX_SET
+                .find_syntax_by_extension(ext)
+                .unwrap_or_else(|| panic!("missing syntax for .{ext}"));
+            assert_ne!(
+                syntax.name, "Plain Text",
+                ".{ext} should not fall back to plain text"
+            );
+        }
+    }
+
     fn render_code_block(
         out: &mut crate::content::builder::LineBuilder,
         lines: &[&str],
