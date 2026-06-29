@@ -80,7 +80,7 @@ end
 local function reset_text(value)
   local stamp = tonumber(value)
   if not stamp then return nil end
-  return "resets " .. os.date("%b %d %H:%M", stamp)
+  return "resets " .. os.date("!%b %d %H:%M", stamp)
 end
 
 local function window_label(seconds, secondary)

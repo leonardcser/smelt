@@ -23,8 +23,8 @@ expression: frame.text()
    plan plus
    credits 12
    usage limit resets 2 available
-   5h limit    |██████████████▋░░░|  82% used  resets Jan 01 01:00
-   7.0d limit  |████████▏░░░░░░░░░|  45% used  resets Jan 01 02:00
+   5h limit    |██████████████▋░░░|  82% used  resets Jan 01 00:00
+   7.0d limit  |████████▏░░░░░░░░░|  45% used  resets Jan 01 01:00
 
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
   1. Refresh usage
