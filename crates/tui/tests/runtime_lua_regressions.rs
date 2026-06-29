@@ -10,6 +10,8 @@ const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_f
 const TRANSCRIPT_DEFAULTS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
 const SCROLL_PILLS_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/scroll_pills.lua");
+const NOTIFICATIONS_LUA: &str = include_str!("../../../runtime/lua/smelt/notifications.lua");
+const NOTIFY_COMMAND_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/notify.lua");
 const TURN_NOTIFICATIONS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/plugins/turn_notifications.lua");
 
@@ -43,6 +45,21 @@ fn install_explicit_api_fixtures(lua: &mlua::Lua) {
     )
     .exec()
     .expect("install explicit API fixtures");
+}
+
+fn install_notifications_preload(lua: &mlua::Lua) {
+    lua.globals()
+        .set("__NOTIFICATIONS_LUA", NOTIFICATIONS_LUA)
+        .expect("install notifications lua source");
+    lua.load(
+        r#"
+        package.preload["smelt.notifications"] = function()
+          return assert(load(__NOTIFICATIONS_LUA, "smelt/notifications.lua"))()
+        end
+        "#,
+    )
+    .exec()
+    .expect("install notification module preload");
 }
 
 #[test]
@@ -957,17 +974,16 @@ fn turn_notifications_are_disabled_by_default() {
     )
     .exec()
     .expect("install fake smelt api");
+    install_notifications_preload(&lua);
     lua.load(TURN_NOTIFICATIONS_LUA)
         .exec()
         .expect("load turn notifications plugin");
 
-    let (bell_count, osc9_present, turn_end, method): (i64, bool, bool, String) = lua
+    let (bell_count, osc9_present, notifications_type): (i64, bool, String) = lua
         .load(
             r#"
             handlers.turn_end({ cancelled = false })
-            return _G.bell_count or 0, _G.osc9 ~= nil,
-              smelt.settings.notifications.turn_end,
-              smelt.settings.notifications.method
+            return _G.bell_count or 0, _G.osc9 ~= nil, type(smelt.settings.notifications)
             "#,
         )
         .eval()
@@ -975,8 +991,7 @@ fn turn_notifications_are_disabled_by_default() {
 
     assert_eq!(bell_count, 0);
     assert!(!osc9_present);
-    assert!(!turn_end);
-    assert_eq!(method, "auto");
+    assert_eq!(notifications_type, "nil");
 }
 
 #[test]
@@ -987,7 +1002,7 @@ fn turn_notifications_choose_osc9_for_supported_terminals() {
         r#"
         local handlers = {}
         smelt = {
-          settings = { notifications = { turn_end = true, method = "auto" } },
+          settings = { notifications = { turn_end = true } },
           events = { on = function(name, fn) handlers[name] = fn end },
           signal = __smelt_signal_stub({}, { task_label = "task-1" }),
           session = {
@@ -1006,6 +1021,7 @@ fn turn_notifications_choose_osc9_for_supported_terminals() {
     )
     .exec()
     .expect("install fake smelt api");
+    install_notifications_preload(&lua);
     lua.load(TURN_NOTIFICATIONS_LUA)
         .exec()
         .expect("load turn notifications plugin");
@@ -1026,16 +1042,15 @@ fn turn_notifications_choose_osc9_for_supported_terminals() {
 }
 
 #[test]
-fn turn_notifications_warn_once_for_invalid_method() {
+fn turn_notifications_support_one_shot_and_session_overrides() {
     let lua = mlua::Lua::new();
     install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         local handlers = {}
         smelt = {
-          settings = { notifications = { turn_end = true, method = "bad" } },
+          settings = { notifications = { turn_end = false } },
           events = { on = function(name, fn) handlers[name] = fn end },
-          notify = { warn = function(msg) _G.warns = (_G.warns or 0) + 1; _G.warn = msg end },
           signal = __smelt_signal_stub({}, {}),
           session = {
             title = { get = function() return "" end },
@@ -1044,7 +1059,7 @@ fn turn_notifications_warn_once_for_invalid_method() {
           terminal = {
             info = function() return { term_program = "WezTerm", tmux = false } end,
             bell = function() _G.bell_count = (_G.bell_count or 0) + 1; return true end,
-            osc9_notify = function(message, opts) _G.osc9 = { message = message, opts = opts }; return true end,
+            osc9_notify = function(message, opts) _G.osc9_count = (_G.osc9_count or 0) + 1; return true end,
           },
           text = { truncate = function(s) return s end },
         }
@@ -1053,25 +1068,153 @@ fn turn_notifications_warn_once_for_invalid_method() {
     )
     .exec()
     .expect("install fake smelt api");
+    install_notifications_preload(&lua);
     lua.load(TURN_NOTIFICATIONS_LUA)
         .exec()
         .expect("load turn notifications plugin");
 
-    let (warns, warn, osc9_present, bell_count): (i64, String, bool, i64) = lua
+    let (before, first, second, suppressed, third, cleared): (i64, i64, i64, bool, i64, bool) = lua
         .load(
             r#"
             handlers.turn_end({ cancelled = false })
+            before = _G.osc9_count or 0
+            smelt.notifications.enable_once()
             handlers.turn_end({ cancelled = false })
-            return _G.warns or 0, _G.warn or "", _G.osc9 ~= nil, _G.bell_count or 0
+            first = _G.osc9_count or 0
+            handlers.turn_end({ cancelled = false })
+            second = _G.osc9_count or 0
+            smelt.notifications.enable_session()
+            handlers.turn_end({ cancelled = false })
+            third = _G.osc9_count or 0
+            smelt.notifications.disable_session()
+            suppressed = smelt.notifications.status().suppressed
+            smelt.notifications.clear_session()
+            return before, first, second, suppressed, third, smelt.notifications.status().enabled
             "#,
         )
         .eval()
         .expect("fire turn_end");
 
-    assert_eq!(warns, 1);
-    assert!(warn.contains("invalid smelt.settings.notifications.method"));
-    assert!(osc9_present);
-    assert_eq!(bell_count, 0);
+    assert_eq!(before, 0);
+    assert_eq!(first, 1);
+    assert_eq!(second, 1);
+    assert!(suppressed);
+    assert_eq!(third, 2);
+    assert!(!cleared);
+}
+
+#[test]
+fn notify_command_controls_transient_notifications() {
+    let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
+    lua.load(
+        r#"
+        local notices = {}
+        local errors = {}
+        smelt = {
+          __commands = {},
+          __notices = notices,
+          __errors = errors,
+          cmd = { register = function(name, fn, opts) smelt.__commands[name] = { fn = fn, opts = opts } end },
+          notify = __smelt_notify_stub(notices, errors),
+          settings = { notifications = { turn_end = true } },
+          terminal = {
+            info = function() return { term_program = "WezTerm", tmux = false } end,
+            bell = function() return true end,
+            osc9_notify = function() return true end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    install_notifications_preload(&lua);
+    lua.load(NOTIFY_COMMAND_LUA)
+        .exec()
+        .expect("load notify command");
+
+    let (once, session, suppressed, cleared, desc, err): (bool, bool, bool, String, String, String) = lua
+        .load(
+            r#"
+            smelt.__commands.notify.fn()
+            once = smelt.notifications.status().once
+            smelt.__commands.notify.fn("on")
+            session = smelt.notifications.status().session
+            smelt.__commands.notify.fn("off")
+            suppressed = smelt.notifications.status().suppressed
+            smelt.__commands.notify.fn("clear")
+            cleared = smelt.notifications.status().mode
+            smelt.__commands.notify.fn("bad")
+            return once, session, suppressed, cleared, smelt.__commands.notify.opts.desc, smelt.__errors[1] or ""
+            "#,
+        )
+        .eval()
+        .expect("run notify command");
+
+    assert!(once);
+    assert!(session);
+    assert!(suppressed);
+    assert_eq!(cleared, "config");
+    assert_eq!(desc, "override turn-end notifications for this session");
+    assert_eq!(err, "usage: /notify [once|on|off|clear|status]");
+}
+
+#[test]
+fn turn_notifications_session_override_can_suppress_config() {
+    let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
+    lua.load(
+        r#"
+        local handlers = {}
+        smelt = {
+          settings = { notifications = { turn_end = true } },
+          events = { on = function(name, fn) handlers[name] = fn end },
+          signal = __smelt_signal_stub({}, {}),
+          session = {
+            title = { get = function() return "" end },
+            slug = { get = function() return "" end },
+          },
+          terminal = {
+            info = function() return { term_program = "WezTerm", tmux = false } end,
+            bell = function() _G.bell_count = (_G.bell_count or 0) + 1; return true end,
+            osc9_notify = function() _G.osc9_count = (_G.osc9_count or 0) + 1; return true end,
+          },
+          text = { truncate = function(s) return s end },
+        }
+        _G.handlers = handlers
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    install_notifications_preload(&lua);
+    lua.load(TURN_NOTIFICATIONS_LUA)
+        .exec()
+        .expect("load turn notifications plugin");
+
+    let (first, suppressed, once, cleared): (i64, i64, i64, i64) = lua
+        .load(
+            r#"
+            handlers.turn_end({ cancelled = false })
+            first = _G.osc9_count or 0
+            smelt.notifications.disable_session()
+            handlers.turn_end({ cancelled = false })
+            suppressed = _G.osc9_count or 0
+            smelt.notifications.enable_once()
+            handlers.turn_end({ cancelled = false })
+            once = _G.osc9_count or 0
+            smelt.notifications.clear()
+            handlers.turn_end({ cancelled = false })
+            cleared = _G.osc9_count or 0
+            return first, suppressed, once, cleared
+            "#,
+        )
+        .eval()
+        .expect("fire turn_end");
+
+    assert_eq!(first, 1);
+    assert_eq!(suppressed, 1);
+    assert_eq!(once, 2);
+    assert_eq!(cleared, 3);
 }
 
 #[test]
@@ -1082,7 +1225,7 @@ fn turn_notifications_fall_back_to_bel_and_skip_cancelled_or_retrying_turns() {
         r#"
         local handlers = {}
         smelt = {
-          settings = { notifications = { turn_end = true, method = "auto" } },
+          settings = { notifications = { turn_end = true } },
           events = { on = function(name, fn) handlers[name] = fn end },
           signal = __smelt_signal_stub({}, {}),
           session = {
@@ -1101,6 +1244,7 @@ fn turn_notifications_fall_back_to_bel_and_skip_cancelled_or_retrying_turns() {
     )
     .exec()
     .expect("install fake smelt api");
+    install_notifications_preload(&lua);
     lua.load(TURN_NOTIFICATIONS_LUA)
         .exec()
         .expect("load turn notifications plugin");

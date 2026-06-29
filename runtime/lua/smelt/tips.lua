@@ -337,6 +337,11 @@ local command_tips = {
     text = "switch models, or open the model picker with no argument",
   },
   {
+    id = "commands.notify",
+    key = "/notify",
+    text = "ask for a terminal notification when the current turn finishes",
+  },
+  {
     id = "commands.usage",
     key = "/usage",
     text = "check session cost and provider usage limits",

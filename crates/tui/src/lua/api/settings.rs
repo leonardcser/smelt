@@ -37,7 +37,6 @@ fn table_setting_decl(key: &str) -> Option<&'static TableSettingDecl> {
 fn init_notifications_settings(lua: &Lua) -> LuaResult<mlua::Table> {
     let table = lua.create_table()?;
     table.set("turn_end", false)?;
-    table.set("method", "auto")?;
     Ok(table)
 }
 

@@ -488,16 +488,12 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
             smelt.settings.show_slug = original
             assert(type(smelt.settings.notifications) == "table")
             assert(smelt.settings.notifications.turn_end == false)
-            assert(smelt.settings.notifications.method == "auto")
-            smelt.settings.notifications = { turn_end = false, method = "auto" }
+            assert(smelt.settings.notifications.method == nil)
+            smelt.settings.notifications = { turn_end = false }
             smelt.settings.notifications.turn_end = true
-            smelt.settings.notifications.method = "bel"
             assert(smelt.settings.notifications.turn_end == true)
-            assert(smelt.settings.notifications.method == "bel")
-            smelt.settings.notifications = { turn_end = false, method = "osc9" }
+            smelt.settings.notifications = { turn_end = false }
             assert(smelt.settings.notifications.turn_end == false)
-            assert(smelt.settings.notifications.method == "osc9")
-            smelt.settings.notifications = { turn_end = false, method = "auto" }
             local seen_notifications = false
             for key in pairs(smelt.settings) do
               if key == "notifications" then seen_notifications = true end
