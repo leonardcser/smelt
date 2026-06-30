@@ -3,11 +3,6 @@ use protocol::{history_item_message_count, HistoryItem};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct LiveDirtyState {
-    pub history_from: Option<usize>,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct LiveSideTables;
 
@@ -16,13 +11,10 @@ pub struct LiveSession {
     pub header: SessionHeader,
     pub session_dir: PathBuf,
     pub store: Option<SessionStoreRef>,
-    pub persisted_history_len: usize,
-    pub store_revision: u64,
     pub live_start: usize,
     pub live_history: Vec<HistoryItem>,
     pub checkpoint: Option<ContextCheckpoint>,
     pub side_tables: LiveSideTables,
-    pub dirty: LiveDirtyState,
 }
 
 impl LiveSession {
@@ -35,20 +27,16 @@ impl LiveSession {
         session_dir: PathBuf,
         store: Option<SessionStoreRef>,
     ) -> Self {
-        let persisted_history_len = header.history_len;
-        let store_revision = header.revision;
+        let live_start = header.history_len;
         let checkpoint = header.meta.checkpoint.clone();
         Self {
             header,
             session_dir,
             store,
-            persisted_history_len,
-            store_revision,
-            live_start: persisted_history_len,
+            live_start,
             live_history: Vec::new(),
             checkpoint,
             side_tables: LiveSideTables,
-            dirty: LiveDirtyState::default(),
         }
     }
 
@@ -61,20 +49,11 @@ impl LiveSession {
     }
 
     pub fn history_len(&self) -> usize {
-        if self.live_start < self.persisted_history_len {
-            self.live_start.saturating_add(self.live_history.len())
-        } else {
-            self.persisted_history_len
-                .saturating_add(self.live_history.len())
-        }
+        self.live_start.saturating_add(self.live_history.len())
     }
 
     pub fn is_empty(&self) -> bool {
         self.history_len() == 0
-    }
-
-    pub fn persisted_history_len(&self) -> usize {
-        self.persisted_history_len
     }
 
     pub fn live_suffix_len(&self) -> usize {
@@ -95,7 +74,6 @@ impl LiveSession {
             self.live_start = idx;
         }
         self.live_history.push(item);
-        self.mark_dirty_from(idx);
         idx
     }
 
@@ -107,27 +85,37 @@ impl LiveSession {
             self.live_start = index;
             self.live_history.clear();
         }
-        self.mark_dirty_from(index);
     }
 
-    pub fn mark_persisted(&mut self, persisted_history_len: usize, revision: u64) {
-        if persisted_history_len > self.live_start {
-            let persisted_live_items = persisted_history_len
-                .saturating_sub(self.live_start)
-                .min(self.live_history.len());
-            self.live_history.drain(..persisted_live_items);
-            self.live_start = persisted_history_len;
+    pub fn compact_saved_prefix(&mut self, saved_history_len: usize, revision: u64) {
+        let saved_history_len = saved_history_len.min(self.history_len());
+        if saved_history_len <= self.live_start {
+            self.live_start = saved_history_len;
+            self.live_history.clear();
+            self.header.history_len = saved_history_len;
+            self.header.revision = revision;
+            self.header.meta.history_len = Some(saved_history_len);
+            self.header.meta.checkpoint = self.checkpoint.clone();
+            return;
         }
-        self.persisted_history_len = persisted_history_len;
-        self.store_revision = revision;
-        self.dirty.history_from = self
-            .dirty
-            .history_from
-            .filter(|idx| *idx >= persisted_history_len);
-        self.header.history_len = persisted_history_len;
+        let drop_count = saved_history_len - self.live_start;
+        if drop_count >= self.live_history.len() {
+            self.live_history.clear();
+        } else {
+            self.live_history.drain(..drop_count);
+        }
+        self.live_start = saved_history_len;
+        self.header.history_len = saved_history_len;
         self.header.revision = revision;
-        self.header.meta.history_len = Some(persisted_history_len);
+        self.header.meta.history_len = Some(saved_history_len);
         self.header.meta.checkpoint = self.checkpoint.clone();
+    }
+
+    pub fn replace_header(&mut self, header: SessionHeader) {
+        self.header = header;
+        self.live_start = self.header.history_len;
+        self.live_history.clear();
+        self.checkpoint = self.header.meta.checkpoint.clone();
     }
 
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
@@ -138,11 +126,11 @@ impl LiveSession {
         }
 
         let mut out = Vec::new();
-        let persisted_end = end.min(self.persisted_history_len).min(self.live_start);
-        if start < persisted_end {
+        let stored_end = end.min(self.live_start);
+        if start < stored_end {
             let db = self.open_store()?;
             out.extend(
-                db.read_history_items_range(start..persisted_end)
+                db.read_history_items_range(start..stored_end)
                     .map_err(|err| format!("read session history range: {err}"))?,
             );
         }
@@ -243,7 +231,7 @@ impl LiveSession {
         } else {
             (Vec::new(), 0)
         };
-        let store_end_index = self.live_start.min(self.persisted_history_len);
+        let store_end_index = self.live_start;
         let store_start_index = first_live_index.min(store_end_index);
         let suffix_start = first_live_index.saturating_sub(self.live_start);
         let suffix = self
@@ -313,14 +301,6 @@ impl LiveSession {
         session.history = self.history_range(0..self.history_len())?;
         session.checkpoint = self.checkpoint.clone();
         Ok(session)
-    }
-
-    fn mark_dirty_from(&mut self, index: usize) {
-        self.dirty.history_from = Some(
-            self.dirty
-                .history_from
-                .map_or(index, |current| current.min(index)),
-        );
     }
 
     fn open_store(&self) -> Result<smelt_store::SessionDb, String> {
@@ -423,7 +403,6 @@ mod tests {
         let rows = live.history_range(1..3).expect("range");
         assert_eq!(rows.len(), 2);
         assert_eq!(live.history_len(), 3);
-        assert_eq!(live.dirty.history_from, Some(2));
         let source = live.model_history_source("summary:");
         match source {
             protocol::ModelHistorySource::Store {

@@ -49,6 +49,8 @@ app_story!(usage_codex_reset_action_available, |ctx| {
     ctx.set_viewport(76, 28);
     ctx.run_lua(
         r#"
+        local primary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
+        local secondary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 })
         smelt.model.current = function() return "gpt-5-codex" end
         smelt.model.list = function()
           return { { key = "gpt-5-codex", name = "gpt-5-codex", provider = "codex" } }
@@ -66,12 +68,12 @@ app_story!(usage_codex_reset_action_available, |ctx| {
                   primary_window = {
                     used_percent = 82,
                     limit_window_seconds = 18000,
-                    reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 }),
+                    reset_at = primary_reset,
                   },
                   secondary_window = {
                     used_percent = 45,
                     limit_window_seconds = 604800,
-                    reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 }),
+                    reset_at = secondary_reset,
                   },
                 },
               }),
@@ -90,6 +92,8 @@ app_story!(usage_codex_reset_action_unavailable, |ctx| {
     ctx.set_viewport(76, 28);
     ctx.run_lua(
         r#"
+        local primary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
+        local secondary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 })
         smelt.model.current = function() return "gpt-5-codex" end
         smelt.model.list = function()
           return { { key = "gpt-5-codex", name = "gpt-5-codex", provider = "codex" } }
@@ -107,12 +111,12 @@ app_story!(usage_codex_reset_action_unavailable, |ctx| {
                 primary_window = {
                   used_percent = 82,
                   limit_window_seconds = 18000,
-                  reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 }),
+                  reset_at = primary_reset,
                 },
                 secondary_window = {
                   used_percent = 45,
                   limit_window_seconds = 604800,
-                  reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 }),
+                  reset_at = secondary_reset,
                 },
               },
             }),

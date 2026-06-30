@@ -43,7 +43,7 @@ impl<'a> ToolSummaryResolver<'a> {
 #[cfg(test)]
 pub(crate) fn live_session_for_test(
     id: String,
-    persisted_history_len: usize,
+    history_len: usize,
     checkpoint: Option<smelt_core::ContextCheckpoint>,
 ) -> smelt_core::session_runtime::LiveSession {
     let header = smelt_core::session::SessionHeader {
@@ -62,12 +62,12 @@ pub(crate) fn live_session_for_test(
             context_tokens: None,
             context_token_identity: None,
             display_context_token_identity: None,
-            history_len: Some(persisted_history_len),
+            history_len: Some(history_len),
             checkpoint,
             text_bytes: None,
             migration: None,
         },
-        history_len: persisted_history_len,
+        history_len,
         revision: 0,
     };
     smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
@@ -1037,7 +1037,7 @@ impl TuiApp {
         if let Some(live) = self.session_document.live_session.as_mut() {
             if let Some((header, _)) = session::load_store_header_for_dir(live.dir().to_path_buf())
             {
-                live.mark_persisted(header.history_len, header.revision);
+                live.replace_header(header);
             }
         }
 
@@ -1259,10 +1259,13 @@ impl TuiApp {
             self.claim_writer_access_for_current_session();
         }
         let history_len = self.session_history_len();
+        let revision = session::load_store_header_for_dir(session::dir_for(&self.core.session))
+            .map_or(0, |(header, _)| header.revision);
         self.session_document.install_loaded_full_session(
             transcript,
             !self.session_access.is_read_only(),
             history_len,
+            revision,
         );
         self.bump_epoch("session_epoch");
         // Drop snapshots beyond the restored history length.
@@ -1665,6 +1668,9 @@ impl TuiApp {
                     session_id.clone(),
                     crate::persist::PersistSaveKind::Metadata,
                     generation,
+                    crate::app::session_document::SubmittedHistoryRange::metadata_only(
+                        state.history_len,
+                    ),
                     None,
                 ) else {
                     return;
@@ -1679,10 +1685,13 @@ impl TuiApp {
                     });
             }
             crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
+                let pending_history =
+                    crate::app::session_document::SubmittedHistoryRange::from_delta(&delta);
                 let Some(save_id) = self.session_document.mark_submitted(
                     session_id.clone(),
                     crate::persist::PersistSaveKind::History,
                     generation,
+                    pending_history,
                     None,
                 ) else {
                     return;
@@ -1750,10 +1759,13 @@ impl TuiApp {
             .dir()
             .to_path_buf();
         self.publish_shared_session_state();
+        let pending_history =
+            crate::app::session_document::SubmittedHistoryRange::from_delta(&delta);
         let Some(save_id) = self.session_document.mark_submitted(
             session_id.clone(),
             crate::persist::PersistSaveKind::History,
             generation,
+            pending_history,
             None,
         ) else {
             return;
@@ -2164,10 +2176,13 @@ impl TuiApp {
         let session = &self.core.session;
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
+        let pending_history =
+            crate::app::session_document::SubmittedHistoryRange::from_delta(&delta);
         let Some(save_id) = self.session_document.mark_submitted(
             session_id.clone(),
             crate::persist::PersistSaveKind::History,
             generation,
+            pending_history,
             descriptor_append,
         ) else {
             return false;

@@ -472,17 +472,7 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
     resumed
         .app
         .session_append_history(HistoryItem::user(Content::text("appended after stale ack")));
-    assert_eq!(
-        resumed
-            .app
-            .session_document
-            .live_session
-            .as_ref()
-            .unwrap()
-            .dirty
-            .history_from,
-        Some(before_len)
-    );
+    assert_eq!(resumed.app.session_history_len(), before_len + 1);
 
     resumed.app.ack_persist_save(PersistAck {
         save_id: 700,
@@ -493,16 +483,9 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
     });
 
     assert_eq!(
-        resumed
-            .app
-            .session_document
-            .live_session
-            .as_ref()
-            .unwrap()
-            .dirty
-            .history_from,
-        Some(before_len),
-        "stale ack must not clear live history appended after the save began"
+        resumed.app.session_history_len(),
+        before_len + 1,
+        "stale ack must not drop live history appended after the save began"
     );
     resumed.app.save_session_and_flush();
 
@@ -709,16 +692,14 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
         message: "save session database: integrity error: history unchanged prefix exceeds stored rows: prefix 2, stored 1".into(),
     });
     assert_eq!(
-        resumed
-            .app
-            .session_document
-            .live_session
-            .as_ref()
-            .unwrap()
-            .dirty
-            .history_from,
+        resumed.app.session_document.dirty_history_from_for_test(),
         Some(0),
-        "a live-session save failure should force a full retry"
+        "a live-session save failure should force the retry to start from the beginning"
+    );
+    assert_eq!(
+        resumed.app.session_document.durable_history_len_for_test(),
+        before_len,
+        "save failure must not make the durable cursor forget stored rows"
     );
 
     resumed.app.save_session_and_flush();
@@ -728,6 +709,72 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
         loaded.history.last(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "recover after failure"
     ));
+}
+
+#[test]
+fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    let stored_len = resumed.app.session_history_len();
+    assert_eq!(stored_len, 1);
+
+    resumed
+        .app
+        .session_append_history(HistoryItem::user(Content::text("kept live row")));
+    assert!(resumed.app.session_document.live_session.is_some());
+    resumed
+        .app
+        .session_document
+        .set_history_resave_from_for_test(stored_len + 1);
+
+    resumed.app.save_session();
+    resumed.app.flush_persist();
+
+    assert!(
+        resumed.app.notification.is_none(),
+        "save should not surface a prefix-exceeds-stored integrity error"
+    );
+    let live = resumed
+        .app
+        .session_document
+        .live_session
+        .as_ref()
+        .expect("store-backed session");
+    assert_eq!(live.live_suffix_len(), 0);
+
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), stored_len + 1);
+    assert!(matches!(
+        loaded.history.last(),
+        Some(HistoryItem::User { content, .. }) if content.text_content() == "kept live row"
+    ));
+}
+
+#[test]
+fn in_flight_live_save_then_rewind_flushes_without_bad_prefix() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    resumed
+        .app
+        .session_append_history(HistoryItem::user(Content::text("save before rewind")));
+    resumed.app.save_session();
+    assert!(resumed.app.session_document.has_pending_save());
+
+    resumed.app.rewind_to_start();
+    resumed.app.save_session_and_flush();
+
+    assert!(
+        resumed.app.notification.is_none(),
+        "rewind after an in-flight live save should not surface a save error"
+    );
+    let loaded = loaded_session(&session_id);
+    assert!(loaded.history.is_empty());
 }
 
 #[test]
