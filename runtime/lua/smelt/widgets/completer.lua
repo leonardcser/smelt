@@ -8,6 +8,9 @@
 --   query(text, anchor, cpos)?     -> string (required with items; optional with matches)
 --   accept(item, anchor, action)   -- action ∈ "enter" | "tab"
 --   on_select?(item)               -- fires on every navigation (live preview)
+--   manual?                        -- true: Tab can open this completer when closed
+--   auto?                          -- false: do not auto-open on text_changed
+--   accept_single?                 -- false: keep picker open even when manual Tab has one match
 --   prefix?                        -- picker row prefix glyph
 --   prefix_color?                  -- ansi for the prefix glyph
 --   label_color?                   -- ansi for the label cell
@@ -26,6 +29,7 @@ local registry = {}            -- registered completer specs in declaration orde
 local current = nil            -- { spec, picker, lock_reg, anchor, items, view, selected, query_key, regs }
 local pending_open = nil       -- delayed initial open while an async provider is searching
 local lock_count = 0
+local tab_bound = false
 local refilter
 
 local function time(label, fn)
@@ -64,6 +68,12 @@ function smelt.prompt.is_modal()
 end
 
 -- ── Helpers ─────────────────────────────────────────────────────────────
+
+local function ensure_tab_binding()
+  if tab_bound then return end
+  tab_bound = true
+  smelt.prompt.win():key("tab", function() M._tab() end)
+end
 
 local function prepare_picker_items(list, spec)
   for _, it in ipairs(list) do
@@ -141,10 +151,20 @@ local function candidate_rows(spec, anchor, text, cpos, show_message)
   return rank_items(items, query), items, nil, tostring(query)
 end
 
-local function detect_any(text, cpos)
+local function spec_auto(spec)
+  return spec.auto ~= false
+end
+
+local function spec_manual(spec)
+  return spec.manual == true
+end
+
+local function detect_any(text, cpos, mode)
   for _, spec in ipairs(registry) do
-    local anchor = spec.detect(text, cpos)
-    if anchor then return spec, anchor end
+    if (mode == "manual" and spec_manual(spec)) or (mode ~= "manual" and spec_auto(spec)) then
+      local anchor = spec.detect(text, cpos)
+      if anchor then return spec, anchor end
+    end
   end
   return nil, nil
 end
@@ -170,6 +190,17 @@ local function fire_on_select()
   end
 end
 
+local function accept_item(spec, item, anchor, action)
+  if not item or item._synthetic then return end
+  close_current()
+  local ok, err = pcall(spec.accept, item, anchor, action)
+  if not ok then smelt.notify.error("completer accept: " .. tostring(err)) end
+end
+
+local function accept_current(self, action)
+  accept_item(self.spec, self.view[self.selected], self.anchor, action)
+end
+
 local function picker_bindings(self)
   local function move(delta)
     local n = #self.view
@@ -179,15 +210,6 @@ local function picker_bindings(self)
     fire_on_select()
   end
 
-  local function accept(action)
-    local item = self.view[self.selected]
-    if not item or item._synthetic then return end
-    local anchor_at_accept = self.anchor
-    close_current()
-    local ok, err = pcall(self.spec.accept, item, anchor_at_accept, action)
-    if not ok then smelt.notify.error("completer accept: " .. tostring(err)) end
-  end
-
   local win = smelt.prompt.win()
   table.insert(self.regs, win:key("up",    function() move(1)  end))
   table.insert(self.regs, win:key("down",  function() move(-1) end))
@@ -195,8 +217,7 @@ local function picker_bindings(self)
   table.insert(self.regs, win:key("c-j",   function() move(-1) end))
   table.insert(self.regs, win:key("c-p",   function() move(1)  end))
   table.insert(self.regs, win:key("c-n",   function() move(-1) end))
-  table.insert(self.regs, win:key("enter", function() accept("enter") end))
-  table.insert(self.regs, win:key("tab",   function() accept("tab")   end))
+  table.insert(self.regs, win:key("enter", function() accept_current(self, "enter") end))
   table.insert(self.regs, win:key("esc",   function() close_current() end))
 end
 
@@ -271,10 +292,14 @@ local function open_for(spec, anchor)
   local cpos = smelt.prompt.cursor()
   local view, items, result, query_key = candidate_rows(spec, anchor, text, cpos, false)
   if #view == 0 then
-    if provider.is_loading(result) then schedule_pending_open(spec, anchor) end
-    return
+    if provider.is_loading(result) then
+      schedule_pending_open(spec, anchor)
+      return true
+    end
+    return false
   end
   activate_current(spec, anchor, view, items, result, query_key)
+  return true
 end
 
 local function apply_provider_result(cur, view, result, next_query_key, old_key)
@@ -335,16 +360,41 @@ end
 -- Run detect across registered completers and open one if any matches.
 -- Called by `text_changed`, by `acquire` release, and by manual reload paths.
 local function recompute_body()
+  ensure_tab_binding()
   if current then refilter() return end
   if lock_count > 0 then return end
   local text = smelt.prompt.text()
   local cpos = smelt.prompt.cursor()
-  local spec, anchor = detect_any(text, cpos)
+  local spec, anchor = detect_any(text, cpos, "auto")
   if spec then open_for(spec, anchor) end
 end
 
 function M._recompute()
   return time("completer:recompute", recompute_body)
+end
+
+local function manual_tab_body()
+  if current then
+    accept_current(current, "tab")
+    return
+  end
+  if lock_count > 0 then return end
+  local text = smelt.prompt.text()
+  local cpos = smelt.prompt.cursor()
+  local spec, anchor = detect_any(text, cpos, "manual")
+  if not spec then return end
+  local view, items, result, query_key = candidate_rows(spec, anchor, text, cpos, false)
+  if #view == 1 and spec.accept_single ~= false and not view[1]._synthetic then
+    accept_item(spec, view[1], anchor, "tab")
+  elseif #view > 0 then
+    activate_current(spec, anchor, view, items, result, query_key)
+  elseif provider.is_loading(result) then
+    schedule_pending_open(spec, anchor)
+  end
+end
+
+function M._tab()
+  return time("completer:tab", manual_tab_body)
 end
 
 -- This file is in `BOOTSTRAP_FILES` so user init.lua can call
@@ -362,6 +412,9 @@ smelt.prompt.win():on("text_changed", function() M._recompute() end)
 ---@field items fun(anchor: integer, text: string, cpos: integer): table[] Build a full candidate set for Lua-side ranking.
 ---@field query fun(text: string, anchor: integer, cpos: integer): string Query used for Lua-side ranking.
 ---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field manual? boolean Whether Tab can open this completer when no picker is active.
+---@field auto? boolean Set false to prevent text_changed from auto-opening this completer.
+---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field on_select? fun(item: table): nil Live selection callback.
 
 --- Completer specification handed to `smelt.prompt.completer` for bounded,
@@ -371,6 +424,9 @@ smelt.prompt.win():on("text_changed", function() M._recompute() end)
 ---@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states.
 ---@field query? fun(text: string, anchor: integer, cpos: integer): string Query identity used to distinguish user edits from provider refreshes.
 ---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field manual? boolean Whether Tab can open this completer when no picker is active.
+---@field auto? boolean Set false to prevent text_changed from auto-opening this completer.
+---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field limit? integer Maximum rows requested from `matches` providers.
 ---@field poll_ms? integer Refresh interval while `matches` returns `{ scanning = true }` or `{ searching = true }`.
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.

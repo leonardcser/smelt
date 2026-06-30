@@ -235,6 +235,11 @@ local editing_tips = {
     text = "after ctrl+y, cycle older killed text",
   },
   {
+    id = "path.complete",
+    key = "tab",
+    text = "after a file path, complete files and folders like a shell",
+  },
+  {
     id = "mode.cycle",
     key = "shift+tab",
     text = "cycle agent modes without opening a menu",

@@ -8,6 +8,14 @@
 
 Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall.
 
+## `smelt.fs.complete_path`
+
+```lua
+fun(dir: string, prefix: string, opts: table?): table?, string?
+```
+
+List immediate filesystem completions under `dir` matching `prefix`. Directory entries are returned first, then files, case-insensitive alphabetical, capped by `opts.limit` (default 200). Hidden names are included only when `prefix` starts with `.`. `opts.insert_prefix` controls inserted text and defaults to `dir` with a trailing separator. Returns `({ items }, nil)` or `(nil, err_string)`. Items are `{ label, path, insert_text, kind, description }`.
+
 ## `smelt.fs.copy`
 
 ```lua

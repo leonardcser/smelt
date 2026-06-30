@@ -862,6 +862,93 @@ fn read_process_output_tool_is_snapshot_only() {
     assert_eq!(output_id, "proc_1");
 }
 
+// -- fs.complete_path -----------------------------------------------------
+
+#[test]
+fn fs_complete_path_filters_sorts_and_limits_entries() {
+    let dir = tempfile::tempdir().expect("tmp");
+    std::fs::create_dir(dir.path().join("zeta-dir")).unwrap();
+    std::fs::create_dir(dir.path().join("alpha-dir")).unwrap();
+    std::fs::write(dir.path().join("beta.txt"), "beta").unwrap();
+    std::fs::write(dir.path().join("aardvark.txt"), "aardvark").unwrap();
+    std::fs::write(dir.path().join(".hidden"), "hidden").unwrap();
+
+    let rt = fresh();
+    rt.lua
+        .globals()
+        .set("DIR", dir.path().to_string_lossy().into_owned())
+        .unwrap();
+    rt.lua
+        .load(
+            r#"
+            RESULT, ERR = smelt.fs.complete_path(DIR, "", {
+                limit = 3,
+                insert_prefix = "~/tmp/",
+            })
+            HIDDEN, HIDDEN_ERR = smelt.fs.complete_path(DIR, ".", { limit = 10 })
+            PREFIXED, PREFIXED_ERR = smelt.fs.complete_path(DIR, "aa", { limit = 10 })
+            EMPTY_LIMIT, EMPTY_LIMIT_ERR = smelt.fs.complete_path(DIR, "", { limit = 0 })
+            DEFAULT_PREFIX, DEFAULT_PREFIX_ERR = smelt.fs.complete_path(DIR, "aa", { limit = 10 })
+            "#,
+        )
+        .exec()
+        .expect("complete_path");
+
+    assert!(matches!(
+        rt.lua.globals().get::<mlua::Value>("ERR").unwrap(),
+        mlua::Value::Nil
+    ));
+
+    let labels = lua_item_labels(get_global(&rt, "RESULT"));
+    assert_eq!(labels, vec!["alpha-dir/", "zeta-dir/", "aardvark.txt"]);
+
+    let result: mlua::Table = get_global(&rt, "RESULT");
+    let items: mlua::Table = result.get("items").unwrap();
+    let first: mlua::Table = items.raw_get(1).unwrap();
+    assert_eq!(first.get::<String>("kind").unwrap(), "dir");
+    assert_eq!(
+        first.get::<String>("insert_text").unwrap(),
+        "~/tmp/alpha-dir/"
+    );
+
+    assert!(matches!(
+        rt.lua.globals().get::<mlua::Value>("HIDDEN_ERR").unwrap(),
+        mlua::Value::Nil
+    ));
+    assert_eq!(lua_item_labels(get_global(&rt, "HIDDEN")), vec![".hidden"]);
+    assert_eq!(
+        lua_item_labels(get_global(&rt, "PREFIXED")),
+        vec!["aardvark.txt"]
+    );
+    assert_eq!(
+        lua_item_labels(get_global(&rt, "EMPTY_LIMIT")),
+        Vec::<String>::new()
+    );
+
+    assert!(matches!(
+        rt.lua
+            .globals()
+            .get::<mlua::Value>("DEFAULT_PREFIX_ERR")
+            .unwrap(),
+        mlua::Value::Nil
+    ));
+    let default_result: mlua::Table = get_global(&rt, "DEFAULT_PREFIX");
+    let default_items: mlua::Table = default_result.get("items").unwrap();
+    let default_item: mlua::Table = default_items.raw_get(1).unwrap();
+    assert_eq!(
+        default_item.get::<String>("insert_text").unwrap(),
+        dir.path().join("aardvark.txt").to_string_lossy()
+    );
+}
+
+fn lua_item_labels(result: mlua::Table) -> Vec<String> {
+    let items: mlua::Table = result.get("items").unwrap();
+    items
+        .sequence_values::<mlua::Table>()
+        .map(|item| item.unwrap().get::<String>("label").unwrap())
+        .collect()
+}
+
 // -- fs.watch -----------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]

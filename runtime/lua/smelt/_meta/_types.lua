@@ -462,6 +462,9 @@
 ---@field items fun(anchor: integer, text: string, cpos: integer): table[] Build a full candidate set for Lua-side ranking.
 ---@field query fun(text: string, anchor: integer, cpos: integer): string Query used for Lua-side ranking.
 ---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field manual? boolean Whether Tab can open this completer when no picker is active.
+---@field auto? boolean Set false to prevent text_changed from auto-opening this completer.
+---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field on_select? fun(item: table): nil Live selection callback.
 
 --- Completer specification handed to `smelt.prompt.completer` for bounded,
@@ -471,6 +474,9 @@
 ---@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states.
 ---@field query? fun(text: string, anchor: integer, cpos: integer): string Query identity used to distinguish user edits from provider refreshes.
 ---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
+---@field manual? boolean Whether Tab can open this completer when no picker is active.
+---@field auto? boolean Set false to prevent text_changed from auto-opening this completer.
+---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field limit? integer Maximum rows requested from `matches` providers.
 ---@field poll_ms? integer Refresh interval while `matches` returns `{ scanning = true }` or `{ searching = true }`.
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.

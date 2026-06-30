@@ -677,6 +677,9 @@ sets ranked in Lua.
 | `items` | `fun(anchor: integer, text: string, cpos: integer):` | yes | table[] Build a full candidate set for Lua-side ranking. |
 | `query` | `fun(text: string, anchor: integer, cpos: integer):` | yes | string Query used for Lua-side ranking. |
 | `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
+| `manual` | `boolean` |  | Whether Tab can open this completer when no picker is active. |
+| `auto` | `boolean` |  | Set false to prevent text_changed from auto-opening this completer. |
+| `accept_single` | `boolean` |  | Set false to keep a manual Tab picker open when there is exactly one match. |
 | `on_select` | `fun(item: table):` |  | nil Live selection callback. |
 
 ### `smelt.prompt.MatchesCompleterSpec`
@@ -690,6 +693,9 @@ already-ranked providers.
 | `matches` | `fun(anchor: integer, text: string, cpos: integer, limit: integer):` | yes | table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states. |
 | `query` | `fun(text: string, anchor: integer, cpos: integer):` |  | string Query identity used to distinguish user edits from provider refreshes. |
 | `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
+| `manual` | `boolean` |  | Whether Tab can open this completer when no picker is active. |
+| `auto` | `boolean` |  | Set false to prevent text_changed from auto-opening this completer. |
+| `accept_single` | `boolean` |  | Set false to keep a manual Tab picker open when there is exactly one match. |
 | `limit` | `integer` |  | Maximum rows requested from `matches` providers. |
 | `poll_ms` | `integer` |  | Refresh interval while `matches` returns `{ scanning = true }` or `{ searching = true }`. |
 | `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |

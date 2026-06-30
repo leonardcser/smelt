@@ -89,6 +89,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     fs.fn_(
+        "complete_path",
+        "List immediate filesystem completions under `dir` matching `prefix`. Directory entries are returned first, then files, case-insensitive alphabetical, capped by `opts.limit` (default 200). Hidden names are included only when `prefix` starts with `.`. `opts.insert_prefix` controls inserted text and defaults to `dir` with a trailing separator. Returns `({ items }, nil)` or `(nil, err_string)`. Items are `{ label, path, insert_text, kind, description }`.",
+        &["dir", "prefix", "opts"],
+        |lua, (dir, prefix, opts): (String, String, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
+            let limit = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<u64>>("limit").ok().flatten())
+                .map(|n| n as usize)
+                .unwrap_or(200);
+            let insert_prefix = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("insert_prefix").ok().flatten())
+                .unwrap_or_else(|| default_insert_prefix(&dir));
+            match complete_path_rows(&dir, &prefix, &insert_prefix, limit) {
+                Ok(rows) => complete_path_to_lua(lua, rows).map(|table| (Some(table), None)),
+                Err(err) => Ok((None, Some(err.to_string()))),
+            }
+        },
+    )?;
+
+    fs.fn_(
         "mkdir",
         "Create directory `p` (parents must exist). Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p"],
@@ -735,6 +756,101 @@ impl LuaUserData for FlockHandle {
             Ok(())
         });
     }
+}
+
+#[derive(Debug)]
+struct PathCompletionRow {
+    label: String,
+    path: String,
+    insert_text: String,
+    kind: &'static str,
+}
+
+fn complete_path_rows(
+    dir: &str,
+    prefix: &str,
+    insert_prefix: &str,
+    limit: usize,
+) -> std::io::Result<Vec<PathCompletionRow>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let include_hidden = prefix.starts_with('.');
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.is_empty()
+            || (!include_hidden && name.starts_with('.'))
+            || !name.starts_with(prefix)
+        {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+        let label = if is_dir {
+            format!("{name}/")
+        } else {
+            name.clone()
+        };
+        rows.push(PathCompletionRow {
+            insert_text: format!("{insert_prefix}{label}"),
+            label,
+            path: entry.path().to_string_lossy().into_owned(),
+            kind: if is_dir { "dir" } else { "file" },
+        });
+    }
+    rows.sort_by_cached_key(|row| {
+        (
+            kind_rank(row.kind),
+            row.label.to_lowercase(),
+            row.label.clone(),
+        )
+    });
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+    Ok(rows)
+}
+
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "dir" => 0,
+        _ => 1,
+    }
+}
+
+fn default_insert_prefix(dir: &str) -> String {
+    if dir.is_empty() {
+        String::new()
+    } else if dir.ends_with(std::path::MAIN_SEPARATOR) {
+        dir.to_owned()
+    } else {
+        format!("{dir}{}", std::path::MAIN_SEPARATOR)
+    }
+}
+
+fn complete_path_to_lua(lua: &Lua, rows: Vec<PathCompletionRow>) -> LuaResult<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("status", if rows.is_empty() { "empty" } else { "ready" })?;
+    table.set("ready", true)?;
+    let items = lua.create_table_with_capacity(rows.len(), 0)?;
+    for (idx, row) in rows.into_iter().enumerate() {
+        let item = lua.create_table_with_capacity(0, 6)?;
+        item.set("label", row.label)?;
+        item.set("path", row.path)?;
+        item.set("insert_text", row.insert_text)?;
+        item.set("kind", row.kind)?;
+        if row.kind == "dir" {
+            item.set("description", "directory")?;
+        }
+        items.raw_set(idx + 1, item)?;
+    }
+    table.set("items", items)?;
+    Ok(table)
 }
 
 fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {

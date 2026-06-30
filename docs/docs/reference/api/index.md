@@ -25,7 +25,7 @@ Available in every runtime, including headless mode.
 - [`smelt.events`](events.md) - 3 function(s)
 - [`smelt.files`](files.md) - 4 function(s)
 - [`smelt.frontend`](frontend.md) - 2 function(s)
-- [`smelt.fs`](fs.md) - 22 function(s)
+- [`smelt.fs`](fs.md) - 23 function(s)
 - [`smelt.fs.file_state`](fs_file_state.md) - 7 function(s)
 - [`smelt.fuzzy`](fuzzy.md) - 2 function(s)
 - [`smelt.grep`](grep.md) - 1 function(s)

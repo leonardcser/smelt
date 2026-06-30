@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 560
+expression: frame.text()
+---
+
+ main.rs
+ lib.rs
+ bin/     directory
+──────────────────────────────────────────────────
+ src/
+──────────────────────────────────────────────────
+ ○ normal                                 1:1 100%

@@ -7,6 +7,10 @@
 ---@class smelt.fs
 local fs = {}
 
+--- List immediate filesystem completions under `dir` matching `prefix`. Directory entries are returned first, then files, case-insensitive alphabetical, capped by `opts.limit` (default 200). Hidden names are included only when `prefix` starts with `.`. `opts.insert_prefix` controls inserted text and defaults to `dir` with a trailing separator. Returns `({ items }, nil)` or `(nil, err_string)`. Items are `{ label, path, insert_text, kind, description }`.
+---@type fun(dir: string, prefix: string, opts: table?): table?, string?
+fs.complete_path = nil
+
 --- Copy file `from` to `to`. Returns `(bytes_copied, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(from: string, to: string): integer?, string?
 fs.copy = nil

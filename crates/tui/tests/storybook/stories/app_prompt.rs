@@ -190,6 +190,18 @@ app_story!(prompt_slash_completion_with_live_notification, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_path_completion_on_tab, |ctx| {
+    // Plain path completion is manual and directory-scoped: Tab lists entries
+    // for the typed directory instead of fuzzy-searching the workspace.
+    ctx.set_viewport(50, 8);
+    ctx.write_fixture("src/main.rs", "fn main() {}\n");
+    ctx.write_fixture("src/lib.rs", "pub fn lib() {}\n");
+    ctx.write_fixture("src/bin/app.rs", "fn main() {}\n");
+    ctx.type_prompt("src/");
+    ctx.press_tab();
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_file_completion_with_error_notification, |ctx| {
     // `@file` uses the same prompt-docked picker plane as slash completion.
     // An error toast is covered by the picker rows when they coincide.

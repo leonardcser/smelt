@@ -4,6 +4,8 @@
 
 if not (smelt.prompt and smelt.prompt.completer and smelt.files) then return end
 
+local path_format = require("smelt.completers.path_format")
+
 -- Returns the byte offset of the `@` anchor when the cursor sits inside an
 -- `@…` zone. Mirrors the previous Rust `cursor_in_at_zone` helper: `@` must
 -- be preceded by whitespace or the buffer start, and the bytes between the
@@ -27,25 +29,9 @@ local function cursor_in_at_zone(buf, cpos)
   return at_byte
 end
 
-local function quote_if_needed(text)
-  if text:find(" ", 1, true) then
-    return '@"' .. text .. '"'
-  end
-  return "@" .. text
-end
-
 local function query_at(anchor, text, cpos)
   if cpos > anchor + 1 then return text:sub(anchor + 2, cpos) end
   return ""
-end
-
-local function mark_file_icon_rows(result)
-  if type(result) == "table" and type(result.items) == "table" then
-    for _, item in ipairs(result.items) do
-      item.icon = { kind = item.kind, path = item.path }
-    end
-  end
-  return result
 end
 
 smelt.prompt.completer({
@@ -54,7 +40,7 @@ smelt.prompt.completer({
     return cursor_in_at_zone(text, cpos)
   end,
   matches = function(anchor, text, cpos, limit)
-    return mark_file_icon_rows(smelt.files.search(query_at(anchor, text, cpos), {
+    return path_format.mark_file_icon_rows(smelt.files.search(query_at(anchor, text, cpos), {
       limit = limit,
       include_dirs = true,
     }))
@@ -67,6 +53,6 @@ smelt.prompt.completer({
     -- Replace from `@` through the cursor with the quoted token + trailing space.
     local cpos = smelt.prompt.cursor()
     smelt.files.accept(item)
-    smelt.prompt.replace_range(anchor, cpos, quote_if_needed(item.insert_text or item.path or item.label) .. " ")
+    smelt.prompt.replace_range(anchor, cpos, path_format.quote_at(path_format.item_path(item)) .. " ")
   end,
 })

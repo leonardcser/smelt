@@ -647,6 +647,8 @@ Query which frontend is active (TUI vs headless).
 
 Sync filesystem primitives.
 
+- `smelt.fs.complete_path` :: `fun(dir: string, prefix: string, opts: table?): table?, string?`
+  List immediate filesystem completions under `dir` matching `prefix`.
 - `smelt.fs.copy` :: `fun(from: string, to: string): integer?, string?`
   Copy file `from` to `to`.
 - `smelt.fs.exists` :: `fun(p: string): boolean`
