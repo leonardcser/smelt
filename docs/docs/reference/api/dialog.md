@@ -43,10 +43,12 @@ fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.inp
 
 Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.input.Input`](types.md#smeltinputinput)
 
-Build a single-line text-input leaf with a fresh buffer. `placeholder`
-shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
-override the dialog gutter. Returns `(leaf, buf, input)` so callers can
-keep using the buffer directly or opt into the first-class input handle.
+Build a line-input leaf with a fresh buffer. `placeholder` shows when the
+buffer is empty. `opts.pad_left` / `opts.pad_right` override the dialog
+gutter; `opts.wrap = true` lets long input soft-wrap across visual rows
+while preserving single-line submit semantics. Returns `(leaf, buf, input)`
+so callers can keep using the buffer directly or opt into the first-class
+input handle.
 
 ## `smelt.dialog.list`
 

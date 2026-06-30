@@ -1261,7 +1261,7 @@ Modal overlay builders.
 - `smelt.dialog.current` :: `fun(): table | nil`
   Return the topmost active dialog ctx (the same shape passed to `on_submit`/`keymap` handlers: `{ resolve, close, win, panels, focused_leaf }`), or `nil` if no dialog is open.
 - `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input`
-  Build a single-line text-input leaf with a fresh buffer.
+  Build a line-input leaf with a fresh buffer.
 - `smelt.dialog.list` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win`
   Wrap an existing `buf` as a selectable list leaf.
 - `smelt.dialog.markdown` :: `fun(text: string): smelt.win.Win, smelt.buf.Buf`
