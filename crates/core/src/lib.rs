@@ -36,6 +36,7 @@ pub mod path_display;
 pub(crate) mod paused_timer;
 pub mod permissions;
 pub mod process;
+pub mod public_status;
 pub mod runtime;
 pub mod session;
 pub mod session_migration;

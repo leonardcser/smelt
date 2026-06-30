@@ -235,6 +235,8 @@ pub struct TuiApp {
     /// test harness constructs a `TuiApp` without a real terminal and skips
     /// claiming. `Drop` here restores the terminal even on panic.
     pub(crate) terminal: Option<crate::term_setup::TuiTerminal>,
+    /// Public process status exported for terminal managers and scripts.
+    pub(crate) public_status: Option<smelt_core::public_status::StatusPublisher>,
     /// Shared HTTP client used for background side-fetches (context window).
     /// `None` in the test harness.
     pub(crate) http_client: Option<engine::HttpClient>,
@@ -1447,6 +1449,17 @@ impl TuiApp {
             },
             pending_dialogs: VecDeque::new(),
             terminal: None,
+            public_status: match smelt_core::public_status::StatusPublisher::new() {
+                Ok(publisher) => Some(publisher),
+                Err(err) => {
+                    engine::log::entry(
+                        engine::log::Level::Warn,
+                        "public_status_init_failed",
+                        &serde_json::json!({ "error": err.to_string() }),
+                    );
+                    None
+                }
+            },
             http_client: None,
             context_window_tx: None,
             context_window_request_id: 0,
@@ -1796,6 +1809,58 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("work_busy", self.busy_stack.entries_snapshot());
+    }
+
+    fn publish_public_status(&mut self) {
+        use smelt_core::public_status::{FocusState, PublicReason, PublicState, StatusUpdate};
+        use smelt_core::working::WorkState;
+
+        let (work_state, _) = self.resolve_work_state();
+        let focus = if self.term_focused {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
+
+        let permission_pending = self.pending_dialog && !self.focused_overlay_blocks_agent();
+        let (state, reason) = if permission_pending {
+            (PublicState::NeedsAttention, Some(PublicReason::Permission))
+        } else {
+            match work_state {
+                WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
+                    (PublicState::Busy, None)
+                }
+                WorkState::Done if !self.term_focused => (
+                    PublicState::NeedsAttention,
+                    Some(PublicReason::TurnComplete),
+                ),
+                WorkState::Done => (PublicState::Idle, Some(PublicReason::TurnComplete)),
+                WorkState::Interrupted => {
+                    (PublicState::NeedsAttention, Some(PublicReason::Interrupted))
+                }
+                WorkState::Idle => (PublicState::Idle, None),
+            }
+        };
+
+        let Some(publisher) = self.public_status.as_mut() else {
+            return;
+        };
+        if let Err(err) = publisher.publish(StatusUpdate {
+            state,
+            reason,
+            focus,
+            cwd: Some(self.cwd.clone()),
+            session_id: Some(self.core.session.id.clone()),
+            mode: self.core.session.mode.clone(),
+            headless: false,
+        }) {
+            engine::log::entry(
+                engine::log::Level::Warn,
+                "public_status_publish_failed",
+                &serde_json::json!({ "error": err.to_string() }),
+            );
+            self.public_status = None;
+        }
     }
 
     /// Drain pending signal notifications and invoke subscribers.
@@ -2519,6 +2584,7 @@ impl TuiApp {
             self.tick_timers();
             self.drain_persist_reports();
             self.publish_diff_signals();
+            self.publish_public_status();
             self.drain_signals_pending();
             self.drive_lua_tasks();
             for _id in self.drain_finished_blocks() {

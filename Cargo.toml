@@ -81,6 +81,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 libc = { workspace = true }
 
 [profile.release]

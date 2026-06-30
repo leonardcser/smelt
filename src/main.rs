@@ -139,6 +139,8 @@ enum Commands {
     Export(ExportArgs),
     /// Start the local session/request inspector web UI
     Inspect(InspectArgs),
+    /// Print public runtime status for running smelt processes
+    Status(StatusArgs),
     /// Upgrade smelt from GitHub releases or main
     Upgrade(upgrade::UpgradeArgs),
 }
@@ -194,6 +196,34 @@ struct InspectArgs {
     no_open: bool,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+struct StatusArgs {
+    /// Running smelt process id to inspect
+    #[arg(long, conflicts_with = "all")]
+    pid: Option<u32>,
+    /// Print every live smelt status file
+    #[arg(long, conflicts_with = "pid", conflicts_with = "file")]
+    all: bool,
+    /// Print the status file path for --pid instead of reading it
+    #[arg(long, requires = "pid", conflicts_with = "json")]
+    file: bool,
+    /// Print the status directory path instead of reading statuses
+    #[arg(long, conflicts_with_all = ["pid", "all", "file", "json"])]
+    dir: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "smelt status",
+    about = "Print public runtime status for running smelt processes"
+)]
+struct FastStatusArgs {
+    #[command(flatten)]
+    status: StatusArgs,
+}
 fn inspect_url(base_url: &str, session: Option<&str>) -> Result<String, String> {
     let Some(session) = session else {
         return Ok(base_url.to_string());
@@ -249,6 +279,100 @@ async fn run_inspect_command(args: InspectArgs) {
     server.stop().await;
 }
 
+fn print_status_json<T: serde::Serialize>(value: &T) -> Result<(), String> {
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer(&mut handle, value).map_err(|err| err.to_string())?;
+    use std::io::Write;
+    writeln!(handle).map_err(|err| err.to_string())
+}
+
+fn print_status_text(status: &smelt_core::public_status::PublicStatus) {
+    println!("pid: {}", status.pid);
+    println!("state: {}", status.state.as_str());
+    if let Some(reason) = status.reason {
+        println!("reason: {}", reason.as_str());
+    }
+    println!("focus: {}", status.focus.as_str());
+    if let Some(cwd) = &status.cwd {
+        println!("cwd: {cwd}");
+    }
+    if let Some(session_id) = &status.session_id {
+        println!("session_id: {session_id}");
+    }
+    if let Some(mode) = &status.mode {
+        println!("mode: {mode}");
+    }
+    println!("updated_at_ms: {}", status.updated_at_ms);
+    println!("expires_at_ms: {}", status.expires_at_ms);
+}
+
+fn print_statuses_text(statuses: &[smelt_core::public_status::PublicStatus]) {
+    if statuses.is_empty() {
+        println!("no running smelt processes found");
+        return;
+    }
+    println!(
+        "{:<8} {:<15} {:<15} {:<10} CWD",
+        "PID", "STATE", "REASON", "FOCUS"
+    );
+    for status in statuses {
+        let reason = status.reason.map(|reason| reason.as_str()).unwrap_or("-");
+        let cwd = status.cwd.as_deref().unwrap_or("-");
+        println!(
+            "{:<8} {:<15} {:<15} {:<10} {}",
+            status.pid,
+            status.state.as_str(),
+            reason,
+            status.focus.as_str(),
+            cwd
+        );
+    }
+}
+
+fn run_status_command(args: StatusArgs) {
+    if args.dir {
+        println!("{}", smelt_core::public_status::status_dir().display());
+        return;
+    }
+
+    let result = if args.all {
+        smelt_core::public_status::read_all_statuses().map(|statuses| {
+            if args.json {
+                print_status_json(&statuses)
+            } else {
+                print_statuses_text(&statuses);
+                Ok(())
+            }
+        })
+    } else {
+        let Some(pid) = args.pid else {
+            eprintln!("error: status requires --pid <PID> or --all");
+            std::process::exit(2);
+        };
+        if args.file {
+            println!(
+                "{}",
+                smelt_core::public_status::status_path_for_pid(pid).display()
+            );
+            return;
+        }
+        smelt_core::public_status::read_status_for_pid(pid).map(|status| {
+            if args.json {
+                print_status_json(&status)
+            } else {
+                print_status_text(&status);
+                Ok(())
+            }
+        })
+    }
+    .and_then(|inner| inner.map_err(std::io::Error::other));
+    if let Err(err) = result {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
 fn run_config_command(args: ConfigArgs) {
     match args.command {
         ConfigCommand::Default => setup::print_default_config(),
@@ -285,8 +409,26 @@ where
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn maybe_run_fast_status_command() -> bool {
+    let mut args = std::env::args_os();
+    let Some(program) = args.next() else {
+        return false;
+    };
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("status")) {
+        return false;
+    }
+
+    let parse_args = std::iter::once(format!("{} status", program.to_string_lossy()).into())
+        .chain(args)
+        .collect::<Vec<std::ffi::OsString>>();
+    match FastStatusArgs::try_parse_from(parse_args) {
+        Ok(args) => run_status_command(args.status),
+        Err(err) => err.exit(),
+    }
+    true
+}
+
+fn main() {
     std::panic::set_hook(Box::new(|info| {
         let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
         let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
@@ -297,6 +439,18 @@ async fn main() {
         eprintln!("{info}");
     }));
 
+    if maybe_run_fast_status_command() {
+        return;
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create tokio runtime");
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     // Mirror the embedded runtime tree to `<XDG_DATA_HOME>/smelt/builtins/`
     // on first launch / after a version bump, so the `customize` skill
     // can point the agent at on-disk source for inspection. Best-effort:
@@ -357,6 +511,10 @@ async fn main() {
             }
             Commands::Inspect(inspect_args) => {
                 run_inspect_command(inspect_args).await;
+                return;
+            }
+            Commands::Status(status_args) => {
+                run_status_command(status_args);
                 return;
             }
             Commands::Upgrade(upgrade_args) => {
