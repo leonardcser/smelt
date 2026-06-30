@@ -5,7 +5,7 @@ use smelt_perf::perf;
 use std::ops::Range;
 
 use crate::compression::ObjectCompression;
-use crate::error::Result;
+use crate::error::{Result, StoreError};
 use crate::object::{self, checked_i64, sha256_hex};
 use rusqlite::types::Value as SqlValue;
 
@@ -203,6 +203,69 @@ fn write_history_item_at_block(
     insert_normalized_history_item(conn, idx, block_idx, &normalized)
 }
 
+fn descriptor_kind_matches_history_item(kind: &str, item: &HistoryItem) -> bool {
+    matches!(
+        (kind, item),
+        ("user", HistoryItem::User { .. })
+            | (
+                "assistant" | "thinking" | "tool" | "exec" | "code",
+                HistoryItem::Assistant(_),
+            )
+    )
+}
+
+// COMPAT(transcript-descriptor-history-link-mismatch): detach descriptor origins
+// saved by broken sparse-resume append coordination before descriptor/history
+// suffix validation existed.
+pub(crate) fn repair_mismatched_transcript_descriptor_history_links(
+    conn: &Connection,
+) -> Result<usize> {
+    let _perf = perf::begin("store:transcript:repair_descriptor_history_links");
+    let mut stmt = conn.prepare(
+        "SELECT transcript_blocks.block_idx, transcript_blocks.kind, history_items.json
+         FROM transcript_blocks
+         LEFT JOIN history_items ON history_items.idx = transcript_blocks.history_idx
+         WHERE transcript_blocks.descriptor_json IS NOT NULL
+           AND transcript_blocks.history_idx IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut block_indices = Vec::new();
+    for (block_idx, kind, history_json) in rows {
+        let matches_history = history_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<HistoryItem>(json).ok())
+            .is_some_and(|item| descriptor_kind_matches_history_item(&kind, &item));
+        if !matches_history {
+            block_indices.push(block_idx);
+        }
+    }
+
+    for block_idx in &block_indices {
+        conn.execute(
+            "UPDATE transcript_search SET history_idx = NULL WHERE block_idx = ?1",
+            [block_idx],
+        )?;
+        conn.execute(
+            "UPDATE transcript_blocks
+             SET history_idx = NULL, origin_json = NULL
+             WHERE block_idx = ?1",
+            [block_idx],
+        )?;
+    }
+    perf::record_value(
+        "store:transcript:descriptor_history_links_repaired",
+        block_indices.len() as u64,
+    );
+    Ok(block_indices.len())
+}
+
 pub(crate) fn replace_history_suffix(
     conn: &Connection,
     start_idx: usize,
@@ -212,27 +275,15 @@ pub(crate) fn replace_history_suffix(
     let _perf = perf::begin("store:history:replace_suffix");
     perf::record_value("store:history:dirty_suffix_rows", items.len() as u64);
     let start_idx_sql = checked_i64(start_idx as u64, "start_idx")?;
-    let preserve_through_block_idx = conn
-        .query_row(
-            "SELECT MAX(block_idx) FROM transcript_blocks WHERE history_idx < ?1",
-            [start_idx_sql],
-            |row| row.get::<_, Option<i64>>(0),
-        )?
-        .unwrap_or(-1);
-    let search_deleted = conn.execute(
-        "DELETE FROM transcript_search
-         WHERE block_idx IN (
-             SELECT block_idx FROM transcript_blocks
-             WHERE history_idx >= ?1
-                OR (history_idx IS NULL AND block_idx > ?2)
-         )",
-        params![start_idx_sql, preserve_through_block_idx],
+    let detached_search = conn.execute(
+        "UPDATE transcript_search SET history_idx = NULL WHERE history_idx >= ?1",
+        [start_idx_sql],
     )?;
-    let transcript_deleted = conn.execute(
-        "DELETE FROM transcript_blocks
-         WHERE history_idx >= ?1
-            OR (history_idx IS NULL AND block_idx > ?2)",
-        params![start_idx_sql, preserve_through_block_idx],
+    let detached_blocks = conn.execute(
+        "UPDATE transcript_blocks
+         SET history_idx = NULL, origin_json = NULL
+         WHERE history_idx >= ?1",
+        [start_idx_sql],
     )?;
     let history_deleted =
         conn.execute("DELETE FROM history_items WHERE idx >= ?1", [start_idx_sql])?;
@@ -244,11 +295,10 @@ pub(crate) fn replace_history_suffix(
     for (block_idx, (offset, item)) in (first_block_idx..).zip(items.iter().enumerate()) {
         write_history_item_at_block(conn, start_idx + offset, block_idx, item, compression)?;
     }
+    perf::record_value("store:history:db_rows_deleted", history_deleted as u64);
     perf::record_value(
-        "store:history:db_rows_deleted",
-        search_deleted
-            .saturating_add(transcript_deleted)
-            .saturating_add(history_deleted) as u64,
+        "store:history:transcript_rows_detached",
+        detached_search.saturating_add(detached_blocks) as u64,
     );
     perf::record_value("store:history:db_rows_inserted", items.len() as u64);
     Ok(())
@@ -489,6 +539,12 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
 ) -> Result<()> {
     let _perf = perf::begin("store:transcript:replace_descriptor_suffix");
     compact_transcript_descriptor_indices(conn)?;
+    let current_descriptor_count = transcript_descriptor_count(conn)?;
+    if start_descriptor_idx > current_descriptor_count {
+        return Err(StoreError::Integrity(format!(
+            "transcript descriptor suffix starts past dense end: start {start_descriptor_idx}, count {current_descriptor_count}",
+        )));
+    }
     perf::record_value(
         "store:transcript:dirty_descriptor_suffix_rows",
         records.len() as u64,
@@ -558,39 +614,75 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     Ok(())
 }
 
-fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<()> {
-    let (count, indexed_count, max_descriptor_idx) = conn.query_row(
-        "SELECT COUNT(*), COUNT(descriptor_idx), COALESCE(MAX(descriptor_idx), -1)
+#[derive(Clone, Copy, Debug)]
+struct TranscriptDescriptorIndexStats {
+    count: i64,
+    indexed_count: i64,
+    distinct_index_count: i64,
+    min_descriptor_idx: i64,
+    max_descriptor_idx: i64,
+}
+
+impl TranscriptDescriptorIndexStats {
+    fn is_dense(self) -> bool {
+        self.count == self.indexed_count
+            && self.count == self.distinct_index_count
+            && self.min_descriptor_idx == 0
+            && self.max_descriptor_idx == self.count.saturating_sub(1)
+    }
+}
+
+fn transcript_descriptor_index_stats(conn: &Connection) -> Result<TranscriptDescriptorIndexStats> {
+    conn.query_row(
+        "SELECT COUNT(*), COUNT(descriptor_idx), COUNT(DISTINCT descriptor_idx),
+                COALESCE(MIN(descriptor_idx), 0), COALESCE(MAX(descriptor_idx), -1)
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL",
         [],
         |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
+            Ok(TranscriptDescriptorIndexStats {
+                count: row.get::<_, i64>(0)?,
+                indexed_count: row.get::<_, i64>(1)?,
+                distinct_index_count: row.get::<_, i64>(2)?,
+                min_descriptor_idx: row.get::<_, i64>(3)?,
+                max_descriptor_idx: row.get::<_, i64>(4)?,
+            })
         },
-    )?;
-    if count == indexed_count && max_descriptor_idx == count.saturating_sub(1) {
-        return Ok(());
+    )
+    .map_err(Into::into)
+}
+
+fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<bool> {
+    let stats = transcript_descriptor_index_stats(conn)?;
+    if stats.is_dense() {
+        return Ok(false);
     }
 
     let mut stmt = conn.prepare(
         "SELECT block_idx, descriptor_idx
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
-         ORDER BY descriptor_idx IS NULL, descriptor_idx, block_idx",
+         ORDER BY descriptor_idx",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
     })?;
     let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
 
+    let temp_count = checked_i64(rows.len() as u64, "descriptor_temp_count")?;
+    let temp_base = stats
+        .min_descriptor_idx
+        .min(0)
+        .checked_sub(temp_count)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or_else(|| StoreError::Integrity("descriptor repair temp index overflow".into()))?;
     for (idx, (block_idx, _)) in rows.iter().enumerate() {
+        let temp_idx = temp_base
+            .checked_sub(checked_i64(idx as u64, "descriptor_temp_idx")?)
+            .ok_or_else(|| StoreError::Integrity("descriptor repair temp index overflow".into()))?;
         conn.execute(
             "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
-            params![-((idx as i64) + 1), block_idx],
+            params![temp_idx, block_idx],
         )?;
     }
     for (idx, (block_idx, _)) in rows.iter().enumerate() {
@@ -599,7 +691,7 @@ fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<()> {
             params![idx as i64, block_idx],
         )?;
     }
-    Ok(())
+    Ok(true)
 }
 
 fn insert_transcript_descriptor_record(

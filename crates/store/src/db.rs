@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -479,6 +479,7 @@ impl SessionDb {
                 self.object_compression,
             )?;
             if let Some(descriptors) = &delta.descriptors {
+                validate_descriptor_suffix_history_links(conn, &delta.history, descriptors)?;
                 history::replace_transcript_descriptor_suffix_in_transaction(
                     conn,
                     descriptors.start_descriptor_idx,
@@ -488,6 +489,16 @@ impl SessionDb {
             }
             Ok(report)
         })
+    }
+
+    pub fn repair_mismatched_transcript_descriptor_history_links(&self) -> Result<usize> {
+        self.immediate_transaction(|conn| {
+            history::repair_mismatched_transcript_descriptor_history_links(conn)
+        })
+    }
+
+    pub fn repair_checkpoint_first_live_index_past_history(&self) -> Result<usize> {
+        self.immediate_transaction(meta::repair_checkpoint_first_live_index_past_history)
     }
 
     pub fn save_session_state_and_side_table_suffixes_as_writer(
@@ -749,6 +760,82 @@ fn local_hostname() -> String {
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
+fn validate_descriptor_suffix_history_links(
+    conn: &Connection,
+    history: &SessionHistorySuffix,
+    descriptors: &TranscriptDescriptorSuffix,
+) -> Result<()> {
+    let start = history.history_start_idx as u64;
+    let end = history.history_len as u64;
+    for record in &descriptors.records {
+        let Some(history_idx) = record.history_idx else {
+            continue;
+        };
+        if history_idx >= end {
+            return Err(StoreError::Integrity(format!(
+                "transcript descriptor history link past saved history: history_idx {history_idx}, history_len {end}"
+            )));
+        }
+        let matches_history = if history_idx < start {
+            let history_kind = persisted_history_kind(conn, history_idx)?;
+            let Some(history_kind) = history_kind else {
+                return Err(StoreError::Integrity(format!(
+                    "transcript descriptor history link missing from stored prefix: history_idx {history_idx}, suffix {start}..{end}"
+                )));
+            };
+            descriptor_kind_matches_history_kind(&record.kind, &history_kind)
+        } else {
+            let suffix_offset = (history_idx - start) as usize;
+            let Some(item) = history.history.get(suffix_offset) else {
+                return Err(StoreError::Integrity(format!(
+                    "transcript descriptor history link missing from saved suffix: history_idx {history_idx}, suffix {start}..{end}"
+                )));
+            };
+            descriptor_kind_matches_history_item(&record.kind, item)
+        };
+        if !matches_history {
+            return Err(StoreError::Integrity(format!(
+                "transcript descriptor history link kind mismatch: descriptor kind {}, history_idx {history_idx}",
+                record.kind
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn persisted_history_kind(conn: &Connection, history_idx: u64) -> Result<Option<String>> {
+    let history_idx = crate::object::checked_i64(history_idx, "history_idx")?;
+    conn.query_row(
+        "SELECT kind FROM history_items WHERE idx = ?1",
+        [history_idx],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn descriptor_kind_matches_history_kind(kind: &str, history_kind: &str) -> bool {
+    matches!(
+        (kind, history_kind),
+        ("user", "user")
+            | (
+                "assistant" | "thinking" | "tool" | "exec" | "code",
+                "assistant"
+            )
+    )
+}
+
+fn descriptor_kind_matches_history_item(kind: &str, item: &protocol::HistoryItem) -> bool {
+    matches!(
+        (kind, item),
+        ("user", protocol::HistoryItem::User { .. })
+            | (
+                "assistant" | "thinking" | "tool" | "exec" | "code",
+                protocol::HistoryItem::Assistant(_),
+            )
+    )
+}
+
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -839,9 +926,13 @@ mod tests {
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = transcript_record(0, "zero", "zero");
         let sparse = transcript_record(302, "sparse", "sparse");
-        db.replace_transcript_descriptor_suffix(0, std::slice::from_ref(&first))
+        db.replace_transcript_descriptor_records(&[first.clone(), sparse.clone()])
             .unwrap();
-        db.replace_transcript_descriptor_suffix(302, std::slice::from_ref(&sparse))
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks SET descriptor_idx = 302 WHERE block_idx = 302",
+                [],
+            )
             .unwrap();
         assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
         assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 303);
@@ -854,6 +945,26 @@ mod tests {
         assert_eq!(
             db.read_all_transcript_descriptor_records().unwrap(),
             vec![first, sparse, appended]
+        );
+    }
+
+    #[test]
+    fn transcript_descriptor_suffix_rejects_start_past_dense_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.replace_transcript_descriptor_records(&[transcript_record(0, "zero", "zero")])
+            .unwrap();
+
+        let err = db
+            .replace_transcript_descriptor_suffix(2, &[transcript_record(2, "stale", "stale")])
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Integrity(message) if message.contains("starts past dense end"))
+        );
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            vec![transcript_record(0, "zero", "zero")]
         );
     }
 
@@ -884,9 +995,13 @@ mod tests {
 
         let first = transcript_record_with_history(0, 1, "first", "first");
         let sparse = transcript_record_with_history(302, 11, "sparse", "sparse");
-        db.replace_transcript_descriptor_suffix(0, std::slice::from_ref(&first))
+        db.replace_transcript_descriptor_records(&[first.clone(), sparse.clone()])
             .unwrap();
-        db.replace_transcript_descriptor_suffix(302, std::slice::from_ref(&sparse))
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks SET descriptor_idx = 302 WHERE block_idx = 302",
+                [],
+            )
             .unwrap();
         for (block_idx, history_idx, kind) in [(1_i64, 10_i64, "assistant"), (2, 11, "user")] {
             db.connection()
@@ -898,8 +1013,13 @@ mod tests {
                 .unwrap();
         }
 
-        let appended_history = protocol::HistoryItem::user(protocol::Content::text("new user"));
-        let appended_descriptor = transcript_record_with_history(303, 12, "appended", "new user");
+        let appended_history = protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("new assistant")),
+            None,
+            Vec::new(),
+        ));
+        let appended_descriptor =
+            transcript_record_with_history(303, 12, "appended", "new assistant");
         db.apply_session_delta_as_writer(&SessionDelta {
             history: SessionHistorySuffix {
                 state: test_session_state("sparse-follow-up", 13),
@@ -930,6 +1050,353 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old_nondescriptor_count, 1);
+    }
+
+    #[test]
+    fn session_delta_keeps_transcript_descriptors_independent_from_history_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let history = (0..3)
+            .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
+            .collect::<Vec<_>>();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("independent-transcript", history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: history.len(),
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        db.connection()
+            .execute("DELETE FROM transcript_search", [])
+            .unwrap();
+        db.connection()
+            .execute("DELETE FROM transcript_blocks", [])
+            .unwrap();
+
+        let initial_descriptors = vec![
+            transcript_record_with_history(0, 0, "first", "first"),
+            transcript_record(1, "assistant-a", "assistant a"),
+            transcript_record(2, "assistant-b", "assistant b"),
+        ];
+        db.replace_transcript_descriptor_records(&initial_descriptors)
+            .unwrap();
+
+        let appended_history = protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("new assistant")),
+            None,
+            Vec::new(),
+        ));
+        let appended_descriptor = transcript_record_with_history(3, 3, "appended", "new assistant");
+        db.apply_session_delta_as_writer(&SessionDelta {
+            history: SessionHistorySuffix {
+                state: test_session_state("independent-transcript", 4),
+                history_start_idx: 3,
+                history_len: 4,
+                history: vec![appended_history],
+                side_tables: None,
+            },
+            descriptors: Some(TranscriptDescriptorSuffix {
+                start_descriptor_idx: 3,
+                records: vec![appended_descriptor.clone()],
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 4);
+        assert_eq!(db.transcript_descriptor_dense_extent().unwrap(), 4);
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            vec![
+                initial_descriptors[0].clone(),
+                initial_descriptors[1].clone(),
+                initial_descriptors[2].clone(),
+                appended_descriptor,
+            ]
+        );
+    }
+
+    #[test]
+    fn session_delta_rejects_descriptor_history_kind_mismatch_in_saved_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let err = db
+            .apply_session_delta_as_writer(&SessionDelta {
+                history: SessionHistorySuffix {
+                    state: test_session_state("mismatched-descriptor-origin", 1),
+                    history_start_idx: 0,
+                    history_len: 1,
+                    history: vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
+                        "cwd changed",
+                    ))],
+                    side_tables: None,
+                },
+                descriptors: Some(TranscriptDescriptorSuffix {
+                    start_descriptor_idx: 0,
+                    records: vec![transcript_record_with_history(0, 0, "user", "follow up")],
+                }),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Integrity(message) if message.contains("kind mismatch")));
+        assert!(db.load_full_session_snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn repair_mismatched_transcript_descriptor_history_links_detaches_bad_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("repair-mismatched-links", 1),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: 1,
+            history: vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "cwd changed",
+            ))],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let bad = transcript_user_record_with_history(0, 0, "bad-user-link", "continue");
+        db.replace_transcript_descriptor_records(std::slice::from_ref(&bad))
+            .unwrap();
+
+        assert_eq!(
+            db.repair_mismatched_transcript_descriptor_history_links()
+                .unwrap(),
+            1
+        );
+        let rows = db.read_all_transcript_descriptor_records().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview_text, "continue");
+        assert_eq!(rows[0].history_idx, None);
+        assert_eq!(rows[0].origin_json, None);
+        let search_history_idx: Option<i64> = db
+            .connection()
+            .query_row(
+                "SELECT history_idx FROM transcript_search WHERE block_idx = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(search_history_idx, None);
+    }
+
+    #[test]
+    fn repair_checkpoint_first_live_index_past_history_replays_retained_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let history = vec![
+            protocol::HistoryItem::user(protocol::Content::text("old prompt")),
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text("recent reply")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("repair-checkpoint-live-index", history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: history.len(),
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let checkpoint = serde_json::json!({
+            "kind": "compaction",
+            "summary": "retained summary",
+            "first_live_index": 177,
+            "created_at_ms": 1,
+        });
+        db.connection()
+            .execute(
+                "UPDATE session_state SET checkpoint_json = ?1 WHERE singleton = 1",
+                [checkpoint.to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.repair_checkpoint_first_live_index_past_history()
+                .unwrap(),
+            1
+        );
+        let repaired = db
+            .session_state()
+            .unwrap()
+            .unwrap()
+            .checkpoint_json
+            .unwrap();
+        assert_eq!(repaired["summary"].as_str(), Some("retained summary"));
+        assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
+        assert_eq!(
+            db.repair_checkpoint_first_live_index_past_history()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn repair_checkpoint_first_live_index_past_actual_history_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("repair-checkpoint-actual-rows", 2),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: 2,
+            history: vec![
+                protocol::HistoryItem::user(protocol::Content::text("old prompt")),
+                protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                    Some(protocol::Content::text("recent reply")),
+                    None,
+                    Vec::new(),
+                )),
+            ],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let checkpoint = serde_json::json!({
+            "kind": "compaction",
+            "summary": "retained summary",
+            "first_live_index": 25,
+            "created_at_ms": 1,
+        });
+        db.connection()
+            .execute(
+                "UPDATE session_state SET history_len = 177, checkpoint_json = ?1 WHERE singleton = 1",
+                [checkpoint.to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.repair_checkpoint_first_live_index_past_history()
+                .unwrap(),
+            1
+        );
+        let repaired = db
+            .session_state()
+            .unwrap()
+            .unwrap()
+            .checkpoint_json
+            .unwrap();
+        assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn session_state_rejects_checkpoint_first_live_index_past_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut state = test_session_state("reject-bad-checkpoint", 1);
+        state.checkpoint_json = Some(serde_json::json!({
+            "kind": "compaction",
+            "summary": "bad summary",
+            "first_live_index": 2,
+            "created_at_ms": 1,
+        }));
+
+        let err = db.upsert_session_state(&state).unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::Integrity(message)
+                if message.contains("checkpoint first_live_index 2 exceeds history_len 1")
+        ));
+        assert!(db.session_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn session_delta_allows_descriptor_links_to_persisted_history_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("prefix-descriptor-origin", 1),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: 1,
+            history: vec![protocol::HistoryItem::user(protocol::Content::text(
+                "old user",
+            ))],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let updated_descriptor = transcript_user_record_with_history(0, 0, "updated", "old user");
+
+        db.apply_session_delta_as_writer(&SessionDelta {
+            history: SessionHistorySuffix {
+                state: test_session_state("prefix-descriptor-origin", 1),
+                history_start_idx: 1,
+                history_len: 1,
+                history: Vec::new(),
+                side_tables: None,
+            },
+            descriptors: Some(TranscriptDescriptorSuffix {
+                start_descriptor_idx: 0,
+                records: vec![updated_descriptor.clone()],
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            vec![updated_descriptor]
+        );
+    }
+
+    #[test]
+    fn session_delta_rejects_descriptor_history_kind_mismatch_in_persisted_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("prefix-descriptor-mismatch", 1),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: 1,
+            history: vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "cwd changed",
+            ))],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        })
+        .unwrap();
+
+        let err = db
+            .apply_session_delta_as_writer(&SessionDelta {
+                history: SessionHistorySuffix {
+                    state: test_session_state("prefix-descriptor-mismatch", 1),
+                    history_start_idx: 1,
+                    history_len: 1,
+                    history: Vec::new(),
+                    side_tables: None,
+                },
+                descriptors: Some(TranscriptDescriptorSuffix {
+                    start_descriptor_idx: 0,
+                    records: vec![transcript_user_record_with_history(
+                        0,
+                        0,
+                        "bad-prefix-link",
+                        "follow up",
+                    )],
+                }),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Integrity(message) if message.contains("kind mismatch")));
+        assert!(db
+            .read_all_transcript_descriptor_records()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1079,7 +1546,7 @@ mod tests {
             history: vec![appended.clone()],
             side_tables: None,
         };
-        let appended_descriptor = transcript_record_with_history(2, 2, "new-user", "new user");
+        let appended_descriptor = transcript_user_record_with_history(2, 2, "new-user", "new user");
         let report = db
             .save_history_suffix_and_transcript_descriptor_suffix_as_writer(
                 &suffix,
@@ -1965,7 +2432,7 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_append_replaces_stale_descriptor_tail() {
+    fn session_snapshot_append_preserves_descriptor_tail_without_descriptor_delta() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
@@ -2051,7 +2518,10 @@ mod tests {
 
         assert_eq!(append.history_unchanged, 1);
         assert_eq!(append.history_inserted, 1);
-        assert_eq!(db.search_blob().unwrap(), "first detailed\nsecond\nuser\n");
+        assert_eq!(
+            db.search_blob().unwrap(),
+            "first detailed\nsynthetic tail\nsecond\nuser\n"
+        );
         assert_eq!(
             db.load_full_session_snapshot()
                 .unwrap()
@@ -2063,7 +2533,7 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_suffix_preserves_prior_multi_block_descriptor() {
+    fn session_snapshot_suffix_preserves_transcript_until_descriptor_delta() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
@@ -2121,7 +2591,7 @@ mod tests {
         let search = db.search_blob().unwrap();
         assert!(search.contains("assistant answer\n"));
         assert!(search.contains("new request\n"));
-        assert!(!search.contains("old request descriptor"));
+        assert!(search.contains("old request descriptor\n"));
     }
 
     #[test]
@@ -2898,6 +3368,23 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    fn transcript_user_record_with_history(
+        block_idx: u64,
+        history_idx: u64,
+        label: &str,
+        search_text: &str,
+    ) -> TranscriptDescriptorRecord {
+        let mut record = transcript_record_with_history(block_idx, history_idx, label, search_text);
+        record.kind = "user".to_string();
+        record.descriptor_json = serde_json::json!({
+            "kind": "user",
+            "label": label,
+            "text": search_text,
+        })
+        .to_string();
+        record
     }
 
     fn without_search_text(mut record: TranscriptDescriptorRecord) -> TranscriptDescriptorRecord {

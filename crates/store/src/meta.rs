@@ -153,6 +153,7 @@ pub(crate) fn clear_writer_lease(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn upsert_session_state(conn: &Connection, state: &SessionState) -> Result<()> {
+    validate_session_state_checkpoint(state)?;
     let accounting_json = optional_json_string(&state.accounting_json)?;
     let checkpoint_json = optional_json_string(&state.checkpoint_json)?;
     conn.execute(
@@ -270,6 +271,64 @@ pub(crate) fn session_meta(conn: &Connection) -> Result<Option<SessionMeta>> {
         updated_at: state.updated_at,
         schema_version: SCHEMA_VERSION,
     }))
+}
+
+// COMPAT(session-checkpoint-live-index-past-history): repair checkpoints saved
+// with a live tail start beyond the retained SQLite history. Keeping the summary
+// and replaying all retained rows preserves the most context available.
+pub(crate) fn repair_checkpoint_first_live_index_past_history(conn: &Connection) -> Result<usize> {
+    let Some(state) = session_state(conn)? else {
+        return Ok(0);
+    };
+    let Some(mut checkpoint_json) = state.checkpoint_json else {
+        return Ok(0);
+    };
+    let Some(first_live_index) = checkpoint_first_live_index(&checkpoint_json) else {
+        return Ok(0);
+    };
+    let retained_history_len = state.history_len.min(history_item_count(conn)?);
+    if first_live_index <= retained_history_len {
+        return Ok(0);
+    }
+    let Some(object) = checkpoint_json.as_object_mut() else {
+        return Ok(0);
+    };
+    object.insert("first_live_index".to_string(), serde_json::json!(0));
+    let checkpoint_json = serde_json::to_string(&checkpoint_json)?;
+    conn.execute(
+        "UPDATE session_state SET checkpoint_json = ?1 WHERE singleton = 1",
+        [checkpoint_json],
+    )?;
+    smelt_perf::perf::record_value("store:session:checkpoint_live_index_repaired", 1);
+    Ok(1)
+}
+
+fn history_item_count(conn: &Connection) -> Result<u64> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM history_items", [], |row| row.get(0))?;
+    Ok(count.max(0) as u64)
+}
+
+fn validate_session_state_checkpoint(state: &SessionState) -> Result<()> {
+    let Some(first_live_index) = state
+        .checkpoint_json
+        .as_ref()
+        .and_then(checkpoint_first_live_index)
+    else {
+        return Ok(());
+    };
+    if first_live_index > state.history_len {
+        return Err(StoreError::Integrity(format!(
+            "checkpoint first_live_index {first_live_index} exceeds history_len {}",
+            state.history_len
+        )));
+    }
+    Ok(())
+}
+
+fn checkpoint_first_live_index(value: &serde_json::Value) -> Option<u64> {
+    value
+        .get("first_live_index")
+        .and_then(serde_json::Value::as_u64)
 }
 
 pub(crate) fn write_meta_sidecar(

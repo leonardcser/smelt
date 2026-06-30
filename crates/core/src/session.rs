@@ -1214,7 +1214,13 @@ impl Session {
         tokens_before: Option<u32>,
         context_snapshot_index: usize,
     ) -> bool {
-        if summary.trim().is_empty() {
+        // Store-backed sessions keep history in SQLite, so an empty in-memory
+        // history can still have a nonzero checkpoint boundary. For materialized
+        // sessions, keep checkpoint coordinates within loaded history.
+        if summary.trim().is_empty()
+            || first_live_index > context_snapshot_index
+            || (!self.history.is_empty() && context_snapshot_index > self.history.len())
+        {
             return false;
         }
         self.checkpoint = Some(ContextCheckpoint {
@@ -1530,6 +1536,20 @@ fn accounting_state_from_json(value: Option<Value>) -> SessionAccountingState {
     }
 }
 
+fn checkpoint_from_json(
+    value: Option<Value>,
+    retained_history_len: usize,
+) -> Option<ContextCheckpoint> {
+    let mut checkpoint: ContextCheckpoint = serde_json::from_value(value?).ok()?;
+    // COMPAT(session-checkpoint-live-index-past-history): read-only load paths
+    // cannot rewrite the store, but they still must not expose impossible
+    // checkpoint coordinates to model-history construction.
+    if checkpoint.first_live_index > retained_history_len {
+        checkpoint.first_live_index = 0;
+    }
+    Some(checkpoint)
+}
+
 pub fn store_state_from_session(
     session: &Session,
     history_len: usize,
@@ -1678,6 +1698,14 @@ pub fn load_store_header_or_import_bounded(
 
 pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader, SessionStoreRef)> {
     let db_path = session_dir.join("session.db");
+    // COMPAT(transcript-descriptor-history-link-mismatch): repair broken
+    // descriptor/history links before sparse resume builds its tail window.
+    // COMPAT(session-checkpoint-live-index-past-history): repair impossible
+    // checkpoint live starts before constructing store-backed model history.
+    if let Ok(db) = smelt_store::SessionDb::open(&db_path) {
+        let _ = db.repair_mismatched_transcript_descriptor_history_links();
+        let _ = db.repair_checkpoint_first_live_index_past_history();
+    }
     let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
     let state = db.session_state().ok()??;
     let meta = load_meta_from_db(&session_dir)?;
@@ -1837,10 +1865,7 @@ fn session_from_store_snapshot(
     let display_context_token_identity = accounting
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
-    let checkpoint = state
-        .checkpoint_json
-        .clone()
-        .and_then(|value| serde_json::from_value(value).ok());
+    let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), history.len());
     let context_tokens = state
         .context_tokens
         .and_then(|tokens| u32::try_from(tokens).ok());
@@ -1916,13 +1941,23 @@ pub(crate) fn repair_sqlite_session_dir(dir_path: &Path) -> Result<bool, smelt_s
             descriptor_count,
             search_blob.as_deref(),
         ) {
-            return Ok(false);
+            let db = smelt_store::SessionDb::open(dir_path.join("session.db"))?;
+            let mut repaired = db.repair_mismatched_transcript_descriptor_history_links()? > 0;
+            repaired |= db.repair_checkpoint_first_live_index_past_history()? > 0;
+            if repaired {
+                if let Some(meta) = load_meta_from_db(dir_path) {
+                    write_meta(dir_path, &meta);
+                }
+            }
+            return Ok(repaired);
         }
     }
 
     let db = smelt_store::SessionDb::open(dir_path.join("session.db"))?;
+    let mut repaired = db.repair_mismatched_transcript_descriptor_history_links()? > 0;
+    repaired |= db.repair_checkpoint_first_live_index_past_history()? > 0;
     let Some(state) = db.session_state()? else {
-        return Ok(false);
+        return Ok(repaired);
     };
     let descriptor_count = db.transcript_descriptor_count()?;
     let search_blob = db.search_blob().ok();
@@ -1932,15 +1967,14 @@ pub(crate) fn repair_sqlite_session_dir(dir_path: &Path) -> Result<bool, smelt_s
         descriptor_count,
         search_blob.as_deref(),
     ) {
-        return Ok(false);
+        return Ok(repaired);
     }
 
     let Some(mut snapshot) = db.load_full_session_snapshot()? else {
-        return Ok(false);
+        return Ok(repaired);
     };
     let history = std::mem::take(&mut snapshot.history);
     let session = session_from_store_snapshot(snapshot, history);
-    let mut repaired = false;
 
     if meta_sidecar_needs_repair(dir_path, &session) {
         write_meta(dir_path, &session.meta());
@@ -1998,6 +2032,8 @@ fn sqlite_session_artifacts_look_current(
         return false;
     };
     let accounting = accounting_state_from_json(state.accounting_json.clone());
+    let checkpoint =
+        checkpoint_from_json(state.checkpoint_json.clone(), state.history_len as usize);
     let context_token_identity = accounting.context_token_identity;
     let display_context_token_identity = accounting
         .display_context_token_identity
@@ -2021,6 +2057,7 @@ fn sqlite_session_artifacts_look_current(
         && meta.context_token_identity == context_token_identity
         && meta.display_context_token_identity == display_context_token_identity
         && meta.history_len == Some(state.history_len as usize)
+        && meta.checkpoint == checkpoint
         && meta.text_bytes.is_some()
 }
 
@@ -2909,9 +2946,7 @@ fn enrich_meta_from_db(
         changed = true;
     }
     if !checkpoint_field_present {
-        meta.checkpoint = state
-            .checkpoint_json
-            .and_then(|value| serde_json::from_value(value).ok());
+        meta.checkpoint = checkpoint_from_json(state.checkpoint_json, state.history_len as usize);
         changed = true;
     }
     let accounting = accounting_state_from_json(state.accounting_json);
@@ -2992,10 +3027,11 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
     let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
     let state = db.session_state().ok()??;
     let text_bytes = Some(db.history_text_bytes().ok()?);
-    let checkpoint = state
-        .checkpoint_json
-        .clone()
-        .and_then(|value| serde_json::from_value(value).ok());
+    let retained_history_len = db
+        .history_item_count()
+        .ok()?
+        .min(state.history_len as usize);
+    let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), retained_history_len);
     let accounting = accounting_state_from_json(state.accounting_json.clone());
     if let Some(meta_json) = db.meta("session_meta_json").ok().flatten() {
         if let Ok(meta) = serde_json::from_str::<SessionJsonlMeta>(&meta_json) {
@@ -3355,6 +3391,111 @@ mod tests {
         assert_eq!(migrated.history.len(), 1);
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         assert_eq!(db.writer_lease().unwrap(), None);
+    }
+
+    #[test]
+    fn load_store_header_for_dir_repairs_mismatched_transcript_descriptor_history_links() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "repair-mismatched-descriptor-history-link".into();
+        s.history
+            .push(HistoryItem::note(protocol::HistoryNote::context(
+                "cwd changed",
+            )));
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
+            .unwrap();
+        db.replace_transcript_descriptor_records(&[smelt_store::TranscriptDescriptorRecord {
+            block_idx: 0,
+            history_idx: Some(0),
+            kind: "user".to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: "bad-user-link".to_string(),
+            estimated_text_bytes: "continue".len() as u64,
+            preview_text: "continue".to_string(),
+            search_text: "continue".to_string(),
+            descriptor_json: serde_json::json!({
+                "kind": "user",
+                "text": "continue",
+                "image_labels": [],
+            })
+            .to_string(),
+            origin_json: Some(serde_json::json!({ "History": 0 }).to_string()),
+            tool_state_json: None,
+        }])
+        .unwrap();
+        drop(db);
+
+        let (_header, _store_ref) = load_store_header_for_dir(dir.path().to_path_buf())
+            .expect("store header loads after repair");
+
+        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+        let rows = db.read_all_transcript_descriptor_records().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].history_idx, None);
+        assert_eq!(rows[0].origin_json, None);
+    }
+
+    #[test]
+    fn load_store_header_for_dir_repairs_checkpoint_first_live_index_past_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "repair-checkpoint-live-index".into();
+        s.history = vec![user_item("old prompt"), assistant_text_item("recent reply")];
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
+            .unwrap();
+        let checkpoint = serde_json::json!({
+            "kind": "compaction",
+            "summary": "retained summary",
+            "first_live_index": 177,
+            "created_at_ms": 1,
+        });
+        db.connection()
+            .execute(
+                "UPDATE session_state SET checkpoint_json = ?1 WHERE singleton = 1",
+                [checkpoint.to_string()],
+            )
+            .unwrap();
+        drop(db);
+
+        let (header, store_ref) = load_store_header_for_dir(dir.path().to_path_buf())
+            .expect("store header loads after repair");
+
+        assert_eq!(header.history_len, 2);
+        assert_eq!(
+            header
+                .meta
+                .checkpoint
+                .as_ref()
+                .map(|cp| cp.first_live_index),
+            Some(0)
+        );
+        let live = crate::session_runtime::LiveSession::from_store(header, store_ref);
+        match live.model_history_source("SUMMARY:") {
+            protocol::ModelHistorySource::Store {
+                prefix,
+                first_live_index,
+                end_index,
+                suffix,
+            } => {
+                assert_eq!(prefix.len(), 1);
+                assert_eq!(first_live_index, 0);
+                assert_eq!(end_index, 2);
+                assert!(suffix.is_empty());
+            }
+            protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
+        }
+
+        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+        let repaired = db
+            .session_state()
+            .unwrap()
+            .unwrap()
+            .checkpoint_json
+            .unwrap();
+        assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
     }
 
     #[test]
@@ -4185,6 +4326,23 @@ mod tests {
         assert!(!installed);
         assert!(s.checkpoint.is_none());
         assert_eq!(s.context_tokens, Some(100));
+    }
+
+    #[test]
+    fn install_context_checkpoint_at_history_index_rejects_past_history() {
+        let mut s = fixture_session();
+        s.history = vec![user_item("only recent"), assistant_text_item("reply")];
+
+        let installed = s.install_context_checkpoint_at_history_index(
+            "compaction".into(),
+            "summary".into(),
+            3,
+            Some(100),
+            2,
+        );
+
+        assert!(!installed);
+        assert!(s.checkpoint.is_none());
     }
 
     #[test]

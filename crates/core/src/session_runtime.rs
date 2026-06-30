@@ -111,11 +111,19 @@ impl LiveSession {
     }
 
     pub fn mark_persisted(&mut self, persisted_history_len: usize, revision: u64) {
+        if persisted_history_len > self.live_start {
+            let persisted_live_items = persisted_history_len
+                .saturating_sub(self.live_start)
+                .min(self.live_history.len());
+            self.live_history.drain(..persisted_live_items);
+            self.live_start = persisted_history_len;
+        }
         self.persisted_history_len = persisted_history_len;
         self.store_revision = revision;
-        self.live_start = persisted_history_len;
-        self.live_history.clear();
-        self.dirty.history_from = None;
+        self.dirty.history_from = self
+            .dirty
+            .history_from
+            .filter(|idx| *idx >= persisted_history_len);
         self.header.history_len = persisted_history_len;
         self.header.revision = revision;
         self.header.meta.history_len = Some(persisted_history_len);

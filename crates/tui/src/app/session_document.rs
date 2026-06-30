@@ -1321,13 +1321,18 @@ impl SessionDocument {
     pub(crate) fn mark_persisted(
         persist: &mut SessionPersistState,
         transcript: &mut TranscriptDocument,
-        live_session: Option<&mut LiveSession>,
+        mut live_session: Option<&mut LiveSession>,
         ack: &crate::persist::PersistAck,
     ) -> bool {
         let current_generation = persist.current_generation(transcript);
         let Some((plan, descriptor_append)) = persist.ack_save(ack, current_generation) else {
             return false;
         };
+        if matches!(ack.kind, crate::persist::PersistSaveKind::History) {
+            if let Some(live) = live_session.as_deref_mut() {
+                live.mark_persisted(ack.history_len, ack.revision);
+            }
+        }
         if let Some(descriptor_append) = descriptor_append {
             Self::mark_request_history_append_persisted(transcript, descriptor_append);
         }
@@ -4146,6 +4151,7 @@ mod tests {
                 session_id: "session-a".into(),
                 kind: crate::persist::PersistSaveKind::History,
                 history_len: 3,
+                revision: 7,
             },
             generation,
         );
@@ -4192,6 +4198,7 @@ mod tests {
                 session_id: "session-a".into(),
                 kind: crate::persist::PersistSaveKind::History,
                 history_len: 1,
+                revision: 7,
             },
         );
 
@@ -4261,6 +4268,7 @@ mod tests {
                 session_id: "session-a".into(),
                 kind: crate::persist::PersistSaveKind::History,
                 history_len: 2,
+                revision: 7,
             },
         );
 
@@ -4292,6 +4300,7 @@ mod tests {
                 session_id: "session-a".into(),
                 kind: crate::persist::PersistSaveKind::Metadata,
                 history_len: 0,
+                revision: 7,
             },
             DocumentGeneration::new(state.dirty_generation, 1),
         );

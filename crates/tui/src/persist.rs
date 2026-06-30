@@ -70,6 +70,7 @@ pub(crate) struct PersistAck {
     pub(crate) session_id: String,
     pub(crate) kind: PersistSaveKind,
     pub(crate) history_len: usize,
+    pub(crate) revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -212,11 +213,12 @@ fn report_history_result(
     reports: &Sender<PersistReport>,
 ) {
     let report = match result {
-        Ok(_save_report) => PersistReport::Saved(PersistAck {
+        Ok(save_report) => PersistReport::Saved(PersistAck {
             save_id: req.save_id,
             session_id: req.session_id.clone(),
             kind: PersistSaveKind::History,
             history_len: req.delta.history.history_len,
+            revision: save_report.revision,
         }),
         Err(message) => PersistReport::Failed(PersistFailure {
             save_id: req.save_id,
@@ -233,11 +235,12 @@ fn report_metadata_result(
     reports: &Sender<PersistReport>,
 ) {
     let report = match result {
-        Ok(_save_report) => PersistReport::Saved(PersistAck {
+        Ok(save_report) => PersistReport::Saved(PersistAck {
             save_id: req.save_id,
             session_id: req.session_id.clone(),
             kind: PersistSaveKind::Metadata,
             history_len: req.state.history_len as usize,
+            revision: save_report.revision,
         }),
         Err(message) => PersistReport::Failed(PersistFailure {
             save_id: req.save_id,
@@ -309,7 +312,7 @@ fn write(
                     transcript_descriptor_row(
                         descriptors.start_descriptor_idx + offset,
                         record,
-                        delta.history.history_len,
+                        &delta.history,
                     )
                 })
                 .collect::<Result<Vec<_>, smelt_store::StoreError>>()
@@ -421,7 +424,16 @@ pub(crate) fn write_transcript_descriptor_suffix(
                 block_id: smelt_core::BlockId::new(descriptor_idx as u64),
                 record: record.clone(),
             };
-            transcript_descriptor_row(descriptor_idx, &record, usize::MAX)
+            let search_text = descriptor_search_text(
+                &record.record.descriptor,
+                record.record.tool_state.as_ref().map(|(_, state)| state),
+            );
+            smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
+                descriptor_idx,
+                record.block_id.get(),
+                &record.record,
+                search_text,
+            )
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
     db.replace_transcript_descriptor_suffix(start_descriptor_idx, &rows)
@@ -430,27 +442,24 @@ pub(crate) fn write_transcript_descriptor_suffix(
 fn transcript_descriptor_row(
     descriptor_idx: usize,
     record: &TranscriptBlockRecordWithId,
-    history_len: usize,
+    history: &smelt_store::SessionHistorySuffix,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
     let search_text = descriptor_search_text(
         &record.record.descriptor,
         record.record.tool_state.as_ref().map(|(_, state)| state),
     );
     let owned_record;
-    // Descriptor-only saves can include blocks whose matching history row is
-    // still outside this delta. Persist the descriptor without an FK to a row
-    // that is not present in the transaction.
-    let record_ref = if matches!(
-        record.record.origin,
-        Some(smelt_core::BlockOrigin::History(idx)) if idx >= history_len
-    ) {
-        owned_record = smelt_core::TranscriptBlockRecord {
-            origin: None,
-            ..record.record.clone()
-        };
-        &owned_record
-    } else {
-        &record.record
+    let record_ref = match record.record.origin {
+        Some(smelt_core::BlockOrigin::History(idx))
+            if !history_suffix_contains_matching_descriptor_origin(history, idx, record) =>
+        {
+            owned_record = smelt_core::TranscriptBlockRecord {
+                origin: None,
+                ..record.record.clone()
+            };
+            &owned_record
+        }
+        _ => &record.record,
     };
     smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
         descriptor_idx,
@@ -460,9 +469,74 @@ fn transcript_descriptor_row(
     )
 }
 
+fn history_suffix_contains_matching_descriptor_origin(
+    history: &smelt_store::SessionHistorySuffix,
+    history_idx: usize,
+    record: &TranscriptBlockRecordWithId,
+) -> bool {
+    if history_idx >= history.history_len {
+        return false;
+    }
+    if history_idx < history.history_start_idx {
+        return true;
+    }
+    history
+        .history
+        .get(history_idx - history.history_start_idx)
+        .is_some_and(|item| descriptor_origin_matches_history_item(&record.record.descriptor, item))
+}
+
+fn descriptor_origin_matches_history_item(
+    descriptor: &smelt_core::TranscriptBlockDescriptor,
+    item: &protocol::HistoryItem,
+) -> bool {
+    matches!(
+        (descriptor.kind(), item),
+        ("user", protocol::HistoryItem::User { .. })
+            | (
+                "assistant" | "thinking" | "tool" | "exec" | "code",
+                protocol::HistoryItem::Assistant(_),
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn suffix(
+        history_start_idx: usize,
+        history_len: usize,
+        history: Vec<protocol::HistoryItem>,
+    ) -> smelt_store::SessionHistorySuffix {
+        smelt_store::SessionHistorySuffix {
+            state: smelt_store::SessionState {
+                id: "test".into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: None,
+                reasoning_effort: None,
+                model: None,
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: 0,
+                history_len: history_len as u64,
+                created_at: 0,
+                updated_at: 0,
+            },
+            history_start_idx,
+            history_len,
+            history,
+            side_tables: None,
+        }
+    }
 
     #[test]
     fn transcript_descriptor_row_preserves_sparse_block_id() {
@@ -479,7 +553,14 @@ mod tests {
             },
         };
 
-        let row = transcript_descriptor_row(1, &record, 12).expect("descriptor row");
+        let history = suffix(
+            11,
+            12,
+            vec![protocol::HistoryItem::user(protocol::Content::text(
+                "follow up",
+            ))],
+        );
+        let row = transcript_descriptor_row(1, &record, &history).expect("descriptor row");
 
         assert_eq!(row.block_idx, 302);
         assert_eq!(row.history_idx, Some(11));
@@ -500,9 +581,39 @@ mod tests {
             },
         };
 
-        let row = transcript_descriptor_row(2, &record, 12).expect("descriptor row");
+        let history = suffix(12, 12, Vec::new());
+        let row = transcript_descriptor_row(2, &record, &history).expect("descriptor row");
 
         assert_eq!(row.block_idx, 303);
+        assert_eq!(row.history_idx, None);
+        assert_eq!(row.origin_json, None);
+    }
+
+    #[test]
+    fn transcript_descriptor_row_omits_origin_that_points_to_nonmatching_suffix_item() {
+        let record = TranscriptBlockRecordWithId {
+            block_id: smelt_core::BlockId::new(304),
+            record: smelt_core::TranscriptBlockRecord {
+                descriptor: smelt_core::TranscriptBlockDescriptor::User {
+                    text: "follow up".to_string(),
+                    image_labels: Vec::new(),
+                },
+                content_hash: 0,
+                origin: Some(smelt_core::BlockOrigin::History(3)),
+                tool_state: None,
+            },
+        };
+        let history = suffix(
+            3,
+            4,
+            vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "cwd changed",
+            ))],
+        );
+
+        let row = transcript_descriptor_row(3, &record, &history).expect("descriptor row");
+
+        assert_eq!(row.block_idx, 304);
         assert_eq!(row.history_idx, None);
         assert_eq!(row.origin_json, None);
     }

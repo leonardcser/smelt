@@ -248,6 +248,79 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
 }
 
 #[test]
+fn store_backed_resume_repairs_checkpoint_that_points_past_retained_history() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("old prompt")));
+        app.app
+            .session_append_history(HistoryItem::assistant(AssistantStep::terminal(
+                Some(Content::text("recent reply")),
+                None,
+                Vec::new(),
+            )));
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+
+    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
+    let db = smelt_store::SessionDb::open(&db_path).unwrap();
+    let checkpoint = serde_json::json!({
+        "kind": "compaction",
+        "summary": "retained summary",
+        "first_live_index": 177,
+        "created_at_ms": 1,
+    });
+    db.connection()
+        .execute(
+            "UPDATE session_state SET checkpoint_json = ?1 WHERE singleton = 1",
+            [checkpoint.to_string()],
+        )
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+
+    assert_eq!(resumed.app.core.session.id, session_id);
+    assert!(resumed.app.core.session.history.is_empty());
+    let checkpoint = resumed
+        .app
+        .session_document
+        .live_session
+        .as_ref()
+        .and_then(|live| live.checkpoint.as_ref())
+        .expect("checkpoint repaired on sparse resume");
+    assert_eq!(checkpoint.first_live_index, 0);
+
+    let history = resumed.app.model_history();
+    assert_eq!(history.len(), 3);
+    assert!(matches!(
+        &history[0],
+        HistoryItem::User { content, .. } if content.text_content().contains("retained summary")
+    ));
+    assert!(matches!(
+        &history[1],
+        HistoryItem::User { content, .. } if content.text_content() == "old prompt"
+    ));
+    assert!(matches!(
+        &history[2],
+        HistoryItem::Assistant(step)
+            if step.content.as_ref().is_some_and(|content| content.text_content() == "recent reply")
+    ));
+
+    let repaired = smelt_store::SessionDb::open_read_only(&db_path)
+        .unwrap()
+        .session_state()
+        .unwrap()
+        .unwrap()
+        .checkpoint_json
+        .unwrap();
+    assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
+}
+
+#[test]
 fn store_backed_resume_then_continue_preserves_prior_tool_invocations() {
     let guard = test_home_guard();
     let session_id = {
@@ -416,6 +489,7 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
         session_id: session_id.clone(),
         kind: PersistSaveKind::History,
         history_len: before_len,
+        revision: 7,
     });
 
     assert_eq!(
@@ -467,6 +541,7 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
         session_id: session_id.clone(),
         kind: PersistSaveKind::History,
         history_len: before_len,
+        revision: 7,
     });
 
     assert!(
@@ -521,6 +596,7 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
         session_id: session_id.clone(),
         kind: PersistSaveKind::History,
         history_len: before_len,
+        revision: 7,
     });
 
     assert!(
@@ -584,6 +660,7 @@ fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
         session_id: session_id.clone(),
         kind: PersistSaveKind::History,
         history_len: before_len,
+        revision: 7,
     });
     assert!(
         resumed
