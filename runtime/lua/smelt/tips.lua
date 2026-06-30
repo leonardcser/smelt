@@ -274,6 +274,10 @@ local settings_tips = {
     text = "set smelt.settings.file_icons = true if your terminal font supports Nerd Font icons",
   },
   {
+    id = "settings.notifications",
+    text = "set smelt.settings.notifications.turn_end = true for persistent turn-end notifications",
+  },
+  {
     id = "config.reload",
     key = "f5",
     text = "reload Lua config without restarting",
@@ -285,6 +289,11 @@ local command_tips = {
     id = "commands.discover",
     key = "/",
     text = "try /resume, /session, /compact, /fork, /ps, /color",
+  },
+  {
+    id = "commands.theme",
+    key = "/theme",
+    text = "preview bundled UI and syntax themes",
   },
   {
     id = "commands.btw",
@@ -345,6 +354,11 @@ local command_tips = {
     id = "commands.usage",
     key = "/usage",
     text = "check session cost and provider usage limits",
+  },
+  {
+    id = "cli.worktree",
+    key = "smelt --worktree NAME",
+    text = "create or enter a managed git worktree before starting a task",
   },
   {
     id = "commands.messages",
