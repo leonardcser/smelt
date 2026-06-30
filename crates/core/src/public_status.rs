@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const SCHEMA_VERSION: u32 = 1;
 const STATUS_TTL_MS: u64 = 15_000;
@@ -88,6 +88,10 @@ pub struct PublicStatus {
     pub mode: Option<String>,
     #[serde(default)]
     pub headless: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_start_time_ticks: Option<u64>,
     pub updated_at_ms: u64,
     pub expires_at_ms: u64,
 }
@@ -108,13 +112,28 @@ struct LastPublished {
     updated_at_ms: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ProcessIdentity {
+    boot_id: Option<String>,
+    start_time_ticks: Option<u64>,
+}
+
 pub struct StatusPublisher {
     pid: u32,
     path: PathBuf,
+    identity: ProcessIdentity,
     last: Option<LastPublished>,
 }
 
 impl StatusPublisher {
+    pub fn heartbeat_interval() -> Duration {
+        Duration::from_millis(STATUS_HEARTBEAT_MS)
+    }
+
+    pub fn status_ttl() -> Duration {
+        Duration::from_millis(STATUS_TTL_MS)
+    }
+
     pub fn new() -> io::Result<Self> {
         let pid = std::process::id();
         let dir = status_dir();
@@ -122,6 +141,7 @@ impl StatusPublisher {
         Ok(Self {
             pid,
             path: status_path_for_pid(pid),
+            identity: process_identity(pid),
             last: None,
         })
     }
@@ -136,13 +156,12 @@ impl StatusPublisher {
             mode: update.mode,
             headless: update.headless,
         };
-        if self.last.as_ref().is_some_and(|last| {
-            last.key == key && unix_ms().saturating_sub(last.updated_at_ms) < STATUS_HEARTBEAT_MS
-        }) {
+        let now_ms = unix_ms();
+        if !should_publish(self.last.as_ref(), &key, now_ms) {
             return Ok(());
         }
 
-        let updated_at_ms = unix_ms();
+        let updated_at_ms = now_ms;
         let status = PublicStatus {
             schema: SCHEMA_VERSION,
             app: "smelt".to_string(),
@@ -154,6 +173,8 @@ impl StatusPublisher {
             session_id: key.session_id.clone(),
             mode: key.mode.clone(),
             headless: key.headless,
+            boot_id: self.identity.boot_id.clone(),
+            process_start_time_ticks: self.identity.start_time_ticks,
             updated_at_ms,
             expires_at_ms: updated_at_ms.saturating_add(STATUS_TTL_MS),
         };
@@ -220,6 +241,12 @@ pub fn read_status_for_pid(pid: u32) -> io::Result<PublicStatus> {
             format!("process {pid} is not running"),
         ));
     }
+    if !process_matches_status_identity(pid, &status) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("status for process {pid} belongs to a different process"),
+        ));
+    }
     Ok(status)
 }
 
@@ -244,8 +271,12 @@ pub fn read_all_statuses() -> io::Result<Vec<PublicStatus>> {
         else {
             continue;
         };
-        if let Ok(status) = read_status_for_pid(pid) {
-            statuses.push(status);
+        match read_status_for_pid(pid) {
+            Ok(status) => statuses.push(status),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let _ = fs::remove_file(path);
+            }
+            Err(_) => {}
         }
     }
     statuses.sort_by_key(|status| status.pid);
@@ -301,6 +332,59 @@ fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
 #[cfg(not(unix))]
 fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::write(path, data)
+}
+
+fn should_publish(last: Option<&LastPublished>, key: &StatusKey, now_ms: u64) -> bool {
+    !last.is_some_and(|last| {
+        last.key == *key && now_ms.saturating_sub(last.updated_at_ms) < STATUS_HEARTBEAT_MS
+    })
+}
+
+fn process_matches_status_identity(pid: u32, status: &PublicStatus) -> bool {
+    if status.boot_id.is_none() && status.process_start_time_ticks.is_none() {
+        return true;
+    }
+
+    let current = process_identity(pid);
+    if let Some(expected) = &status.boot_id {
+        if current.boot_id.as_deref() != Some(expected.as_str()) {
+            return false;
+        }
+    }
+    if let Some(expected) = status.process_start_time_ticks {
+        if current.start_time_ticks != Some(expected) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity(pid: u32) -> ProcessIdentity {
+    ProcessIdentity {
+        boot_id: linux_boot_id(),
+        start_time_ticks: linux_process_start_time_ticks(pid),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_identity(_pid: u32) -> ProcessIdentity {
+    ProcessIdentity::default()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_boot_id() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_start_time_ticks(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(") ")?;
+    rest.split_whitespace().nth(19)?.parse().ok()
 }
 
 #[cfg(unix)]
@@ -368,8 +452,133 @@ mod tests {
         assert_eq!(status.reason, Some(PublicReason::TurnComplete));
         assert_eq!(status.focus, FocusState::Unfocused);
         assert_eq!(status.cwd.as_deref(), Some("/repo"));
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(status.boot_id, linux_boot_id());
+            assert_eq!(
+                status.process_start_time_ticks,
+                linux_process_start_time_ticks(std::process::id())
+            );
+        }
         drop(publisher);
         assert!(!status_path_for_pid(std::process::id()).exists());
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn heartbeat_policy_rewrites_unchanged_status_before_expiry() {
+        let key = StatusKey {
+            state: PublicState::Idle,
+            reason: None,
+            focus: FocusState::Unknown,
+            cwd: None,
+            session_id: None,
+            mode: None,
+            headless: false,
+        };
+        let last = LastPublished {
+            key: key.clone(),
+            updated_at_ms: 1_000,
+        };
+        assert!(!should_publish(
+            Some(&last),
+            &key,
+            1_000 + STATUS_HEARTBEAT_MS - 1
+        ));
+        assert!(should_publish(
+            Some(&last),
+            &key,
+            1_000 + STATUS_HEARTBEAT_MS
+        ));
+        assert!(StatusPublisher::heartbeat_interval() < StatusPublisher::status_ttl());
+    }
+
+    #[test]
+    fn heartbeat_policy_writes_state_changes_immediately() {
+        let key = StatusKey {
+            state: PublicState::Idle,
+            reason: None,
+            focus: FocusState::Unknown,
+            cwd: None,
+            session_id: None,
+            mode: None,
+            headless: false,
+        };
+        let changed = StatusKey {
+            state: PublicState::Busy,
+            ..key.clone()
+        };
+        let last = LastPublished {
+            key,
+            updated_at_ms: 1_000,
+        };
+        assert!(should_publish(Some(&last), &changed, 1_001));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_rejects_status_for_reused_pid_identity() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        let pid = std::process::id();
+        let now_ms = unix_ms();
+        write_status_atomic(
+            &status_path_for_pid(pid),
+            &PublicStatus {
+                schema: SCHEMA_VERSION,
+                app: "smelt".to_string(),
+                pid,
+                state: PublicState::Idle,
+                reason: None,
+                focus: FocusState::Unknown,
+                cwd: None,
+                session_id: None,
+                mode: None,
+                headless: false,
+                boot_id: linux_boot_id(),
+                process_start_time_ticks: Some(u64::MAX),
+                updated_at_ms: now_ms,
+                expires_at_ms: now_ms + STATUS_TTL_MS,
+            },
+        )
+        .unwrap();
+
+        let err = read_status_for_pid(pid).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn read_all_removes_stale_status_files() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        let pid = 424_242;
+        let path = status_path_for_pid(pid);
+        write_status_atomic(
+            &path,
+            &PublicStatus {
+                schema: SCHEMA_VERSION,
+                app: "smelt".to_string(),
+                pid,
+                state: PublicState::Idle,
+                reason: None,
+                focus: FocusState::Unknown,
+                cwd: None,
+                session_id: None,
+                mode: None,
+                headless: false,
+                boot_id: None,
+                process_start_time_ticks: None,
+                updated_at_ms: 0,
+                expires_at_ms: 0,
+            },
+        )
+        .unwrap();
+
+        assert!(read_all_statuses().unwrap().is_empty());
+        assert!(!path.exists());
         std::env::remove_var("XDG_RUNTIME_DIR");
     }
 }

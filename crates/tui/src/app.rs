@@ -2574,6 +2574,9 @@ impl TuiApp {
         }
 
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+        let mut public_status_heartbeat =
+            tokio::time::interval(smelt_core::public_status::StatusPublisher::heartbeat_interval());
+        public_status_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         'main: loop {
             let _app_guard = crate::lua::install_app_ptr(self);
@@ -2904,6 +2907,10 @@ impl TuiApp {
                             self.exec = None;
                         }
                     }
+                }
+
+                _ = public_status_heartbeat.tick() => {
+                    self.publish_public_status();
                 }
 
                 _ = tokio::time::sleep({
