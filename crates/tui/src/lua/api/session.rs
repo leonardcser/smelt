@@ -372,6 +372,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "worktrees",
+        "List smelt-managed git worktrees for the current repository. Rows are `{ name, branch, path, base, current }` and are sorted by name.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let out = lua.create_table()?;
+            if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
+                let cwd = std::path::Path::new(&app.cwd);
+                let root = std::path::Path::new(&app.core.config.settings.worktree_root);
+                let worktrees = smelt_core::worktree::list_managed(cwd, Some(root))
+                    .map_err(mlua::Error::external)?;
+                for (i, worktree) in worktrees.iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("name", worktree.name.as_str())?;
+                    row.set("branch", worktree.branch.as_str())?;
+                    row.set("path", worktree.path.display().to_string())?;
+                    row.set("base", worktree.base.as_str())?;
+                    row.set("current", worktree.current)?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(())
+            }) {
+                result?;
+            }
+            Ok(out)
+        },
+    )?;
+    m.fn_(
         "switch_cwd",
         "Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.",
         &["path"],

@@ -150,4 +150,8 @@ session.tree = nil
 ---@type fun(): table
 session.turns = nil
 
+--- List smelt-managed git worktrees for the current repository. Rows are `{ name, branch, path, base, current }` and are sorted by name.
+---@type fun(): table
+session.worktrees = nil
+
 return session

@@ -22,6 +22,15 @@ pub struct WorktreeInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct ManagedWorktreeInfo {
+    pub name: String,
+    pub branch: String,
+    pub path: PathBuf,
+    pub base: String,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ManagedWorktreeContext {
     pub path: PathBuf,
     pub branch: String,
@@ -196,6 +205,35 @@ pub fn enter_or_create(cwd: &Path, spec: WorktreeSpec<'_>) -> Result<WorktreeInf
     Err(format!(
         "could not find an unused worktree name for {base_name}"
     ))
+}
+
+pub fn list_managed(cwd: &Path, root: Option<&Path>) -> Result<Vec<ManagedWorktreeInfo>, String> {
+    let active_root = worktree_root(cwd)?;
+    let active_root = std::fs::canonicalize(&active_root).unwrap_or(active_root);
+    let base = default_base_ref(&active_root);
+    let mut out = Vec::new();
+
+    for wt in git_worktrees(&active_root)? {
+        let path = std::fs::canonicalize(&wt.path).unwrap_or(wt.path);
+        if !is_managed_worktree_path(&path, root) {
+            continue;
+        }
+        let branch = wt
+            .branch
+            .or_else(|| current_branch(&path))
+            .unwrap_or_else(|| "HEAD".to_string());
+        let name = path_name(&path).unwrap_or_else(|| branch.clone());
+        out.push(ManagedWorktreeInfo {
+            name,
+            branch,
+            current: path == active_root,
+            path,
+            base: base.clone(),
+        });
+    }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
 }
 
 pub fn managed_context(cwd: &Path, root: Option<&Path>) -> Option<ManagedWorktreeContext> {

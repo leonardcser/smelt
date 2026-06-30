@@ -15,6 +15,8 @@ const NOTIFICATIONS_LUA: &str = include_str!("../../../runtime/lua/smelt/notific
 const NOTIFY_COMMAND_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/notify.lua");
 const TURN_NOTIFICATIONS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/plugins/turn_notifications.lua");
+const ARGV_LUA: &str = include_str!("../../../runtime/lua/smelt/argv.lua");
+const WORKTREE_LUA: &str = include_str!("../../../runtime/lua/smelt/worktree.lua");
 
 fn install_explicit_api_fixtures(lua: &mlua::Lua) {
     lua.load(
@@ -61,6 +63,86 @@ fn install_notifications_preload(lua: &mlua::Lua) {
     )
     .exec()
     .expect("install notification module preload");
+}
+
+#[test]
+fn argv_split_handles_quotes_and_reports_incomplete_input() {
+    let lua = mlua::Lua::new();
+    let argv: mlua::Table = lua.load(ARGV_LUA).eval().expect("load argv module");
+
+    let (count, first, second, third): (i64, String, String, String) = lua
+        .load(r#"local argv = ...; local args = assert(argv.split([[alpha "two words" 'three words']])) return #args, args[1], args[2], args[3]"#)
+        .call(argv.clone())
+        .expect("split argv input");
+
+    assert_eq!(count, 3);
+    assert_eq!(first, "alpha");
+    assert_eq!(second, "two words");
+    assert_eq!(third, "three words");
+
+    let err: String = lua
+        .load(r#"local argv = ...; local args, err = argv.split([[unterminated "]]); assert(args == nil); return err"#)
+        .call(argv)
+        .expect("report argv error");
+    assert_eq!(err, "unterminated quote");
+}
+
+#[test]
+fn worktree_picker_items_mark_current_and_switch_existing_paths() {
+    let lua = mlua::Lua::new();
+    let worktree: mlua::Table = lua.load(WORKTREE_LUA).eval().expect("load worktree module");
+
+    let (create_action, current_label, current_desc, other_action, other_desc, other_path): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = lua
+        .load(
+            r##"
+            local worktree = ...
+            local rows = worktree.picker_items({
+              info = { cwd = "/repo" },
+              accent = "#ffaa00",
+              worktrees = {
+                { name = "worktree-command", branch = "worktree-command", path = "/repo/.worktrees/worktree-command", current = true },
+                { name = "feature", branch = "feature", path = "/repo/.worktrees/feature", current = false },
+              },
+            })
+            return rows[1].action, rows[2].label, rows[2].description, rows[3].action, rows[3].description, rows[3].path
+            "##,
+        )
+        .call(worktree)
+        .expect("build worktree picker rows");
+
+    assert_eq!(create_action, "create");
+    assert_eq!(current_label, "worktree-command*");
+    assert_eq!(current_desc, "/repo/.worktrees/worktree-command");
+    assert_eq!(other_action, "switch");
+    assert_eq!(other_desc, "/repo/.worktrees/feature");
+    assert_eq!(other_path, "/repo/.worktrees/feature");
+}
+
+#[test]
+fn worktree_picker_items_include_list_error() {
+    let lua = mlua::Lua::new();
+    let worktree: mlua::Table = lua.load(WORKTREE_LUA).eval().expect("load worktree module");
+
+    let (label, description): (String, String) = lua
+        .load(
+            r#"
+            local worktree = ...
+            local rows = worktree.picker_items({ info = { cwd = "/repo" }, list_error = "git failed" })
+            return rows[3].label, rows[3].description
+            "#,
+        )
+        .call(worktree)
+        .expect("build list error row");
+
+    assert_eq!(label, "could not list worktrees");
+    assert_eq!(description, "git failed");
 }
 
 #[test]

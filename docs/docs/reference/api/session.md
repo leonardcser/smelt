@@ -272,3 +272,11 @@ fun(): table
 
 Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message. Used by the rewind dialog.
 
+## `smelt.session.worktrees`
+
+```lua
+fun(): table
+```
+
+List smelt-managed git worktrees for the current repository. Rows are `{ name, branch, path, base, current }` and are sorted by name.
+

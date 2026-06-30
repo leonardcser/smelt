@@ -1583,6 +1583,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Arrange a flat list of session entries (as returned by `smelt.session.list`) into a DFS-ordered tree by `parent_id`.
 - `smelt.session.turns` :: `fun(): table`
   Return user turns as `{ block_idx, label }` rows where `label` is the first line of the user message.
+- `smelt.session.worktrees` :: `fun(): table`
+  List smelt-managed git worktrees for the current repository.
 
 #### `smelt.session.messages`
 
