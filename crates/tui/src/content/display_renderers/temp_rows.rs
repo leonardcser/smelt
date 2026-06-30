@@ -1,0 +1,167 @@
+use smelt_core::buffer::SpanMeta;
+use smelt_core::content::builder::{display_width, LineBuilder};
+
+pub(super) fn apply_temp_decoration(
+    out: &mut LineBuilder,
+    buf: &smelt_core::buffer::Buffer,
+    row: usize,
+    copy_fill_bg: bool,
+) {
+    let dec = buf.decoration_at(row).clone();
+    if let Some(source) = dec.source_text.as_deref() {
+        out.set_source_text(source);
+    }
+    if let Some(source_line) = dec.source_line {
+        out.set_source_line(source_line);
+    }
+    if dec.soft_wrapped {
+        out.mark_soft_wrap_continuation();
+    } else if dec.copy_continuation {
+        out.mark_copy_continuation();
+    }
+    if dec.cell_selectable {
+        out.mark_cell_selectable();
+    }
+    if dec.block_selectable {
+        out.mark_block_selectable();
+    }
+    if copy_fill_bg {
+        if let Some(bg) = dec.fill_bg {
+            out.fill_line_bg(bg);
+        }
+    }
+}
+
+pub(super) fn emit_buffer_row_clipped(
+    buf: &smelt_core::buffer::Buffer,
+    row: u16,
+    max_cols: u16,
+    out: &mut LineBuilder,
+    style_overlay: Option<(bool, bool)>,
+) -> u16 {
+    let text = buf.get_line(row as usize).unwrap_or("");
+    let mut highlights = buf.highlights_at(row as usize);
+    highlights.sort_by_key(|h| h.col_start);
+
+    let text_width = display_width_u16(text);
+    let mut emitted_cols: u16 = 0;
+    let mut col_idx: u16 = 0;
+
+    let theme_clone = out.theme().clone();
+
+    for h in &highlights {
+        if h.col_end <= col_idx {
+            continue;
+        }
+        if h.col_start > col_idx {
+            let end = h.col_start.min(text_width);
+            let plain = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
+            let style = style_overlay.map(|overlay| overlay_style(None, overlay));
+            let used = emit_clipped(
+                out,
+                plain,
+                style,
+                SpanMeta::default(),
+                max_cols,
+                emitted_cols,
+            );
+            emitted_cols = emitted_cols.saturating_add(used);
+            col_idx = end;
+            if emitted_cols >= max_cols {
+                return emitted_cols;
+            }
+        }
+        let end = h.col_end.min(text_width);
+        if end <= col_idx {
+            continue;
+        }
+        let segment = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
+        let style = overlay_style(
+            Some(theme_clone.resolve(h.hl)),
+            style_overlay.unwrap_or_default(),
+        );
+        let used = emit_clipped(
+            out,
+            segment,
+            Some(style),
+            h.meta.clone(),
+            max_cols,
+            emitted_cols,
+        );
+        emitted_cols = emitted_cols.saturating_add(used);
+        col_idx = end;
+        if emitted_cols >= max_cols {
+            return emitted_cols;
+        }
+    }
+    if col_idx < text_width && emitted_cols < max_cols {
+        let tail = smelt_buffer::text::slice_cells(text, col_idx as usize, text_width as usize);
+        let style = style_overlay.map(|overlay| overlay_style(None, overlay));
+        let used = emit_clipped(
+            out,
+            tail,
+            style,
+            SpanMeta::default(),
+            max_cols,
+            emitted_cols,
+        );
+        emitted_cols = emitted_cols.saturating_add(used);
+    }
+    emitted_cols
+}
+
+fn display_width_u16(text: &str) -> u16 {
+    display_width(text).min(u16::MAX as usize) as u16
+}
+
+fn char_display_width(ch: char) -> u16 {
+    let mut buf = [0; 4];
+    display_width(ch.encode_utf8(&mut buf)).min(u16::MAX as usize) as u16
+}
+
+fn overlay_style(
+    base: Option<smelt_core::style::Style>,
+    overlay: (bool, bool),
+) -> smelt_core::style::Style {
+    let mut style = base.unwrap_or_default();
+    if overlay.0 {
+        style.dim = true;
+    }
+    if overlay.1 {
+        style.italic = true;
+    }
+    style
+}
+
+fn emit_clipped(
+    out: &mut LineBuilder,
+    segment: &str,
+    style: Option<smelt_core::style::Style>,
+    meta: SpanMeta,
+    max_cols: u16,
+    already: u16,
+) -> u16 {
+    let budget = max_cols.saturating_sub(already);
+    if budget == 0 {
+        return 0;
+    }
+    let mut acc = String::new();
+    let mut acc_w: u16 = 0;
+    for ch in segment.chars() {
+        let cw = char_display_width(ch);
+        if acc_w.saturating_add(cw) > budget {
+            break;
+        }
+        acc.push(ch);
+        acc_w = acc_w.saturating_add(cw);
+    }
+    if acc.is_empty() {
+        return 0;
+    }
+    if let Some(s) = style {
+        out.append_resolved_span(&acc, s, meta);
+    } else {
+        out.print(&acc);
+    }
+    acc_w
+}

@@ -2,6 +2,7 @@
 
 mod layout_ir;
 mod markdown;
+mod temp_rows;
 
 pub(crate) use layout_ir::{
     measure_layout_ir_with_options, render_layout_ir_into, render_layout_ir_into_with_history,

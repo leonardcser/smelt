@@ -1,6 +1,10 @@
 use std::borrow::Cow;
 
-use super::markdown::{measure_markdown_inner_with_options, render_markdown_inner_with_options};
+use super::markdown::{
+    markdown_range_has_visible_text_with_options, measure_markdown_inner_with_options,
+    render_markdown_inner_range_with_options,
+};
+use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
 use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
@@ -617,13 +621,12 @@ fn render_markdown_spec(
         );
     }
 
-    let total = measure_markdown_spec(spec, width, inline_options);
-    if row_start == 0 && row_count >= total && gutter.is_none() {
+    if gutter.is_none() {
         if spec.italic {
             out.save_style();
             out.set_italic();
         }
-        let rows = render_markdown_inner_with_options(
+        let rows = render_markdown_inner_range_with_options(
             out,
             &spec.content,
             width as usize,
@@ -631,6 +634,8 @@ fn render_markdown_spec(
             spec.dim,
             None,
             inline_options,
+            row_start,
+            row_count,
         );
         if spec.italic {
             out.pop_style();
@@ -638,33 +643,67 @@ fn render_markdown_spec(
         return rows;
     }
 
-    render_via_temp(
+    render_markdown_spec_with_gutter(
         out,
+        spec,
         width,
         row_start,
         row_count,
-        gutter,
-        gutter.filter(|g| g.styled).map(|_| (spec.dim, spec.italic)),
-        |col| {
-            if spec.italic {
-                col.save_style();
-                col.set_italic();
-            }
-            let rows = render_markdown_inner_with_options(
-                col,
-                &spec.content,
-                width as usize,
-                "",
-                spec.dim,
-                None,
-                inline_options,
-            );
-            if spec.italic {
-                col.pop_style();
-            }
-            rows
-        },
+        gutter.expect("guttered markdown render requires gutter"),
+        inline_options,
     )
+}
+
+fn render_markdown_spec_with_gutter(
+    out: &mut LineBuilder,
+    spec: &MarkdownSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: &GutterSpec,
+    inline_options: &InlineOptions,
+) -> u16 {
+    let theme = out.theme().clone();
+    let inherited_style = out.current_style();
+    let mut buf = smelt_core::buffer::Buffer::new(
+        smelt_core::buffer::BufId(0),
+        smelt_core::buffer::BufCreateOpts::default(),
+    );
+    let outcome = {
+        let mut col = LineBuilder::new(&mut buf, &theme, width.max(1));
+        col.push(None, inherited_style);
+        if spec.italic {
+            col.save_style();
+            col.set_italic();
+        }
+        render_markdown_inner_range_with_options(
+            &mut col,
+            &spec.content,
+            width as usize,
+            "",
+            spec.dim,
+            None,
+            inline_options,
+            row_start,
+            row_count,
+        );
+        if spec.italic {
+            col.pop_style();
+        }
+        col.finish()
+    };
+    if outcome.was_wrapped {
+        out.mark_wrapped();
+    }
+    let style_overlay = gutter.styled.then_some((spec.dim, spec.italic));
+    let rows = outcome.line_count.min(u16::MAX as usize) as u16;
+    for row in 0..rows {
+        print_row_chrome(out, RowChrome::Gutter(gutter));
+        apply_temp_decoration(out, &buf, row as usize, true);
+        emit_buffer_row_clipped(&buf, row, width, out, style_overlay);
+        out.newline();
+    }
+    rows
 }
 
 fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> u16 {
@@ -1202,37 +1241,6 @@ fn render_ir_row_prefix(
     rows
 }
 
-fn apply_temp_decoration(
-    out: &mut LineBuilder,
-    buf: &smelt_core::buffer::Buffer,
-    row: usize,
-    copy_fill_bg: bool,
-) {
-    let dec = buf.decoration_at(row).clone();
-    if let Some(source) = dec.source_text.as_deref() {
-        out.set_source_text(source);
-    }
-    if let Some(source_line) = dec.source_line {
-        out.set_source_line(source_line);
-    }
-    if dec.soft_wrapped {
-        out.mark_soft_wrap_continuation();
-    } else if dec.copy_continuation {
-        out.mark_copy_continuation();
-    }
-    if dec.cell_selectable {
-        out.mark_cell_selectable();
-    }
-    if dec.block_selectable {
-        out.mark_block_selectable();
-    }
-    if copy_fill_bg {
-        if let Some(bg) = dec.fill_bg {
-            out.fill_line_bg(bg);
-        }
-    }
-}
-
 fn styled_spans_width(spans: &[protocol::StyledSpan]) -> usize {
     spans.iter().map(|span| display_width(&span.text)).sum()
 }
@@ -1552,6 +1560,9 @@ fn omitted_rows_have_visible_text(
     if start >= end {
         return false;
     }
+    if let Some(visible) = layout_range_has_visible_text(child, width, start, end, inline_options) {
+        return visible;
+    }
     let mut buf = smelt_core::buffer::Buffer::new(smelt_core::buffer::BufId(0), Default::default());
     let mut out = LineBuilder::new(&mut buf, theme, width);
     let rows = render_layout_ir_range(
@@ -1566,6 +1577,97 @@ fn omitted_rows_have_visible_text(
     );
     out.finish();
     rows > 0 && (0..rows as usize).any(|row| !buf.get_line(row).unwrap_or("").trim().is_empty())
+}
+
+fn layout_range_has_visible_text(
+    layout: &LayoutIr,
+    width: u16,
+    start: u16,
+    end: u16,
+    inline_options: &InlineOptions,
+) -> Option<bool> {
+    if start >= end {
+        return Some(false);
+    }
+    match layout {
+        BlockLayout::Empty => Some(false),
+        BlockLayout::Leaf(IrLeaf::Markdown(spec)) if !spec.inline => {
+            Some(markdown_range_has_visible_text_with_options(
+                &spec.content,
+                width as usize,
+                "",
+                spec.dim,
+                None,
+                inline_options,
+                start,
+                end.saturating_sub(start),
+            ))
+        }
+        BlockLayout::Vbox(items) => {
+            vbox_range_has_visible_text(items, width, start, end, inline_options)
+        }
+        BlockLayout::Hbox(items) => {
+            let widths = solve_ir_hbox_widths(items, width);
+            let mut saw_unknown = false;
+            for (item, item_width) in items.iter().zip(widths) {
+                match layout_range_has_visible_text(
+                    &item.layout,
+                    item_width,
+                    start,
+                    end,
+                    inline_options,
+                ) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => saw_unknown = true,
+                }
+            }
+            (!saw_unknown).then_some(false)
+        }
+        BlockLayout::Gutter { child, spec } => {
+            let child_width = child_width_after_gutter(width, display_width_u16(&spec.text));
+            layout_range_has_visible_text(child, child_width, start, end, inline_options)
+        }
+        BlockLayout::Style { child, .. } => {
+            layout_range_has_visible_text(child, width, start, end, inline_options)
+        }
+        _ => None,
+    }
+}
+
+fn vbox_range_has_visible_text(
+    items: &[LayoutIr],
+    width: u16,
+    start: u16,
+    end: u16,
+    inline_options: &InlineOptions,
+) -> Option<bool> {
+    let mut base = 0u16;
+    let mut saw_unknown = false;
+    for child in items {
+        if base >= end {
+            break;
+        }
+        let rows = measure_layout_ir_full(child, width, inline_options);
+        let child_end = base.saturating_add(rows);
+        if child_end > start && base < end {
+            let local_start = start.saturating_sub(base);
+            let local_end = end.saturating_sub(base).min(rows);
+            match layout_range_has_visible_text(
+                child,
+                width,
+                local_start,
+                local_end,
+                inline_options,
+            ) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => saw_unknown = true,
+            }
+        }
+        base = child_end;
+    }
+    (!saw_unknown).then_some(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1834,138 +1936,8 @@ fn display_width_u16(text: &str) -> u16 {
     display_width(text).min(u16::MAX as usize) as u16
 }
 
-fn char_display_width(ch: char) -> u16 {
-    let mut buf = [0; 4];
-    display_width(ch.encode_utf8(&mut buf)).min(u16::MAX as usize) as u16
-}
-
 fn child_width_after_gutter(width: u16, gutter_width: u16) -> u16 {
     width.saturating_sub(gutter_width).max(1)
-}
-
-fn emit_buffer_row_clipped(
-    buf: &smelt_core::buffer::Buffer,
-    row: u16,
-    max_cols: u16,
-    out: &mut LineBuilder,
-    style_overlay: Option<(bool, bool)>,
-) -> u16 {
-    let text = buf.get_line(row as usize).unwrap_or("");
-    let mut highlights = buf.highlights_at(row as usize);
-    highlights.sort_by_key(|h| h.col_start);
-
-    let text_width = display_width_u16(text);
-    let mut emitted_cols: u16 = 0;
-    let mut col_idx: u16 = 0;
-
-    let theme_clone = out.theme().clone();
-
-    for h in &highlights {
-        if h.col_end <= col_idx {
-            continue;
-        }
-        if h.col_start > col_idx {
-            let end = h.col_start.min(text_width);
-            let plain = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
-            let style = style_overlay.map(|overlay| overlay_style(None, overlay));
-            let used = emit_clipped(
-                out,
-                plain,
-                style,
-                SpanMeta::default(),
-                max_cols,
-                emitted_cols,
-            );
-            emitted_cols = emitted_cols.saturating_add(used);
-            col_idx = end;
-            if emitted_cols >= max_cols {
-                return emitted_cols;
-            }
-        }
-        let end = h.col_end.min(text_width);
-        if end <= col_idx {
-            continue;
-        }
-        let segment = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
-        let style = overlay_style(
-            Some(theme_clone.resolve(h.hl)),
-            style_overlay.unwrap_or_default(),
-        );
-        let used = emit_clipped(
-            out,
-            segment,
-            Some(style),
-            h.meta.clone(),
-            max_cols,
-            emitted_cols,
-        );
-        emitted_cols = emitted_cols.saturating_add(used);
-        col_idx = end;
-        if emitted_cols >= max_cols {
-            return emitted_cols;
-        }
-    }
-    if col_idx < text_width && emitted_cols < max_cols {
-        let tail = smelt_buffer::text::slice_cells(text, col_idx as usize, text_width as usize);
-        let style = style_overlay.map(|overlay| overlay_style(None, overlay));
-        let used = emit_clipped(
-            out,
-            tail,
-            style,
-            SpanMeta::default(),
-            max_cols,
-            emitted_cols,
-        );
-        emitted_cols = emitted_cols.saturating_add(used);
-    }
-    emitted_cols
-}
-
-fn overlay_style(
-    base: Option<smelt_core::style::Style>,
-    overlay: (bool, bool),
-) -> smelt_core::style::Style {
-    let mut style = base.unwrap_or_default();
-    if overlay.0 {
-        style.dim = true;
-    }
-    if overlay.1 {
-        style.italic = true;
-    }
-    style
-}
-
-fn emit_clipped(
-    out: &mut LineBuilder,
-    segment: &str,
-    style: Option<smelt_core::style::Style>,
-    meta: SpanMeta,
-    max_cols: u16,
-    already: u16,
-) -> u16 {
-    let budget = max_cols.saturating_sub(already);
-    if budget == 0 {
-        return 0;
-    }
-    let mut acc = String::new();
-    let mut acc_w: u16 = 0;
-    for ch in segment.chars() {
-        let cw = char_display_width(ch);
-        if acc_w.saturating_add(cw) > budget {
-            break;
-        }
-        acc.push(ch);
-        acc_w = acc_w.saturating_add(cw);
-    }
-    if acc.is_empty() {
-        return 0;
-    }
-    if let Some(s) = style {
-        out.append_resolved_span(&acc, s, meta);
-    } else {
-        out.print(&acc);
-    }
-    acc_w
 }
 
 #[cfg(test)]
@@ -1973,7 +1945,8 @@ mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
     use smelt_core::content::block_layout::{
-        CapKeep, CapMarker, CapSpec, LayoutLeaf, LineSpec, RowPrefixSpec, TextSpec,
+        CapKeep, CapMarker, CapSpec, GutterSpec, LayoutLeaf, LineSpec, MarkdownSpec, RowPrefixSpec,
+        TextSpec,
     };
 
     fn render_lines(layout: &LayoutIr, width: u16) -> Vec<String> {
@@ -1987,6 +1960,113 @@ mod tests {
         (0..buf.line_count())
             .filter_map(|row| buf.get_line(row).map(str::to_string))
             .collect()
+    }
+
+    #[test]
+    fn markdown_range_render_does_not_materialize_full_block() {
+        let content = (0..2_000)
+            .map(|i| format!("Paragraph {i}: {}", "alpha beta gamma delta ".repeat(6)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let layout = BlockLayout::Leaf(LayoutLeaf::Markdown(MarkdownSpec {
+            content,
+            dim: false,
+            italic: false,
+            inline: false,
+        }));
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 60);
+            render_layout_ir_range_into(&mut out, &layout, 60, 300, 3, &InlineOptions::default());
+            out.finish();
+        }
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        smelt_perf::perf::clear();
+
+        assert_eq!(buf.line_count(), 3);
+        let full_renders = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "render:markdown")
+            .map_or(0, |row| row.count);
+        assert_eq!(
+            full_renders, 0,
+            "range render should not use full markdown rendering"
+        );
+        let range_renders = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "render:markdown:range")
+            .map_or(0, |row| row.count);
+        assert!(
+            range_renders > 0,
+            "range render should use markdown range rendering"
+        );
+    }
+
+    #[test]
+    fn guttered_markdown_range_render_stays_bounded() {
+        let content = (0..2_000)
+            .map(|i| format!("Paragraph {i}: {}", "alpha beta gamma delta ".repeat(6)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let layout = BlockLayout::Gutter {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Markdown(MarkdownSpec {
+                content,
+                dim: true,
+                italic: true,
+                inline: false,
+            }))),
+            spec: GutterSpec {
+                text: "│ ".into(),
+                styled: true,
+            },
+        };
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 60);
+            render_layout_ir_range_into(&mut out, &layout, 60, 300, 3, &InlineOptions::default());
+            out.finish();
+        }
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        smelt_perf::perf::clear();
+
+        assert_eq!(buf.line_count(), 3);
+        for row in 0..buf.line_count() {
+            assert!(
+                buf.get_line(row).is_some_and(|line| line.starts_with("│ ")),
+                "row {row} missing gutter: {:?}",
+                buf.get_line(row)
+            );
+        }
+        let full_renders = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "render:markdown")
+            .map_or(0, |row| row.count);
+        assert_eq!(
+            full_renders, 0,
+            "guttered range render should not use full markdown rendering"
+        );
+        let range_renders = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "render:markdown:range")
+            .map_or(0, |row| row.count);
+        assert!(
+            range_renders > 0,
+            "range render should use markdown range rendering"
+        );
     }
 
     #[test]

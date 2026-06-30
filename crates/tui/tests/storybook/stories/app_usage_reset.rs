@@ -66,12 +66,12 @@ app_story!(usage_codex_reset_action_available, |ctx| {
                   primary_window = {
                     used_percent = 82,
                     limit_window_seconds = 18000,
-                    reset_at = 1893456000,
+                    reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 }),
                   },
                   secondary_window = {
                     used_percent = 45,
                     limit_window_seconds = 604800,
-                    reset_at = 1893459600,
+                    reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 }),
                   },
                 },
               }),
@@ -107,12 +107,12 @@ app_story!(usage_codex_reset_action_unavailable, |ctx| {
                 primary_window = {
                   used_percent = 82,
                   limit_window_seconds = 18000,
-                  reset_at = 1893456000,
+                  reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 }),
                 },
                 secondary_window = {
                   used_percent = 45,
                   limit_window_seconds = 604800,
-                  reset_at = 1893459600,
+                  reset_at = os.time({ year = 2030, month = 1, day = 1, hour = 1, min = 0, sec = 0 }),
                 },
               },
             }),
