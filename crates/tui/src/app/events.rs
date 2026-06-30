@@ -1050,15 +1050,20 @@ impl TuiApp {
         self.input_history.push(input.to_string());
 
         let is_from_paste = self.input.skip_shell_escape();
+        let parsed = crate::commands::parse_command_line(trimmed);
+
+        if let crate::commands::ParsedCommand::Slash { name, .. } = &parsed {
+            if !self.has_command_name(name) {
+                return InputOutcome::StartAgent;
+            }
+        }
 
         match crate::commands::run_command(self, trimmed) {
             CommandAction::Exec(handle) => return InputOutcome::Exec(handle),
             CommandAction::Continue => {}
         }
-        if matches!(
-            crate::commands::parse_command_line(trimmed),
-            crate::commands::ParsedCommand::Slash { .. }
-        ) || crate::commands::prompt_quit_alias(trimmed)
+        if matches!(parsed, crate::commands::ParsedCommand::Slash { .. })
+            || crate::commands::prompt_quit_alias(trimmed)
         {
             return InputOutcome::Continue;
         }

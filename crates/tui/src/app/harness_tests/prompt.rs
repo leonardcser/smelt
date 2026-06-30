@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn unknown_slash_prompt_submits_as_user_message() {
+    let mut app = TestApp::builder().build();
+
+    app.type_text("/not-a-command please answer normally");
+    app.press(KeyCode::Enter);
+
+    assert!(app.agent_running());
+    assert!(
+        app.state().notification.is_none(),
+        "unknown slash text should not raise a command error"
+    );
+    assert_eq!(app.state().prompt_text, "");
+    let sent = app.actions().iter().any(|action| match action {
+        Action::EngineSend(cmd) => matches!(
+            cmd.as_ref(),
+            protocol::UiCommand::StartTurn(payload)
+                if matches!(
+                    &payload.input,
+                    protocol::StartTurnInput::User { content, .. }
+                        if content.text_content() == "/not-a-command please answer normally"
+                )
+        ),
+        _ => false,
+    });
+    assert!(
+        sent,
+        "unknown slash text should reach the engine as a user message"
+    );
+}
+
+#[test]
 fn question_keymap_after_prompt_attachment_is_not_plain_insertion() {
     let mut app = TestApp::builder()
         .with_vim(true)

@@ -224,6 +224,10 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn has_command_name(&self, name: &str) -> bool {
+        !name.is_empty() && self.lua.has_command(name)
+    }
+
     pub(crate) fn run_command_by_name(
         &mut self,
         name: &str,
@@ -237,7 +241,7 @@ impl TuiApp {
             .signals
             .emit_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
         self.drain_signals_pending();
-        if !name.is_empty() && self.lua.has_command(&name) {
+        if self.has_command_name(&name) {
             self.lua
                 .run_command_with_queue_target(&name, arg, ctx.queue_target.into());
         } else {
@@ -333,7 +337,7 @@ impl TuiApp {
 
         let parsed = parse_command_line(input);
         let (name, normalized) = match parsed {
-            ParsedCommand::Slash { name, .. } if !name.is_empty() && self.lua.has_command(name) => {
+            ParsedCommand::Slash { name, .. } if self.has_command_name(name) => {
                 (name.to_string(), input.to_string())
             }
             _ => return None,
