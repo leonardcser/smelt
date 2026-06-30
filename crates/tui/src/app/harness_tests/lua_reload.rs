@@ -178,7 +178,7 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
         .expect("create_goal should be registered");
     assert!(create
         .description
-        .contains("system/developer instructions; do not infer goals from ordinary tasks"));
+        .contains("latest user message explicitly asks for a persistent goal"));
 
     let update = tools
         .iter()
