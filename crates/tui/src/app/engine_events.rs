@@ -255,6 +255,12 @@ impl TuiApp {
                         text,
                         image_labels: vec![],
                     });
+                    for line in drained
+                        .iter()
+                        .filter_map(crate::app::QueuedInput::command_line)
+                    {
+                        self.run_queued_command_line(line);
+                    }
                 }
                 SessionControl::Continue
             }

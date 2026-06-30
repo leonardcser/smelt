@@ -865,7 +865,7 @@ impl TuiApp {
         if !self.turn_input_is_active() {
             return self.queued_inputs.try_push_turn(queued);
         }
-        let text = queued.request_text().map(str::to_string);
+        let text = queued.steer_text().map(str::to_string);
         if !self.queued_inputs.try_push_request(queued) {
             return false;
         }
@@ -1127,6 +1127,13 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn run_queued_command_line(&mut self, line: &str) {
+        let line = line.to_string();
+        crate::lua::with_app_ptr(self, |app| {
+            crate::commands::run_command(app, &line);
+        });
+    }
+
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
         self.clear_prompt_prediction();
         match queued {
@@ -1149,6 +1156,9 @@ impl TuiApp {
                     }
                     QueuedTurnOptions::Default => {}
                 }
+            }
+            QueuedInput::Command { line, .. } => {
+                self.run_queued_command_line(&line);
             }
             QueuedInput::ProcessStatus(note) if !note.text().is_empty() => {
                 let turn = self.begin_process_status_turn(note);

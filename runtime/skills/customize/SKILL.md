@@ -268,11 +268,10 @@ smelt.cmd.register("greet", function(arg)
   smelt.notify.info("hello " .. (arg or "world"))
 end, {
   desc = "say hello",
-  args = "[name]",          -- shown in /command help
-  while_busy = true,        -- runnable while the agent is generating (default true)
-  queue_when_busy = false,  -- queue instead of run if busy (default false)
-  startup_ok = false,       -- runnable before init is complete (default false)
-  hidden = false,           -- hide from completer + help (default false)
+  args = "[name]",      -- shown in /command help
+  busy = "run",         -- run (default), reject, queue_request, or queue_command
+  startup_ok = false,   -- runnable before init is complete (default false)
+  hidden = false,       -- hide from completer + help (default false)
 })
 ```
 
@@ -1739,7 +1738,7 @@ Root smelt namespace.
 Register and list slash commands.
 
 - `smelt.cmd.list` (Host) :: `fun(): table`
-  Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows.
+  Return every registered slash command as a Lua array of `{ name, desc, args, busy, startup_ok, hidden }` rows.
 - `smelt.cmd.picker` (UiHost) :: `fun(name: string, opts: table?): nil`
   Register a slash command `name` that opens a prompt-docked picker when called without arguments, or invokes `opts.apply(arg)` directly when given one.
 - `smelt.cmd.register` (Host) :: `fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg`

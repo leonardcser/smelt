@@ -811,7 +811,7 @@ impl TuiApp {
         let Some(queued) = self.queued_inputs.promote_turn_to_request() else {
             return;
         };
-        let Some(text) = queued.request_text().map(str::to_string) else {
+        let Some(text) = queued.steer_text().map(str::to_string) else {
             return;
         };
         if !text.is_empty() {
@@ -2067,7 +2067,7 @@ mod tests {
                         nil,
                         "request-body " .. (arg or "")
                     )
-                end, { while_busy = false, queue_when_busy = true })
+                end, { busy = "queue_request" })
             "#
         ));
         app.start_turn(1);
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_when_busy_slash_command_enqueues_expanded_request() {
+    fn queue_request_busy_command_enqueues_expanded_request() {
         let _guard = lua_command_queue_guard();
         let mut app = TestApp::builder().build();
         assert!(app.run_lua(
@@ -2160,7 +2160,7 @@ mod tests {
                         nil,
                         "qbody " .. (arg or "")
                     )
-                end, { while_busy = false, queue_when_busy = true })
+                end, { busy = "queue_request" })
             "#
         ));
         app.start_turn(1);
@@ -2181,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_when_busy_command_overrides_survive_interrupt_start() {
+    fn queue_request_busy_command_overrides_survive_interrupt_start() {
         let _guard = lua_command_queue_guard();
         let mut app = TestApp::builder().build();
         assert!(app.run_lua(
@@ -2193,7 +2193,7 @@ mod tests {
                         { reasoning_effort = "high" },
                         "qoverride"
                     )
-                end, { while_busy = false, queue_when_busy = true })
+                end, { busy = "queue_request" })
             "#
         ));
         app.start_turn(1);
@@ -2221,7 +2221,7 @@ mod tests {
                 smelt.cmd.register("blocked", function(_)
                     _G.blocked_ran = 1
                     smelt.engine.submit_command("blocked", "should not run", nil, "blocked")
-                end, { while_busy = false })
+                end, { busy = "reject" })
             "#
         ));
         app.start_turn(1);
@@ -2257,7 +2257,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_enter_while_busy_without_agent_does_not_promote_to_request() {
+    fn empty_enter_busy_without_agent_does_not_promote_to_request() {
         let mut app = TestApp::builder().build();
         assert!(app.run_lua("_G._busy_handle = smelt.work.busy('busy')"));
         app.type_text("wait for busy");

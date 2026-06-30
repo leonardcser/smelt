@@ -18,6 +18,5 @@ smelt.cmd.register("simplify", function(arg)
 end, {
   desc = "review changed code for reuse, quality, and efficiency",
   args = { "<focus>" },
-  while_busy = false,
-  queue_when_busy = true,
+  busy = "queue_request",
 })

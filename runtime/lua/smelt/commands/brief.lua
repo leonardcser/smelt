@@ -30,6 +30,5 @@ smelt.cmd.register("brief", function(arg)
 end, {
   desc = "summarize planned or completed changes compactly",
   args = { "[user|internal|all]", "<focus>" },
-  while_busy = false,
-  queue_when_busy = true,
+  busy = "queue_request",
 })

@@ -73,7 +73,7 @@ impl InputQueues {
     pub(crate) fn front_turn_is_request(&self) -> bool {
         self.turn
             .front()
-            .is_some_and(QueuedInput::is_request_queueable)
+            .is_some_and(QueuedInput::can_queue_for_request)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -90,7 +90,7 @@ impl InputQueues {
     }
 
     pub(crate) fn try_push_request(&mut self, queued: QueuedInput) -> bool {
-        if self.len() >= MAX_QUEUED_MESSAGES || !queued.is_request_queueable() {
+        if self.len() >= MAX_QUEUED_MESSAGES || !queued.can_queue_for_request() {
             return false;
         }
         self.request.push_back(queued);
@@ -99,7 +99,7 @@ impl InputQueues {
 
     pub(crate) fn promote_turn_to_request(&mut self) -> Option<&QueuedInput> {
         let queued = self.turn.pop_front()?;
-        if !queued.is_request_queueable() {
+        if !queued.can_queue_for_request() {
             self.turn.push_front(queued);
             return None;
         }
@@ -210,6 +210,7 @@ impl QueuedRequest {
 #[derive(Clone)]
 pub(crate) enum QueuedInput {
     Request(Box<QueuedRequest>),
+    Command { display: String, line: String },
     ProcessStatus(protocol::HistoryNote),
 }
 
@@ -233,21 +234,43 @@ impl QueuedInput {
         )))
     }
 
+    pub(crate) fn command(line: impl Into<String>) -> Self {
+        let line = line.into();
+        let display = if line.starts_with('/') {
+            line.clone()
+        } else {
+            format!("/{line}")
+        };
+        QueuedInput::Command { display, line }
+    }
+
     pub(crate) fn display(&self) -> String {
         match self {
             QueuedInput::Request(req) => req.display.clone(),
+            QueuedInput::Command { display, .. } => display.clone(),
             QueuedInput::ProcessStatus(note) => note.text().to_string(),
         }
     }
 
-    pub(crate) fn is_request_queueable(&self) -> bool {
-        matches!(self, QueuedInput::Request(req) if req.content.image_count() == 0)
+    pub(crate) fn can_queue_for_request(&self) -> bool {
+        matches!(
+            self,
+            QueuedInput::Request(req) if req.content.image_count() == 0
+        ) || matches!(self, QueuedInput::Command { .. })
     }
 
-    pub(crate) fn request_text(&self) -> Option<&str> {
+    pub(crate) fn steer_text(&self) -> Option<&str> {
         match self {
             QueuedInput::Request(req) => Some(req.content.as_text()),
+            QueuedInput::Command { line, .. } => Some(line.as_str()),
             QueuedInput::ProcessStatus(_) => None,
+        }
+    }
+
+    pub(crate) fn command_line(&self) -> Option<&str> {
+        match self {
+            QueuedInput::Command { line, .. } => Some(line.as_str()),
+            _ => None,
         }
     }
 

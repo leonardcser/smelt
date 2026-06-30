@@ -1,5 +1,5 @@
 use crate::app::{
-    CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, QueueStage, TuiApp,
+    CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, QueueStage, QueuedInput, TuiApp,
 };
 use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
@@ -342,15 +342,34 @@ impl TuiApp {
             }
             _ => return None,
         };
-        if self.lua.command_queues_when_busy(&name) {
-            return match self.run_command_with_queue_target(&normalized, queue_target) {
-                CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
-                CommandAction::Continue => Some(EventOutcome::Noop),
-            };
-        }
-        if self.lua.command_blocks_while_busy(&name) == Some(true) {
-            self.notify_error(format!("cannot run /{name} while agent is working"));
-            return Some(EventOutcome::Noop);
+        match self
+            .lua
+            .command_busy_behavior(&name)
+            .unwrap_or(smelt_core::lua::CommandBusyBehavior::Run)
+        {
+            smelt_core::lua::CommandBusyBehavior::QueueCommand => {
+                let queued = QueuedInput::command(normalized);
+                match queue_target {
+                    QueueStage::Turn => {
+                        self.queued_inputs.try_push_turn(queued);
+                    }
+                    QueueStage::Request => {
+                        self.queue_input_for_request(queued);
+                    }
+                }
+                return Some(EventOutcome::Noop);
+            }
+            smelt_core::lua::CommandBusyBehavior::QueueRequest => {
+                return match self.run_command_with_queue_target(&normalized, queue_target) {
+                    CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
+                    CommandAction::Continue => Some(EventOutcome::Noop),
+                };
+            }
+            smelt_core::lua::CommandBusyBehavior::Reject => {
+                self.notify_error(format!("cannot run /{name} while agent is working"));
+                return Some(EventOutcome::Noop);
+            }
+            smelt_core::lua::CommandBusyBehavior::Run => {}
         }
 
         match self.run_command_with_queue_target(&normalized, queue_target) {

@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn queued_goal_command_waits_until_transcript_activation() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+
+    app.type_text("/goal finish queued activation");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(
+        app.state().queued_inputs,
+        vec!["/goal finish queued activation".to_string()]
+    );
+    assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
+
+    crate::lua::with_app_ptr(&mut app.app, |app| {
+        app.discard_turn(crate::app::TurnEnd::Complete);
+    });
+    let history = app.app.session_document.transcript.history();
+    assert!(history.order.iter().any(|id| matches!(
+        history.block(*id),
+        Some(smelt_core::transcript_model::Block::User { text, .. })
+            if text == "/goal finish queued activation"
+    )));
+
+    assert!(app.run_lua(
+        r#"
+            local current = assert(require("smelt.goal").current())
+            assert(current.objective == "finish queued activation")
+            assert(current.state == "active")
+        "#,
+    ));
+}
+
+#[test]
+fn request_queued_goal_command_waits_for_steered_transcript_ack() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+
+    app.type_text("/goal finish steered activation");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+
+    assert_eq!(
+        app.state().queued_inputs,
+        vec!["/goal finish steered activation".to_string()]
+    );
+    assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::Steered {
+        text: "/goal finish steered activation".into(),
+        count: 1,
+    }));
+
+    assert!(app.run_lua(
+        r#"
+            local current = assert(require("smelt.goal").current())
+            assert(current.objective == "finish steered activation")
+            assert(current.state == "active")
+        "#,
+    ));
+}
+
+#[test]
 fn lua_goal_renders_top_banner_not_statusline() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 16);

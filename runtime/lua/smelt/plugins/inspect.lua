@@ -52,7 +52,6 @@ function M.setup()
 	end, {
 		desc = "Open the session inspector web UI in a browser.",
 		args = {},
-		while_busy = true,
 	})
 end
 

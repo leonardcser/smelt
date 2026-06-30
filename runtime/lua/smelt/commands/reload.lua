@@ -4,7 +4,7 @@
 
 smelt.cmd.register("reload", function()
   smelt.engine.reload()
-end, { desc = "reload user Lua config", while_busy = false })
+end, { desc = "reload user Lua config", busy = "reject" })
 
 smelt.keymap.set("", "<F5>", function()
   smelt.engine.reload()

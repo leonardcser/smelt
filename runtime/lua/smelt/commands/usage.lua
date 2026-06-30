@@ -511,5 +511,5 @@ smelt.lifecycle.on_ready(function()
   end
 end)
 
-smelt.cmd.register("usage", open_usage, { desc = "show session cost and active provider usage", while_busy = true })
-smelt.cmd.register("cost", open_usage, { desc = "show session cost and active provider usage", while_busy = true })
+smelt.cmd.register("usage", open_usage, { desc = "show session cost and active provider usage" })
+smelt.cmd.register("cost", open_usage, { desc = "show session cost and active provider usage" })

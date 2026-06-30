@@ -439,4 +439,4 @@ smelt.cmd.register("resume", function()
     local picked = smelt.task.wait(task_id)
     if picked then smelt.session.load(picked.id) end
   end)
-end, { desc = "resume saved session", while_busy = false, startup_ok = true })
+end, { desc = "resume saved session", busy = "reject", startup_ok = true })

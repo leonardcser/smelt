@@ -1024,22 +1024,8 @@ impl LuaRuntime {
         })
     }
 
-    pub fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
-        self.shared
-            .commands
-            .lock()
-            .ok()?
-            .get(name)
-            .map(|c| !c.while_busy)
-    }
-
-    pub fn command_queues_when_busy(&self, name: &str) -> bool {
-        self.shared
-            .commands
-            .lock()
-            .ok()
-            .and_then(|m| m.get(name).map(|c| c.queue_when_busy))
-            .unwrap_or(false)
+    pub fn command_busy_behavior(&self, name: &str) -> Option<crate::lua::CommandBusyBehavior> {
+        self.shared.commands.lock().ok()?.get(name).map(|c| c.busy)
     }
 
     pub fn command_startup_ok(&self, name: &str) -> Option<bool> {

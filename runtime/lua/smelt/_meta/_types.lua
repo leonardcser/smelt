@@ -72,8 +72,7 @@
 ---@class smelt.cmd.RegisterOpts
 ---@field desc? string Human-readable description shown in `/help` and the slash-command picker.
 ---@field args? string[] Positional argument labels used for help text and completion hints.
----@field while_busy? boolean If true, the command can be invoked while an agent turn is running. Defaults to `true`.
----@field queue_when_busy? boolean If true, busy invocations are queued instead of rejected. Defaults to `false`.
+---@field busy? string Busy behavior while an agent turn is running: `run` (default), `reject`, `queue_request`, or `queue_command`.
 ---@field startup_ok? boolean If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`.
 ---@field hidden? boolean If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
 ---@field override? boolean If true, replace an existing command with the same name. Defaults to `false`.

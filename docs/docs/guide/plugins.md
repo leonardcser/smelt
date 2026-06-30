@@ -173,10 +173,9 @@ busy-state policy, and visibility.
 smelt.cmd.register("ps", function(_arg)
   -- ...
 end, {
-  desc            = "manage background processes",
-  while_busy      = true,   -- callable while an agent turn is running (default)
-  queue_when_busy = false,  -- reject vs queue when busy
-  hidden          = false,  -- skip /help and the picker
+  desc   = "manage background processes",
+  busy   = "run", -- run (default), reject, queue_request, or queue_command
+  hidden = false, -- skip /help and the picker
 })
 ```
 

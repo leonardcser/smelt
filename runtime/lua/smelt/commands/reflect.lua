@@ -18,6 +18,5 @@ smelt.cmd.register("reflect", function(arg)
 end, {
   desc = "step back and rethink recent changes before moving on",
   args = { "<focus>" },
-  while_busy = false,
-  queue_when_busy = true,
+  busy = "queue_request",
 })

@@ -18,6 +18,5 @@ smelt.cmd.register("handoff", function(arg)
 end, {
   desc = "write a continuation handoff for another agent",
   args = { "<focus>" },
-  while_busy = false,
-  queue_when_busy = true,
+  busy = "queue_request",
 })

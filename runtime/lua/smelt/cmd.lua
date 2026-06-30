@@ -97,7 +97,7 @@ function smelt.cmd.picker(name, opts)
   end, {
     desc       = opts.desc,
     args       = args,
-    while_busy = opts.while_busy,
+    busy       = opts.busy,
     startup_ok = opts.startup_ok,
   })
 end

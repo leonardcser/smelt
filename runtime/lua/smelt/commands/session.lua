@@ -184,8 +184,8 @@ end, { desc = "start new conversation" })
 
 smelt.cmd.register("fork", function()
   smelt.session.fork()
-end, { desc = "fork current session", while_busy = false })
+end, { desc = "fork current session", busy = "reject" })
 
 smelt.cmd.register("branch", function()
   smelt.session.fork()
-end, { desc = "fork current session", while_busy = false })
+end, { desc = "fork current session", busy = "reject" })

@@ -263,8 +263,7 @@ local function register_dir(dir)
     end, {
       desc            = file_desc(path),
       args            = { "<arg>" },
-      while_busy      = false,
-      queue_when_busy = true,
+      busy            = "queue_request",
       override        = file_overrides_existing(path),
     })
     if not ok then

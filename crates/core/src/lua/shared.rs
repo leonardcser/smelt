@@ -46,15 +46,31 @@ impl Phase {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandBusyBehavior {
+    Run,
+    Reject,
+    QueueRequest,
+    QueueCommand,
+}
+
+impl CommandBusyBehavior {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommandBusyBehavior::Run => "run",
+            CommandBusyBehavior::Reject => "reject",
+            CommandBusyBehavior::QueueRequest => "queue_request",
+            CommandBusyBehavior::QueueCommand => "queue_command",
+        }
+    }
+}
+
 pub struct RegisteredCommand {
     pub handle: LuaHandle,
     pub token: u64,
     pub description: Option<String>,
     pub args: Vec<String>,
-    /// If false, dispatcher rejects this command while the agent is mid-turn.
-    pub while_busy: bool,
-    /// If true, silently defers this command until the current turn ends rather than erroring.
-    pub queue_when_busy: bool,
+    pub busy: CommandBusyBehavior,
     pub startup_ok: bool,
     /// If true, hidden from the completer but still dispatchable by name.
     pub hidden: bool,
