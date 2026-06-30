@@ -286,9 +286,9 @@ smelt.settings.transcript = {
       grep = "collapsed",
       glob = "collapsed",
       web_fetch = "collapsed",
-      write_file = "collapsed",
+      write_file = "expanded",
       edit_file = "collapsed",
-      edit_notebook = "collapsed",
+      edit_notebook = "expanded",
     },
     groups = {
       read_file_batch = "collapsed",

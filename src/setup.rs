@@ -491,9 +491,9 @@ fn default_config_lua() -> String {
     lua.push_str("      grep = \"collapsed\",\n");
     lua.push_str("      glob = \"collapsed\",\n");
     lua.push_str("      web_fetch = \"collapsed\",\n");
-    lua.push_str("      write_file = \"collapsed\",\n");
+    lua.push_str("      write_file = \"expanded\",\n");
     lua.push_str("      edit_file = \"collapsed\",\n");
-    lua.push_str("      edit_notebook = \"collapsed\",\n");
+    lua.push_str("      edit_notebook = \"expanded\",\n");
     lua.push_str("    },\n");
     lua.push_str("    groups = {\n");
     lua.push_str("      read_file_batch = \"collapsed\",\n");
