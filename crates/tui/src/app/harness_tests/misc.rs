@@ -197,6 +197,104 @@ fn system_prompt_omits_tool_guidance_when_tool_calling_disabled() {
 }
 
 #[test]
+fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 40);
+    app.start_turn(7);
+
+    let call_id = "edit-file-flicker-call".to_string();
+    let stream_id = "edit-file-flicker-stream".to_string();
+    let path = "/tmp/smelt-edit-file-flicker.rs";
+    let old_content = "fn main() {\n    println!(\"flicker-old\");\n}\n";
+    let new_content = "fn main() {\n    println!(\"flicker-new\");\n}\n";
+    let old_string = "println!(\"flicker-old\");";
+    let new_string = "println!(\"flicker-new\");";
+
+    assert!(app.run_lua(&format!(
+        "smelt.fs.file_state.record_read_with_mtime({}, {}, 1, 1000, 1)",
+        serde_json::to_string(path).unwrap(),
+        serde_json::to_string(old_content).unwrap()
+    )));
+
+    let args = std::collections::HashMap::from([
+        ("file_path".to_string(), serde_json::json!(path)),
+        ("old_string".to_string(), serde_json::json!(old_string)),
+        ("new_string".to_string(), serde_json::json!(new_string)),
+        ("replace_all".to_string(), serde_json::json!(false)),
+    ]);
+    let arguments = serde_json::to_string(&serde_json::json!({
+        "file_path": path,
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": false,
+    }))
+    .unwrap();
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: stream_id.clone(),
+        call_id: Some(call_id.clone()),
+        tool_name: Some("edit_file".into()),
+    }));
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolCallDraftFinished {
+        stream_id,
+        call_id: call_id.clone(),
+        tool_name: "edit_file".into(),
+        arguments,
+    }));
+    let draft_frame = app.render_to_frame().text();
+    assert_edit_file_diff_visible(&draft_frame, "draft-finished");
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolStarted {
+        call_id: call_id.clone(),
+        tool_name: "edit_file".into(),
+        args,
+    }));
+    assert!(
+        app.app
+            .session_document
+            .transcript
+            .history()
+            .tool_state(&call_id)
+            .is_some_and(|state| state.preview),
+        "promoted finished draft should keep a preview flag"
+    );
+    let pending_frame = app.render_to_frame().text();
+    assert_edit_file_diff_visible(&pending_frame, "pending-promoted");
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolFinished {
+        call_id: call_id.clone(),
+        result: protocol::ToolOutcome {
+            content: format!("edited {path}"),
+            is_error: false,
+            metadata: Some(serde_json::json!({
+                "path": path,
+                "old_content": old_content,
+                "new_content": new_content,
+            })),
+        },
+        elapsed_ms: Some(5),
+    }));
+    assert!(
+        app.app
+            .session_document
+            .transcript
+            .history()
+            .tool_state(&call_id)
+            .is_some_and(|state| !state.preview),
+        "finished tool should rely on output metadata instead of preview state"
+    );
+    let finished_frame = app.render_to_frame().text();
+    assert_edit_file_diff_visible(&finished_frame, "finished");
+}
+
+fn assert_edit_file_diff_visible(frame: &str, stage: &str) {
+    assert!(
+        frame.contains("flicker-old") && frame.contains("flicker-new"),
+        "edit_file diff not visible at {stage}:\n{frame}"
+    );
+}
+
+#[test]
 fn stale_title_response_after_reset_is_ignored() {
     let mut app = TestApp::builder().build();
     let original_session_id = app.app.core.session.id.clone();

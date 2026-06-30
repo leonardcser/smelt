@@ -104,7 +104,16 @@ transcript_defaults.__tool_body_renderers.edit_file = function(block)
       args.old_string or ""
     )
   end
-  return nil
+
+  if not block.preview then
+    return nil
+  end
+
+  local _, old_string, new_string = edit_fields(args)
+  if old_string == "" and new_string == "" then
+    return nil
+  end
+  return planned_diff(args)
 end
 
 transcript_defaults.__tool_collapsed_details.edit_file = function(block)

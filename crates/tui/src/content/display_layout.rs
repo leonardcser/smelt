@@ -565,6 +565,7 @@ fn block_snapshot_json(
             if let Some(state) = history.tool_state(call_id) {
                 value.insert("output".into(), serde_json::to_value(&state.output).ok()?);
                 value.insert("user_message".into(), serde_json::json!(state.user_message));
+                value.insert("preview".into(), serde_json::json!(state.preview));
             }
         }
         Block::Exec { command, output } => {

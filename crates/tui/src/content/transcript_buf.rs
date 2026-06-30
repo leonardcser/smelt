@@ -3326,6 +3326,7 @@ mod tests {
                     metadata: None,
                 })),
                 user_message: None,
+                preview: false,
             },
         );
     }
@@ -3378,6 +3379,7 @@ mod tests {
                 elapsed: Some(std::time::Duration::from_millis(1)),
                 output: None,
                 user_message: None,
+                preview: false,
             },
         );
         let mut projection = TranscriptProjection::new();
@@ -4728,6 +4730,7 @@ mod tests {
                     metadata: None,
                 })),
                 user_message: None,
+                preview: false,
             },
         );
         let target_output = (0..60)
@@ -4750,6 +4753,7 @@ mod tests {
                     metadata: None,
                 })),
                 user_message: None,
+                preview: false,
             },
         );
         let target = transcript.history.order[1];
@@ -6175,6 +6179,7 @@ mod tests {
                             metadata: None,
                         })),
                         user_message: None,
+                        preview: false,
                     },
                 );
             }
@@ -6299,6 +6304,7 @@ mod tests {
                         metadata: None,
                     })),
                     user_message: None,
+                    preview: false,
                 },
             );
             i += 1;

@@ -2338,6 +2338,9 @@ fn transcript_block_to_lua_table(
             if let Some(message) = state.and_then(|s| s.user_message.as_deref()) {
                 t.set("user_message", message)?;
             }
+            if let Some(state) = state {
+                t.set("preview", state.preview)?;
+            }
             if let Some(output) = state.and_then(|s| s.output.as_deref()) {
                 t.set("output", tool_output_to_lua_table(lua, output)?)?;
             }

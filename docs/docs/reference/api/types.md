@@ -916,6 +916,7 @@ Semantic transcript block snapshot passed to the root renderer.
 | `elapsed_text` | `string` |  | Terminal/static tool elapsed label. |
 | `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
+| `preview` | `boolean` |  | True while a promoted finished draft should keep rendering its pre-execute preview. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output snapshot. |
 | `event` | `string` |  | Process status event type, e.g. `"background_process_completed"`. |
 | `event_type` | `string` |  | Alias for `event`. |

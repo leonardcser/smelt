@@ -196,6 +196,10 @@ impl StreamParser {
         let Some(block_id) = block_id else {
             return false;
         };
+        let preview = matches!(
+            history.block(block_id),
+            Some(Block::ToolDraft { finished: true, .. })
+        );
         let block = Block::ToolCall {
             call_id: call_id.clone(),
             name,
@@ -207,6 +211,7 @@ impl StreamParser {
             elapsed: None,
             output: None,
             user_message: None,
+            preview,
         };
         history.rewrite_with_tool_state(block_id, block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
@@ -243,6 +248,7 @@ impl StreamParser {
             elapsed: None,
             output: None,
             user_message: None,
+            preview: false,
         };
         let block_id = history.push_with_state(block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
@@ -364,6 +370,7 @@ impl StreamParser {
                 state.output = Some(out);
             }
             state.elapsed = elapsed;
+            state.preview = false;
         });
         if let Some(idx) = active_idx {
             let block_id = self.active_tools[idx].block_id;
@@ -394,6 +401,7 @@ impl StreamParser {
             Self::update_tool_state(history, &cid, |state| {
                 state.status = status;
                 state.elapsed = elapsed;
+                state.preview = false;
             });
         }
     }

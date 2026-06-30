@@ -89,6 +89,10 @@ pub struct ToolOutput {
 
 pub type ToolOutputRef = Box<ToolOutput>;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id`.
 /// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
 /// layout can be cached permanently.
@@ -98,6 +102,8 @@ pub struct ToolState {
     pub elapsed: Option<Duration>,
     pub output: Option<ToolOutputRef>,
     pub user_message: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preview: bool,
 }
 
 impl ToolState {
@@ -121,6 +127,7 @@ impl ToolState {
             status: ToolStatus,
             output: Option<DisplayOutput<'a>>,
             user_message: &'a Option<String>,
+            preview: bool,
         }
 
         crate::utils::hash_serializable(&DisplayState {
@@ -134,6 +141,7 @@ impl ToolState {
                     .map(crate::utils::hash_serializable),
             }),
             user_message: &self.user_message,
+            preview: self.preview,
         })
     }
 }
@@ -1864,6 +1872,7 @@ mod tests {
                     metadata: Some(serde_json::json!({"small": true})),
                 })),
                 user_message: None,
+                preview: false,
             },
             BlockOrigin::History(1),
         );
@@ -2074,6 +2083,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
+            preview: false,
         }
     }
 
@@ -2113,6 +2123,15 @@ mod tests {
             descriptor.content_hash(),
             descriptor.to_block().content_hash()
         );
+    }
+
+    #[test]
+    fn tool_display_hash_includes_preview_state() {
+        let a = pending_state();
+        let mut b = pending_state();
+        b.preview = true;
+
+        assert_ne!(a.display_hash(), b.display_hash());
     }
 
     #[test]
