@@ -661,29 +661,75 @@ end, { desc = "install the newest smelt build (background)", args = { "check" } 
 --
 -- Opens a read-only dialog with the release notes (stable) or the
 -- HEAD commit message (unstable) for the channel's `latest` cache.
--- When the cache is empty we trigger a fetch and surface a notification
--- instead of opening an empty panel.
+-- When the cache is empty we open immediately with a loading row, then
+-- replace it in place when the fetch completes. Refresh keeps the dialog
+-- open and dims any cached notes while the network request is in flight.
 
-local function changelog_lines()
-  local lines = {}
-  local body = latest.details
+local CHANGELOG_DIM = { fg = "Comment", dim = true }
+local CHANGELOG_ERR = { fg = "ErrorMsg" }
+
+local function changelog_body()
+  return latest.details
       and (latest.details.body or latest.details.message)
-  if body and body ~= "" then
-    for line in body:gmatch("([^\n]*)\n?") do
-      table.insert(lines, line)
-    end
-  else
-    table.insert(lines, "(no notes available)")
-  end
-  return lines
 end
 
-local function open_changelog_dialog()
-  local body_buf = smelt.buf.new({ readonly = true })
-  body_buf:lines(changelog_lines())
-  local leaf = smelt.dialog.content({ buf = body_buf, interactive = true })
+local function changelog_rows(entry)
+  local rows = {}
+  local body = changelog_body()
+  if entry.error then
+    table.insert(rows, { { text = entry.error, style = CHANGELOG_ERR } })
+    if body and body ~= "" then
+      table.insert(rows, { { text = "", style = CHANGELOG_DIM } })
+    end
+  end
+  if body and body ~= "" then
+    local style = entry.refreshing and CHANGELOG_DIM or nil
+    for line in (body .. "\n"):gmatch("(.-)\n") do
+      table.insert(rows, { { text = line, style = style } })
+    end
+  elseif entry.refreshing then
+    table.insert(rows, { { text = "fetching changelog…", style = CHANGELOG_DIM } })
+  elseif not entry.error then
+    table.insert(rows, { { text = "(no notes available)", style = CHANGELOG_DIM } })
+  end
+  return rows
+end
 
-  smelt.dialog.open({
+local function render_changelog(buf, entry)
+  buf:styled(changelog_rows(entry))
+end
+
+local function changelog_refresh_error(status)
+  if status == "rate_limited" then return "rate limited by github, try again later" end
+  if status == "busy" then return "a changelog refresh is already running" end
+  if status == "deferred" or status == "error" then return "failed to fetch changelog, try again later" end
+  return nil
+end
+
+local function open_changelog_dialog(refreshing)
+  local body_buf = smelt.buf.new({ readonly = true })
+  local leaf = smelt.dialog.content({ buf = body_buf, interactive = true })
+  local closed = false
+  local entry = { refreshing = false, error = nil }
+
+  local function render()
+    if closed then return end
+    render_changelog(body_buf, entry)
+  end
+
+  local function start_refresh()
+    if entry.refreshing then return end
+    entry.refreshing = true
+    entry.error = nil
+    render()
+    run_check(true, function(status)
+      entry.refreshing = false
+      entry.error = changelog_refresh_error(status)
+      render()
+    end)
+  end
+
+  local handle = smelt.dialog.open_handle({
     title      = "changelog",
     min_height = "30%",
     max_height = "70%",
@@ -691,24 +737,18 @@ local function open_changelog_dialog()
     close_with_q = true,
     keymaps    = {
       { key = "<Esc>", on_press = function(ctx) ctx.close() end },
-      { key = "r",     on_press = function(ctx)
-          ctx.close()
-          run_check(true)
-          notify.info("refreshing changelog…")
-      end },
+      { key = "r",     on_press = function() start_refresh() end },
     },
   })
+  handle.win:on("close", function() closed = true end)
+
+  if refreshing then start_refresh() else render() end
 end
 
 smelt.cmd.register("changelog", function()
-  if not latest.details then
-    if should_check_now() or not channel_state(settings_channel()).latest then
-      run_check(true)
-      notify.info("fetching changelog…")
-      return
-    end
-  end
-  open_changelog_dialog()
+  if not latest.details then recompute() end
+  local needs_refresh = should_check_now() or not channel_state(settings_channel()).latest
+  open_changelog_dialog(needs_refresh)
 end, { desc = "show release notes for the latest smelt build" })
 
 -- ── boot ───────────────────────────────────────────────────────────────
