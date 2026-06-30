@@ -51,7 +51,14 @@ impl WorkState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnOutcome {
     Done,
-    Interrupted,
+    Cancelled,
+    Errored,
+}
+
+impl TurnOutcome {
+    pub fn is_interrupted(self) -> bool {
+        !matches!(self, Self::Done)
+    }
 }
 
 /// A turn that is currently running.
@@ -352,7 +359,7 @@ impl WorkingState {
         self.last_reported_tps = meta.display_tps.or(meta.avg_tps);
         self.last = Some(LastTurn {
             outcome: if meta.interrupted {
-                TurnOutcome::Interrupted
+                TurnOutcome::Cancelled
             } else {
                 TurnOutcome::Done
             },
@@ -372,7 +379,7 @@ fn turn_meta_for(
         elapsed_ms: elapsed.as_millis() as u64,
         avg_tps,
         display_tps,
-        interrupted: matches!(outcome, TurnOutcome::Interrupted),
+        interrupted: outcome.is_interrupted(),
         tool_elapsed: std::collections::HashMap::new(),
     }
 }
@@ -503,10 +510,10 @@ mod tests {
     }
 
     #[test]
-    fn finish_interrupted_sets_interrupted_flag() {
+    fn finish_cancelled_sets_interrupted_flag() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Interrupted);
+        s.finish(TurnOutcome::Cancelled);
         let meta = s.turn_meta().unwrap();
         assert!(meta.interrupted);
     }
@@ -809,10 +816,10 @@ mod tests {
     }
 
     #[test]
-    fn last_outcome_interrupted_after_finish_interrupted() {
+    fn last_outcome_cancelled_after_finish_cancelled() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
-        s.finish(TurnOutcome::Interrupted);
-        assert_eq!(s.last_outcome(), Some(TurnOutcome::Interrupted));
+        s.finish(TurnOutcome::Cancelled);
+        assert_eq!(s.last_outcome(), Some(TurnOutcome::Cancelled));
     }
 }

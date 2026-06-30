@@ -491,7 +491,7 @@ impl TuiApp {
                 retry_at_ms,
             } => {
                 {
-                    self.working.finish(TurnOutcome::Interrupted);
+                    self.working.finish(TurnOutcome::Errored);
                 };
                 self.core.signals.emit_dyn(
                     "turn_error",
@@ -584,7 +584,7 @@ impl TuiApp {
                 self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message, .. } => {
-                self.working.finish(TurnOutcome::Interrupted);
+                self.working.finish(TurnOutcome::Errored);
                 self.notify_error_sticky(message);
             }
             EngineEvent::RequestAuditError { message } => {

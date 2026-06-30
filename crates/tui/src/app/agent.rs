@@ -510,7 +510,7 @@ impl TuiApp {
         self.clear_compaction_preview();
         self.pending_history_appends.clear();
         {
-            self.working.finish(TurnOutcome::Interrupted);
+            self.working.finish(TurnOutcome::Cancelled);
         };
         self.queued_inputs.clear();
     }
@@ -543,7 +543,7 @@ impl TuiApp {
             self.clear_compaction_preview();
             // Archive an interrupted outcome so the prompt bar shows
             // "interrupted" rather than falling back to idle/done.
-            self.working.finish(TurnOutcome::Interrupted);
+            self.working.finish(TurnOutcome::Cancelled);
         }
     }
 
@@ -617,7 +617,7 @@ impl TuiApp {
                     self.pending_history_appends.retain(|pending| {
                         pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
                     });
-                    let meta = self.working.finish(TurnOutcome::Interrupted);
+                    let meta = self.working.finish(TurnOutcome::Cancelled);
                     self.drain_queued_inputs_into_prompt();
                     self.restore_session_metadata_after_rewind(self.session_history_len());
                     (meta, false)
@@ -626,7 +626,7 @@ impl TuiApp {
                     self.pending_history_appends.retain(|pending| {
                         pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
                     });
-                    let meta = self.working.finish(TurnOutcome::Interrupted);
+                    let meta = self.working.finish(TurnOutcome::Errored);
                     // On error the queue is preserved so the user can resubmit.
                     (meta, false)
                 }

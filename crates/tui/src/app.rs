@@ -1744,7 +1744,7 @@ impl TuiApp {
         } else {
             match outcome {
                 Some(TurnOutcome::Done) => WorkState::Done,
-                Some(TurnOutcome::Interrupted) => WorkState::Interrupted,
+                Some(TurnOutcome::Cancelled | TurnOutcome::Errored) => WorkState::Interrupted,
                 None => WorkState::Idle,
             }
         };
@@ -1774,7 +1774,9 @@ impl TuiApp {
 
         let outcome_str = match outcome {
             Some(TurnOutcome::Done) if engine.is_none() => "done",
-            Some(TurnOutcome::Interrupted) if engine.is_none() => "interrupted",
+            Some(TurnOutcome::Cancelled | TurnOutcome::Errored) if engine.is_none() => {
+                "interrupted"
+            }
             _ => "",
         };
 
@@ -1835,9 +1837,12 @@ impl TuiApp {
                     Some(PublicReason::TurnComplete),
                 ),
                 WorkState::Done => (PublicState::Idle, Some(PublicReason::TurnComplete)),
-                WorkState::Interrupted => {
-                    (PublicState::NeedsAttention, Some(PublicReason::Interrupted))
-                }
+                WorkState::Interrupted => match self.working.last_outcome() {
+                    Some(smelt_core::working::TurnOutcome::Errored) => {
+                        (PublicState::NeedsAttention, Some(PublicReason::Error))
+                    }
+                    _ => (PublicState::Idle, Some(PublicReason::Interrupted)),
+                },
                 WorkState::Idle => (PublicState::Idle, None),
             }
         };

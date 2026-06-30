@@ -20,8 +20,8 @@ fn turn_error_preserves_request_queue() {
     );
     assert_eq!(
         app.app.working.last_outcome(),
-        Some(smelt_core::working::TurnOutcome::Interrupted),
-        "error should archive an interrupted outcome"
+        Some(smelt_core::working::TurnOutcome::Errored),
+        "error should archive an error outcome"
     );
 
     // Plugins observe the turn_end event; it must signal interruption on error.
@@ -64,10 +64,50 @@ fn turn_error_preserves_turn_queue() {
         "queued turn should not auto-start after an error"
     );
 
-    // The status bar should record an interrupted outcome, not done.
+    // The status bar should record an error outcome, not done.
     assert_eq!(
         app.app.working.last_outcome(),
-        Some(smelt_core::working::TurnOutcome::Interrupted)
+        Some(smelt_core::working::TurnOutcome::Errored)
+    );
+}
+
+#[test]
+fn public_status_cancelled_turn_is_idle_interrupted() {
+    let mut app = TestApp::builder().build();
+    app.app.term_focused = false;
+    app.start_turn(1);
+
+    app.app.discard_turn(crate::app::TurnEnd::Cancelled);
+    app.app.publish_public_status();
+
+    let status = smelt_core::public_status::read_status_for_pid(std::process::id()).unwrap();
+    assert_eq!(status.state, smelt_core::public_status::PublicState::Idle);
+    assert_eq!(
+        status.reason,
+        Some(smelt_core::public_status::PublicReason::Interrupted)
+    );
+}
+
+#[test]
+fn public_status_turn_error_needs_attention() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+        message: "connection failed".to_string(),
+        kind: None,
+        retry_at_ms: None,
+    }));
+    app.app.publish_public_status();
+
+    let status = smelt_core::public_status::read_status_for_pid(std::process::id()).unwrap();
+    assert_eq!(
+        status.state,
+        smelt_core::public_status::PublicState::NeedsAttention
+    );
+    assert_eq!(
+        status.reason,
+        Some(smelt_core::public_status::PublicReason::Error)
     );
 }
 
