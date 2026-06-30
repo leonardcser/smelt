@@ -1,18 +1,17 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 472
 expression: frame.text()
 ---
 * edit_notebook analysis.ipynb
-  replaced cell, 2 lines
 
 * edit_notebook analysis.ipynb
-  replaced cell, 2 lines
+   1 - import pandas
+   2 - df = pandas.read_csv('data.csv')
+   1 + import pandas as pd
+   2 + df = pd.read_csv("data.csv")
 
 * edit_notebook analysis.ipynb
-  inserted cell, 1 lines
-
-
+   1   print("new cell")
 
 
 
