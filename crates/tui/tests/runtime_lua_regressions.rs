@@ -17,6 +17,8 @@ const TURN_NOTIFICATIONS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/plugins/turn_notifications.lua");
 const ARGV_LUA: &str = include_str!("../../../runtime/lua/smelt/argv.lua");
 const WORKTREE_LUA: &str = include_str!("../../../runtime/lua/smelt/worktree.lua");
+const USAGE_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/usage.lua");
+const USAGE_CACHE_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/usage/cache.lua");
 
 fn install_explicit_api_fixtures(lua: &mlua::Lua) {
     lua.load(
@@ -63,6 +65,111 @@ fn install_notifications_preload(lua: &mlua::Lua) {
     )
     .exec()
     .expect("install notification module preload");
+}
+
+#[test]
+fn usage_command_renders_codex_reset_times_in_local_time() {
+    let lua = mlua::Lua::new();
+    install_explicit_api_fixtures(&lua);
+    lua.globals()
+        .set("__USAGE_CACHE_LUA", USAGE_CACHE_LUA)
+        .expect("install usage cache source");
+    lua.load(
+        r#"
+        local last_buf = nil
+        local command = nil
+        package.preload["smelt.commands.usage.cache"] = function()
+          return assert(load(__USAGE_CACHE_LUA, "smelt/commands/usage/cache.lua"))()
+        end
+        package.loaded["smelt.bar"] = {
+          progress = function()
+            return { { text = "[bar]" } }
+          end,
+        }
+        package.loaded["smelt.modal"] = { open = function() end }
+
+        smelt = {
+          __last_buf = nil,
+          __command = nil,
+          lifecycle = { on_ready = function() end },
+          cmd = { register = function(name, fn) if name == "usage" then command = fn; smelt.__command = fn end end },
+          log = { warn = function() end },
+          notify = __smelt_notify_stub(nil, nil),
+          spawn = function(fn) fn() end,
+          task = { external = function(fn) return fn(1) end, resume = function() end },
+          model = {
+            current = function() return "codex-model" end,
+            list = function() return { { key = "codex-model", provider = "codex", api_base = "" } } end,
+            pricing = function() return { source = "none" } end,
+          },
+          session = { cost = function() return 0 end },
+          text = { format_cost = function() return "$0.00" end },
+          auth = {
+            request = function(provider, opts)
+              assert(provider == "codex")
+              assert(opts.path == "/wham/usage")
+              return { status = 200, body = "{}" }
+            end,
+          },
+          parse = {
+            json = function()
+              return {
+                rate_limit = {
+                  primary_window = {
+                    used_percent = 25,
+                    limit_window_seconds = 18000,
+                    reset_at = 1700000000,
+                  },
+                },
+              }
+            end,
+          },
+          json = { encode = function() return "{}" end },
+          buf = {
+            new = function()
+              local buf = { rows = {} }
+              function buf:styled(rows) self.rows = rows end
+              last_buf = buf
+              smelt.__last_buf = buf
+              return buf
+            end,
+          },
+          dialog = {
+            content = function(opts) return { buf = opts.buf, on = function() end } end,
+            menu = function() return { on = function() end }, { set_items = function() end } end,
+            open_handle = function()
+              return { win = { on = function() end } }
+            end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install usage command stubs");
+    lua.load(USAGE_LUA).exec().expect("load usage command");
+
+    let (rendered, expected): (String, String) = lua
+        .load(
+            r#"
+            assert(smelt.__command)()
+            local parts = {}
+            for _, line in ipairs(assert(smelt.__last_buf).rows) do
+              for _, span in ipairs(line) do
+                parts[#parts + 1] = span.text or ""
+              end
+              parts[#parts + 1] = "\n"
+            end
+            return table.concat(parts), "resets " .. os.date("%b %d %H:%M", 1700000000)
+            "#,
+        )
+        .eval()
+        .expect("render usage dialog");
+
+    assert!(
+        rendered.contains(&expected),
+        "rendered usage was:\n{rendered}"
+    );
+    assert!(!USAGE_LUA.contains("os.date(\"!"));
 }
 
 #[test]
