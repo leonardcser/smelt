@@ -12,7 +12,8 @@
 //! same `Grid` primitives the live app uses. Crossterm is used only for
 //! the terminal envelope (alt screen, raw mode, input polling).
 //!
-//! Keys: `j`/`k` or `↓`/`↑` navigate, `g`/`G` jump to top/bottom,
+//! Keys: `j`/`k` or `↓`/`↑` navigate, `Ctrl-D`/`Ctrl-U` half-page,
+//! `gg`/`G` top/bottom, `/` searches, drag the sidebar divider to resize,
 //! `q` or `Esc` quits.
 //!
 //! Run from the workspace root:
@@ -22,11 +23,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use smelt_term::{
     Color, Compositor, Grid, GridSlice, Rect, SnapshotFrame, Style, TerminalSession, Theme,
 };
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Debug)]
 struct Story {
@@ -128,26 +130,90 @@ fn group_counts(stories: &[Story]) -> Vec<(String, usize)> {
     pairs
 }
 
+const DEFAULT_LIST_W: u16 = 32;
+const MIN_LIST_W: u16 = 18;
+const PREVIEW_MIN_W: u16 = 20;
+
 struct App {
     stories: Vec<Story>,
+    filtered: Vec<usize>,
     selected: usize,
     list_scroll: usize,
+    list_w: u16,
+    query: String,
+    search_active: bool,
+    resizing_sidebar: bool,
+    pending_g: bool,
 }
 
 impl App {
     fn new(stories: Vec<Story>) -> Self {
-        Self {
+        let mut app = Self {
             stories,
+            filtered: Vec::new(),
             selected: 0,
             list_scroll: 0,
+            list_w: DEFAULT_LIST_W,
+            query: String::new(),
+            search_active: false,
+            resizing_sidebar: false,
+            pending_g: false,
+        };
+        app.refilter();
+        app
+    }
+
+    fn selected_story(&self) -> Option<&Story> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|&story_index| self.stories.get(story_index))
+    }
+
+    fn visible_len(&self) -> usize {
+        self.filtered.len()
+    }
+
+    fn refilter(&mut self) {
+        let query = self.query.trim().to_lowercase();
+        self.filtered = self
+            .stories
+            .iter()
+            .enumerate()
+            .filter_map(|(i, story)| {
+                if query.is_empty()
+                    || story.group.to_lowercase().contains(&query)
+                    || story.name.to_lowercase().contains(&query)
+                    || story.full_id.to_lowercase().contains(&query)
+                {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+        if self.filtered.is_empty() {
+            self.selected = 0;
+            self.list_scroll = 0;
+        } else if self.selected < self.list_scroll {
+            self.list_scroll = self.selected;
         }
     }
 
+    fn set_query(&mut self, query: String) {
+        self.query = query;
+        self.selected = 0;
+        self.list_scroll = 0;
+        self.refilter();
+    }
+
     fn move_selection(&mut self, delta: i32, list_height: usize) {
-        if self.stories.is_empty() {
+        if self.filtered.is_empty() {
             return;
         }
-        let len = self.stories.len() as i32;
+        let len = self.filtered.len() as i32;
         let mut idx = self.selected as i32 + delta;
         if idx < 0 {
             idx = 0;
@@ -155,6 +221,14 @@ impl App {
             idx = len - 1;
         }
         self.selected = idx as usize;
+        self.keep_selection_visible(list_height);
+    }
+
+    fn keep_selection_visible(&mut self, list_height: usize) {
+        if list_height == 0 {
+            self.list_scroll = self.selected;
+            return;
+        }
         if self.selected < self.list_scroll {
             self.list_scroll = self.selected;
         }
@@ -164,16 +238,21 @@ impl App {
     }
 
     fn jump(&mut self, top: bool, list_height: usize) {
-        if self.stories.is_empty() {
+        if self.filtered.is_empty() {
             return;
         }
         if top {
             self.selected = 0;
             self.list_scroll = 0;
         } else {
-            self.selected = self.stories.len() - 1;
+            self.selected = self.filtered.len() - 1;
             self.list_scroll = self.selected.saturating_sub(list_height.saturating_sub(1));
         }
+    }
+
+    fn set_list_width(&mut self, width: u16, term_w: u16) {
+        let max_w = term_w.saturating_sub(PREVIEW_MIN_W).max(MIN_LIST_W);
+        self.list_w = width.clamp(MIN_LIST_W, max_w);
     }
 }
 
@@ -201,14 +280,45 @@ const STYLE_DIM: Style = Style {
     reverse: false,
 };
 
+fn truncate_with_ellipsis(text: &str, max_w: u16) -> String {
+    let max_w = max_w as usize;
+    if max_w == 0 {
+        return String::new();
+    }
+    let width = text
+        .chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum::<usize>();
+    if width <= max_w {
+        return text.to_string();
+    }
+    if max_w == 1 {
+        return "…".to_string();
+    }
+
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_w >= max_w {
+            break;
+        }
+        out.push(ch);
+        used += ch_w;
+    }
+    out.push('…');
+    out
+}
+
 /// Paint `text` left-aligned at `(x, y)`, truncating to `max_w` and
 /// padding with spaces so a styled background extends to the edge.
 fn write_line(slice: &mut GridSlice<'_>, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
-    slice.put_padded(x, y, max_w, text, style);
+    let text = truncate_with_ellipsis(text, max_w);
+    slice.put_padded(x, y, max_w, &text, style);
 }
 
 fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
-    let list_w: u16 = 32;
+    let list_w = app.list_w.min(term_w.saturating_sub(1));
     let gap: u16 = 1;
     let preview_left = list_w + gap;
     let preview_w = term_w.saturating_sub(preview_left);
@@ -218,31 +328,45 @@ fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
     let content_h = term_h.saturating_sub(header_h + footer_h);
 
     let selected_frame = app
-        .stories
-        .get(app.selected)
+        .selected_story()
         .map(|story| (story.full_id.clone(), load_frame(story)));
 
     {
         let mut slice = grid.slice_mut(Rect::new(0, 0, term_w, term_h));
 
-        // Header.
         let header = format!(
-            "smelt storybook - {} stories across {} groups",
+            "smelt storybook - {} of {} stories across {} groups",
+            app.visible_len(),
             app.stories.len(),
             group_counts(&app.stories).len()
         );
         write_line(&mut slice, 0, 0, term_w, &header, STYLE_BOLD);
 
-        // List pane.
+        let search_style = if app.search_active {
+            STYLE_BOLD
+        } else {
+            STYLE_DIM
+        };
+        let search = if app.search_active || !app.query.is_empty() {
+            format!("/{}", app.query)
+        } else {
+            String::from("/ search")
+        };
+        write_line(&mut slice, 0, 1, list_w, &search, search_style);
+
         let mut last_group: Option<&str> = None;
-        for (offset, (i, story)) in app
-            .stories
+        for (offset, (i, story_index)) in app
+            .filtered
             .iter()
+            .copied()
             .enumerate()
             .skip(app.list_scroll)
             .take(content_h as usize)
             .enumerate()
         {
+            let Some(story) = app.stories.get(story_index) else {
+                continue;
+            };
             let row = content_top + offset as u16;
             if row >= content_top + content_h {
                 break;
@@ -269,7 +393,27 @@ fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
             write_line(&mut slice, 0, row, list_w, &label, style);
         }
 
-        slice.rule_v_range(list_w, content_top, content_h, STYLE_DIM);
+        if app.filtered.is_empty() {
+            write_line(
+                &mut slice,
+                0,
+                content_top,
+                list_w,
+                "no matching stories",
+                STYLE_DIM,
+            );
+        }
+
+        let divider_style = if app.resizing_sidebar {
+            Style {
+                fg: Some(Color::White),
+                bg: None,
+                ..Style::default()
+            }
+        } else {
+            STYLE_DIM
+        };
+        slice.rule_v_range(list_w, content_top, content_h, divider_style);
 
         if let Some((full_id, frame)) = selected_frame.as_ref() {
             write_line(
@@ -326,7 +470,8 @@ fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
     }
 
     let mut slice = grid.slice_mut(Rect::new(0, 0, term_w, term_h));
-    let footer = "j/k or ↓/↑ navigate · g/G top/bottom · q/Esc quit";
+    let footer =
+        "j/k navigate · Ctrl-U/D half-page · gg/G top/bottom · / search · drag │ resize · q quit";
     write_line(
         &mut slice,
         0,
@@ -350,11 +495,12 @@ fn run() -> std::io::Result<()> {
     }
 
     let mut term = TerminalSession::builder()
-        .mouse_capture(false)
+        .mouse_capture(true)
         .enter_stdout()?;
 
     let mut app = App::new(stories);
     let mut size = term.size()?;
+    app.set_list_width(app.list_w, size.0);
     let theme = Theme::default();
     let mut compositor = Compositor::new(size.0, size.1);
 
@@ -372,37 +518,109 @@ fn run() -> std::io::Result<()> {
                 match event::read()? {
                     Event::Key(KeyEvent {
                         code, modifiers, ..
-                    }) => match code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            app.move_selection(1, list_height);
+                    }) => {
+                        let mut keep_pending_g = false;
+                        match code {
+                            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                break
+                            }
+                            KeyCode::Esc => {
+                                if app.search_active {
+                                    app.search_active = false;
+                                    app.pending_g = false;
+                                    dirty = true;
+                                } else {
+                                    break;
+                                }
+                            }
+                            KeyCode::Char('q') if !app.search_active => break,
+                            KeyCode::Char('/') if !app.search_active => {
+                                app.search_active = true;
+                                app.pending_g = false;
+                                dirty = true;
+                            }
+                            KeyCode::Backspace if app.search_active => {
+                                let mut query = app.query.clone();
+                                query.pop();
+                                app.set_query(query);
+                                dirty = true;
+                            }
+                            KeyCode::Char(ch) if app.search_active => {
+                                if !modifiers.contains(KeyModifiers::CONTROL) {
+                                    let mut query = app.query.clone();
+                                    query.push(ch);
+                                    app.set_query(query);
+                                    dirty = true;
+                                }
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                app.move_selection(1, list_height);
+                                dirty = true;
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                app.move_selection(-1, list_height);
+                                dirty = true;
+                            }
+                            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.move_selection((list_height as i32).max(2) / 2, list_height);
+                                dirty = true;
+                            }
+                            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.move_selection(-((list_height as i32).max(2) / 2), list_height);
+                                dirty = true;
+                            }
+                            KeyCode::PageDown => {
+                                app.move_selection((list_height as i32) - 2, list_height);
+                                dirty = true;
+                            }
+                            KeyCode::PageUp => {
+                                app.move_selection(-((list_height as i32) - 2), list_height);
+                                dirty = true;
+                            }
+                            KeyCode::Char('g') if app.pending_g => {
+                                app.jump(true, list_height);
+                                dirty = true;
+                            }
+                            KeyCode::Char('g') => {
+                                app.pending_g = true;
+                                keep_pending_g = true;
+                            }
+                            KeyCode::Home => {
+                                app.jump(true, list_height);
+                                dirty = true;
+                            }
+                            KeyCode::Char('G') | KeyCode::End => {
+                                app.jump(false, list_height);
+                                dirty = true;
+                            }
+                            _ => {}
+                        }
+                        if !keep_pending_g {
+                            app.pending_g = false;
+                        }
+                    }
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if mouse.column == app.list_w => {
+                            app.resizing_sidebar = true;
                             dirty = true;
                         }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            app.move_selection(-1, list_height);
+                        MouseEventKind::Drag(MouseButton::Left) if app.resizing_sidebar => {
+                            app.set_list_width(mouse.column, size.0);
+                            app.keep_selection_visible(list_height);
                             dirty = true;
                         }
-                        KeyCode::PageDown => {
-                            app.move_selection((list_height as i32) - 2, list_height);
-                            dirty = true;
-                        }
-                        KeyCode::PageUp => {
-                            app.move_selection(-((list_height as i32) - 2), list_height);
-                            dirty = true;
-                        }
-                        KeyCode::Char('g') | KeyCode::Home => {
-                            app.jump(true, list_height);
-                            dirty = true;
-                        }
-                        KeyCode::Char('G') | KeyCode::End => {
-                            app.jump(false, list_height);
+                        MouseEventKind::Up(MouseButton::Left) if app.resizing_sidebar => {
+                            app.set_list_width(mouse.column, size.0);
+                            app.resizing_sidebar = false;
+                            app.keep_selection_visible(list_height);
                             dirty = true;
                         }
                         _ => {}
                     },
                     Event::Resize(w, h) => {
                         size = (w, h);
+                        app.set_list_width(app.list_w, w);
+                        app.keep_selection_visible((h as usize).saturating_sub(4));
                         compositor.resize(w, h);
                         dirty = true;
                     }
