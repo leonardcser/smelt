@@ -16,10 +16,13 @@ set -o pipefail; cargo nextest run --workspace --features smelt-tui/harness 2>&1
 # targeted cargo test fallback: keep output bounded; rerun narrower tests if tail omits context
 set -o pipefail; cargo test -p smelt-tui --features harness double_esc 2>&1 | tail -120
 
-# format and lint
-set -o pipefail; cargo fmt && cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings 2>&1 | tail -120
+# format check
+set -o pipefail; cargo fmt -- --check 2>&1 | tail -120
 
-# coverage / CI-equivalent test gate (requires `cargo install cargo-llvm-cov`; enables smelt-tui's harness feature for storybook/test helpers)
+# lint
+set -o pipefail; cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings 2>&1 | tail -120
+
+# coverage test gate, matching CI's test step only (requires `cargo install cargo-llvm-cov`; enables smelt-tui's harness feature for storybook/test helpers)
 set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80 2>&1 | tail -120
 
 # quick coverage summary (does not enforce CI's coverage floor)
@@ -27,6 +30,9 @@ set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness
 
 # regenerate Lua API stubs + reference docs (commit the result)
 set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120
+
+# storybook snapshots (run when changing render_plan, tool renderers, or permission/transcript UI)
+set -o pipefail; cargo test -p smelt-tui --test storybook_main --features harness app_dialog_permission 2>&1 | tail -120
 ```
 
 ## Conventions
