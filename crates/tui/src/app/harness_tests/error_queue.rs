@@ -128,12 +128,27 @@ fn has_started_turn(cmds: &[protocol::UiCommand]) -> bool {
         .any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(_)))
 }
 
+fn clear_goal(app: &mut TestApp) {
+    assert!(app.run_lua(r#"require("smelt.goal").clear()"#));
+}
+
+fn create_auto_goal(app: &mut TestApp, objective: &str) {
+    clear_goal(app);
+    assert!(app.run_lua(&format!(
+        r#"assert(require("smelt.goal").create({objective:?}, {{ auto_continue = true }}))"#
+    )));
+}
+
+fn isolated_app() -> (std::sync::MutexGuard<'static, ()>, TestApp) {
+    let home_guard = crate::app::test_harness::test_home_guard();
+    let app = TestApp::builder().build_with_test_home_guard(&home_guard);
+    (home_guard, app)
+}
+
 #[test]
 fn goal_auto_continues_after_recoverable_quota_error() {
-    let mut app = TestApp::builder().build();
-    assert!(app.run_lua(
-        r#"assert(require("smelt.goal").create("finish quota test", { auto_continue = true }))"#
-    ));
+    let (_home_guard, mut app) = isolated_app();
+    create_auto_goal(&mut app, "finish quota test");
     app.start_turn(1);
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
@@ -146,14 +161,10 @@ fn goal_auto_continues_after_recoverable_quota_error() {
 }
 
 #[test]
-fn goal_auto_continue_after_quota_setting_disables_retry() {
-    let mut app = TestApp::builder().build();
-    assert!(app.run_lua(
-        r#"
-        smelt.settings.goal_auto_continue_after_quota = false
-        assert(require("smelt.goal").create("finish quota test", { auto_continue = true }))
-        "#
-    ));
+fn auto_continue_off_disables_quota_retry() {
+    let (_home_guard, mut app) = isolated_app();
+    assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
+    create_auto_goal(&mut app, "finish quota test");
     app.start_turn(1);
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
@@ -166,11 +177,42 @@ fn goal_auto_continue_after_quota_setting_disables_retry() {
 }
 
 #[test]
+fn auto_continue_always_continues_without_goal() {
+    let (_home_guard, mut app) = isolated_app();
+    assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
+    clear_goal(&mut app);
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        first_changed_index: 0,
+        history: None,
+        meta: None,
+    }));
+
+    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
+}
+
+#[test]
+fn auto_continue_goal_mode_ignores_sessions_without_goal() {
+    let (_home_guard, mut app) = isolated_app();
+    clear_goal(&mut app);
+    app.start_turn(1);
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        first_changed_index: 0,
+        history: None,
+        meta: None,
+    }));
+
+    assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+}
+
+#[test]
 fn goal_auto_continue_ignores_non_quota_errors() {
-    let mut app = TestApp::builder().build();
-    assert!(app.run_lua(
-        r#"assert(require("smelt.goal").create("finish quota test", { auto_continue = true }))"#
-    ));
+    let (_home_guard, mut app) = isolated_app();
+    create_auto_goal(&mut app, "finish quota test");
     app.start_turn(1);
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {

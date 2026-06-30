@@ -197,8 +197,8 @@ settings! {
     system_clipboard:      Bool   = true;
     /// Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless).
     auto_compact:          Bool   = true;
-    /// Continue active auto goals after recoverable quota or rate-limit resets.
-    goal_auto_continue_after_quota: Bool = true;
+    /// Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session.
+    auto_continue:         String = "goal", choices: ["off", "goal", "always"];
     /// Tokens/sec in status bar.
     show_tps:              Bool   = true;
     /// Context token count in status bar.

@@ -222,7 +222,7 @@ Set preferences in `init.lua` by writing to `smelt.settings`:
 ```lua
 smelt.settings.vim = true
 smelt.settings.auto_compact = true
-smelt.settings.goal_auto_continue_after_quota = true
+smelt.settings.auto_continue = "goal"
 smelt.settings.compact_threshold = 0.65
 smelt.settings.compact_keep_recent_groups = 1
 smelt.settings.show_tps = true
@@ -236,7 +236,7 @@ keys raise at the access site; type mismatches raise on assignment.
 | `vim`                            | `boolean` | `false`                  | Vi keybindings in the prompt                                                                                                                                                                                                                  |
 | `system_clipboard`               | `boolean` | `true`                   | Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works                    |
 | `auto_compact`                   | `boolean` | `true`                   | Auto-summarize when active request context usage crosses `compact_threshold` (forced on in headless)                                                                                                                                          |
-| `goal_auto_continue_after_quota` | `boolean` | `true`                   | Continue active auto goals after recoverable quota or rate-limit resets                                                                                                                                                                       |
+| `auto_continue`                  | `string`  | `"goal"`                 | Idle auto-continue policy: `"off"` disables it, `"goal"` continues active auto goals, and `"always"` continues any idle session                                                                                                             |
 | `compact_threshold`              | `number`  | `0.80`                   | Fraction of the active context window at which auto-compact fires before oversized requests (0 < x ≤ 1)                                                                                                                                       |
 | `compact_keep_recent_groups`     | `number`  | `1`                      | Minimum number of trailing message groups kept verbatim after compaction; a group is a user message, a plain assistant message, or an assistant tool-use step with its tool outputs                                                           |
 | `show_tps`                       | `boolean` | `true`                   | Tokens/sec in status bar                                                                                                                                                                                                                      |

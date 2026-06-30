@@ -16,10 +16,8 @@ local state = smelt.state.persistent("goal", { debounce_ms = 200 })
 if type(state.sessions) ~= "table" then state.sessions = {} end
 if type(state.next_id) ~= "number" then state.next_id = 0 end
 
-local short_schedule_id = 0
-local quota_schedule_id = 0
+local auto_continue = require("smelt.auto_continue")
 local setup_done = false
-local generation = 0
 
 local function trim(s)
   return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -126,7 +124,7 @@ end
 local function store_goal(goal)
   sessions()[session_id()] = normalize_goal(goal)
   state.save()
-  generation = generation + 1
+  auto_continue.bump_generation()
 end
 
 local function is_active(goal)
@@ -208,31 +206,6 @@ local function continuation_prompt(goal)
     "- Do not use blocked merely because the work is hard, slow, uncertain, or incomplete.",
     "- Otherwise, continue until this turn reaches a useful stopping point.",
   }, "\n")
-end
-
-local function prompt_is_empty()
-  if not (smelt.prompt and smelt.prompt.text) then return true end
-  local ok, text = pcall(smelt.prompt.text)
-  return not ok or trim(text or "") == ""
-end
-
-local function can_schedule_auto_continue()
-  local goal = session_goal()
-  return is_active(goal) and goal.auto_continue ~= false
-end
-
-local function should_auto_continue()
-  return can_schedule_auto_continue()
-    and not smelt.engine.is_running()
-    and not smelt.work.is_busy()
-    and prompt_is_empty()
-end
-
-local function recoverable_quota_error(ev)
-  if not ev or not ev.cancelled then return false end
-  if smelt.settings and smelt.settings.goal_auto_continue_after_quota == false then return false end
-  if ev.error_kind ~= "quota" and ev.error_kind ~= "rate_limited" then return false end
-  return type(ev.retry_at_ms) == "number" and type(ev.continuation_token) == "number"
 end
 
 local function store_and_sync(goal)
@@ -463,48 +436,49 @@ function M.clear()
   apply("clear")
 end
 
+function M.auto_continue_request()
+  local goal = session_goal()
+  if not is_active(goal) or goal.auto_continue == false then return nil end
+  return {
+    name = "goal",
+    body = continuation_prompt(goal),
+    display = "goal continue",
+  }
+end
+
 function M.continue(reason, continuation_token)
   local goal = session_goal()
   if not is_active(goal) then return false end
+  local request = {
+    name = "goal",
+    body = continuation_prompt(goal),
+    display = reason == "auto" and "goal continue" or "goal",
+  }
+
   if reason == "auto" and continuation_token then
     return smelt.engine.submit_command_continuation(
-      "goal",
-      continuation_prompt(goal),
+      request.name,
+      request.body,
       nil,
-      "goal continue",
+      request.display,
       continuation_token
     ) ~= false
   end
   smelt.engine.submit_command(
-    "goal",
-    continuation_prompt(goal),
+    request.name,
+    request.body,
     nil,
-    reason == "auto" and "goal continue" or "goal"
+    request.display
   )
   return true
 end
 
 function M.schedule_auto_continue(continuation_token)
-  if not can_schedule_auto_continue() then return end
-  short_schedule_id = short_schedule_id + 1
-  local schedule_id = short_schedule_id
-  local gen = generation
-  smelt.timer.set(AUTO_DELAY_MS, function()
-    if schedule_id ~= short_schedule_id or gen ~= generation or not should_auto_continue() then return end
-    M.continue("auto", continuation_token)
-  end)
+  auto_continue.schedule(continuation_token)
 end
 
 function M.schedule_quota_auto_continue(ev)
-  if not recoverable_quota_error(ev) or not can_schedule_auto_continue() then return end
-  quota_schedule_id = quota_schedule_id + 1
-  local schedule_id = quota_schedule_id
-  local gen = generation
-  local delay = math.max(AUTO_DELAY_MS, math.floor(ev.retry_at_ms - now_ms()) + 1000)
-  smelt.timer.set(delay, function()
-    if schedule_id ~= quota_schedule_id or gen ~= generation or not should_auto_continue() then return end
-    M.continue("auto", ev.continuation_token)
-  end)
+  auto_continue.schedule_quota(ev)
 end
 
 function M.start(text)
@@ -705,13 +679,10 @@ function M.setup()
   sync_context_note()
 
   smelt.signal.subscribe("session_epoch", sync_context_note)
-  smelt.events.on("turn_end", function(ev)
-    if ev and ev.cancelled then
-      M.schedule_quota_auto_continue(ev)
-      return
-    end
-    M.schedule_auto_continue(ev and ev.continuation_token)
+  auto_continue.set_provider(function()
+    return M.auto_continue_request()
   end)
+  auto_continue.setup()
 end
 
 return M

@@ -476,7 +476,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `vim` | `bool` | `false` | Vi keybindings in the prompt. |
 | `system_clipboard` | `bool` | `true` | Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works. |
 | `auto_compact` | `bool` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
-| `goal_auto_continue_after_quota` | `bool` | `true` | Continue active auto goals after recoverable quota or rate-limit resets. |
+| `auto_continue` | `"off"` \| `"goal"` \| `"always"` | `"goal"` | Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. |
 | `show_tps` | `bool` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `bool` | `true` | Context token count in status bar. |
 | `show_cost` | `bool` | `true` | Session cost in status bar. |

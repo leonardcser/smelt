@@ -1,4 +1,4 @@
 -- Goal lifecycle plugin. Registers the goal tools, headerline source, context
--- note sync, and idle auto-continue hooks.
+-- note sync, and goal-aware auto-continue provider.
 
 require("smelt.goal").setup()

@@ -39,12 +39,13 @@ Type `/` to open the command picker with fuzzy search.
 | `/upgrade [check]`        | Install the newest smelt build (or refresh the cache with `check`)   |
 | `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                               |
 
-Goal auto-continue runs only while idle. Queued user messages run first; if the
-same goal remains active afterward, auto-continue resumes. When a provider
-returns a quota or rate-limit reset time, an active auto goal schedules its next
-continue after that reset. Set
-`smelt.settings.goal_auto_continue_after_quota = false` to disable that retry
-behavior.
+Auto-continue runs only while idle. Queued user messages run first. By default,
+`smelt.settings.auto_continue = "goal"`, so only active auto goals continue; if
+the same goal remains active afterward, auto-continue resumes. When a provider
+returns a quota or rate-limit reset time, an eligible auto-continue schedules its
+next continue after that reset. Set `smelt.settings.auto_continue = "off"` to
+disable idle continuation, or `"always"` to continue any idle session even when
+no goal is active.
 
 ## Shell Escape
 
