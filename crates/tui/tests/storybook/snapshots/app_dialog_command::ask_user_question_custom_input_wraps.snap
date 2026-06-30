@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+─ Auth method ──────────────────────────────────────
+ Which authentication method should I use?
+  1. OAuth
+     redirect to provider login
+  2. API key
+     paste a secret token
+  3. Anonymous
+     skip auth entirely
+ Use OAuth for browser sign-in, but keep an
+ API-key fallback for automation and support
+ scripts.
+ ○ normal                                  1:96 100%

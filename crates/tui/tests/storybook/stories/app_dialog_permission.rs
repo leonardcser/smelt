@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use crate::app_story;
+use crate::storybook::app_ctx::AppStoryCtx;
 use crate::storybook::args;
 
-app_story!(bash_permission_dialog, |ctx| {
-    ctx.set_viewport(80, 22);
+fn open_bash_permission_dialog(ctx: &mut AppStoryCtx) {
     ctx.request_permission(
         "bash",
         args([
@@ -22,6 +22,28 @@ app_story!(bash_permission_dialog, |ctx| {
             ("description", json!("List files in /tmp/foo")),
         ]),
         vec!["ls *".into()],
+    );
+}
+
+app_story!(bash_permission_dialog, |ctx| {
+    ctx.set_viewport(80, 22);
+    open_bash_permission_dialog(ctx);
+    ctx.assert_snapshot();
+});
+
+app_story!(bash_permission_dialog_expanded_max_height, |ctx| {
+    ctx.set_viewport(80, 22);
+    open_bash_permission_dialog(ctx);
+    ctx.expand_active_dialog_to_max_height();
+    ctx.assert_snapshot();
+});
+
+app_story!(bash_permission_reason_input_wraps, |ctx| {
+    ctx.set_viewport(58, 22);
+    open_bash_permission_dialog(ctx);
+    ctx.press_tab();
+    ctx.type_prompt(
+        "Needed to inspect the temporary directory before deciding whether the generated fixtures can be reused.",
     );
     ctx.assert_snapshot();
 });

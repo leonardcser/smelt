@@ -52,6 +52,28 @@ impl AppStoryCtx {
         self.app.set_terminal_size(w, h);
     }
 
+    /// Apply the same size override a top-edge resize would produce when the
+    /// active bottom-docked dialog is dragged as tall as it can go. Stories use
+    /// this to pin fully expanded dialog layouts without depending on exact
+    /// mouse-hit coordinates in each dialog's chrome.
+    pub fn expand_active_dialog_to_max_height(&mut self) {
+        let id = self
+            .app
+            .app
+            .ui
+            .active_modal()
+            .expect("active modal dialog exists");
+        let (width, height) = self.app.app.ui.terminal_size();
+        let height = height.saturating_sub(1).max(1);
+        self.app
+            .app
+            .ui
+            .overlay_mut(id)
+            .expect("active modal overlay exists")
+            .size_override = Some((width, height));
+        self.pump_lua();
+    }
+
     /// Set the configured context window so prompt-bar token percentages
     /// render in stories.
     pub fn set_context_window(&mut self, context_window: Option<u32>) {
@@ -388,6 +410,13 @@ impl AppStoryCtx {
             self.app
                 .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
         }
+    }
+
+    /// Press Tab and pump Lua callbacks so focus-changing dialog keymaps settle
+    /// before the next synthetic input.
+    pub fn press_tab(&mut self) {
+        self.app.press(crossterm::event::KeyCode::Tab);
+        self.pump_lua();
     }
 
     /// Promote the oldest queued next-turn message into the next-request queue.

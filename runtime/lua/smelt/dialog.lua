@@ -25,7 +25,7 @@
 --     options leaf instead of dismissing the dialog).
 --
 -- Buffer helpers:
---   smelt.dialog.input(placeholder)         -> leaf, buf, input  (single-line input)
+--   smelt.dialog.input(placeholder, opts)   -> leaf, buf, input  (line input; opts.wrap soft-wraps)
 --   smelt.dialog.menu(items, opts)          -> leaf, ctrl (numbered selectable list)
 --   smelt.dialog.list(buf, opts)            -> leaf       (existing buffer as a list)
 --   smelt.dialog.markdown(text)             -> leaf, buf  (markdown-rendered content)
@@ -154,10 +154,12 @@ local GUTTER = 1
 ---@field min_height? any Forwarded to `smelt.dialog.open`.
 ---@field blocks_agent? boolean Forwarded to `smelt.dialog.open`.
 
--- Build a single-line text-input leaf with a fresh buffer. `placeholder`
--- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
--- override the dialog gutter. Returns `(leaf, buf, input)` so callers can
--- keep using the buffer directly or opt into the first-class input handle.
+-- Build a line-input leaf with a fresh buffer. `placeholder` shows when the
+-- buffer is empty. `opts.pad_left` / `opts.pad_right` override the dialog
+-- gutter; `opts.wrap = true` lets long input soft-wrap across visual rows
+-- while preserving single-line submit semantics. Returns `(leaf, buf, input)`
+-- so callers can keep using the buffer directly or opt into the first-class
+-- input handle.
 ---@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input
 function smelt.dialog.input(placeholder, opts)
   opts = opts or {}
@@ -167,7 +169,7 @@ function smelt.dialog.input(placeholder, opts)
     pad_left = opts.pad_left or GUTTER,
     pad_right = opts.pad_right or GUTTER,
     scrollbar = false,
-    wrap = false,
+    wrap = opts.wrap == true,
   })
   return input:win(), input:buf(), input
 end

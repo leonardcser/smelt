@@ -6,10 +6,10 @@ use protocol::EngineEvent;
 use serde_json::json;
 
 use crate::app_story;
+use crate::storybook::app_ctx::AppStoryCtx;
 use crate::storybook::args;
 
-app_story!(present_plan_dialog, |ctx| {
-    ctx.set_viewport(80, 24);
+fn open_present_plan_dialog(ctx: &mut AppStoryCtx) {
     ctx.engine(EngineEvent::ToolDispatch {
         request_id: 1,
         call_id: "plan-dialog".into(),
@@ -23,5 +23,17 @@ app_story!(present_plan_dialog, |ctx| {
             ),
         ]),
     });
+}
+
+app_story!(present_plan_dialog, |ctx| {
+    ctx.set_viewport(80, 24);
+    open_present_plan_dialog(ctx);
+    ctx.assert_snapshot();
+});
+
+app_story!(present_plan_dialog_expanded_max_height, |ctx| {
+    ctx.set_viewport(80, 24);
+    open_present_plan_dialog(ctx);
+    ctx.expand_active_dialog_to_max_height();
     ctx.assert_snapshot();
 });

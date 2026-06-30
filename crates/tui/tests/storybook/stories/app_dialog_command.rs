@@ -14,7 +14,29 @@ use protocol::EngineEvent;
 use serde_json::json;
 
 use crate::app_story;
+use crate::storybook::app_ctx::AppStoryCtx;
 use crate::storybook::args;
+
+fn open_ask_user_question_dialog(ctx: &mut AppStoryCtx) {
+    ctx.engine(EngineEvent::ToolDispatch {
+        request_id: 1,
+        call_id: "aq-1".into(),
+        tool_name: "ask_user_question".into(),
+        args: args([(
+            "questions",
+            json!([{
+                "header": "Auth method",
+                "question": "Which authentication method should I use?",
+                "options": [
+                    { "label": "OAuth",     "description": "redirect to provider login" },
+                    { "label": "API key",   "description": "paste a secret token" },
+                    { "label": "Anonymous", "description": "skip auth entirely" },
+                ],
+                "multiSelect": false,
+            }]),
+        )]),
+    });
+}
 
 app_story!(help_overlay, |ctx| {
     // `/help` opens a centered overlay (not a dialog) built from
@@ -194,25 +216,25 @@ app_story!(ask_user_question_dialog, |ctx| {
     // `dialog.open`; pumping `LuaWakeup` events lets it advance to the
     // yield. The snapshot then captures the production dialog (header
     // = question, markdown panel, options panel, free-text "Other").
-    ctx.engine(EngineEvent::ToolDispatch {
-        request_id: 1,
-        call_id: "aq-1".into(),
-        tool_name: "ask_user_question".into(),
-        args: args([(
-            "questions",
-            json!([{
-                "header": "Auth method",
-                "question": "Which authentication method should I use?",
-                "options": [
-                    { "label": "OAuth",     "description": "redirect to provider login" },
-                    { "label": "API key",   "description": "paste a secret token" },
-                    { "label": "Anonymous", "description": "skip auth entirely" },
-                ],
-                "multiSelect": false,
-            }]),
-        )]),
-    });
+    open_ask_user_question_dialog(ctx);
     // Coroutine has yielded at `dialog.open`; render captures it.
+    ctx.assert_snapshot();
+});
+
+app_story!(ask_user_question_dialog_expanded_max_height, |ctx| {
+    ctx.set_viewport(80, 22);
+    open_ask_user_question_dialog(ctx);
+    ctx.expand_active_dialog_to_max_height();
+    ctx.assert_snapshot();
+});
+
+app_story!(ask_user_question_custom_input_wraps, |ctx| {
+    ctx.set_viewport(52, 18);
+    open_ask_user_question_dialog(ctx);
+    ctx.press_tab();
+    ctx.type_prompt(
+        "Use OAuth for browser sign-in, but keep an API-key fallback for automation and support scripts.",
+    );
     ctx.assert_snapshot();
 });
 

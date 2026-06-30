@@ -81,7 +81,8 @@ smelt.tools.register({
 
       local md_leaf = smelt.dialog.markdown(q.question or "")
       -- Free-text input for a custom answer, shown below the options.
-      local other_leaf, other_buf = smelt.dialog.input("type a custom answer…")
+      local other_leaf, other_buf =
+          smelt.dialog.input("press tab to add your own answer…", { wrap = true })
       ---@cast other_leaf any
       ---@cast other_buf any
 
@@ -106,11 +107,9 @@ smelt.tools.register({
         min_height   = 0,
         focus        = menu_leaf,
         panels = {
-          { leaf = md_leaf, height = "fit" },
-        },
-        bottom_panels = {
+          { leaf = md_leaf,    height = "fit" },
           { leaf = menu_leaf,  height = "fit" },
-          { leaf = other_leaf, height = 1     },
+          { leaf = other_leaf, height = "fit" },
         },
       })
 

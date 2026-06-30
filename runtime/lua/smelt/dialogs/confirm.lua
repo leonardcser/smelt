@@ -148,7 +148,7 @@ function smelt.confirm.open(handle_id)
   -- Reason input is built first so the options menu's on_submit can read
   -- its buffer when the user dismisses with text already typed.
   local reason_leaf, reason_buf =
-      smelt.dialog.input("press tab to add a reason…", { pad_left = 2 })
+      smelt.dialog.input("press tab to add a reason…", { pad_left = 2, wrap = true })
   local typed_reason = false
   reason_leaf:on("text_changed", function() typed_reason = true end)
 
@@ -190,7 +190,7 @@ function smelt.confirm.open(handle_id)
       { leaf = allow_leaf,   height = "fit"                              },
       { leaf = options_leaf, height = "fit"                              },
       { leaf = spacer_leaf,  height = "fit"                              },
-      { leaf = reason_leaf,                  collapse_when_empty = true  },
+      { leaf = reason_leaf,  height = "fit", collapse_when_empty = true  },
     },
     focus = options_leaf,
     keymaps = {

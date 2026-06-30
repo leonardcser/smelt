@@ -1,0 +1,26 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash ls -la /tmp/foo
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────
+ bash: ls -la /tmp/foo
+ List files in /tmp/foo
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow ls * for this session
+  4. allow ls * in ~/cwd
+
+  Needed to inspect the temporary directory before
+  deciding whether the generated fixtures can be reused.
+ ○ normal                                       1:104 100%
