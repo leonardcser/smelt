@@ -581,7 +581,7 @@ local function register_tools()
 
   smelt.tools.register({
     name = "create_goal",
-    description = "Create a session goal only when the latest user message explicitly asks for a persistent goal; do not infer goals from ordinary tasks. Fails if an unfinished goal already exists; use update_goal only to report done or blocked.",
+    description = "Create a session goal only when the user explicitly asks to start, set, or create a persistent goal, or system/developer instructions explicitly require one. Do not infer goals from ordinary tasks, investigations, implementations, or requests to continue working. Fails if an unfinished goal already exists; use update_goal only to report done or blocked.",
     parameters = {
       type = "object",
       properties = {
@@ -608,7 +608,7 @@ local function register_tools()
 
   smelt.tools.register({
     name = "update_goal_progress",
-    description = "Update durable goal progress shown in the top goal bar. Call when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass, including the first one after a goal is set. Do not use for routine substeps, individual tool calls, live activity, done, or blocked.",
+    description = "Update durable progress for an existing active goal shown in the top goal bar. Do not call unless a goal already exists. Call when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass for that goal, including the first one after it is set. Do not use for routine substeps, individual tool calls, live activity, done, or blocked.",
     parameters = {
       type = "object",
       properties = {

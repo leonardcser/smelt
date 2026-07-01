@@ -178,7 +178,7 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
         .expect("create_goal should be registered");
     assert!(create
         .description
-        .contains("latest user message explicitly asks for a persistent goal"));
+        .contains("Do not infer goals from ordinary tasks"));
 
     let update = tools
         .iter()
@@ -197,7 +197,7 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
         .iter()
         .find(|tool| tool.name == "update_goal_progress")
         .expect("update_goal_progress should be registered");
-    assert!(status.description.contains("durable goal progress"));
+    assert!(status.description.contains("existing active goal"));
     assert!(status.parameters["properties"].get("activity").is_none());
     assert!(status.parameters["properties"].get("summary").is_none());
     assert!(status.parameters["properties"]["progress"]
