@@ -142,7 +142,7 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        self.append_span_styled(text, SpanMeta::default());
+        self.append_span_styled(text, SpanMeta::default(), 0);
     }
 
     pub fn print_string(&mut self, s: String) {
@@ -153,7 +153,14 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        self.append_span_styled(text, meta);
+        self.append_span_styled(text, meta, 0);
+    }
+
+    pub fn print_with_meta_width_extra(&mut self, text: &str, meta: SpanMeta, width_extra: usize) {
+        if text.is_empty() {
+            return;
+        }
+        self.append_span_styled(text, meta, width_extra);
     }
 
     pub fn print_gutter(&mut self, text: &str) {
@@ -429,43 +436,45 @@ impl<'a> LineBuilder<'a> {
 
     // ── Internals ───────────────────────────────────────────────────
 
-    fn append_span_styled(&mut self, text: &str, meta: SpanMeta) {
+    fn append_span_styled(&mut self, text: &str, meta: SpanMeta, width_extra: usize) {
         let resolved = self.resolve_current();
         let style_default = style_is_default(&resolved);
         let meta_default = meta.selectable && meta.copy_as.is_none();
         if style_default && meta_default {
-            self.append_text(text);
+            self.append_text(text, width_extra);
             return;
         }
         let hl = self.current_hl(resolved);
-        self.append_span_with_hl(text, hl, meta);
+        self.append_span_with_hl(text, hl, meta, width_extra);
     }
 
     fn append_span_resolved(&mut self, text: &str, style: Style, meta: SpanMeta) {
         let style_default = style_is_default(&style);
         let meta_default = meta.selectable && meta.copy_as.is_none();
         if style_default && meta_default {
-            self.append_text(text);
+            self.append_text(text, 0);
             return;
         }
         let hl = intern_anonymous_style(style);
-        self.append_span_with_hl(text, hl, meta);
+        self.append_span_with_hl(text, hl, meta, 0);
     }
 
-    fn append_text(&mut self, text: &str) {
+    fn append_text(&mut self, text: &str, width_extra: usize) {
         let cols_before = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let cols_after = cols_before.saturating_add(display_width(text) as u16);
+        let cols_after =
+            cols_before.saturating_add(display_width(text).saturating_add(width_extra) as u16);
         self.cur_visible_cols = cols_after;
         if !text.is_empty() {
             self.has_pending_content = true;
         }
     }
 
-    fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta) {
+    fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta, width_extra: usize) {
         let cols_before = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let cols_after = cols_before.saturating_add(display_width(text) as u16);
+        let cols_after =
+            cols_before.saturating_add(display_width(text).saturating_add(width_extra) as u16);
         self.cur_visible_cols = cols_after;
         if text.is_empty() {
             return;

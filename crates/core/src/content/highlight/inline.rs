@@ -509,7 +509,7 @@ fn emit_table_label_spans(out: &mut LineBuilder, spans: &[InlineSpan], dim: bool
         if let Some(group) = span.style.group {
             out.set_hl(group);
         }
-        out.print(&span.text);
+        out.print_with_meta_width_extra(&span.text, span.meta.clone(), span.width_extra);
         out.pop_style();
     }
 }
@@ -525,8 +525,8 @@ fn min_visual_width(text: &str, options: &InlineOptions) -> usize {
     let mut max_w = 0usize;
     for span in parse_inline_spans_with_options(text, false, options) {
         let is_code = span.style.group == Some(intern("SmeltAccent"));
-        if is_code {
-            max_w = max_w.max(span.text.width());
+        if is_code || span.width_extra > 0 {
+            max_w = max_w.max(span.text.width() + span.width_extra);
         } else {
             max_w = max_w.max(
                 span.text
@@ -572,6 +572,7 @@ pub struct InlineSpan {
     pub style: InlineStyle,
     pub meta: SpanMeta,
     pub break_policy: BreakPolicy,
+    pub width_extra: usize,
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
@@ -961,6 +962,7 @@ fn lower_inline_event(
                     icon_style,
                     SpanMeta::unselectable(),
                     BreakPolicy::AttachNext,
+                    1,
                 );
             }
             if let Some(file) = inline_file_reference(text, &options.file_icons) {
@@ -1039,7 +1041,7 @@ fn push_inline_span_meta(
     style: InlineStyle,
     meta: SpanMeta,
 ) {
-    push_inline_span_meta_with_policy(out, text, style, meta, BreakPolicy::Normal);
+    push_inline_span_meta_with_policy(out, text, style, meta, BreakPolicy::Normal, 0);
 }
 
 fn push_inline_span_meta_with_policy(
@@ -1048,12 +1050,16 @@ fn push_inline_span_meta_with_policy(
     style: InlineStyle,
     meta: SpanMeta,
     break_policy: BreakPolicy,
+    width_extra: usize,
 ) {
     if text.is_empty() {
         return;
     }
     if let Some(last) = out.last_mut().filter(|span| {
-        span.style == style && span.meta == meta && span.break_policy == break_policy
+        span.style == style
+            && span.meta == meta
+            && span.break_policy == break_policy
+            && span.width_extra == width_extra
     }) {
         last.text.push_str(text);
     } else {
@@ -1062,6 +1068,7 @@ fn push_inline_span_meta_with_policy(
             style,
             meta,
             break_policy,
+            width_extra,
         });
     }
 }
@@ -1073,9 +1080,15 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
             .map(|span| {
                 InlineRun::new(
                     span.text.clone(),
-                    (span.style, span.meta.clone(), span.break_policy),
+                    (
+                        span.style,
+                        span.meta.clone(),
+                        span.break_policy,
+                        span.width_extra,
+                    ),
                     span.break_policy,
                 )
+                .with_width_extra(span.width_extra)
             })
             .collect(),
     );
@@ -1088,6 +1101,7 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
                     style: run.meta.0,
                     meta: run.meta.1,
                     break_policy: run.meta.2,
+                    width_extra: run.meta.3,
                 })
                 .collect()
         })
@@ -1109,16 +1123,13 @@ pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
                 ..Default::default()
             },
         );
-        out.print_with_meta(&span.text, span.meta.clone());
+        out.print_with_meta_width_extra(&span.text, span.meta.clone(), span.width_extra);
         out.pop_style();
     }
 }
 
 pub fn inline_spans_width(spans: &[InlineSpan]) -> usize {
-    spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.text.as_str()))
-        .sum()
+    spans.iter().map(|s| s.text.width() + s.width_extra).sum()
 }
 
 #[cfg(test)]
@@ -1310,12 +1321,14 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                width_extra: 0,
             },
             InlineSpan {
                 text: "R ".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::unselectable(),
                 break_policy: BreakPolicy::AttachNext,
+                width_extra: 1,
             },
             InlineSpan {
                 text: "verylongfilename.rs".into(),
@@ -1326,6 +1339,7 @@ mod tests {
                     col: None,
                 }),
                 break_policy: BreakPolicy::Normal,
+                width_extra: 0,
             },
         ];
         let rows = wrap_inline_spans(&spans, 6);
@@ -1338,10 +1352,10 @@ mod tests {
             text_rows,
             vec![
                 String::from("see "),
-                String::from("R very"),
-                String::from("longfi"),
-                String::from("lename"),
-                String::from(".rs"),
+                String::from("R ver"),
+                String::from("ylongf"),
+                String::from("ilenam"),
+                String::from("e.rs"),
             ]
         );
     }
@@ -1913,12 +1927,14 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                width_extra: 0,
             },
             InlineSpan {
                 text: "cd".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                width_extra: 0,
             },
         ];
         assert_eq!(inline_spans_width(&spans), 4);
@@ -1931,6 +1947,7 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
+            width_extra: 0,
         }];
         let rows = wrap_inline_spans(&spans, 0);
         assert_eq!(rows.len(), 1);
@@ -1969,6 +1986,7 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
+            width_extra: 0,
         }];
         let rows = wrap_inline_spans(&spans, 3);
         assert!(rows.len() >= 3);
@@ -2294,8 +2312,8 @@ mod tests {
         let options = file_icon_options(true, Some(dir.path().to_path_buf()));
         let rows = vec![vec!["File".to_string()], vec!["`main.rs`".to_string()]];
 
-        let block = render_test(80, |out| {
-            render_markdown_table_with_options(out, &rows, &[], 80, false, None, "", &options);
+        let block = render_test(74, |out| {
+            render_markdown_table_with_options(out, &rows, &[], 74, false, None, "", &options);
         });
         let top_width = block
             .lines
@@ -2317,9 +2335,33 @@ mod tests {
             "expected file icon {icon_text:?} in row {file_row:?}"
         );
         assert_eq!(
-            file_row.width(),
+            inline_visual_width("`main.rs`", &options) + 4,
             top_width,
             "table border width should include the file icon: {file_row:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_table_wrapped_file_icon_rows_reserve_terminal_icon_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("crates/tui/src/content/transcript_buf.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let options = file_icon_options(true, Some(dir.path().to_path_buf()));
+        let spans = parse_inline_spans_with_options(
+            "`crates/tui/src/content/transcript_buf.rs`",
+            false,
+            &options,
+        );
+        let wrapped = wrap_inline_spans(&spans, 30);
+        let icon_text = expected_icon_text(Path::new("transcript_buf.rs"), &options);
+        let first_text: String = wrapped[0].iter().map(|span| span.text.as_str()).collect();
+
+        assert!(wrapped.len() > 1, "expected path to wrap: {first_text:?}");
+        assert!(first_text.contains(&icon_text));
+        assert!(
+            inline_spans_width(&wrapped[0]) <= 30,
+            "icon row should fit when the terminal displays the file icon as a double-cell glyph: {first_text:?}"
         );
     }
 
