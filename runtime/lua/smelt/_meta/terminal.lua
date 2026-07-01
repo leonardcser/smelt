@@ -19,6 +19,10 @@ terminal.clear_title = nil
 ---@type fun(): table
 terminal.info = nil
 
+--- Return true when the smelt terminal window currently has OS focus.
+---@type fun(): boolean
+terminal.is_focused = nil
+
 --- Post an OSC 9 terminal notification with `message`. Pass `{ dcs_passthrough = true }` inside tmux to wrap the notification for tmux passthrough. Control characters are stripped from messages before writing.
 ---@type fun(message: string, opts: table?): boolean
 terminal.osc9_notify = nil

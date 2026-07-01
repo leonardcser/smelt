@@ -16,6 +16,7 @@ local banner_tips = {
 local ROTATE_SECS = 12
 local current_tip_id = nil
 local last_tip_at = nil
+local focused_tip_elapsed = 0
 
 local function tips_enabled()
   if not smelt.settings then return true end
@@ -28,6 +29,12 @@ local function vim_enabled()
   if not smelt.settings then return false end
   local ok, value = pcall(function() return smelt.settings.vim end)
   return ok and value == true
+end
+
+local function app_focused()
+  if not smelt.terminal or not smelt.terminal.is_focused then return true end
+  local ok, value = pcall(smelt.terminal.is_focused)
+  return not ok or value ~= false
 end
 
 local function tip_visible(tip)
@@ -124,11 +131,22 @@ function M.prompt_tip()
   if not have_source and os and os.time then now = os.time() end
 
   if not current_idx then current_idx = 1 end
-  if not last_tip_at or now < last_tip_at or now - last_tip_at > ROTATE_SECS * 2 then
-    last_tip_at = now
-  elseif now - last_tip_at >= ROTATE_SECS then
-    current_idx = (current_idx % #visible) + 1
-    last_tip_at = now
+  if app_focused() then
+    if not last_tip_at then
+      last_tip_at = now
+    elseif now < last_tip_at or now - last_tip_at > ROTATE_SECS * 2 then
+      last_tip_at = now
+      focused_tip_elapsed = 0
+    else
+      focused_tip_elapsed = focused_tip_elapsed + now - last_tip_at
+      last_tip_at = now
+      if focused_tip_elapsed >= ROTATE_SECS then
+        current_idx = (current_idx % #visible) + 1
+        focused_tip_elapsed = focused_tip_elapsed % ROTATE_SECS
+      end
+    end
+  else
+    last_tip_at = nil
   end
 
   local tip = visible[current_idx]

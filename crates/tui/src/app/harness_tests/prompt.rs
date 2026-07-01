@@ -609,6 +609,62 @@ fn focus_lost_cancels_stale_prompt_mouse_endpoint() {
 }
 
 #[test]
+fn lua_reports_terminal_focus_state() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(r#"assert(smelt.terminal.is_focused() == true)"#));
+    app.feed_one(SourceEvent::Term(Event::FocusLost));
+    assert!(app.run_lua(r#"assert(smelt.terminal.is_focused() == false)"#));
+    app.feed_one(SourceEvent::Term(Event::FocusGained));
+    assert!(app.run_lua(r#"assert(smelt.terminal.is_focused() == true)"#));
+}
+
+#[test]
+fn prompt_tips_do_not_rotate_while_terminal_is_unfocused() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        local tips = require("smelt.tips")
+        tips.register({ id = "test.focus.a", text = "test focus tip a" })
+        tips.register({ id = "test.focus.b", text = "test focus tip b" })
+        _G.smelt_tip_now = 0
+        smelt.clock.unix_ms = function() return _G.smelt_tip_now * 1000 end
+
+        local id = tips.prompt_tip().id
+        for _ = 1, #tips.list() + 2 do
+          if id == "test.focus.a" then break end
+          _G.smelt_tip_now = _G.smelt_tip_now + 12
+          id = tips.prompt_tip().id
+        end
+        assert(id == "test.focus.a")
+
+        _G.smelt_tip_now = _G.smelt_tip_now + 11
+        assert(tips.prompt_tip().id == "test.focus.a")
+        "#
+    ));
+
+    app.feed_one(SourceEvent::Term(Event::FocusLost));
+    assert!(app.run_lua(
+        r#"
+        local tips = require("smelt.tips")
+        _G.smelt_tip_now = _G.smelt_tip_now + 100
+        assert(tips.prompt_tip().id == "test.focus.a")
+        "#
+    ));
+
+    app.feed_one(SourceEvent::Term(Event::FocusGained));
+    assert!(app.run_lua(
+        r#"
+        local tips = require("smelt.tips")
+        assert(tips.prompt_tip().id == "test.focus.a")
+        _G.smelt_tip_now = _G.smelt_tip_now + 1
+        assert(tips.prompt_tip().id == "test.focus.b")
+        "#
+    ));
+}
+
+#[test]
 fn prompt_window_wraps_parser_output() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(

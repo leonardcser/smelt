@@ -32,6 +32,14 @@ fun(): table
 
 Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.
 
+## `smelt.terminal.is_focused`
+
+```lua
+fun(): boolean
+```
+
+Return true when the smelt terminal window currently has OS focus.
+
 ## `smelt.terminal.osc9_notify`
 
 ```lua

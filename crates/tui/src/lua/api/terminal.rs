@@ -152,6 +152,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     m.fn_(
+        "is_focused",
+        "Return true when the smelt terminal window currently has OS focus.",
+        &[],
+        |_, ()| -> LuaResult<bool> { Ok(crate::lua::with_app(|app| app.term_focused)) },
+    )?;
+
+    m.fn_(
         "info",
         "Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.",
         &[],

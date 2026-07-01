@@ -1627,6 +1627,8 @@ Terminal integration helpers.
   Clear the terminal window/tab title using OSC 0 with an empty payload.
 - `smelt.terminal.info` :: `fun(): table`
   Return environment-derived terminal information: `{ term, term_program, color_term, platform, tmux, screen, ssh }`.
+- `smelt.terminal.is_focused` :: `fun(): boolean`
+  Return true when the smelt terminal window currently has OS focus.
 - `smelt.terminal.osc9_notify` :: `fun(message: string, opts: table?): boolean`
   Post an OSC 9 terminal notification with `message`.
 - `smelt.terminal.set_title` :: `fun(title: string?): boolean`
