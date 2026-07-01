@@ -1492,11 +1492,7 @@ impl TuiApp {
 
     #[allow(dead_code)]
     pub(crate) fn session_checkpoint(&self) -> Option<&smelt_core::ContextCheckpoint> {
-        self.session_document
-            .live_session
-            .as_ref()
-            .and_then(|live| live.checkpoint.as_ref())
-            .or(self.core.session.checkpoint.as_ref())
+        self.core.session.checkpoint.as_ref()
     }
 
     pub(crate) fn session_set_checkpoint(
@@ -1509,7 +1505,10 @@ impl TuiApp {
 
     fn store_session_model_history_source(&self) -> protocol::ModelHistorySource {
         if let Some(live) = &self.session_document.live_session {
-            return live.model_history_source(engine::SUMMARY_PREFIX);
+            return live.model_history_source(
+                engine::SUMMARY_PREFIX,
+                self.core.session.checkpoint.as_ref(),
+            );
         }
         let (prefix, first_live_index, end_index) = self
             .core
@@ -1593,7 +1592,9 @@ impl TuiApp {
     }
 
     pub(crate) fn ack_persist_save(&mut self, ack: crate::persist::PersistAck) {
-        let save_queued = self.session_document.mark_persisted(&ack);
+        let save_queued = self
+            .session_document
+            .mark_persisted(&ack, self.core.session.checkpoint.as_ref());
         if save_queued {
             self.save_session();
         }
@@ -1912,15 +1913,17 @@ impl TuiApp {
         if summary.trim().is_empty() || live.is_empty() {
             return false;
         }
-        let first_live_index =
-            match live.first_live_history_index_for_model_message(first_live_message_index) {
-                Ok(Some(index)) => index,
-                Ok(None) => return false,
-                Err(err) => {
-                    self.notify_error_sticky(format!("failed to install checkpoint: {err}"));
-                    return false;
-                }
-            };
+        let first_live_index = match live.first_live_history_index_for_model_message(
+            self.core.session.checkpoint.as_ref(),
+            first_live_message_index,
+        ) {
+            Ok(Some(index)) => index,
+            Ok(None) => return false,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to install checkpoint: {err}"));
+                return false;
+            }
+        };
         let history_len = live.history_len();
         self.apply_session_document_mutation(
             crate::app::session_document::SessionMutation::InstallContextCheckpointAtHistoryIndex {
@@ -2236,20 +2239,10 @@ impl TuiApp {
                 delta,
                 descriptor_append,
             } => {
-                if self.persist_history_suffix(generation, delta, Some(descriptor_append)) {
-                    let checkpoint = self.core.session.checkpoint.clone();
-                    if let Some(live) = self.session_document.live_session.as_mut() {
-                        live.set_checkpoint(checkpoint);
-                    }
-                }
+                self.persist_history_suffix(generation, delta, Some(descriptor_append));
             }
             crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
-                if self.persist_history_suffix(generation, delta, None) {
-                    let checkpoint = self.core.session.checkpoint.clone();
-                    if let Some(live) = self.session_document.live_session.as_mut() {
-                        live.set_checkpoint(checkpoint);
-                    }
-                }
+                self.persist_history_suffix(generation, delta, None);
             }
             crate::app::session_document::PreparedSessionSave::Skip(_)
             | crate::app::session_document::PreparedSessionSave::MetadataOnly { .. } => {
@@ -2784,15 +2777,6 @@ mod checkpoint_tests {
         assert_eq!(app.app.core.session.history.len(), 0);
         let checkpoint = app.app.core.session.checkpoint.as_ref().unwrap();
         assert_eq!(checkpoint.first_live_index, 4);
-        assert_eq!(
-            app.app
-                .session_document
-                .live_session
-                .as_ref()
-                .unwrap()
-                .checkpoint,
-            Some(checkpoint.clone())
-        );
         match app.app.session_model_history_source() {
             protocol::ModelHistorySource::Store {
                 prefix,

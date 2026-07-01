@@ -287,10 +287,10 @@ fn store_backed_resume_repairs_checkpoint_that_points_past_retained_history() {
     assert!(resumed.app.core.session.history.is_empty());
     let checkpoint = resumed
         .app
-        .session_document
-        .live_session
+        .core
+        .session
+        .checkpoint
         .as_ref()
-        .and_then(|live| live.checkpoint.as_ref())
         .expect("checkpoint repaired on sparse resume");
     assert_eq!(checkpoint.first_live_index, 0);
 
@@ -751,6 +751,65 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
         loaded.history.last(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "kept live row"
     ));
+}
+
+#[test]
+fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for idx in 0..4 {
+            app.app
+                .session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
+        }
+        app.app
+            .session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
+                kind: "compaction".into(),
+                summary: "retained summary".into(),
+                first_live_index: 3,
+                created_at_ms: 1,
+                tokens_before: None,
+                tokens_after_estimate: None,
+                pre_checkpoint_context_tokens: None,
+                pre_checkpoint_context_history_len: None,
+            }));
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert_eq!(
+        resumed
+            .app
+            .core
+            .session
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.first_live_index),
+        Some(3)
+    );
+    resumed.app.session_truncate_from(1);
+    let identity = resumed.app.active_context_token_identity();
+    resumed.app.apply_session_document_mutation(
+        crate::app::session_document::SessionMutation::RestoreRewindableAfterRewind {
+            history_len: 1,
+            keep_checkpoint_at_boundary: false,
+            identity,
+        },
+    );
+    assert!(resumed.app.core.session.checkpoint.is_none());
+
+    resumed
+        .app
+        .session_append_history(HistoryItem::user(Content::text("new after rewind")));
+    resumed.app.save_session_and_flush();
+
+    assert!(
+        resumed.app.notification.is_none(),
+        "save after rewind should not surface a checkpoint/history integrity error: {:?}",
+        resumed.app.notification
+    );
 }
 
 #[test]

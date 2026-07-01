@@ -305,11 +305,16 @@ impl TuiSessionDocument {
             .begin_save(session_id, kind, generation, history, descriptor_append)
     }
 
-    pub(crate) fn mark_persisted(&mut self, ack: &crate::persist::PersistAck) -> bool {
+    pub(crate) fn mark_persisted(
+        &mut self,
+        ack: &crate::persist::PersistAck,
+        checkpoint: Option<&ContextCheckpoint>,
+    ) -> bool {
         SessionDocument::mark_persisted(
             &mut self.persist,
             &mut self.transcript,
             self.live_session.as_mut(),
+            checkpoint,
             ack,
         )
     }
@@ -1375,6 +1380,7 @@ impl SessionDocument {
         persist: &mut SessionPersistState,
         transcript: &mut TranscriptDocument,
         live_session: Option<&mut LiveSession>,
+        checkpoint: Option<&ContextCheckpoint>,
         ack: &crate::persist::PersistAck,
     ) -> bool {
         let current_generation = persist.current_generation(transcript);
@@ -1388,7 +1394,11 @@ impl SessionDocument {
             SaveAckPlan::MarkClean { clear_descriptors } => {
                 if let Some(live_session) = live_session {
                     if matches!(ack.kind, crate::persist::PersistSaveKind::History) {
-                        live_session.compact_saved_prefix(ack.history_len, ack.revision);
+                        live_session.compact_saved_prefix(
+                            ack.history_len,
+                            ack.revision,
+                            checkpoint,
+                        );
                     }
                 }
                 if clear_descriptors {
@@ -1719,11 +1729,8 @@ impl SessionDocument {
         pid: u32,
         cwd: std::path::PathBuf,
     ) -> Self {
-        let mut session = session_from_meta(header.meta.clone(), pid, cwd);
+        let session = session_from_meta(header.meta.clone(), pid, cwd);
         let live_session = smelt_core::session_runtime::LiveSession::from_store(header, store_ref);
-        if session.checkpoint.is_none() {
-            session.checkpoint = live_session.checkpoint.clone();
-        }
         Self {
             session,
             transcript,
@@ -1756,7 +1763,6 @@ impl SessionDocument {
         if let Some(live_session) = live_session {
             let appended_idx = live_session.append_history(item);
             debug_assert_eq!(appended_idx, idx);
-            session.checkpoint = live_session.checkpoint.clone();
         } else {
             session.history.push(item);
         }
@@ -2101,7 +2107,6 @@ impl SessionDocument {
         match mutation {
             SessionMutation::AppendHistoryItem { item } => {
                 let idx = live_session.append_history(item);
-                session.checkpoint = live_session.checkpoint.clone();
                 MutationResult {
                     session_dirty: true,
                     history_idx: Some(idx),
@@ -2115,7 +2120,6 @@ impl SessionDocument {
             SessionMutation::TruncateHistoryFrom { index } => {
                 let dirty_from = index.min(live_session.history_len());
                 live_session.truncate_from(index);
-                session.checkpoint = live_session.checkpoint.clone();
                 MutationResult {
                     session_dirty: true,
                     history_dirty_from: Some(dirty_from),
@@ -2123,11 +2127,10 @@ impl SessionDocument {
                 }
             }
             SessionMutation::SetCheckpoint { checkpoint } => {
-                if session.checkpoint == checkpoint && live_session.checkpoint == checkpoint {
+                if session.checkpoint == checkpoint {
                     return MutationResult::default();
                 }
-                session.checkpoint = checkpoint.clone();
-                live_session.set_checkpoint(checkpoint);
+                session.checkpoint = checkpoint;
                 MutationResult {
                     session_dirty: true,
                     ..Default::default()
@@ -4307,6 +4310,7 @@ mod tests {
             &mut state,
             &mut transcript,
             None,
+            None,
             &crate::persist::PersistAck {
                 save_id,
                 session_id: "session-a".into(),
@@ -4380,6 +4384,7 @@ mod tests {
         let save_queued = SessionDocument::mark_persisted(
             &mut state,
             &mut transcript,
+            None,
             None,
             &crate::persist::PersistAck {
                 save_id,

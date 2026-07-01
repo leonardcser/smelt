@@ -1550,6 +1550,21 @@ fn checkpoint_from_json(
     Some(checkpoint)
 }
 
+fn checkpoint_json_for_history_len(
+    checkpoint: Option<&ContextCheckpoint>,
+    history_len: usize,
+) -> Result<Option<Value>, smelt_store::StoreError> {
+    let Some(checkpoint) = checkpoint else {
+        return Ok(None);
+    };
+    if checkpoint.first_live_index > history_len {
+        smelt_perf::perf::record_value("session:save:dropped_checkpoint_past_history", 1);
+        return Ok(None);
+    }
+    debug_assert!(checkpoint.first_live_index <= history_len);
+    Ok(Some(serde_json::to_value(checkpoint)?))
+}
+
 pub fn store_state_from_session(
     session: &Session,
     history_len: usize,
@@ -1569,11 +1584,7 @@ pub fn store_state_from_session(
         accounting_json: Some(serde_json::to_value(accounting_state_from_session(
             session,
         ))?),
-        checkpoint_json: session
-            .checkpoint
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()?,
+        checkpoint_json: checkpoint_json_for_history_len(session.checkpoint.as_ref(), history_len)?,
         context_tokens: session.context_tokens.map(u64::from),
         context_tokens_history_len: session.context_tokens_history_len.map(|len| len as u64),
         display_context_tokens: session.display_context_tokens.map(u64::from),
@@ -3438,6 +3449,18 @@ mod tests {
     }
 
     #[test]
+    fn store_state_drops_checkpoint_past_target_history_len() {
+        let mut s = fixture_session();
+        s.history = vec![user_item("kept")];
+        s.checkpoint = Some(checkpoint("stale summary", 3));
+
+        let state = store_state_from_session(&s, 1).unwrap();
+
+        assert_eq!(state.history_len, 1);
+        assert!(state.checkpoint_json.is_none());
+    }
+
+    #[test]
     fn load_store_header_for_dir_repairs_checkpoint_first_live_index_past_history() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut s = fixture_session();
@@ -3472,8 +3495,9 @@ mod tests {
                 .map(|cp| cp.first_live_index),
             Some(0)
         );
+        let checkpoint = header.meta.checkpoint.clone();
         let live = crate::session_runtime::LiveSession::from_store(header, store_ref);
-        match live.model_history_source("SUMMARY:") {
+        match live.model_history_source("SUMMARY:", checkpoint.as_ref()) {
             protocol::ModelHistorySource::Store {
                 prefix,
                 first_live_index,

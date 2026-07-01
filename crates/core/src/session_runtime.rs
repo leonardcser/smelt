@@ -13,7 +13,6 @@ pub struct LiveSession {
     pub store: Option<SessionStoreRef>,
     pub live_start: usize,
     pub live_history: Vec<HistoryItem>,
-    pub checkpoint: Option<ContextCheckpoint>,
     pub side_tables: LiveSideTables,
 }
 
@@ -28,14 +27,12 @@ impl LiveSession {
         store: Option<SessionStoreRef>,
     ) -> Self {
         let live_start = header.history_len;
-        let checkpoint = header.meta.checkpoint.clone();
         Self {
             header,
             session_dir,
             store,
             live_start,
             live_history: Vec::new(),
-            checkpoint,
             side_tables: LiveSideTables,
         }
     }
@@ -64,10 +61,6 @@ impl LiveSession {
         history_json_bytes(&self.live_history)
     }
 
-    pub fn set_checkpoint(&mut self, checkpoint: Option<ContextCheckpoint>) {
-        self.checkpoint = checkpoint;
-    }
-
     pub fn append_history(&mut self, item: HistoryItem) -> usize {
         let idx = self.history_len();
         if self.live_history.is_empty() {
@@ -87,7 +80,12 @@ impl LiveSession {
         }
     }
 
-    pub fn compact_saved_prefix(&mut self, saved_history_len: usize, revision: u64) {
+    pub fn compact_saved_prefix(
+        &mut self,
+        saved_history_len: usize,
+        revision: u64,
+        checkpoint: Option<&ContextCheckpoint>,
+    ) {
         let saved_history_len = saved_history_len.min(self.history_len());
         if saved_history_len <= self.live_start {
             self.live_start = saved_history_len;
@@ -95,7 +93,7 @@ impl LiveSession {
             self.header.history_len = saved_history_len;
             self.header.revision = revision;
             self.header.meta.history_len = Some(saved_history_len);
-            self.header.meta.checkpoint = self.checkpoint.clone();
+            self.header.meta.checkpoint = checkpoint.cloned();
             return;
         }
         let drop_count = saved_history_len - self.live_start;
@@ -108,14 +106,13 @@ impl LiveSession {
         self.header.history_len = saved_history_len;
         self.header.revision = revision;
         self.header.meta.history_len = Some(saved_history_len);
-        self.header.meta.checkpoint = self.checkpoint.clone();
+        self.header.meta.checkpoint = checkpoint.cloned();
     }
 
     pub fn replace_header(&mut self, header: SessionHeader) {
         self.header = header;
         self.live_start = self.header.history_len;
         self.live_history.clear();
-        self.checkpoint = self.header.meta.checkpoint.clone();
     }
 
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
@@ -218,8 +215,12 @@ impl LiveSession {
         Ok(fallback.to_string())
     }
 
-    pub fn model_history_source(&self, summary_prefix: &str) -> protocol::ModelHistorySource {
-        let (prefix, first_live_index) = if let Some(checkpoint) = self.checkpoint.as_ref() {
+    pub fn model_history_source(
+        &self,
+        summary_prefix: &str,
+        checkpoint: Option<&ContextCheckpoint>,
+    ) -> protocol::ModelHistorySource {
+        let (prefix, first_live_index) = if let Some(checkpoint) = checkpoint {
             (
                 vec![HistoryItem::user(protocol::Content::text(format!(
                     "{}\n{}",
@@ -249,6 +250,7 @@ impl LiveSession {
 
     pub fn first_live_history_index_for_model_message(
         &self,
+        checkpoint: Option<&ContextCheckpoint>,
         first_live_message_index: usize,
     ) -> Result<Option<usize>, String> {
         if first_live_message_index == 0 {
@@ -256,7 +258,7 @@ impl LiveSession {
         }
 
         let mut message_index = 0usize;
-        let first_history_index = if let Some(checkpoint) = &self.checkpoint {
+        let first_history_index = if let Some(checkpoint) = checkpoint {
             message_index = 1;
             checkpoint.first_live_index
         } else {
@@ -299,7 +301,6 @@ impl LiveSession {
         smelt_perf::perf::record_value(reason, 1);
         let mut session = template.clone();
         session.history = self.history_range(0..self.history_len())?;
-        session.checkpoint = self.checkpoint.clone();
         Ok(session)
     }
 
@@ -403,7 +404,7 @@ mod tests {
         let rows = live.history_range(1..3).expect("range");
         assert_eq!(rows.len(), 2);
         assert_eq!(live.history_len(), 3);
-        let source = live.model_history_source("summary:");
+        let source = live.model_history_source("summary:", None);
         match source {
             protocol::ModelHistorySource::Store {
                 first_live_index,
