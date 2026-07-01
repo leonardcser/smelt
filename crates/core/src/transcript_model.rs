@@ -89,10 +89,6 @@ pub struct ToolOutput {
 
 pub type ToolOutputRef = Box<ToolOutput>;
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 /// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id`.
 /// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
 /// layout can be cached permanently.
@@ -102,8 +98,8 @@ pub struct ToolState {
     pub elapsed: Option<Duration>,
     pub output: Option<ToolOutputRef>,
     pub user_message: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub preview: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_output: Option<ToolOutputRef>,
 }
 
 impl ToolState {
@@ -126,22 +122,26 @@ impl ToolState {
         struct DisplayState<'a> {
             status: ToolStatus,
             output: Option<DisplayOutput<'a>>,
+            preview_output: Option<DisplayOutput<'a>>,
             user_message: &'a Option<String>,
-            preview: bool,
         }
 
-        crate::utils::hash_serializable(&DisplayState {
-            status: self.status,
-            output: self.output.as_ref().map(|output| DisplayOutput {
+        fn display_output(output: &ToolOutput) -> DisplayOutput<'_> {
+            DisplayOutput {
                 content: output.content.as_str(),
                 is_error: output.is_error,
                 metadata_hash: output
                     .metadata
                     .as_ref()
                     .map(crate::utils::hash_serializable),
-            }),
+            }
+        }
+
+        crate::utils::hash_serializable(&DisplayState {
+            status: self.status,
+            output: self.output.as_deref().map(display_output),
+            preview_output: self.preview_output.as_deref().map(display_output),
             user_message: &self.user_message,
-            preview: self.preview,
         })
     }
 }
@@ -1872,7 +1872,7 @@ mod tests {
                     metadata: Some(serde_json::json!({"small": true})),
                 })),
                 user_message: None,
-                preview: false,
+                preview_output: None,
             },
             BlockOrigin::History(1),
         );
@@ -2083,7 +2083,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            preview: false,
+            preview_output: None,
         }
     }
 
@@ -2126,10 +2126,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_hash_includes_preview_state() {
+    fn tool_display_hash_includes_preview_output() {
         let a = pending_state();
         let mut b = pending_state();
-        b.preview = true;
+        b.preview_output = Some(Box::new(ToolOutput {
+            content: String::new(),
+            is_error: false,
+            metadata: Some(serde_json::json!({ "old_content": "before", "new_content": "after" })),
+        }));
 
         assert_ne!(a.display_hash(), b.display_hash());
     }

@@ -98,6 +98,12 @@ impl ToolDraftController {
         })
     }
 
+    fn finished_for_call(&self, call_id: &str) -> bool {
+        self.drafts
+            .values()
+            .any(|draft| draft.call_id.as_deref() == Some(call_id) && draft.finished)
+    }
+
     fn update(
         &mut self,
         event: ToolDraftEvent,
@@ -284,6 +290,11 @@ impl TuiApp {
         args: HashMap<String, serde_json::Value>,
     ) -> bool {
         let stream_id = self.draft_tools.stream_id_for_call(&call_id);
+        let preview_output = self
+            .draft_tools
+            .finished_for_call(&call_id)
+            .then(|| self.lua.tool_preview_output(&tool_name, &args))
+            .flatten();
         let promoted = self
             .apply_session_document_mutation(
                 crate::app::session_document::SessionMutation::PromoteToolDraft {
@@ -293,6 +304,7 @@ impl TuiApp {
                         name: tool_name,
                         summary,
                         args,
+                        preview_output,
                     },
                     now: self.core.clock.instant_now(),
                 },

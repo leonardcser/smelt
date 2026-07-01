@@ -63,6 +63,29 @@ local function planned_diff(args)
   return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
 end
 
+local function planned_output(args)
+  local path, old_string, new_string, do_all = edit_fields(args)
+  if old_string == "" and new_string == "" then
+    return nil
+  end
+
+  local cached = path ~= "" and old_string ~= "" and smelt.fs.file_state.get(path) or nil
+  local content = cached and cached.content or nil
+  if not content then
+    return nil
+  end
+
+  return {
+    content = "",
+    is_error = false,
+    metadata = {
+      path = path,
+      old_content = content,
+      new_content = apply_edit(content, old_string, new_string, do_all),
+    },
+  }
+end
+
 local function line_label(count, label)
   return tostring(count) .. " " .. label .. (count == 1 and "" or "s")
 end
@@ -95,7 +118,7 @@ end
 transcript_defaults.__tool_body_renderers.edit_file = function(block)
   local args = block.args or {}
 
-  local meta = block.output and block.output.metadata
+  local meta = (block.output and block.output.metadata) or (block.preview_output and block.preview_output.metadata)
   if meta then
     return diff_from_content(
       meta.path or args.file_path or "",
@@ -105,15 +128,7 @@ transcript_defaults.__tool_body_renderers.edit_file = function(block)
     )
   end
 
-  if not block.preview then
-    return nil
-  end
-
-  local _, old_string, new_string = edit_fields(args)
-  if old_string == "" and new_string == "" then
-    return nil
-  end
-  return planned_diff(args)
+  return nil
 end
 
 transcript_defaults.__tool_collapsed_details.edit_file = function(block)
@@ -166,6 +181,9 @@ smelt.tools.register({
   end,
   preview = function(args)
     return planned_diff(args)
+  end,
+  preview_output = function(args)
+    return planned_output(args or {})
   end,
   draft_preview = function(args, ctx, block)
     local _ = ctx

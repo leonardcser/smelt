@@ -2300,7 +2300,7 @@ fn push_history_item_descriptor_rows(
                         metadata: inv.result.metadata.clone(),
                     })),
                     user_message: None,
-                    preview: false,
+                    preview_output: None,
                 };
                 records.push(transcript_descriptor_record(
                     records.len(),

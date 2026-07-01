@@ -3562,6 +3562,7 @@ mod tests {
                     name: "bash".into(),
                     summary: StyledLines::from_plain("bash"),
                     args: HashMap::new(),
+                    preview_output: None,
                 },
                 now,
             },

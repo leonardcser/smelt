@@ -87,6 +87,7 @@ pub struct ToolHandles {
     pub preflight: Option<LuaHandle>,
     pub paths_for_workspace: Option<LuaHandle>,
     pub preview: Option<LuaHandle>,
+    pub preview_output: Option<LuaHandle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]

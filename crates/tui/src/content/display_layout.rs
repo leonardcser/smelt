@@ -12,7 +12,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 10;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 11;
 
 pub(crate) fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
@@ -120,7 +120,7 @@ pub(crate) enum CompileJob {
         key: DisplayCacheKey,
         view_state: ViewState,
         block: Block,
-        state: Option<ToolState>,
+        state: Option<Box<ToolState>>,
         cache_source_views: bool,
     },
     Group {
@@ -161,7 +161,7 @@ impl CompileJob {
                         block_id,
                         index,
                         &block,
-                        state.as_ref(),
+                        state.as_deref(),
                         view_state,
                         &mut cache,
                     ),
@@ -302,7 +302,9 @@ impl DisplayModel {
                         continue;
                     };
                     let state = match &block {
-                        Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
+                        Block::ToolCall { call_id, .. } => {
+                            history.tool_state(call_id).cloned().map(Box::new)
+                        }
                         _ => None,
                     };
                     let cache_source_views = cache_source_views_for_block(&block);
@@ -564,8 +566,11 @@ fn block_snapshot_json(
             value.insert("status_hl".into(), serde_json::json!(status.hl_group()));
             if let Some(state) = history.tool_state(call_id) {
                 value.insert("output".into(), serde_json::to_value(&state.output).ok()?);
+                value.insert(
+                    "preview_output".into(),
+                    serde_json::to_value(&state.preview_output).ok()?,
+                );
                 value.insert("user_message".into(), serde_json::json!(state.user_message));
-                value.insert("preview".into(), serde_json::json!(state.preview));
             }
         }
         Block::Exec { command, output } => {

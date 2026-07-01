@@ -472,7 +472,7 @@ fn push_assistant_blocks(
                 elapsed: elapsed_ms.map(Duration::from_millis),
                 output: Some(Box::new(output)),
                 user_message: None,
-                preview: false,
+                preview_output: None,
             },
             smelt_core::BlockOrigin::History(history_index),
         );

@@ -131,7 +131,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            preview: false,
+            preview_output: None,
         }
     }
 

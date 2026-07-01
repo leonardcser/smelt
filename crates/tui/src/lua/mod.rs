@@ -1021,7 +1021,7 @@ mod tests {
                     metadata: None,
                 })),
                 user_message: None,
-                preview: false,
+                preview_output: None,
             },
         )
     }
@@ -1158,7 +1158,7 @@ mod tests {
                 metadata: None,
             })),
             user_message: Some("done".into()),
-            preview: false,
+            preview_output: None,
         };
         let layout = render_transcript_block(&rt, &tool, Some(&state));
         let BlockLayout::Vbox(items) = layout else {

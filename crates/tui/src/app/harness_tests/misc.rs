@@ -255,11 +255,19 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
             .transcript
             .history()
             .tool_state(&call_id)
-            .is_some_and(|state| state.preview),
-        "promoted finished draft should keep a preview flag"
+            .is_some_and(|state| state.preview_output.is_some()),
+        "promoted finished draft should keep immutable preview output"
     );
     let pending_frame = app.render_to_frame().text();
     assert_edit_file_diff_visible(&pending_frame, "pending-promoted");
+
+    assert!(app.run_lua(&format!(
+        "smelt.fs.file_state.record_write({}, {})",
+        serde_json::to_string(path).unwrap(),
+        serde_json::to_string(new_content).unwrap()
+    )));
+    let after_write_frame = app.render_to_frame().text();
+    assert_edit_file_diff_visible(&after_write_frame, "pending-after-file-state-write");
 
     app.feed_one(SourceEvent::Engine(EngineEvent::ToolFinished {
         call_id: call_id.clone(),
@@ -280,8 +288,8 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
             .transcript
             .history()
             .tool_state(&call_id)
-            .is_some_and(|state| !state.preview),
-        "finished tool should rely on output metadata instead of preview state"
+            .is_some_and(|state| state.preview_output.is_none()),
+        "finished tool should rely on output metadata instead of preview output"
     );
     let finished_frame = app.render_to_frame().text();
     assert_edit_file_diff_visible(&finished_frame, "finished");

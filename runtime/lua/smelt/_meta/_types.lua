@@ -610,6 +610,7 @@
 ---@field preflight? function `preflight(args, ctx) -> table?` - validation hook; nil result skips.
 ---@field paths_for_workspace? function `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
 ---@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. The confirm dialog renders it directly into the preview pane.
+---@field preview_output? function `preview_output(args) -> { content, is_error?, metadata? }|nil` - immutable pending transcript output derived from final streamed arguments before execution.
 ---@field draft_preview? function `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript.
 ---@field watchdog_timeout_ms? integer Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally.
 ---@field watchdog_max_timeout_ms? integer Maximum watchdog deadline accepted from tool arguments, in milliseconds.
@@ -643,7 +644,7 @@
 ---@field elapsed_text? string Terminal/static tool elapsed label.
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
----@field preview? boolean True while a promoted finished draft should keep rendering its pre-execute preview.
+---@field preview_output? smelt.transcript.ToolOutput Immutable pending output snapshot for a promoted finished draft.
 ---@field output? smelt.transcript.ToolOutput Tool output snapshot.
 ---@field event? string Process status event type, e.g. `"background_process_completed"`.
 ---@field event_type? string Alias for `event`.

@@ -222,7 +222,7 @@ mod tests {
                 metadata: Some(metadata),
             })),
             user_message: None,
-            preview: false,
+            preview_output: None,
         }
     }
 

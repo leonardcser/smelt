@@ -32,6 +32,7 @@ pub struct ToolStart {
     pub name: String,
     pub summary: protocol::StyledLines,
     pub args: HashMap<String, serde_json::Value>,
+    pub preview_output: Option<ToolOutputRef>,
 }
 
 impl Default for StreamParser {
@@ -191,15 +192,12 @@ impl StreamParser {
             name,
             summary,
             args,
+            preview_output,
         } = tool;
         let block_id = stream_id.and_then(|stream_id| self.tool_drafts.remove(stream_id));
         let Some(block_id) = block_id else {
             return false;
         };
-        let preview = matches!(
-            history.block(block_id),
-            Some(Block::ToolDraft { finished: true, .. })
-        );
         let block = Block::ToolCall {
             call_id: call_id.clone(),
             name,
@@ -211,7 +209,7 @@ impl StreamParser {
             elapsed: None,
             output: None,
             user_message: None,
-            preview,
+            preview_output,
         };
         history.rewrite_with_tool_state(block_id, block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
@@ -248,7 +246,7 @@ impl StreamParser {
             elapsed: None,
             output: None,
             user_message: None,
-            preview: false,
+            preview_output: None,
         };
         let block_id = history.push_with_state(block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
@@ -370,7 +368,7 @@ impl StreamParser {
                 state.output = Some(out);
             }
             state.elapsed = elapsed;
-            state.preview = false;
+            state.preview_output = None;
         });
         if let Some(idx) = active_idx {
             let block_id = self.active_tools[idx].block_id;
@@ -401,7 +399,7 @@ impl StreamParser {
             Self::update_tool_state(history, &cid, |state| {
                 state.status = status;
                 state.elapsed = elapsed;
-                state.preview = false;
+                state.preview_output = None;
             });
         }
     }
@@ -1139,6 +1137,7 @@ mod tests {
                 name: "bash".to_string(),
                 summary: protocol::StyledLines::from_plain("echo hi"),
                 args: HashMap::new(),
+                preview_output: None,
             },
             Instant::now(),
         );

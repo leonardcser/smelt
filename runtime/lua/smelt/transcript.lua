@@ -40,7 +40,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field elapsed_text? string Terminal/static tool elapsed label.
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
----@field preview? boolean True while a promoted finished draft should keep rendering its pre-execute preview.
+---@field preview_output? smelt.transcript.ToolOutput Immutable pending output snapshot for a promoted finished draft.
 ---@field output? smelt.transcript.ToolOutput Tool output snapshot.
 ---@field event? string Process status event type, e.g. `"background_process_completed"`.
 ---@field event_type? string Alias for `event`.

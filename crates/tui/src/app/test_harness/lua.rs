@@ -139,6 +139,9 @@ impl TestApp {
                 if let Some(h) = &t.preview {
                     check(&format!("tools[{name}].preview"), h);
                 }
+                if let Some(h) = &t.preview_output {
+                    check(&format!("tools[{name}].preview_output"), h);
+                }
             }
         }
 

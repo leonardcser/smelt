@@ -15,7 +15,7 @@ use crate::lua::{
     TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
-use crate::transcript_model::{Block, BlockId, ToolState, ToolStatus};
+use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
@@ -1437,6 +1437,64 @@ impl LuaRuntime {
         }
     }
 
+    pub fn tool_preview_output(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> Option<ToolOutputRef> {
+        let preview_output_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let h = handlers.get(tool_name)?;
+            let rh = h.preview_output.as_ref()?;
+            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool preview_output: build args: {e}"));
+                return None;
+            }
+        };
+
+        let _perf = smelt_perf::perf::begin("lua:tool");
+        let result: mlua::Value = match preview_output_fn.call(args_table) {
+            Ok(v) => v,
+            Err(e) => {
+                self.record_error(format!("tool preview_output `{tool_name}`: {e}"));
+                return None;
+            }
+        };
+
+        match result {
+            mlua::Value::Nil => None,
+            mlua::Value::Table(table) => {
+                Some(Box::new(Self::tool_output_from_lua_table(&self.lua, table)))
+            }
+            other => {
+                self.record_error(format!(
+                    "tool preview_output `{tool_name}`: expected result table or nil, got {}",
+                    other.type_name()
+                ));
+                None
+            }
+        }
+    }
+
+    fn tool_output_from_lua_table(lua: &Lua, result: mlua::Table) -> ToolOutput {
+        let content: String = result.get("content").unwrap_or_default();
+        let is_error: bool = result.get("is_error").unwrap_or(false);
+        let metadata = result
+            .get::<mlua::Value>("metadata")
+            .ok()
+            .and_then(|v| crate::lua::lua_to_serde::<serde_json::Value>(lua, &v));
+        ToolOutput {
+            content,
+            is_error,
+            metadata,
+        }
+    }
+
     /// Invoke the tool's `summary(args)` Lua hook. The hook may return:
     ///   * `nil` / no value - empty summary (no header text)
     ///   * a `string` - wrapped as a single plain span (each `\n`-line one row)
@@ -2324,8 +2382,8 @@ fn transcript_block_to_lua_table(
             if let Some(message) = state.and_then(|s| s.user_message.as_deref()) {
                 t.set("user_message", message)?;
             }
-            if let Some(state) = state {
-                t.set("preview", state.preview)?;
+            if let Some(output) = state.and_then(|s| s.preview_output.as_deref()) {
+                t.set("preview_output", tool_output_to_lua_table(lua, output)?)?;
             }
             if let Some(output) = state.and_then(|s| s.output.as_deref()) {
                 t.set("output", tool_output_to_lua_table(lua, output)?)?;

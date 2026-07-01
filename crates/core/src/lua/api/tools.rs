@@ -116,6 +116,9 @@ pub struct LuaToolDef {
     /// `preview(args) -> smelt.layout` - pre-execute preview render. The
     /// confirm dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
+    /// `preview_output(args) -> { content, is_error?, metadata? }|nil` - immutable
+    /// pending transcript output derived from final streamed arguments before execution.
+    pub preview_output: Option<mlua::Function>,
     /// `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort
     /// renderer for streamed partial arguments in the transcript.
     pub draft_preview: Option<mlua::Function>,
@@ -191,6 +194,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let preflight_handle = def.preflight.map(stash).transpose()?;
                 let paths_for_workspace_handle = def.paths_for_workspace.map(stash).transpose()?;
                 let preview_handle = def.preview.map(stash).transpose()?;
+                let preview_output_handle = def.preview_output.map(stash).transpose()?;
                 let has_draft_preview = def.draft_preview.is_some();
 
                 let meta = lua.create_table()?;
@@ -213,6 +217,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     paths_for_workspace_handle.is_some(),
                 )?;
                 meta.set("hook_preview", preview_handle.is_some())?;
+                meta.set("hook_preview_output", preview_output_handle.is_some())?;
                 meta.set("hook_draft_preview", has_draft_preview)?;
                 meta.set("headless", def.headless.unwrap_or(true))?;
                 meta.set("override_core", def.override_core)?;
@@ -248,6 +253,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             preflight: preflight_handle,
                             paths_for_workspace: paths_for_workspace_handle,
                             preview: preview_handle,
+                            preview_output: preview_output_handle,
                         },
                     );
                 }

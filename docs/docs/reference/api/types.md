@@ -884,6 +884,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `preflight` | `function` |  | `preflight(args, ctx) -> table?` - validation hook; nil result skips. |
 | `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. |
 | `preview` | `function` |  | `preview(args) -> smelt.layout` - pre-execute preview render. The confirm dialog renders it directly into the preview pane. |
+| `preview_output` | `function` |  | `preview_output(args) -> { content, is_error?, metadata? }|nil` - immutable pending transcript output derived from final streamed arguments before execution. |
 | `draft_preview` | `function` |  | `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript. |
 | `watchdog_timeout_ms` | `integer` |  | Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally. |
 | `watchdog_max_timeout_ms` | `integer` |  | Maximum watchdog deadline accepted from tool arguments, in milliseconds. |
@@ -921,7 +922,7 @@ Semantic transcript block snapshot passed to the root renderer.
 | `elapsed_text` | `string` |  | Terminal/static tool elapsed label. |
 | `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
-| `preview` | `boolean` |  | True while a promoted finished draft should keep rendering its pre-execute preview. |
+| `preview_output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Immutable pending output snapshot for a promoted finished draft. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output snapshot. |
 | `event` | `string` |  | Process status event type, e.g. `"background_process_completed"`. |
 | `event_type` | `string` |  | Alias for `event`. |
