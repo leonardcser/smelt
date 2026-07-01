@@ -98,6 +98,60 @@ function smelt.tools.path_summary(path, ctx, opts)
   return (opts.prefix or "") .. shown .. (opts.suffix or "")
 end
 
+local function cwd_prefixes()
+  local cwd = smelt.session.cwd()
+  if not cwd or cwd == "" then return {} end
+  local last = cwd:sub(-1)
+  if last == "/" or last == "\\" then return { cwd } end
+  return { cwd .. "/", cwd .. "\\" }
+end
+
+local function compact_cwd_path(path, prefixes)
+  path = path or ""
+  for _, prefix in ipairs(prefixes) do
+    if path:sub(1, #prefix) == prefix then return path:sub(#prefix + 1) end
+  end
+  return path
+end
+
+-- Compact repeated absolute cwd prefixes in model-facing tool output. This is
+-- display-only policy for structured path outputs, not a filesystem primitive.
+function smelt.tools._compact_cwd_path(path)
+  return compact_cwd_path(path, cwd_prefixes())
+end
+
+function smelt.tools._compact_cwd_paths(paths)
+  local prefixes = cwd_prefixes()
+  if #prefixes == 0 then return paths or {} end
+  local out = {}
+  for i, path in ipairs(paths or {}) do
+    out[i] = compact_cwd_path(path, prefixes)
+  end
+  return out
+end
+
+function smelt.tools._compact_cwd_prefix_lines(content)
+  if not content or content == "" then return content or "" end
+  local prefixes = cwd_prefixes()
+  if #prefixes == 0 then return content end
+
+  local has_prefix = false
+  for _, prefix in ipairs(prefixes) do
+    if content:find(prefix, 1, true) then
+      has_prefix = true
+      break
+    end
+  end
+  if not has_prefix then return content end
+
+  local out = {}
+  for line, newline in content:gmatch("([^\n]*)(\n?)") do
+    if line == "" and newline == "" then break end
+    out[#out + 1] = compact_cwd_path(line, prefixes) .. newline
+  end
+  return table.concat(out)
+end
+
 -- Attach an outer watchdog to a tool definition. This is intentionally
 -- separate from the tool's own timeout handling: builtins use a small grace
 -- period so their domain-specific timeout result wins before the watchdog fires.

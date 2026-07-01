@@ -76,7 +76,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     if err then
       return { content = err, is_error = true }
     end
-    local paths = results and results.paths or {}
+    local paths = smelt.tools._compact_cwd_paths(results and results.paths or {})
     if results and results.timed_out then
       return {
         content = string.format(

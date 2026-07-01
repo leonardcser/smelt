@@ -232,8 +232,8 @@ smelt.tools.register(smelt.tools._with_watchdog({
       end
     end
 
-    local combined = combine_streams(out.stdout, out.stderr)
-    local count_source = out.stdout or combined
+    local combined = smelt.tools._compact_cwd_prefix_lines(combine_streams(out.stdout, out.stderr))
+    local count_source = smelt.tools._compact_cwd_prefix_lines(out.stdout or combined)
     if out.timed_out then
       local secs = math.floor(((args.timeout_ms or 30000) / 1000) + 0.5)
       return {
