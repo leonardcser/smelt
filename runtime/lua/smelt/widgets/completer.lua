@@ -29,7 +29,7 @@ local registry = {}            -- registered completer specs in declaration orde
 local current = nil            -- { spec, picker, lock_reg, anchor, items, view, selected, query_key, regs }
 local pending_open = nil       -- delayed initial open while an async provider is searching
 local lock_count = 0
-local tab_bound = false
+local manual_tab_reg = nil     -- Tab binding while a manual completer is available and closed
 local refilter
 
 local function time(label, fn)
@@ -37,6 +37,19 @@ local function time(label, fn)
     return smelt.perf.time(label, fn)
   end
   return fn()
+end
+
+-- ── Helpers ─────────────────────────────────────────────────────────────
+
+local function bind_manual_tab()
+  if manual_tab_reg then return end
+  manual_tab_reg = smelt.prompt.win():key("tab", function() M._tab() end)
+end
+
+local function clear_manual_tab_binding()
+  if not manual_tab_reg then return end
+  manual_tab_reg:remove()
+  manual_tab_reg = nil
 end
 
 -- ── Modality lock ───────────────────────────────────────────────────────
@@ -47,6 +60,7 @@ end
 -- recompute pass. Idempotent - multiple acquirers stack.
 ---@type fun(): smelt.Reg
 function smelt.prompt.acquire()
+  clear_manual_tab_binding()
   lock_count = lock_count + 1
   local released = false
   local reg = smelt.reg.new(function()
@@ -65,14 +79,6 @@ end
 ---@type fun(): boolean
 function smelt.prompt.is_modal()
   return lock_count > 0
-end
-
--- ── Helpers ─────────────────────────────────────────────────────────────
-
-local function ensure_tab_binding()
-  if tab_bound then return end
-  tab_bound = true
-  smelt.prompt.win():key("tab", function() M._tab() end)
 end
 
 local function prepare_picker_items(list, spec)
@@ -218,6 +224,7 @@ local function picker_bindings(self)
   table.insert(self.regs, win:key("c-p",   function() move(1)  end))
   table.insert(self.regs, win:key("c-n",   function() move(-1) end))
   table.insert(self.regs, win:key("enter", function() accept_current(self, "enter") end))
+  table.insert(self.regs, win:key("tab",   function() accept_current(self, "tab") end))
   table.insert(self.regs, win:key("esc",   function() close_current() end))
 end
 
@@ -360,13 +367,29 @@ end
 -- Run detect across registered completers and open one if any matches.
 -- Called by `text_changed`, by `acquire` release, and by manual reload paths.
 local function recompute_body()
-  ensure_tab_binding()
-  if current then refilter() return end
-  if lock_count > 0 then return end
+  if current then
+    clear_manual_tab_binding()
+    refilter()
+    return
+  end
+  if lock_count > 0 then
+    clear_manual_tab_binding()
+    return
+  end
   local text = smelt.prompt.text()
   local cpos = smelt.prompt.cursor()
   local spec, anchor = detect_any(text, cpos, "auto")
-  if spec then open_for(spec, anchor) end
+  if spec then
+    clear_manual_tab_binding()
+    open_for(spec, anchor)
+    return
+  end
+  local manual_spec = detect_any(text, cpos, "manual")
+  if manual_spec then
+    bind_manual_tab()
+  else
+    clear_manual_tab_binding()
+  end
 end
 
 function M._recompute()
@@ -382,7 +405,10 @@ local function manual_tab_body()
   local text = smelt.prompt.text()
   local cpos = smelt.prompt.cursor()
   local spec, anchor = detect_any(text, cpos, "manual")
-  if not spec then return end
+  if not spec then
+    clear_manual_tab_binding()
+    return
+  end
   local view, items, result, query_key = candidate_rows(spec, anchor, text, cpos, false)
   if #view == 1 and spec.accept_single ~= false and not view[1]._synthetic then
     accept_item(spec, view[1], anchor, "tab")

@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn prompt_prediction_tab_accepts_after_non_path_typing() {
+    let mut app = TestApp::builder().build();
+
+    // This first edit used to leave the manual path-completer Tab binding
+    // installed, which swallowed the later prediction accept.
+    app.type_text("ordinary prompt text");
+    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    app.install_prompt_placeholder(
+        "predicted follow-up".to_string(),
+        vec![crate::smelt_edit::KeyBind::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )],
+        Vec::new(),
+    );
+
+    app.press(KeyCode::Tab);
+
+    assert_eq!(app.state().prompt_text, "predicted follow-up");
+}
+
+#[test]
+fn slash_completion_tab_accepts_command_name() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"smelt.cmd.register("tab-accept-regression", function() end, { desc = "tab regression" })"#
+    ));
+
+    app.type_text("/tab-accept-regression");
+    app.press(KeyCode::Tab);
+
+    assert_eq!(app.state().prompt_text, "/tab-accept-regression ");
+}
+
+#[test]
+fn path_completion_tab_still_opens_for_path_tokens() {
+    let mut app = TestApp::builder().build();
+    let src = std::path::Path::new(&app.app.cwd).join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(src.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+
+    app.type_text("src/");
+    app.press(KeyCode::Tab);
+
+    assert!(
+        app.state().picker_count > 0,
+        "Tab on a path token should open the path completion picker"
+    );
+}
+
+#[test]
 fn unknown_slash_prompt_submits_as_user_message() {
     let mut app = TestApp::builder().build();
 
