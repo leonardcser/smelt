@@ -1,3 +1,6 @@
+mod semantic;
+
+use semantic::*;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -13,7 +16,9 @@ use tokio::time::{timeout, Duration};
 pub struct LspServerConfig {
     pub cmd: Vec<String>,
     #[serde(default)]
-    pub languages: Vec<String>,
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub language_id: Option<String>,
     #[serde(default)]
     pub root_markers: Vec<String>,
     #[serde(default = "default_init_timeout_ms")]
@@ -88,6 +93,7 @@ struct LspClient {
     request_timeout_ms: u64,
     init_timeout_ms: u64,
     initialization_options: Value,
+    config: LspServerConfig,
     next_id: AtomicU64,
     _child: Mutex<Child>,
 }
@@ -179,12 +185,206 @@ impl LspManager {
             ClientForFile::NotReady(value) => return Ok(value),
         };
         client.sync_document(file_path).await?;
-        client
-            .request(
-                "textDocument/documentSymbol",
-                json!({ "textDocument": text_document(file_path)? }),
-            )
-            .await
+        request_document_symbols(&client, file_path).await
+    }
+
+    pub(crate) async fn outline(&self, options: OutlineOptions<'_>) -> Result<Value, String> {
+        let raw_symbols = self.document_symbols(options.file_path).await?;
+        if !raw_symbols.is_array() {
+            return Ok(raw_symbols);
+        }
+        let symbols = normalize_document_symbols(&raw_symbols);
+        let total = count_symbols(&symbols);
+        let limit = bounded_limit(options.max_symbols, 200, 500);
+        let mut remaining = limit;
+        let compact_symbols = compact_outline_symbols_filtered(
+            &symbols,
+            &mut remaining,
+            OutlineFilter {
+                symbol: options.symbol,
+                kind: options.kind,
+                name_contains: options.name_contains,
+                max_depth: options.max_depth,
+            },
+        );
+        let shown = count_compact_outline_symbols(&compact_symbols);
+        Ok(json!({
+            "file_path": display_path(&absolute_path_string(options.file_path)),
+            "filters": {
+                "symbol": options.symbol,
+                "kind": options.kind,
+                "name_contains": options.name_contains,
+                "max_depth": options.max_depth,
+            },
+            "total": total,
+            "limit": limit,
+            "truncated": total > shown,
+            "shown": shown,
+            "omitted": total.saturating_sub(shown),
+            "symbols": compact_symbols,
+        }))
+    }
+
+    pub async fn workspace_symbols(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+        path_glob: Option<&str>,
+        limit: usize,
+        exact: bool,
+    ) -> Result<Value, String> {
+        let clients = self.workspace_clients(path_glob).await?;
+        let mut errors = Vec::new();
+        let mut symbols = Vec::new();
+        let mut handles = Vec::new();
+        for (server, client) in clients {
+            let query = query.to_string();
+            handles.push(tokio::spawn(async move {
+                let result = client
+                    .request("workspace/symbol", json!({ "query": query }))
+                    .await;
+                (server, result)
+            }));
+        }
+        for handle in handles {
+            let Ok((server, result)) = handle.await else {
+                errors.push(json!({
+                    "code": "lsp_workspace_symbol_task_failed",
+                    "message": "workspace symbol request task failed",
+                }));
+                continue;
+            };
+            match result {
+                Ok(value) => {
+                    collect_workspace_symbols(&value, &server, kind, path_glob, &mut symbols)
+                }
+                Err(err) => errors.push(json!({
+                    "code": "lsp_workspace_symbol_request_failed",
+                    "message": err,
+                    "server": server,
+                })),
+            }
+        }
+        rank_workspace_symbols(&mut symbols, query, exact);
+        let total = symbols.len();
+        let limit = bounded_limit(limit, 20, 100);
+        let truncated = total > limit;
+        symbols.truncate(limit);
+        Ok(json!({
+            "query": query,
+            "kind": kind,
+            "path_glob": path_glob,
+            "exact": exact,
+            "limit": limit,
+            "truncated": truncated,
+            "total": total,
+            "shown": symbols.len(),
+            "omitted": total.saturating_sub(symbols.len()),
+            "symbols": symbols,
+            "errors": errors,
+        }))
+    }
+
+    pub async fn inspect_symbol(
+        &self,
+        file_path: &str,
+        line: u64,
+        column: u64,
+        depth: u64,
+    ) -> Result<Value, String> {
+        let client = match self.client_for_file(file_path).await? {
+            ClientForFile::Ready(client) => client,
+            ClientForFile::NotReady(value) => return Ok(value),
+        };
+        let text = client.sync_document(file_path).await?;
+        let params = text_position_params(file_path, &text, line, column)?;
+        let hover_params = params.clone();
+        let definition_params = params.clone();
+        let type_definition_params = params.clone();
+        let implementation_params = params;
+        let symbols_client = client.clone();
+        let references_client = client.clone();
+        let references_text = text.clone();
+        let (hover, definitions, type_definitions, implementations, raw_symbols, references) = tokio::join!(
+            async {
+                normalize_hover(
+                    optional_lsp_request(&client, "textDocument/hover", hover_params).await,
+                )
+            },
+            async {
+                optional_lsp_locations(&client, "textDocument/definition", definition_params).await
+            },
+            async {
+                optional_lsp_locations(
+                    &client,
+                    "textDocument/typeDefinition",
+                    type_definition_params,
+                )
+                .await
+            },
+            async {
+                optional_lsp_locations(
+                    &client,
+                    "textDocument/implementation",
+                    implementation_params,
+                )
+                .await
+            },
+            async {
+                request_document_symbols(&symbols_client, file_path)
+                    .await
+                    .ok()
+            },
+            async {
+                if depth == 0 {
+                    return Value::Null;
+                }
+                let mut reference_params =
+                    match text_position_params(file_path, &references_text, line, column) {
+                        Ok(params) => params,
+                        Err(err) => return json!({ "error": err }),
+                    };
+                reference_params["context"] = json!({ "includeDeclaration": false });
+                match references_client
+                    .request("textDocument/references", reference_params)
+                    .await
+                {
+                    Ok(raw_refs) => location_summary(
+                        &raw_refs,
+                        LocationSummaryOptions {
+                            limit: 30,
+                            symbol: Some(SymbolPosition {
+                                file_path,
+                                line,
+                                column,
+                            }),
+                        },
+                    ),
+                    Err(err) => json!({ "error": err }),
+                }
+            }
+        );
+        let symbols = raw_symbols
+            .as_ref()
+            .map(normalize_document_symbols)
+            .unwrap_or_default();
+        let enclosing_symbol = enclosing_symbol_at(&symbols, line, column);
+        let outline_context = outline_path_at_position(&symbols, line, column);
+
+        Ok(json!({
+            "position": {
+                "file_path": display_path(&absolute_path_string(file_path)),
+                "line": line,
+                "column": column,
+            },
+            "enclosing_symbol": enclosing_symbol,
+            "hover": hover,
+            "definitions": definitions,
+            "type_definitions": type_definitions,
+            "implementations": implementations,
+            "references": references,
+            "outline_context": outline_context,
+        }))
     }
 
     pub async fn definition(
@@ -198,20 +398,31 @@ impl LspManager {
             ClientForFile::NotReady(value) => return Ok(value),
         };
         let text = client.sync_document(file_path).await?;
-        client
+        let raw = client
             .request(
                 "textDocument/definition",
                 text_position_params(file_path, &text, line, column)?,
             )
-            .await
+            .await?;
+        Ok(location_summary(
+            &raw,
+            LocationSummaryOptions {
+                limit: 50,
+                symbol: Some(SymbolPosition {
+                    file_path,
+                    line,
+                    column,
+                }),
+            },
+        ))
     }
 
-    pub async fn references(
+    pub(crate) async fn references(
         &self,
         file_path: &str,
         line: u64,
         column: u64,
-        include_declaration: bool,
+        options: ReferenceOptions,
     ) -> Result<Value, String> {
         let client = match self.client_for_file(file_path).await? {
             ClientForFile::Ready(client) => client,
@@ -219,8 +430,22 @@ impl LspManager {
         };
         let text = client.sync_document(file_path).await?;
         let mut params = text_position_params(file_path, &text, line, column)?;
-        params["context"] = json!({ "includeDeclaration": include_declaration });
-        client.request("textDocument/references", params).await
+        params["context"] = json!({ "includeDeclaration": options.include_declaration });
+        let raw_refs = client.request("textDocument/references", params).await?;
+        if options.raw {
+            return Ok(raw_refs);
+        }
+        Ok(location_summary(
+            &raw_refs,
+            LocationSummaryOptions {
+                limit: options.limit,
+                symbol: Some(SymbolPosition {
+                    file_path,
+                    line,
+                    column,
+                }),
+            },
+        ))
     }
 
     pub async fn diagnostics(&self, file_path: Option<&str>) -> Result<Value, String> {
@@ -230,7 +455,6 @@ impl LspManager {
                 ClientForFile::NotReady(value) => return Ok(value),
             };
             client.sync_document(path).await?;
-            tokio::time::sleep(Duration::from_millis(250)).await;
             let uri = file_uri(path)?;
             let diagnostics = client.diagnostics.lock().await;
             return Ok(diagnostics.get(&uri).cloned().unwrap_or_else(|| json!([])));
@@ -280,6 +504,90 @@ impl LspManager {
         Ok(json!({ "applied": apply, "summary": summary, "edit": edit }))
     }
 
+    async fn workspace_clients(
+        &self,
+        path_glob: Option<&str>,
+    ) -> Result<Vec<(String, Arc<LspClient>)>, String> {
+        let (existing_slots, candidate_names, hinted): (Vec<_>, Vec<String>, bool) = {
+            let servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+            if servers.is_empty() {
+                return Err("no LSP servers configured".into());
+            }
+            let mut existing = servers
+                .iter()
+                .flat_map(|(name, entry)| {
+                    entry
+                        .clients
+                        .values()
+                        .cloned()
+                        .map(|slot| (name.clone(), slot))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            existing.sort_by(|a, b| a.0.cmp(&b.0));
+            let hinted = path_glob.and_then(extension_from_pattern).is_some();
+            let candidate_names = workspace_candidate_servers(&servers, path_glob);
+            (existing, candidate_names, hinted)
+        };
+
+        let mut ready_clients = Vec::new();
+        for (name, slot) in &existing_slots {
+            if !candidate_names.contains(name) {
+                continue;
+            }
+            if let Some(client) = slot.ready_now().await {
+                ready_clients.push((name.clone(), client));
+            }
+        }
+        if !ready_clients.is_empty() {
+            return Ok(ready_clients);
+        }
+        if !hinted && candidate_names.len() > 1 {
+            return Err(json!({
+                "error": "find_symbol needs a path_glob when multiple LSP servers are configured and none are ready",
+                "servers": candidate_names,
+            })
+            .to_string());
+        }
+
+        let slots: Vec<_> = {
+            let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let mut slots = Vec::new();
+            for name in candidate_names {
+                let Some(entry) = servers.get_mut(&name) else {
+                    continue;
+                };
+                let root = find_root(&cwd, &entry.config.root_markers);
+                let slot = entry
+                    .clients
+                    .entry(root.clone())
+                    .or_insert_with(|| {
+                        LspClientSlot::start(name.clone(), entry.config.clone(), root)
+                    })
+                    .clone();
+                slots.push((name, slot));
+            }
+            slots.sort_by(|a, b| a.0.cmp(&b.0));
+            slots
+        };
+
+        let mut clients = Vec::new();
+        let mut errors = Vec::new();
+        for (name, slot) in slots {
+            match slot.wait_ready().await {
+                Ok(client) => clients.push((name, client)),
+                Err(err) => errors.push(json!({ "server": name, "status": err })),
+            }
+        }
+        if clients.is_empty() {
+            return Err(
+                json!({ "error": "no LSP server became ready", "servers": errors }).to_string(),
+            );
+        }
+        Ok(clients)
+    }
+
     async fn client_for_file(&self, file_path: &str) -> Result<ClientForFile, String> {
         let file = PathBuf::from(file_path);
         let (server_name, slot) = {
@@ -308,6 +616,60 @@ impl LspManager {
             }
         })
     }
+}
+
+pub(crate) struct OutlineOptions<'a> {
+    pub(crate) file_path: &'a str,
+    pub(crate) max_symbols: usize,
+    pub(crate) symbol: Option<&'a str>,
+    pub(crate) kind: Option<&'a str>,
+    pub(crate) name_contains: Option<&'a str>,
+    pub(crate) max_depth: Option<usize>,
+}
+
+pub(crate) struct ReferenceOptions {
+    pub(crate) include_declaration: bool,
+    pub(crate) limit: usize,
+    pub(crate) raw: bool,
+}
+
+struct SymbolPosition<'a> {
+    file_path: &'a str,
+    line: u64,
+    column: u64,
+}
+
+struct LocationSummaryOptions<'a> {
+    limit: usize,
+    symbol: Option<SymbolPosition<'a>>,
+}
+
+fn location_summary(locations: &Value, options: LocationSummaryOptions<'_>) -> Value {
+    let mut locations = normalize_locations(locations);
+    let total = locations.len();
+    let limit = bounded_limit(options.limit, 50, 200);
+    locations.truncate(limit);
+    add_location_previews(&mut locations);
+    let locations = locations
+        .into_iter()
+        .map(|loc| loc.to_json())
+        .collect::<Vec<_>>();
+    let mut out = json!({
+        "total": total,
+        "limit": limit,
+        "truncated": total > locations.len(),
+        "shown": locations.len(),
+        "omitted": total.saturating_sub(locations.len()),
+        "locations": locations,
+    });
+    if let Some(symbol) = options.symbol {
+        out["symbol"] = json!({
+            "file_path": display_path(&absolute_path_string(symbol.file_path)),
+            "line": symbol.line,
+            "column": symbol.column,
+        });
+    }
+    out
 }
 
 impl LspClientSlot {
@@ -478,6 +840,7 @@ impl LspClient {
             request_timeout_ms: config.request_timeout_ms,
             init_timeout_ms: config.init_timeout_ms,
             initialization_options: config.initialization_options.clone(),
+            config: config.clone(),
             next_id: AtomicU64::new(1),
             _child: Mutex::new(child),
         });
@@ -506,11 +869,17 @@ impl LspClient {
                             "synchronization": { "didOpen": true, "didChange": true },
                             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                             "definition": {},
+                            "typeDefinition": {},
+                            "implementation": {},
+                            "hover": { "contentFormat": ["markdown", "plaintext"] },
                             "references": {},
                             "rename": { "prepareSupport": false },
                             "publishDiagnostics": {}
                         },
-                        "workspace": { "workspaceEdit": { "documentChanges": true } }
+                        "workspace": {
+                            "symbol": {},
+                            "workspaceEdit": { "documentChanges": true }
+                        }
                     },
                     "initializationOptions": self.initialization_options.clone()
                 }),
@@ -541,7 +910,7 @@ impl LspClient {
                 json!({
                     "textDocument": {
                         "uri": uri,
-                        "languageId": language_id(file_path),
+                        "languageId": language_id(file_path, &self.config),
                         "version": version,
                         "text": text
                     }
@@ -747,25 +1116,59 @@ fn server_request_result(msg: &Value, settings: &Value) -> Value {
     }
 }
 
+fn workspace_candidate_servers(
+    servers: &HashMap<String, ServerEntry>,
+    path_glob: Option<&str>,
+) -> Vec<String> {
+    let hinted_ext = path_glob.and_then(extension_from_pattern);
+    let mut names = servers
+        .iter()
+        .filter(|(name, entry)| {
+            hinted_ext.is_none_or(|ext| server_matches_extension(name, &entry.config, ext))
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if names.is_empty() && servers.len() == 1 {
+        names.extend(servers.keys().cloned());
+    }
+    names.sort();
+    names
+}
+
+fn extension_from_pattern(pattern: &str) -> Option<&str> {
+    let trimmed = pattern.trim_end_matches(['*', '/', '.']);
+    Path::new(trimmed)
+        .extension()?
+        .to_str()
+        .filter(|ext| !ext.is_empty())
+}
+
+fn server_matches_extension(name: &str, config: &LspServerConfig, ext: &str) -> bool {
+    let default_language = default_language_id_for_extension(ext);
+    config.extensions.iter().any(|item| item == ext)
+        || name == ext
+        || default_language.is_some_and(|language| name == language)
+        || config
+            .language_id
+            .as_deref()
+            .is_some_and(|language_id| language_id == ext || default_language == Some(language_id))
+}
+
 fn pick_server(servers: &HashMap<String, ServerEntry>, file: &Path) -> Option<String> {
     let ext = file.extension().and_then(|s| s.to_str()).unwrap_or("");
-    let language_id = language_id(file.to_str().unwrap_or_default());
-    for (name, entry) in servers {
-        if entry
-            .config
-            .languages
-            .iter()
-            .any(|ft| ft == ext || ft == &language_id || ft == name)
-            || name == ext
-            || name == &language_id
-        {
-            return Some(name.clone());
+    let mut matches = servers
+        .iter()
+        .filter(|(name, entry)| server_matches_extension(name, &entry.config, ext))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.into_iter().next().or_else(|| {
+        if servers.len() == 1 {
+            servers.keys().next().cloned()
+        } else {
+            None
         }
-    }
-    if servers.len() == 1 {
-        return servers.keys().next().cloned();
-    }
-    None
+    })
 }
 
 fn find_root(file: &Path, markers: &[String]) -> PathBuf {
@@ -813,23 +1216,35 @@ fn lsp_position(content: &str, line: u64, column: u64) -> Result<Value, String> 
     Ok(json!({ "line": line_index, "character": char_column_to_utf16(line_text, char_column) }))
 }
 
-fn language_id(file_path: &str) -> String {
-    match Path::new(file_path)
+fn language_id(file_path: &str, config: &LspServerConfig) -> String {
+    if let Some(language_id) = config
+        .language_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return language_id.to_string();
+    }
+    let ext = Path::new(file_path)
         .extension()
         .and_then(|s| s.to_str())
-        .unwrap_or("")
-    {
-        "rs" => "rust",
-        "ts" => "typescript",
-        "tsx" => "typescriptreact",
-        "js" => "javascript",
-        "jsx" => "javascriptreact",
-        "py" => "python",
-        "go" => "go",
-        "lua" => "lua",
-        other => other,
+        .unwrap_or("");
+    default_language_id_for_extension(ext)
+        .map(str::to_string)
+        .unwrap_or_else(|| ext.to_string())
+}
+
+fn default_language_id_for_extension(ext: &str) -> Option<&'static str> {
+    match ext {
+        "rs" => Some("rust"),
+        "ts" => Some("typescript"),
+        "tsx" => Some("typescriptreact"),
+        "js" => Some("javascript"),
+        "jsx" => Some("javascriptreact"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        "lua" => Some("lua"),
+        _ => None,
     }
-    .to_string()
 }
 
 fn file_uri(path: &str) -> Result<String, String> {
@@ -880,9 +1295,10 @@ fn apply_workspace_edit(edit: &Value) -> Result<(), String> {
     let mut by_uri: HashMap<String, Vec<Value>> = HashMap::new();
     if let Some(changes) = edit.get("changes").and_then(Value::as_object) {
         for (uri, edits) in changes {
-            if let Some(edits) = edits.as_array() {
-                by_uri.entry(uri.clone()).or_default().extend(edits.clone());
-            }
+            let edits = edits
+                .as_array()
+                .ok_or("LSP workspace edit contains non-array text edits")?;
+            by_uri.entry(uri.clone()).or_default().extend(edits.clone());
         }
     }
     if let Some(changes) = edit.get("documentChanges").and_then(Value::as_array) {
@@ -890,22 +1306,27 @@ fn apply_workspace_edit(edit: &Value) -> Result<(), String> {
             let uri = change
                 .get("textDocument")
                 .and_then(|d| d.get("uri"))
-                .and_then(Value::as_str);
-            let edits = change.get("edits").and_then(Value::as_array);
-            if let (Some(uri), Some(edits)) = (uri, edits) {
-                by_uri
-                    .entry(uri.to_string())
-                    .or_default()
-                    .extend(edits.clone());
-            }
+                .and_then(Value::as_str)
+                .ok_or("LSP workspace edit contains unsupported document change")?;
+            let edits = change
+                .get("edits")
+                .and_then(Value::as_array)
+                .ok_or("LSP workspace edit contains unsupported document change")?;
+            by_uri
+                .entry(uri.to_string())
+                .or_default()
+                .extend(edits.clone());
         }
     }
     for (uri, edits) in by_uri {
         let path = uri_to_path(&uri)?;
-        let content =
-            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let path_str = path.to_string_lossy().to_string();
+        let _lock = crate::fs::try_flock(&path_str)?;
+        let content = crate::fs::read_to_string(&path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
         let new_content = apply_text_edits(&content, &edits)?;
-        std::fs::write(&path, new_content).map_err(|e| format!("write {}: {e}", path.display()))?;
+        crate::fs::write(&path, new_content.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     Ok(())
 }
@@ -980,6 +1401,23 @@ fn utf16_col_to_byte(line: &str, col: usize) -> usize {
 mod tests {
     use super::*;
 
+    fn test_server(cmd: &str, language_id: &str, extensions: &[&str]) -> ServerEntry {
+        ServerEntry {
+            config: LspServerConfig {
+                cmd: vec![cmd.into()],
+                extensions: extensions.iter().map(|ext| (*ext).into()).collect(),
+                language_id: Some(language_id.into()),
+                root_markers: Vec::new(),
+                init_timeout_ms: default_init_timeout_ms(),
+                request_timeout_ms: default_request_timeout_ms(),
+                startup_wait_ms: default_startup_wait_ms(),
+                initialization_options: Value::Null,
+                settings: Value::Null,
+            },
+            clients: HashMap::new(),
+        }
+    }
+
     #[test]
     fn lsp_position_uses_character_columns() {
         let content = "a😀b\nnext";
@@ -1025,5 +1463,133 @@ mod tests {
             json!({ "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 4 } }, "newText": "B" }),
         ];
         assert_eq!(apply_text_edits("a😀\nnext", &edits).unwrap(), "A😀\nB");
+    }
+
+    #[test]
+    fn normalizes_document_symbols_and_outline_path() {
+        let symbols = normalize_document_symbols(&json!([
+            {
+                "name": "outer",
+                "kind": 12,
+                "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 9, "character": 1 } },
+                "selectionRange": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 8 } },
+                "children": [
+                    {
+                        "name": "inner",
+                        "kind": 6,
+                        "detail": "&self",
+                        "range": { "start": { "line": 2, "character": 4 }, "end": { "line": 4, "character": 5 } },
+                        "selectionRange": { "start": { "line": 2, "character": 7 }, "end": { "line": 2, "character": 12 } }
+                    }
+                ]
+            }
+        ]));
+
+        assert_eq!(symbols[0].name, "outer");
+        assert_eq!(symbols[0].kind, "function");
+        assert_eq!(symbols[0].children[0].kind, "method");
+        assert_eq!(
+            enclosing_symbol_name(&symbols, 3, 5).as_deref(),
+            Some("method inner")
+        );
+        assert_eq!(
+            outline_path_at_position(&symbols, 3, 5),
+            json!([
+                {
+                    "name": "outer",
+                    "kind": "function",
+                    "range": { "start": { "line": 1, "column": 1 }, "end": { "line": 10, "column": 2 } }
+                },
+                {
+                    "name": "inner",
+                    "kind": "method",
+                    "range": { "start": { "line": 3, "column": 5 }, "end": { "line": 5, "column": 6 } }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn normalizes_locations_and_kind_aliases() {
+        let refs = normalize_locations(&json!([
+            {
+                "targetUri": "file:///tmp/demo.rs",
+                "targetSelectionRange": { "start": { "line": 4, "character": 2 }, "end": { "line": 4, "character": 7 } }
+            }
+        ]));
+        assert_eq!(refs[0].file_path, "/tmp/demo.rs");
+        assert_eq!(refs[0].line, 5);
+        assert_eq!(refs[0].column, 3);
+        assert_eq!(normalize_kind_filter("trait"), "interface");
+        assert_eq!(normalize_kind_filter("fn"), "function");
+        assert_eq!(normalize_kind_filter("const"), "constant");
+    }
+
+    #[test]
+    fn pick_server_uses_file_language_not_server_own_name() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "typescript".to_string(),
+            test_server("typescript-language-server", "typescript", &["ts", "js"]),
+        );
+        servers.insert(
+            "rust-analyzer".to_string(),
+            test_server("rust-analyzer", "rust", &["rs"]),
+        );
+
+        assert_eq!(
+            pick_server(&servers, Path::new("crates/core/src/session.rs")),
+            Some("rust-analyzer".to_string())
+        );
+        assert_eq!(
+            pick_server(&servers, Path::new("web/src/app.ts")),
+            Some("typescript".to_string())
+        );
+    }
+
+    #[test]
+    fn path_globs_hint_workspace_symbol_servers() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "rust-analyzer".to_string(),
+            test_server("rust-analyzer", "rust", &["rs"]),
+        );
+        servers.insert(
+            "lua-language-server".to_string(),
+            test_server("lua-language-server", "lua", &["lua"]),
+        );
+
+        assert_eq!(
+            workspace_candidate_servers(&servers, Some("crates/**/*.rs")),
+            vec!["rust-analyzer".to_string()]
+        );
+        assert_eq!(workspace_candidate_servers(&servers, None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn workspace_symbol_query_without_hint_does_not_start_multiple_servers() {
+        let manager = LspManager::default();
+        manager.configure_sync(LspConfig {
+            start: "manual".into(),
+            servers: HashMap::from([
+                (
+                    "rust-analyzer".to_string(),
+                    test_server("rust-analyzer", "rust", &["rs"]).config,
+                ),
+                (
+                    "lua-language-server".to_string(),
+                    test_server("lua-language-server", "lua", &["lua"]).config,
+                ),
+            ]),
+        });
+
+        let err = manager
+            .workspace_symbols("Thing", None, None, 20, false)
+            .await
+            .expect_err("ambiguous query should ask for a path_glob");
+
+        assert!(err.contains("path_glob"));
+        assert!(err.contains("rust-analyzer"));
+        assert!(err.contains("lua-language-server"));
     }
 }

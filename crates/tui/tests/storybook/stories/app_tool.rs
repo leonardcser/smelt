@@ -498,7 +498,7 @@ app_story!(lsp_tool_states, |ctx| {
     ctx.set_viewport(96, 86);
     ctx.run_lua("require('smelt.plugins.lsp').setup({ servers = {} })");
     ctx.tool_call_with_metadata(
-        "lsp_status",
+        "language_server_status",
         &[("file_path", json!("crates/core/src/lsp.rs"))],
         r#"{
   "servers": [
@@ -513,23 +513,7 @@ app_story!(lsp_tool_states, |ctx| {
         Some(2),
     );
     ctx.tool_call_with_metadata(
-        "lsp_document_symbols",
-        &[("file_path", json!("crates/core/src/lsp.rs"))],
-        r#"[
-  {
-    "name": "LspManager",
-    "kind": 5,
-    "range": {
-      "start": { "line": 70, "character": 0 },
-      "end": { "line": 260, "character": 1 }
-    }
-  }
-]"#,
-        json!({ "syntax": "json" }),
-        Some(18),
-    );
-    ctx.tool_call_with_metadata(
-        "lsp_definition",
+        "find_definition",
         &[
             ("file_path", json!("crates/core/src/lsp.rs")),
             ("line", json!(111)),
@@ -548,7 +532,7 @@ app_story!(lsp_tool_states, |ctx| {
         Some(9),
     );
     ctx.tool_call_with_metadata(
-        "lsp_references",
+        "find_references",
         &[
             ("file_path", json!("crates/core/src/lsp.rs")),
             ("line", json!(111)),
@@ -568,7 +552,7 @@ app_story!(lsp_tool_states, |ctx| {
         Some(27),
     );
     ctx.tool_call_with_metadata(
-        "lsp_diagnostics",
+        "diagnostics",
         &[("file_path", json!("crates/core/src/lsp.rs"))],
         r#"[
   {
@@ -584,7 +568,7 @@ app_story!(lsp_tool_states, |ctx| {
         Some(6),
     );
     ctx.tool_call_with_metadata(
-        "lsp_rename_preview",
+        "preview_rename",
         &[
             ("file_path", json!("crates/core/src/lsp.rs")),
             ("line", json!(111)),
@@ -608,7 +592,7 @@ app_story!(lsp_tool_states, |ctx| {
         Some(15),
     );
     ctx.tool_call_with_metadata(
-        "lsp_rename",
+        "rename_symbol",
         &[
             ("file_path", json!("crates/core/src/lsp.rs")),
             ("line", json!(111)),

@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-* lsp_status crates/core/src/lsp.rs
+* language_server_status crates/core/src/lsp.rs
   {
     "servers": [
       {
@@ -13,19 +13,7 @@ expression: frame.text()
     ]
   }
 
-* lsp_document_symbols crates/core/src/lsp.rs
-  [
-    {
-      "name": "LspManager",
-      "kind": 5,
-      "range": {
-        "start": { "line": 70, "character": 0 },
-        "end": { "line": 260, "character": 1 }
-      }
-    }
-  ]
-
-* lsp_definition crates/core/src/lsp.rs
+* find_definition crates/core/src/lsp.rs
   [
     {
       "uri": "file:///repo/smelt/crates/core/src/lsp.rs",
@@ -36,7 +24,7 @@ expression: frame.text()
     }
   ]
 
-* lsp_references crates/core/src/lsp.rs
+* find_references crates/core/src/lsp.rs
   [
     {
       "uri": "file:///repo/smelt/crates/core/src/lua/api/lsp.rs",
@@ -47,7 +35,7 @@ expression: frame.text()
     }
   ]
 
-* lsp_diagnostics crates/core/src/lsp.rs
+* diagnostics crates/core/src/lsp.rs
   [
     {
       "range": {
@@ -59,7 +47,7 @@ expression: frame.text()
     }
   ]
 
-* lsp_rename_preview crates/core/src/lsp.rs
+* preview_rename crates/core/src/lsp.rs
   {
     "changes": {
       "file:///repo/smelt/crates/core/src/lsp.rs": [
@@ -74,12 +62,24 @@ expression: frame.text()
     }
   }
 
-* lsp_rename crates/core/src/lsp.rs
+* rename_symbol crates/core/src/lsp.rs
   {
     "applied": true,
     "files": ["/repo/smelt/crates/core/src/lsp.rs"],
     "edits": 1
   }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

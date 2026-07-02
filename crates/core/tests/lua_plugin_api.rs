@@ -425,15 +425,27 @@ fn tool_execute_preserves_result_metadata() {
 }
 
 #[test]
-fn lsp_plugin_marks_structured_results_as_json() {
+fn lsp_plugin_formats_semantic_results_as_text() {
     let rt = fresh();
     rt.lua
         .load(
             r#"
             smelt.lsp = {
                 configure = function(_) end,
-                __status = function(id, _)
-                    smelt.task.resume(id, { result = { state = "ready" } })
+                __call = function(id, operation, _)
+                    assert(operation == "outline")
+                    smelt.task.resume(id, { result = {
+                        file_path = "/tmp/example.rs",
+                        total = 2,
+                        shown = 2,
+                        omitted = 0,
+                        filters = { max_depth = 1 },
+                        symbols = {
+                            { kind = "function", name = "outer", line = 3, column = 1, children = {
+                                { kind = "method", name = "inner", line = 5, column = 3 },
+                            } },
+                        },
+                    } })
                 end,
             }
             for _, name in ipairs({ "glob", "grep", "edit_file" }) do
@@ -449,11 +461,13 @@ fn lsp_plugin_marks_structured_results_as_json() {
         .exec()
         .expect("load lsp plugin");
 
+    let mut args = HashMap::new();
+    args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
     let result = rt.execute_tool(
-        "lsp_status",
-        &HashMap::new(),
+        "outline",
+        &args,
         4,
-        "call-lsp-status",
+        "call-get-file-outline",
         ToolEnv {
             mode: protocol::AgentMode::normal(),
             session_id: "sess",
@@ -479,17 +493,179 @@ fn lsp_plugin_marks_structured_results_as_json() {
                         content,
                         is_error,
                         metadata,
-                    } if call_id == "call-lsp-status" => Some((content, is_error, metadata)),
+                    } if call_id == "call-get-file-outline" => Some((content, is_error, metadata)),
                     _ => None,
                 })
-                .expect("lsp_status completion")
+                .expect("outline completion")
         }
     };
 
     assert!(!is_error);
-    assert!(content.contains("\"state\": \"ready\""));
-    assert!(!content.contains("```"));
-    assert_eq!(metadata, Some(serde_json::json!({ "syntax": "json" })));
+    assert!(content.contains("Outline: /tmp/example.rs"));
+    assert!(content.contains("Filters: max_depth=1"));
+    assert!(content.contains("- fn outer @ 3:1"));
+    assert!(content.contains("  - method inner @ 5:3"));
+    assert!(!content.contains("\"symbols\""));
+    assert!(metadata.is_none() || metadata == Some(serde_json::Value::Null));
+}
+
+#[test]
+fn lsp_plugin_registers_agent_friendly_semantic_tools() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.lsp = { configure = function(_) end }
+            for _, name in ipairs({ "glob", "grep", "edit_file" }) do
+                smelt.tools.register({ name = name, execute = function() return "" end })
+            end
+            "#,
+        )
+        .exec()
+        .expect("stub lsp backend");
+    rt.lua
+        .load(LSP_PLUGIN_LUA)
+        .set_name("smelt/plugins/lsp.lua")
+        .exec()
+        .expect("load lsp plugin");
+
+    let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+    let outline = defs
+        .iter()
+        .find(|def| def.name == "outline")
+        .expect("outline tool");
+    assert_eq!(
+        outline.parameters["required"],
+        serde_json::json!(["file_path"])
+    );
+    assert!(outline.parameters["properties"].get("symbol").is_some());
+    assert!(outline.parameters["properties"].get("max_depth").is_some());
+    assert!(outline.parameters["properties"]
+        .get("around_line")
+        .is_none());
+    assert!(outline.parameters["properties"]
+        .get("name_contains")
+        .is_some());
+
+    let find = defs
+        .iter()
+        .find(|def| def.name == "find_symbol")
+        .expect("find_symbol tool");
+    assert!(find.description.contains("semantic name search"));
+    assert!(find.parameters["properties"].get("path_glob").is_some());
+    assert!(find.parameters["properties"].get("exact").is_some());
+    assert_eq!(find.parameters["required"], serde_json::json!(["query"]));
+
+    let inspect_at = defs
+        .iter()
+        .find(|def| def.name == "inspect_symbol_at")
+        .expect("inspect_symbol_at tool");
+    assert!(inspect_at.parameters["properties"].get("depth").is_some());
+    assert_eq!(
+        inspect_at.parameters["required"],
+        serde_json::json!(["file_path", "line", "column"])
+    );
+
+    let inspect = defs
+        .iter()
+        .find(|def| def.name == "inspect_symbol")
+        .expect("inspect_symbol tool");
+    assert!(inspect.parameters["properties"].get("depth").is_some());
+    assert!(inspect.parameters["properties"].get("query").is_some());
+    assert_eq!(inspect.parameters["required"], serde_json::json!(["query"]));
+
+    let refs = defs
+        .iter()
+        .find(|def| def.name == "find_references")
+        .expect("find_references tool");
+    assert!(refs.description.contains("normalized locations"));
+    assert!(refs.parameters["properties"].get("raw").is_some());
+    assert!(refs.parameters["properties"].get("group_by").is_none());
+}
+
+#[test]
+fn lsp_plugin_formats_reference_summaries_as_text() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.lsp = {
+                configure = function(_) end,
+                __call = function(id, operation, _)
+                    assert(operation == "references")
+                    smelt.task.resume(id, { result = {
+                        symbol = { file_path = "/tmp/example.rs", line = 10, column = 4 },
+                        total = 2,
+                        shown = 2,
+                        omitted = 0,
+                        locations = {
+                            { file_path = "/tmp/example.rs", line = 12, column = 8, preview = "call_site()" },
+                            { file_path = "/tmp/example.rs", line = 18, column = 2 },
+                        },
+                    } })
+                end,
+            }
+            for _, name in ipairs({ "glob", "grep", "edit_file" }) do
+                smelt.tools.register({ name = name, execute = function() return "" end })
+            end
+            "#,
+        )
+        .exec()
+        .expect("stub lsp backend");
+    rt.lua
+        .load(LSP_PLUGIN_LUA)
+        .set_name("smelt/plugins/lsp.lua")
+        .exec()
+        .expect("load lsp plugin");
+
+    let mut args = HashMap::new();
+    args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
+    args.insert("line".into(), serde_json::json!(10));
+    args.insert("column".into(), serde_json::json!(4));
+    let result = rt.execute_tool(
+        "find_references",
+        &args,
+        6,
+        "call-lsp-references-text",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+
+    let (content, is_error, metadata) = match result {
+        ToolExecResult::Immediate {
+            content,
+            is_error,
+            metadata,
+        } => (content, is_error, metadata),
+        ToolExecResult::Pending => {
+            rt.pump_task_events();
+            rt.drive_tasks(Instant::now())
+                .into_iter()
+                .find_map(|out| match out {
+                    TaskDriveOutput::ToolComplete {
+                        request_id: 6,
+                        call_id,
+                        content,
+                        is_error,
+                        metadata,
+                    } if call_id == "call-lsp-references-text" => {
+                        Some((content, is_error, metadata))
+                    }
+                    _ => None,
+                })
+                .expect("find_references completion")
+        }
+    };
+
+    assert!(!is_error);
+    assert!(content.contains("References for /tmp/example.rs:10:4: 2 total, 2 shown"));
+    assert!(content.contains("/tmp/example.rs:12:8 - call_site()"));
+    assert!(!content.contains("\"locations\""));
+    assert!(metadata.is_none() || metadata == Some(serde_json::Value::Null));
 }
 
 #[test]
@@ -500,7 +676,8 @@ fn lsp_plugin_truncates_large_structured_results() {
             r#"
             smelt.lsp = {
                 configure = function(_) end,
-                __references = function(id, _)
+                __call = function(id, operation, _)
+                    assert(operation == "references")
                     local refs = {}
                     for i = 1, 205 do
                         refs[i] = {
@@ -532,7 +709,7 @@ fn lsp_plugin_truncates_large_structured_results() {
     args.insert("line".into(), serde_json::json!(1));
     args.insert("column".into(), serde_json::json!(1));
     let result = rt.execute_tool(
-        "lsp_references",
+        "find_references",
         &args,
         5,
         "call-lsp-references",
@@ -564,7 +741,7 @@ fn lsp_plugin_truncates_large_structured_results() {
                     } if call_id == "call-lsp-references" => Some((content, is_error, metadata)),
                     _ => None,
                 })
-                .expect("lsp_references completion")
+                .expect("find_references completion")
         }
     };
 
