@@ -290,6 +290,33 @@ fn open_confirm_recheck_keeps_dialog_when_mode_still_asks() {
 }
 
 #[test]
+fn public_status_open_confirm_needs_attention() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(13), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+
+    assert_eq!(app.pending_confirm_count(), 1);
+    assert!(app.state().focused_overlay.is_some());
+
+    let (state, reason) = app.app.public_status_state_reason();
+    assert_eq!(
+        state,
+        smelt_core::public_status::PublicState::NeedsAttention
+    );
+    assert_eq!(
+        reason,
+        Some(smelt_core::public_status::PublicReason::Permission)
+    );
+}
+
+#[test]
 fn shift_tab_on_open_confirm_cycles_mode_and_auto_allows() {
     let mut app = TestApp::builder()
         .with_mode_cycle(vec![
@@ -550,6 +577,46 @@ fn present_plan_dialog_tracks_terminal_width_on_resize() {
         .find(|line| line.starts_with("─ plan "))
         .expect("dialog title row after resize");
     assert_eq!(title_row.chars().count(), 100);
+}
+
+#[test]
+fn public_status_open_question_needs_attention() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.start_turn(1);
+
+    let mut args = std::collections::HashMap::new();
+    args.insert(
+        "questions".into(),
+        serde_json::json!([
+            {
+                "header": "Choice",
+                "question": "Pick one?",
+                "options": [
+                    { "label": "One", "description": "first option" },
+                    { "label": "Two", "description": "second option" }
+                ],
+                "multiSelect": false
+            }
+        ]),
+    );
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+        request_id: 77,
+        call_id: "status-question".into(),
+        tool_name: "ask_user_question".into(),
+        args,
+    }));
+    assert!(app.state().focused_overlay.is_some());
+
+    let (state, reason) = app.app.public_status_state_reason();
+    assert_eq!(
+        state,
+        smelt_core::public_status::PublicState::NeedsAttention
+    );
+    assert_eq!(
+        reason,
+        Some(smelt_core::public_status::PublicReason::Question)
+    );
 }
 
 #[test]

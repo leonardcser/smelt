@@ -1610,7 +1610,8 @@ impl TuiApp {
             .signals
             .publish_if_changed("running_procs", running_procs);
 
-        let permission_pending = self.pending_dialog && !self.focused_overlay_blocks_agent();
+        let permission_pending = self.public_attention_reason()
+            == Some(smelt_core::public_status::PublicReason::Permission);
         self.core
             .signals
             .publish_if_changed("permission_pending", permission_pending);
@@ -1813,39 +1814,63 @@ impl TuiApp {
             .publish_if_changed("work_busy", self.busy_stack.entries_snapshot());
     }
 
-    fn publish_public_status(&mut self) {
-        use smelt_core::public_status::{FocusState, PublicReason, PublicState, StatusUpdate};
+    fn public_attention_reason(&self) -> Option<smelt_core::public_status::PublicReason> {
+        use smelt_core::public_status::PublicReason;
+
+        if !self.core.confirms.is_clear() {
+            Some(PublicReason::Permission)
+        } else if self.focused_overlay_blocks_agent() {
+            Some(PublicReason::Question)
+        } else if self.pending_dialog {
+            Some(PublicReason::Permission)
+        } else {
+            None
+        }
+    }
+
+    fn public_status_state_reason(
+        &self,
+    ) -> (
+        smelt_core::public_status::PublicState,
+        Option<smelt_core::public_status::PublicReason>,
+    ) {
+        use smelt_core::public_status::{PublicReason, PublicState};
         use smelt_core::working::WorkState;
 
+        if let Some(reason) = self.public_attention_reason() {
+            return (PublicState::NeedsAttention, Some(reason));
+        }
+
         let (work_state, _) = self.resolve_work_state();
+        match work_state {
+            WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
+                (PublicState::Busy, None)
+            }
+            WorkState::Done if !self.term_focused => (
+                PublicState::NeedsAttention,
+                Some(PublicReason::TurnComplete),
+            ),
+            WorkState::Done => (PublicState::Idle, Some(PublicReason::TurnComplete)),
+            WorkState::Interrupted => match self.working.last_outcome() {
+                Some(smelt_core::working::TurnOutcome::Errored) => {
+                    (PublicState::NeedsAttention, Some(PublicReason::Error))
+                }
+                _ => (PublicState::Idle, Some(PublicReason::Interrupted)),
+            },
+            WorkState::Idle => (PublicState::Idle, None),
+        }
+    }
+
+    fn publish_public_status(&mut self) {
+        use smelt_core::public_status::{FocusState, StatusUpdate};
+
         let focus = if self.term_focused {
             FocusState::Focused
         } else {
             FocusState::Unfocused
         };
 
-        let permission_pending = self.pending_dialog && !self.focused_overlay_blocks_agent();
-        let (state, reason) = if permission_pending {
-            (PublicState::NeedsAttention, Some(PublicReason::Permission))
-        } else {
-            match work_state {
-                WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
-                    (PublicState::Busy, None)
-                }
-                WorkState::Done if !self.term_focused => (
-                    PublicState::NeedsAttention,
-                    Some(PublicReason::TurnComplete),
-                ),
-                WorkState::Done => (PublicState::Idle, Some(PublicReason::TurnComplete)),
-                WorkState::Interrupted => match self.working.last_outcome() {
-                    Some(smelt_core::working::TurnOutcome::Errored) => {
-                        (PublicState::NeedsAttention, Some(PublicReason::Error))
-                    }
-                    _ => (PublicState::Idle, Some(PublicReason::Interrupted)),
-                },
-                WorkState::Idle => (PublicState::Idle, None),
-            }
-        };
+        let (state, reason) = self.public_status_state_reason();
 
         let Some(publisher) = self.public_status.as_mut() else {
             return;

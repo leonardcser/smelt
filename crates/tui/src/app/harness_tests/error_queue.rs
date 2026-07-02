@@ -78,12 +78,10 @@ fn public_status_cancelled_turn_is_idle_interrupted() {
     app.start_turn(1);
 
     app.app.discard_turn(crate::app::TurnEnd::Cancelled);
-    app.app.publish_public_status();
-
-    let status = smelt_core::public_status::read_status_for_pid(std::process::id()).unwrap();
-    assert_eq!(status.state, smelt_core::public_status::PublicState::Idle);
+    let (state, reason) = app.app.public_status_state_reason();
+    assert_eq!(state, smelt_core::public_status::PublicState::Idle);
     assert_eq!(
-        status.reason,
+        reason,
         Some(smelt_core::public_status::PublicReason::Interrupted)
     );
 }
@@ -98,17 +96,12 @@ fn public_status_turn_error_needs_attention() {
         kind: None,
         retry_at_ms: None,
     }));
-    app.app.publish_public_status();
-
-    let status = smelt_core::public_status::read_status_for_pid(std::process::id()).unwrap();
+    let (state, reason) = app.app.public_status_state_reason();
     assert_eq!(
-        status.state,
+        state,
         smelt_core::public_status::PublicState::NeedsAttention
     );
-    assert_eq!(
-        status.reason,
-        Some(smelt_core::public_status::PublicReason::Error)
-    );
+    assert_eq!(reason, Some(smelt_core::public_status::PublicReason::Error));
 }
 
 #[test]
