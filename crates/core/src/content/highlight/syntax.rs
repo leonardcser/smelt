@@ -8,13 +8,12 @@ use syntect::parsing::SyntaxReference;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::buffer::SpanMeta;
-use crate::content::builder::LineBuilder;
+use crate::content::builder::{display_width, LineBuilder};
 use crate::content::code_block::CodeBlock;
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
 use crate::theme::intern;
-use unicode_width::UnicodeWidthStr;
 
 /// Map a language token (`"bash"`, `"rust"`, `"ts"`, …) to a syntect-friendly file extension.
 /// Unknown tokens fall through unchanged so syntect can attempt a direct extension lookup.
@@ -357,7 +356,7 @@ fn print_split_regions(
         };
         out.set_fg(fg);
         out.print(text);
-        col += UnicodeWidthStr::width(text.as_str());
+        col += display_width(text.as_str());
     }
     out.pop_style();
     col
@@ -583,7 +582,7 @@ mod tests {
         assert_eq!(block.lines.len(), 2);
         for line in &block.lines {
             assert!(
-                UnicodeWidthStr::width(line.text.as_str()) <= 3,
+                display_width(line.text.as_str()) <= 3,
                 "line overflowed width: {:?}",
                 line.text
             );
@@ -723,7 +722,7 @@ mod tests {
             for row in rows {
                 let text: String = row.iter().map(|(_, t)| t.as_str()).collect();
                 assert!(
-                    UnicodeWidthStr::width(text.as_str()) <= 3,
+                    display_width(text.as_str()) <= 3,
                     "row overflowed width: {text:?}"
                 );
             }

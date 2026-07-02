@@ -942,7 +942,6 @@ impl Buffer {
     /// cells covered by `selectable: false` spans are dropped; `copy_as` spans
     /// emit their substitution string once per span. Rows are joined with `\n`.
     pub fn extract_text(&self, start: usize, end: usize) -> String {
-        use unicode_width::UnicodeWidthChar;
         if start >= end {
             return String::new();
         }
@@ -961,7 +960,7 @@ impl Buffer {
                 let mut col: u16 = 0;
                 let mut byte_pos: usize = 0;
                 for ch in line.chars() {
-                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                    let cw = crate::cell_width::char_width_u16(ch);
                     let ch_byte_end = byte_pos + ch.len_utf8();
                     let in_byte_clip = ch_byte_end > bs && byte_pos < be;
                     if in_byte_clip {
@@ -1058,7 +1057,7 @@ impl Buffer {
             let col = line
                 .chars()
                 .take(char_col)
-                .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
+                .map(crate::cell_width::char_width)
                 .sum();
             return (row, col);
         }
@@ -1975,8 +1974,9 @@ mod tests {
     #[test]
     fn projection_cursor_columns_are_terminal_cells() {
         // ProjectionMaps are indexed by display chars, but public cursor and
-        // hit-test APIs speak terminal cells. Zero-width controls and wide
-        // chars must not trick viewport code into horizontal panning.
+        // hit-test APIs speak terminal cells. Control bytes and wide chars use
+        // the shared terminal-cell width oracle so viewport panning and hit
+        // testing match the rendered grid.
         let mut buf = make_buf();
         buf.set_source("abc".into());
         buf.set_all_lines(vec!["a\0日".into()]);
@@ -1988,10 +1988,10 @@ mod tests {
             row_offsets: vec![0],
         });
 
-        assert_eq!(buf.display_cursor_pos(2), (0, 1));
-        assert_eq!(buf.display_cursor_pos(3), (0, 3));
+        assert_eq!(buf.display_cursor_pos(2), (0, 2));
+        assert_eq!(buf.display_cursor_pos(3), (0, 4));
         assert_eq!(buf.display_byte_pos(3), (0, "a\0日".len()));
         assert_eq!(buf.byte_at_display_pos(0, 1), 1);
-        assert_eq!(buf.byte_at_display_pos(0, 3), 3);
+        assert_eq!(buf.byte_at_display_pos(0, 4), 3);
     }
 }

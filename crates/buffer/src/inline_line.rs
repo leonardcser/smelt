@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthStr;
+use smelt_style::cell_width::{char_width, text_width};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreakPolicy {
@@ -30,8 +30,6 @@ pub struct InlineRun<T> {
     pub text: String,
     pub meta: T,
     pub break_policy: BreakPolicy,
-    #[serde(default)]
-    pub width_extra: usize,
 }
 
 impl<T> InlineRun<T> {
@@ -40,13 +38,7 @@ impl<T> InlineRun<T> {
             text: text.into(),
             meta,
             break_policy,
-            width_extra: 0,
         }
-    }
-
-    pub fn with_width_extra(mut self, width_extra: usize) -> Self {
-        self.width_extra = width_extra;
-        self
     }
 }
 
@@ -56,7 +48,6 @@ pub struct WrappedRun<T> {
     pub range: Range<usize>,
     pub meta: T,
     pub break_policy: BreakPolicy,
-    pub width_extra: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,10 +65,7 @@ impl<T> InlineLine<T> {
     }
 
     pub fn measure_unwrapped(&self) -> usize {
-        self.runs
-            .iter()
-            .map(|run| text_width(&run.text) + run.width_extra)
-            .sum()
+        self.runs.iter().map(|run| text_width(&run.text)).sum()
     }
 
     /// Wrap the concatenated plain text into byte ranges using the transcript
@@ -128,7 +116,6 @@ impl<T: Clone> InlineLine<T> {
                     range: 0..run.text.len(),
                     meta: run.meta.clone(),
                     break_policy: run.break_policy,
-                    width_extra: run.width_extra,
                 })
                 .collect();
             return vec![row];
@@ -172,8 +159,7 @@ impl<T: Clone + PartialEq> InlineLine<T> {
                     append_text(
                         &mut out,
                         self.fragment_text(&fragment),
-                        &InlineRun::new("", fragment.meta, fragment.break_policy)
-                            .with_width_extra(fragment.width_extra),
+                        &InlineRun::new("", fragment.meta, fragment.break_policy),
                     );
                 }
                 out
@@ -231,10 +217,9 @@ impl<T: Clone> WrapState<T> {
         }
         self.cur.push(WrappedRun {
             run_index,
-            range: range.clone(),
+            range,
             meta: run.meta.clone(),
             break_policy: run.break_policy,
-            width_extra: fragment_width_extra(run, &range),
         });
     }
 
@@ -247,9 +232,8 @@ impl<T: Clone> WrapState<T> {
             range: 0..run.text.len(),
             meta: run.meta.clone(),
             break_policy: run.break_policy,
-            width_extra: run.width_extra,
         });
-        self.pending_attach_width += text_width(&run.text) + run.width_extra;
+        self.pending_attach_width += text_width(&run.text);
     }
 
     fn flush_pending_attach(&mut self) {
@@ -289,10 +273,8 @@ fn append_normal_fragments<T: Clone>(
         let word_end = offset + word_rel_end;
         let has_space = word_end < text.len();
         let space_end = word_end + usize::from(has_space);
-        let segment_width = text_width(&text[word_start..space_end])
-            + fragment_width_extra(run, &(word_start..space_end));
-        let word_width = text_width(&text[word_start..word_end])
-            + fragment_width_extra(run, &(word_start..word_end));
+        let segment_width = text_width(&text[word_start..space_end]);
+        let word_width = text_width(&text[word_start..word_end]);
 
         let word_overflows_current_row =
             state.col + state.pending_width() + segment_width > state.max_cells() && state.col > 0;
@@ -330,7 +312,7 @@ fn append_unbreakable_fragment<T: Clone>(
     run: &InlineRun<T>,
     state: &mut WrapState<T>,
 ) {
-    let width = text_width(&run.text) + run.width_extra;
+    let width = text_width(&run.text);
     if state.col + state.pending_width() + width > state.max_cells() && state.col > 0 {
         state.push_row();
     }
@@ -370,34 +352,12 @@ fn append_text<T: Clone + PartialEq>(row: &mut Vec<InlineRun<T>>, text: &str, ru
         return;
     }
     if let Some(last) = row.last_mut() {
-        if last.meta == run.meta
-            && last.break_policy == run.break_policy
-            && last.width_extra == run.width_extra
-        {
+        if last.meta == run.meta && last.break_policy == run.break_policy {
             last.text.push_str(text);
             return;
         }
     }
-    row.push(
-        InlineRun::new(text, run.meta.clone(), run.break_policy).with_width_extra(run.width_extra),
-    );
-}
-
-fn fragment_width_extra<T>(run: &InlineRun<T>, range: &Range<usize>) -> usize {
-    if range.start == 0 && range.end == run.text.len() {
-        run.width_extra
-    } else {
-        0
-    }
-}
-
-fn text_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
-}
-
-fn char_width(ch: char) -> usize {
-    let mut buf = [0; 4];
-    UnicodeWidthStr::width(ch.encode_utf8(&mut buf))
+    row.push(InlineRun::new(text, run.meta.clone(), run.break_policy));
 }
 
 #[cfg(test)]

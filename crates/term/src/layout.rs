@@ -664,7 +664,7 @@ impl Gutters {
         }
     }
 
-    /// Width inside the left gutter (still includes the scrollbar column if any).
+    /// Width inside the left padding (still includes the scrollbar column if any).
     pub fn layer_width(&self, total: u16) -> u16 {
         total.saturating_sub(self.pad_left)
     }
@@ -674,6 +674,11 @@ impl Gutters {
         self.layer_width(total)
             .saturating_sub(self.pad_right)
             .saturating_sub(self.scrollbar_width())
+    }
+
+    /// Inner content width after a data-driven gutter column has been reserved.
+    pub fn content_width_with_gutter(&self, total: u16, gutter_width: u16) -> u16 {
+        self.content_width(total.saturating_sub(gutter_width))
     }
 }
 
@@ -1229,6 +1234,26 @@ mod tests {
     const A: PaintId = PaintId(100);
     const B: PaintId = PaintId(101);
     const C: PaintId = PaintId(102);
+
+    #[test]
+    fn gutters_content_width_reserves_data_gutter_and_scrollbar() {
+        let gutters = Gutters {
+            pad_left: 2,
+            pad_right: 1,
+            scrollbar: true,
+        };
+        assert_eq!(gutters.content_width_with_gutter(20, 3), 13);
+    }
+
+    #[test]
+    fn gutters_content_width_saturates_when_gutter_consumes_area() {
+        let gutters = Gutters {
+            pad_left: 2,
+            pad_right: 1,
+            scrollbar: true,
+        };
+        assert_eq!(gutters.content_width_with_gutter(4, 4), 0);
+    }
 
     #[test]
     fn single_leaf_fills_area() {

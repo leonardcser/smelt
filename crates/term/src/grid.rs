@@ -36,8 +36,7 @@ pub enum TextAlign {
 }
 
 pub fn display_width(text: &str) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+    smelt_style::cell_width::text_width_u16(text)
 }
 
 pub fn truncate_width(text: &str, max_width: u16) -> String {
@@ -47,8 +46,7 @@ pub fn truncate_width(text: &str, max_width: u16) -> String {
 }
 
 pub(crate) fn char_width(ch: char) -> u16 {
-    use unicode_width::UnicodeWidthChar;
-    UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
+    smelt_style::cell_width::char_width_u16(ch)
 }
 
 fn write_text(mut col: u16, limit: u16, text: &str, mut write: impl FnMut(u16, char)) -> u16 {
@@ -119,9 +117,8 @@ impl Grid {
     ///
     /// Escape hatch that **bypasses** the wide-char continuation invariant
     /// upheld by `set` / `put_char` / `fill`. Callers must own the entire
-    /// region they write into and re-establish the invariant themselves
-    /// (e.g. `snapshot.rs` stamps `\0` continuations explicitly). For any
-    /// normal painting, prefer `set` / `put_str` / `put_char` / `fill`.
+    /// region they write into and re-establish the invariant themselves. For
+    /// any normal painting, prefer `set` / `put_str` / `put_char` / `fill`.
     pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         if x < self.width && y < self.height {
             let idx = self.idx(x, y);
@@ -139,8 +136,10 @@ impl Grid {
     /// `fill`, and their slice equivalents - funnels through here so the
     /// wide-char continuation invariant is upheld in exactly one place:
     ///
-    /// 1. A wide char at `(x, y)` implies `(x+1, y).symbol == '\0'`.
+    /// 1. A stored wide char at `(x, y)` implies `(x+1, y).symbol == '\0'`.
     /// 2. `(x, y).symbol == '\0'` implies `(x-1, y)` holds a wide char.
+    /// 3. A wide char that cannot fit before the active right boundary is
+    ///    stored as a styled space, never as a half-wide glyph.
     ///
     /// Three transitions need extra bookkeeping to keep the invariant:
     ///
@@ -158,14 +157,26 @@ impl Grid {
     /// Cleared cells inherit the new cell's style so a styled background
     /// stays visually contiguous across the now-narrow run.
     fn write_cell(&mut self, x: u16, y: u16, new_cell: Cell) {
-        use unicode_width::UnicodeWidthChar;
+        self.write_cell_clipped(x, y, new_cell, self.width);
+    }
+
+    fn write_cell_clipped(&mut self, x: u16, y: u16, new_cell: Cell, right_limit: u16) {
         if x >= self.width || y >= self.height {
             return;
         }
+        let right_limit = right_limit.min(self.width);
+        let new_cell = if char_width(new_cell.symbol) == 2 && x + 1 >= right_limit {
+            Cell {
+                symbol: ' ',
+                style: new_cell.style,
+            }
+        } else {
+            new_cell
+        };
         let idx = self.idx(x, y);
         let old_symbol = self.cells[idx].symbol;
 
-        if x + 1 < self.width && UnicodeWidthChar::width(old_symbol).unwrap_or(1) == 2 {
+        if x + 1 < self.width && char_width(old_symbol) == 2 {
             let cont = self.idx(x + 1, y);
             if self.cells[cont].symbol == '\0' {
                 self.cells[cont] = Cell {
@@ -176,7 +187,7 @@ impl Grid {
         }
         if old_symbol == '\0' && x > 0 {
             let lead = self.idx(x - 1, y);
-            if UnicodeWidthChar::width(self.cells[lead].symbol).unwrap_or(1) == 2 {
+            if char_width(self.cells[lead].symbol) == 2 {
                 self.cells[lead] = Cell {
                     symbol: ' ',
                     style: new_cell.style,
@@ -186,10 +197,10 @@ impl Grid {
 
         self.cells[idx] = new_cell;
 
-        if UnicodeWidthChar::width(new_cell.symbol).unwrap_or(1) == 2 && x + 1 < self.width {
+        if char_width(new_cell.symbol) == 2 && x + 1 < self.width {
             let cont = self.idx(x + 1, y);
             let displaced = self.cells[cont].symbol;
-            if UnicodeWidthChar::width(displaced).unwrap_or(1) == 2 && x + 2 < self.width {
+            if char_width(displaced) == 2 && x + 2 < self.width {
                 let dispcont = self.idx(x + 2, y);
                 if self.cells[dispcont].symbol == '\0' {
                     self.cells[dispcont] = Cell {
@@ -215,13 +226,17 @@ impl Grid {
     /// Overwrites `symbol` and `style.fg`; preserves the existing cell's
     /// `bg` and text attributes. Use for fg-only painting over a filled background.
     pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
+        self.put_char_clipped(x, y, symbol, fg, self.width);
+    }
+
+    fn put_char_clipped(&mut self, x: u16, y: u16, symbol: char, fg: Color, right_limit: u16) {
         if x >= self.width || y >= self.height {
             return;
         }
         let idx = self.idx(x, y);
         let mut style = self.cells[idx].style;
         style.fg = Some(fg);
-        self.write_cell(x, y, Cell { symbol, style });
+        self.write_cell_clipped(x, y, Cell { symbol, style }, right_limit);
     }
 
     /// String form of [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
@@ -250,9 +265,18 @@ impl Grid {
 
     pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
         let new_cell = Cell { symbol, style };
+        let right = area.right().min(self.width);
+        let symbol_width = char_width(symbol);
         for row in area.top..area.bottom().min(self.height) {
-            for col in area.left..area.right().min(self.width) {
-                self.write_cell(col, row, new_cell);
+            let mut col = area.left;
+            while col < right {
+                self.write_cell_clipped(col, row, new_cell, right);
+                let step = if symbol_width == 2 && col.saturating_add(1) < right {
+                    2
+                } else {
+                    1
+                };
+                col = col.saturating_add(step);
             }
         }
     }
@@ -288,7 +312,12 @@ impl Grid {
             if cell != prev_cell {
                 let x = (i % self.width as usize) as u16;
                 let y = (i / self.width as usize) as u16;
-                Some(CellUpdate { x, y, cell })
+                Some(CellUpdate {
+                    x,
+                    y,
+                    row_width: self.width,
+                    cell,
+                })
             } else {
                 None
             }
@@ -309,6 +338,7 @@ impl Grid {
 pub struct CellUpdate<'a> {
     pub x: u16,
     pub y: u16,
+    pub row_width: u16,
     pub cell: &'a Cell,
 }
 
@@ -356,8 +386,12 @@ impl<'a> GridSlice<'a> {
 
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
         if x < self.area.width && y < self.area.height {
-            self.grid
-                .set(self.area.left + x, self.area.top + y, symbol, style);
+            self.grid.write_cell_clipped(
+                self.area.left + x,
+                self.area.top + y,
+                Cell { symbol, style },
+                self.area.right(),
+            );
         }
     }
 
@@ -398,8 +432,11 @@ impl<'a> GridSlice<'a> {
         let limit = x
             .saturating_add(max_width.unwrap_or(u16::MAX))
             .min(self.area.width);
+        let abs_left = self.area.left;
+        let right = self.area.right();
         write_text(x, limit, text, |col, ch| {
-            self.grid.set(self.area.left + col, abs_y, ch, style)
+            self.grid
+                .write_cell_clipped(abs_left + col, abs_y, Cell { symbol: ch, style }, right)
         })
     }
 
@@ -475,8 +512,13 @@ impl<'a> GridSlice<'a> {
     /// Slice-local [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
     pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
         if x < self.area.width && y < self.area.height {
-            self.grid
-                .put_char(self.area.left + x, self.area.top + y, symbol, fg);
+            self.grid.put_char_clipped(
+                self.area.left + x,
+                self.area.top + y,
+                symbol,
+                fg,
+                self.area.right(),
+            );
         }
     }
 
@@ -505,8 +547,11 @@ impl<'a> GridSlice<'a> {
             return x.min(self.area.width);
         }
         let abs_y = self.area.top + y;
+        let abs_left = self.area.left;
+        let right = self.area.right();
         write_text(x, self.area.width, text, |col, ch| {
-            self.grid.put_char(self.area.left + col, abs_y, ch, fg)
+            self.grid
+                .put_char_clipped(abs_left + col, abs_y, ch, fg, right)
         })
     }
 
@@ -536,6 +581,16 @@ mod tests {
         assert_eq!(grid.height(), 5);
         assert_eq!(grid.cell(0, 0).symbol, ' ');
         assert_eq!(grid.cell(9, 4).symbol, ' ');
+    }
+
+    #[test]
+    fn private_use_icons_are_narrow_cells() {
+        let mut grid = Grid::new(4, 1);
+        grid.set(0, 0, '\u{e6b2}', Style::default());
+
+        assert_eq!(char_width('\u{e6b2}'), 1);
+        assert_eq!(grid.cell(0, 0).symbol, '\u{e6b2}');
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
     }
 
     #[test]
@@ -961,7 +1016,6 @@ mod tests {
     ///   I1. `(x, y).symbol == '\0'` only at the cell immediately right of a wide.
     ///   I2. A wide char at `(x, y)` with `x+1 < width` implies `(x+1, y).symbol == '\0'`.
     fn assert_grid_invariants(grid: &Grid) {
-        use unicode_width::UnicodeWidthChar;
         for y in 0..grid.height() {
             for x in 0..grid.width() {
                 let cell = grid.cell(x, y);
@@ -969,12 +1023,16 @@ mod tests {
                     assert!(x > 0, "continuation at column 0 has no leading cell");
                     let lead = grid.cell(x - 1, y).symbol;
                     assert_eq!(
-                        UnicodeWidthChar::width(lead).unwrap_or(1),
+                        char_width(lead),
                         2,
                         "orphaned continuation at ({x}, {y}); leading cell symbol is {lead:?}"
                     );
                 }
-                if UnicodeWidthChar::width(cell.symbol).unwrap_or(1) == 2 && x + 1 < grid.width() {
+                if char_width(cell.symbol) == 2 {
+                    assert!(
+                        x + 1 < grid.width(),
+                        "wide char at ({x}, {y}) cannot fit a continuation cell"
+                    );
                     let cont = grid.cell(x + 1, y).symbol;
                     assert_eq!(
                         cont, '\0',
@@ -983,6 +1041,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn wide_char_at_right_edge_paints_space() {
+        let mut grid = Grid::new(2, 1);
+        let style = Style::new().fg(Color::Red);
+        grid.set(1, 0, '漢', style);
+
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
+        assert_eq!(grid.cell(1, 0).style.fg, Some(Color::Red));
+        assert_grid_invariants(&grid);
+    }
+
+    #[test]
+    fn slice_wide_char_at_right_edge_paints_space_inside_slice() {
+        let mut grid = Grid::new(4, 1);
+        let style = Style::new().fg(Color::Red);
+        {
+            let mut slice = grid.slice_mut(Rect::new(0, 1, 2, 1));
+            slice.set(1, 0, '漢', style);
+        }
+
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+        assert_eq!(grid.cell(2, 0).style.fg, Some(Color::Red));
+        assert_eq!(grid.cell(3, 0).symbol, ' ');
+        assert_ne!(grid.cell(3, 0).symbol, '\0');
+        assert_grid_invariants(&grid);
+    }
+
+    #[test]
+    fn slice_put_char_wide_at_right_edge_paints_space_inside_slice() {
+        let mut grid = Grid::new(4, 1);
+        {
+            let mut slice = grid.slice_mut(Rect::new(0, 1, 2, 1));
+            slice.put_char(1, 0, '漢', Color::Red);
+        }
+
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+        assert_eq!(grid.cell(2, 0).style.fg, Some(Color::Red));
+        assert_eq!(grid.cell(3, 0).symbol, ' ');
+        assert_grid_invariants(&grid);
+    }
+
+    #[test]
+    fn slice_put_str_wide_at_right_edge_does_not_spill_outside_slice() {
+        let mut grid = Grid::new(4, 1);
+        {
+            let mut slice = grid.slice_mut(Rect::new(0, 1, 2, 1));
+            let end = slice.put_str(1, 0, "漢", Style::default());
+            assert_eq!(end, 1);
+        }
+
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+        assert_eq!(grid.cell(3, 0).symbol, ' ');
+        assert_grid_invariants(&grid);
+    }
+
+    #[test]
+    fn fill_wide_char_at_rect_edge_does_not_spill_outside_rect() {
+        let mut grid = Grid::new(4, 1);
+        let style = Style::new().bg(Color::Blue);
+        grid.fill(Rect::new(0, 1, 1, 1), '漢', style);
+
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
+        assert_eq!(grid.cell(1, 0).style.bg, Some(Color::Blue));
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+        assert_ne!(grid.cell(2, 0).style.bg, Some(Color::Blue));
+        assert_grid_invariants(&grid);
+    }
+
+    #[test]
+    fn fill_tiles_wide_chars_by_cell_width() {
+        let mut grid = Grid::new(5, 1);
+        let style = Style::new().bg(Color::Blue);
+        grid.fill(Rect::new(0, 0, 5, 1), '漢', style);
+
+        assert_eq!(grid.cell(0, 0).symbol, '漢');
+        assert_eq!(grid.cell(1, 0).symbol, '\0');
+        assert_eq!(grid.cell(2, 0).symbol, '漢');
+        assert_eq!(grid.cell(3, 0).symbol, '\0');
+        assert_eq!(grid.cell(4, 0).symbol, ' ');
+        for x in 0..5 {
+            assert_eq!(grid.cell(x, 0).style.bg, Some(Color::Blue));
+        }
+        assert_grid_invariants(&grid);
+    }
+
+    #[test]
+    fn overwriting_continuation_with_right_edge_wide_clears_old_wide() {
+        let mut grid = Grid::new(2, 1);
+        grid.set(0, 0, '漢', Style::default());
+        grid.set(1, 0, '漢', Style::default());
+
+        assert_eq!(grid.cell(0, 0).symbol, ' ');
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
+        assert_grid_invariants(&grid);
     }
 
     #[test]

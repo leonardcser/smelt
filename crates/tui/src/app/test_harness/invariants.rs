@@ -32,7 +32,7 @@ impl TestApp {
             // cursor over a literal space renders like the insertion point just
             // after that space. Keep the oracle strict for visible non-space
             // text, which is the stuck-cursor class this probe targets.
-            let hidden_width = unicode_width::UnicodeWidthStr::width(hidden);
+            let hidden_width = smelt_buffer::cell_width::text_width(hidden);
             assert!(
                 hidden_width == 0 || hidden.chars().all(|ch| ch == ' '),
                 "prompt visual cursor projection does not round-trip to cpos: visual row {}, col {}, cpos {}, projected {}, hidden source {:?}, source {:?}",

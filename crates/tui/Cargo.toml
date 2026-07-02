@@ -23,7 +23,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
-unicode-width = { workspace = true }
 glob = { workspace = true }
 futures-core = { workspace = true }
 mlua = { workspace = true }

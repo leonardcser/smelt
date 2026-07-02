@@ -6,12 +6,11 @@
 use crate::buffer::{Buffer, LineDecoration, SourceLine, SpanMeta};
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
-use smelt_buffer::text;
-use unicode_width::UnicodeWidthStr;
+use smelt_buffer::{cell_width, text};
 
 /// Display-column width of a string slice.
 pub fn display_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
+    cell_width::text_width(s)
 }
 
 /// Outcome returned by [`LineBuilder::finish`].
@@ -142,7 +141,7 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        self.append_span_styled(text, SpanMeta::default(), 0);
+        self.append_span_styled(text, SpanMeta::default());
     }
 
     pub fn print_string(&mut self, s: String) {
@@ -153,14 +152,7 @@ impl<'a> LineBuilder<'a> {
         if text.is_empty() {
             return;
         }
-        self.append_span_styled(text, meta, 0);
-    }
-
-    pub fn print_with_meta_width_extra(&mut self, text: &str, meta: SpanMeta, width_extra: usize) {
-        if text.is_empty() {
-            return;
-        }
-        self.append_span_styled(text, meta, width_extra);
+        self.append_span_styled(text, meta);
     }
 
     pub fn print_gutter(&mut self, text: &str) {
@@ -436,45 +428,43 @@ impl<'a> LineBuilder<'a> {
 
     // ── Internals ───────────────────────────────────────────────────
 
-    fn append_span_styled(&mut self, text: &str, meta: SpanMeta, width_extra: usize) {
+    fn append_span_styled(&mut self, text: &str, meta: SpanMeta) {
         let resolved = self.resolve_current();
         let style_default = style_is_default(&resolved);
         let meta_default = meta.selectable && meta.copy_as.is_none();
         if style_default && meta_default {
-            self.append_text(text, width_extra);
+            self.append_text(text);
             return;
         }
         let hl = self.current_hl(resolved);
-        self.append_span_with_hl(text, hl, meta, width_extra);
+        self.append_span_with_hl(text, hl, meta);
     }
 
     fn append_span_resolved(&mut self, text: &str, style: Style, meta: SpanMeta) {
         let style_default = style_is_default(&style);
         let meta_default = meta.selectable && meta.copy_as.is_none();
         if style_default && meta_default {
-            self.append_text(text, 0);
+            self.append_text(text);
             return;
         }
         let hl = intern_anonymous_style(style);
-        self.append_span_with_hl(text, hl, meta, 0);
+        self.append_span_with_hl(text, hl, meta);
     }
 
-    fn append_text(&mut self, text: &str, width_extra: usize) {
+    fn append_text(&mut self, text: &str) {
         let cols_before = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let cols_after =
-            cols_before.saturating_add(display_width(text).saturating_add(width_extra) as u16);
+        let cols_after = cols_before.saturating_add(display_width(text) as u16);
         self.cur_visible_cols = cols_after;
         if !text.is_empty() {
             self.has_pending_content = true;
         }
     }
 
-    fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta, width_extra: usize) {
+    fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta) {
         let cols_before = self.cur_visible_cols;
         self.cur_text.push_str(text);
-        let cols_after =
-            cols_before.saturating_add(display_width(text).saturating_add(width_extra) as u16);
+        let cols_after = cols_before.saturating_add(display_width(text) as u16);
         self.cur_visible_cols = cols_after;
         if text.is_empty() {
             return;

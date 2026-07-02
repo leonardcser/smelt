@@ -18,7 +18,6 @@ path = "src/lib.rs"
 smelt-style = { workspace = true }
 smelt-ansi = { workspace = true }
 crossterm = { workspace = true }
-unicode-width = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

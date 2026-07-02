@@ -93,11 +93,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     // width so wrap-driven gutters and intra-frame paints have something to
     // read. Subsequent frames hit the buffer's wrap cache.
     for &win_id in &window_leaves {
-        let content_w = app
-            .ui
-            .win(win_id)
-            .map(|w| w.config.gutters.content_width(term_w))
-            .unwrap_or(term_w);
+        let content_w = app.ui.win_content_width(win_id).unwrap_or(term_w);
         if let Some(buf_id) = app.ui.win(win_id).map(|w| w.buf) {
             if let Some(buf) = app.ui.buf_mut(buf_id) {
                 buf.ensure_rendered_at(content_w);
@@ -158,11 +154,7 @@ pub(crate) fn open_decoration(
         crate::lua::api::overlay_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
     let (term_w, _) = app.ui.terminal_size();
     for &win_id in &window_leaves {
-        let content_w = app
-            .ui
-            .win(win_id)
-            .map(|w| w.config.gutters.content_width(term_w))
-            .unwrap_or(term_w);
+        let content_w = app.ui.win_content_width(win_id).unwrap_or(term_w);
         if let Some(buf_id) = app.ui.win(win_id).map(|w| w.buf) {
             if let Some(buf) = app.ui.buf_mut(buf_id) {
                 buf.ensure_rendered_at(content_w);

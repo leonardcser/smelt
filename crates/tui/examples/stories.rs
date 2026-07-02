@@ -28,7 +28,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton
 use smelt_term::{
     Color, Compositor, Grid, GridSlice, Rect, SnapshotFrame, Style, TerminalSession, Theme,
 };
-use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Debug)]
 struct Story {
@@ -285,10 +284,7 @@ fn truncate_with_ellipsis(text: &str, max_w: u16) -> String {
     if max_w == 0 {
         return String::new();
     }
-    let width = text
-        .chars()
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum::<usize>();
+    let width = smelt_buffer::cell_width::text_width(text);
     if width <= max_w {
         return text.to_string();
     }
@@ -299,7 +295,7 @@ fn truncate_with_ellipsis(text: &str, max_w: u16) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
-        let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let ch_w = smelt_buffer::cell_width::char_width(ch);
         if used + ch_w >= max_w {
             break;
         }

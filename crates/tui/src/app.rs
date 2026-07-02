@@ -2039,14 +2039,6 @@ impl TuiApp {
         self.flush_lua_callbacks();
     }
 
-    /// Gutters configured on the transcript window (single source of truth: `Window.config.gutters`).
-    pub(crate) fn transcript_gutters(&self) -> crate::smelt_edit::Gutters {
-        self.ui
-            .win(crate::app::TRANSCRIPT_WIN)
-            .map(|w| w.config.gutters)
-            .unwrap_or_default()
-    }
-
     pub(crate) fn transcript_win(&self) -> &crate::smelt_edit::Window {
         self.ui
             .win(self.well_known.transcript)
@@ -2075,10 +2067,26 @@ impl TuiApp {
             .expect("prompt window")
     }
 
-    /// Width available for transcript content (terminal width minus gutter/scrollbar columns).
+    /// Width available for transcript content (window width minus gutter and scrollbar columns).
     pub(crate) fn transcript_width(&self) -> usize {
-        let (w, _) = self.ui.terminal_size();
-        (self.transcript_gutters().content_width(w) as usize).max(1)
+        self.ui
+            .win_content_width(self.well_known.transcript)
+            .map(|width| (width as usize).max(1))
+            .unwrap_or_else(|| {
+                let (terminal_width, _) = self.ui.terminal_size();
+                let win = self.transcript_win();
+                let gutter_width = self
+                    .ui
+                    .buf(win.buf)
+                    .map(|buf| win.gutter_width(buf))
+                    .unwrap_or(0)
+                    .min(terminal_width);
+                let width = win
+                    .config
+                    .gutters
+                    .content_width_with_gutter(terminal_width, gutter_width);
+                (width as usize).max(1)
+            })
     }
 
     /// Resolves a raw leaf id to a live `Window` or a registered paint region (`None` if unrecognised).

@@ -9,8 +9,7 @@
 //! columns to and from terminal cells.
 
 use crate::buffer::{Buffer, LineDecoration, SelectionRange, Span};
-use crate::text;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use crate::{cell_width, text};
 
 /// Bidirectional source↔display char maps + per-row offsets.
 /// Stored on [`Buffer`] after parse for buffers whose source-byte stream
@@ -96,7 +95,7 @@ pub fn byte_range_to_row_ranges(
     let mut ranges = Vec::with_capacity(end_row - start_row + 1);
     for row in start_row..=end_row {
         let line = buf.get_line(row).unwrap_or_default();
-        let line_width = UnicodeWidthStr::width(line);
+        let line_width = cell_width::text_width(line);
         let mut cs = if row == start_row { start_col } else { 0 };
         let mut ce = if row == end_row {
             if end_col > line_width {
@@ -134,7 +133,7 @@ pub fn range_contains_selectable(
     col_end: usize,
 ) -> bool {
     let line = buf.get_line(row).unwrap_or_default();
-    let line_width = UnicodeWidthStr::width(line);
+    let line_width = cell_width::text_width(line);
     if col_start >= col_end || line_width == 0 {
         return false;
     }
@@ -423,7 +422,7 @@ fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize,
     let mut emitted_copy_as: Vec<usize> = Vec::new();
     let mut col = 0usize;
     for ch in line.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        let w = cell_width::char_width(ch);
         let ch_end = col.saturating_add(w);
         if ch_end <= c_start || col >= c_end {
             col = ch_end;

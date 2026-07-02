@@ -13,6 +13,7 @@ pub(crate) use markdown::render_markdown_inner;
 #[cfg(test)]
 mod tests {
     use crate::content::display_layout::{compile_block, render_block_into, RenderCtx};
+    use smelt_buffer::cell_width;
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::LayoutContext;
@@ -527,7 +528,7 @@ mod tests {
                 "control byte leaked into row {row}: {line:?}"
             );
             assert!(
-                unicode_width::UnicodeWidthStr::width(line) <= 107,
+                cell_width::text_width(line) <= 107,
                 "row {row} overflowed transcript width: {line:?}"
             );
         }

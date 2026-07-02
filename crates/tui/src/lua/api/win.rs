@@ -221,14 +221,7 @@ impl mlua::UserData for LuaWin {
         // the current terminal size during the first frame of a resize, before
         // the window viewport has been refreshed by painting.
         methods.add_method("content_width", |_, this, ()| -> LuaResult<mlua::Value> {
-            let w = crate::lua::try_with_app(|app| {
-                let win = app.ui.win(this.id)?;
-                if let Some(rect) = app.ui.split_rect(this.id) {
-                    return Some(win.config.gutters.content_width(rect.width));
-                }
-                win.viewport.map(|vp| vp.content_width)
-            })
-            .flatten();
+            let w = crate::lua::try_with_app(|app| app.ui.win_content_width(this.id)).flatten();
             Ok(match w {
                 Some(n) => mlua::Value::Integer(n as i64),
                 None => mlua::Value::Nil,

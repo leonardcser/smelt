@@ -23,10 +23,12 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use smelt_style::style::{Color, Style};
+use smelt_style::{
+    cell_width,
+    style::{Color, Style},
+};
 use smelt_term::geometry::Rect;
 use smelt_term::grid::Grid;
-use unicode_width::UnicodeWidthChar;
 
 /// A small char alphabet biased toward producing wide chars so overlap
 /// scenarios surface within a handful of operations.
@@ -155,14 +157,18 @@ fn assert_invariants(grid: &Grid, label: &str) {
             if cell.symbol == '\0' {
                 assert!(x > 0, "[{label}] continuation at col 0 has no leading cell");
                 let lead = grid.cell(x - 1, y).symbol;
-                let w = UnicodeWidthChar::width(lead).unwrap_or(1);
+                let w = cell_width::char_width(lead);
                 assert_eq!(
                     w, 2,
                     "[{label}] orphaned '\\0' at ({x},{y}); leading symbol {lead:?} has width {w}"
                 );
             }
-            let w = UnicodeWidthChar::width(cell.symbol).unwrap_or(1);
-            if w == 2 && x + 1 < grid.width() {
+            let w = cell_width::char_width(cell.symbol);
+            if w == 2 {
+                assert!(
+                    x + 1 < grid.width(),
+                    "[{label}] wide char at ({x},{y}) cannot fit a continuation cell"
+                );
                 let cont = grid.cell(x + 1, y).symbol;
                 assert_eq!(
                     cont, '\0',

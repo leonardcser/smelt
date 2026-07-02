@@ -8,7 +8,7 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
-use crate::content::builder::LineBuilder;
+use crate::content::builder::{display_width, LineBuilder};
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
@@ -581,8 +581,6 @@ fn print_syntax_spans(
     row_bg: Option<Color>,
     inline_bg: Option<Color>,
 ) -> usize {
-    use unicode_width::UnicodeWidthStr;
-
     let mut col = 0;
     for span in spans {
         if span.text.is_empty() {
@@ -602,7 +600,7 @@ fn print_syntax_spans(
             b: span.meta.fg.2,
         });
         out.print(&span.text);
-        col += UnicodeWidthStr::width(span.text.as_str());
+        col += display_width(span.text.as_str());
     }
     out.reset_style();
     col
@@ -1326,7 +1324,7 @@ mod tests {
             };
             assert_eq!(
                 diff_line_layout(text).measure_unwrapped(),
-                unicode_width::UnicodeWidthStr::width(text.as_str())
+                display_width(text.as_str())
             );
         }
     }

@@ -61,7 +61,6 @@ fn wrap_logical(
     width: usize,
     visit: &mut impl FnMut(usize, usize),
 ) {
-    use unicode_width::UnicodeWidthStr;
     if start == end {
         visit(start, end);
         return;
@@ -81,7 +80,7 @@ fn wrap_logical(
         }
         // Process the word `line[word_start..i]`.
         let word_end = i;
-        let word_w: usize = UnicodeWidthStr::width(&line[word_start..word_end]);
+        let word_w: usize = crate::cell_width::text_width(&line[word_start..word_end]);
         let trailing = if at_space { 1 } else { 0 };
         let total_w = word_w + trailing;
         // If word+space doesn't fit on current line and chunk has content, emit.
@@ -98,7 +97,7 @@ fn wrap_logical(
             let mut idx = word_start;
             for ch in line[word_start..word_end].chars() {
                 let end_idx = idx + ch.len_utf8();
-                let cw = UnicodeWidthStr::width(&line[idx..end_idx]);
+                let cw = crate::cell_width::text_width(&line[idx..end_idx]);
                 if col + cw > width && col > 0 {
                     visit(chunk_start, chunk_end);
                     chunk_start = idx;

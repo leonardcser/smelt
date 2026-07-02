@@ -3,7 +3,7 @@
 //! Lua API, and any future fixed-width slot stay byte-for-byte
 //! consistent.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use smelt_buffer::cell_width;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RightPaddedText {
@@ -21,7 +21,7 @@ pub fn take_to_cells(s: &str, max_cells: usize) -> String {
     let mut out = String::new();
     let mut col = 0usize;
     for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let w = cell_width::char_width(ch);
         if col + w > max_cells {
             break;
         }
@@ -35,10 +35,10 @@ pub fn take_to_cells(s: &str, max_cells: usize) -> String {
 /// `suffix` when truncation actually happened. When `suffix` alone
 /// overruns the budget we return as many of its leading chars as fit.
 pub fn truncate_to_cells(s: &str, max_cells: usize, suffix: &str) -> String {
-    if UnicodeWidthStr::width(s) <= max_cells {
+    if cell_width::text_width(s) <= max_cells {
         return s.to_string();
     }
-    let suffix_w = UnicodeWidthStr::width(suffix);
+    let suffix_w = cell_width::text_width(suffix);
     if suffix_w >= max_cells {
         return take_to_cells(suffix, max_cells);
     }

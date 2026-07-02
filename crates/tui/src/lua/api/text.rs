@@ -3,10 +3,10 @@
 //! count). Render helpers live in `smelt.render`.
 
 use mlua::prelude::*;
+use smelt_buffer::cell_width;
 use smelt_core::content::width::{pad_to_cells, truncate_to_cells};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use unicode_width::UnicodeWidthStr;
 
 fn lossy_utf8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -135,7 +135,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "width",
         "Return the visual column count of `s`. Lua's `#s` counts bytes; use this for sizing extmark ranges or computing column offsets so multi-byte and wide characters land correctly.",
         &["s"],
-        |_, s: String| Ok(UnicodeWidthStr::width(s.as_str()) as u64),
+        |_, s: String| Ok(cell_width::text_width(s.as_str()) as u64),
     )?;
     m.fn_(
         "line_count",
@@ -201,14 +201,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let suffix = opt("suffix", "…");
             let fill = opt("fill", " ");
             // Zero-width fill would never close the gap; reject early.
-            let fill_w = UnicodeWidthStr::width(fill.as_str());
+            let fill_w = cell_width::text_width(fill.as_str());
             if fill_w == 0 {
                 return Err(mlua::Error::RuntimeError(
                     "smelt.text.fit: fill must have non-zero display width".into(),
                 ));
             }
             let trimmed = truncate_to_cells(&s, width, &suffix);
-            let gap = width.saturating_sub(UnicodeWidthStr::width(trimmed.as_str()));
+            let gap = width.saturating_sub(cell_width::text_width(trimmed.as_str()));
             if gap == 0 {
                 return Ok(trimmed);
             }

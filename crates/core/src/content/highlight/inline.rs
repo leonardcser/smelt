@@ -11,7 +11,6 @@ use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
-use unicode_width::UnicodeWidthStr;
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
 /// columns) or shorter than the column count (missing entries default to left).
@@ -509,7 +508,7 @@ fn emit_table_label_spans(out: &mut LineBuilder, spans: &[InlineSpan], dim: bool
         if let Some(group) = span.style.group {
             out.set_hl(group);
         }
-        out.print_with_meta_width_extra(&span.text, span.meta.clone(), span.width_extra);
+        out.print_with_meta(&span.text, span.meta.clone());
         out.pop_style();
     }
 }
@@ -525,16 +524,10 @@ fn min_visual_width(text: &str, options: &InlineOptions) -> usize {
     let mut max_w = 0usize;
     for span in parse_inline_spans_with_options(text, false, options) {
         let is_code = span.style.group == Some(intern("SmeltAccent"));
-        if is_code || span.width_extra > 0 {
-            max_w = max_w.max(span.text.width() + span.width_extra);
+        if is_code {
+            max_w = max_w.max(display_width(&span.text));
         } else {
-            max_w = max_w.max(
-                span.text
-                    .split(' ')
-                    .map(UnicodeWidthStr::width)
-                    .max()
-                    .unwrap_or(0),
-            );
+            max_w = max_w.max(span.text.split(' ').map(display_width).max().unwrap_or(0));
         }
     }
     max_w
@@ -572,7 +565,6 @@ pub struct InlineSpan {
     pub style: InlineStyle,
     pub meta: SpanMeta,
     pub break_policy: BreakPolicy,
-    pub width_extra: usize,
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
@@ -962,7 +954,6 @@ fn lower_inline_event(
                     icon_style,
                     SpanMeta::unselectable(),
                     BreakPolicy::AttachNext,
-                    1,
                 );
             }
             if let Some(file) = inline_file_reference(text, &options.file_icons) {
@@ -1041,7 +1032,7 @@ fn push_inline_span_meta(
     style: InlineStyle,
     meta: SpanMeta,
 ) {
-    push_inline_span_meta_with_policy(out, text, style, meta, BreakPolicy::Normal, 0);
+    push_inline_span_meta_with_policy(out, text, style, meta, BreakPolicy::Normal);
 }
 
 fn push_inline_span_meta_with_policy(
@@ -1050,16 +1041,12 @@ fn push_inline_span_meta_with_policy(
     style: InlineStyle,
     meta: SpanMeta,
     break_policy: BreakPolicy,
-    width_extra: usize,
 ) {
     if text.is_empty() {
         return;
     }
     if let Some(last) = out.last_mut().filter(|span| {
-        span.style == style
-            && span.meta == meta
-            && span.break_policy == break_policy
-            && span.width_extra == width_extra
+        span.style == style && span.meta == meta && span.break_policy == break_policy
     }) {
         last.text.push_str(text);
     } else {
@@ -1068,7 +1055,6 @@ fn push_inline_span_meta_with_policy(
             style,
             meta,
             break_policy,
-            width_extra,
         });
     }
 }
@@ -1080,15 +1066,9 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
             .map(|span| {
                 InlineRun::new(
                     span.text.clone(),
-                    (
-                        span.style,
-                        span.meta.clone(),
-                        span.break_policy,
-                        span.width_extra,
-                    ),
+                    (span.style, span.meta.clone(), span.break_policy),
                     span.break_policy,
                 )
-                .with_width_extra(span.width_extra)
             })
             .collect(),
     );
@@ -1101,7 +1081,6 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
                     style: run.meta.0,
                     meta: run.meta.1,
                     break_policy: run.meta.2,
-                    width_extra: run.meta.3,
                 })
                 .collect()
         })
@@ -1123,13 +1102,13 @@ pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
                 ..Default::default()
             },
         );
-        out.print_with_meta_width_extra(&span.text, span.meta.clone(), span.width_extra);
+        out.print_with_meta(&span.text, span.meta.clone());
         out.pop_style();
     }
 }
 
 pub fn inline_spans_width(spans: &[InlineSpan]) -> usize {
-    spans.iter().map(|s| s.text.width() + s.width_extra).sum()
+    spans.iter().map(|s| display_width(&s.text)).sum()
 }
 
 #[cfg(test)]
@@ -1226,6 +1205,13 @@ mod tests {
 
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].text, expected_icon_text(&file, &options));
+        assert_eq!(
+            inline_spans_width(&spans),
+            spans
+                .iter()
+                .map(|span| display_width(&span.text))
+                .sum::<usize>()
+        );
         assert!(!spans[0].meta.selectable);
         assert_eq!(spans[1].text, path);
         assert!(spans[1].meta.selectable);
@@ -1321,14 +1307,12 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
-                width_extra: 0,
             },
             InlineSpan {
-                text: "R ".into(),
+                text: "\u{e6b2} ".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::unselectable(),
                 break_policy: BreakPolicy::AttachNext,
-                width_extra: 1,
             },
             InlineSpan {
                 text: "verylongfilename.rs".into(),
@@ -1339,7 +1323,6 @@ mod tests {
                     col: None,
                 }),
                 break_policy: BreakPolicy::Normal,
-                width_extra: 0,
             },
         ];
         let rows = wrap_inline_spans(&spans, 6);
@@ -1352,10 +1335,10 @@ mod tests {
             text_rows,
             vec![
                 String::from("see "),
-                String::from("R ver"),
-                String::from("ylongf"),
-                String::from("ilenam"),
-                String::from("e.rs"),
+                String::from("\u{e6b2} very"),
+                String::from("longfi"),
+                String::from("lename"),
+                String::from(".rs"),
             ]
         );
     }
@@ -1920,21 +1903,19 @@ mod tests {
     }
 
     #[test]
-    fn inline_spans_width_sums_unicode_widths() {
+    fn inline_spans_width_sums_cell_widths() {
         let spans = vec![
             InlineSpan {
                 text: "ab".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
-                width_extra: 0,
             },
             InlineSpan {
                 text: "cd".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
-                width_extra: 0,
             },
         ];
         assert_eq!(inline_spans_width(&spans), 4);
@@ -1947,7 +1928,6 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
-            width_extra: 0,
         }];
         let rows = wrap_inline_spans(&spans, 0);
         assert_eq!(rows.len(), 1);
@@ -1971,7 +1951,7 @@ mod tests {
         assert!(rows.len() >= 2, "expected wrap; got rows={texts:?}");
         // No row exceeds max_cols by visual width.
         for row in &rows {
-            let width: usize = row.iter().map(|s| s.text.as_str().width()).sum();
+            let width: usize = row.iter().map(|s| display_width(&s.text)).sum();
             assert!(width <= 12, "row too wide: {row:?}");
         }
         // Round-trip: concatenation preserves every char (modulo trailing wrap space).
@@ -1986,7 +1966,6 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
-            width_extra: 0,
         }];
         let rows = wrap_inline_spans(&spans, 3);
         assert!(rows.len() >= 3);
@@ -2205,7 +2184,7 @@ mod tests {
             "expected stacked fallback:\n{joined}"
         );
         for line in &block.lines {
-            let width = line.text.width();
+            let width = display_width(&line.text);
             assert!(
                 width <= 24,
                 "stacked row overflowed: width={width}, line={:?}",
@@ -2228,7 +2207,7 @@ mod tests {
             render_markdown_table(out, &rows, &[], 80, false, Some(&bctx), "");
         });
         for line in &block.lines {
-            let width = line.text.width();
+            let width = display_width(&line.text);
             assert!(
                 width <= 10,
                 "stacked row overflowed: width={width}, line={:?}",
@@ -2261,7 +2240,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .any(|s| s.style.bold && s.text.contains('a')));
         for line in &block.lines {
-            let width = line.text.width();
+            let width = display_width(&line.text);
             assert!(
                 width <= 8,
                 "stacked row overflowed: width={width}, line={:?}",
@@ -2315,13 +2294,14 @@ mod tests {
         let block = render_test(74, |out| {
             render_markdown_table_with_options(out, &rows, &[], 74, false, None, "", &options);
         });
-        let top_width = block
-            .lines
-            .iter()
-            .find(|line| line.text.contains('┏'))
-            .expect("top border")
-            .text
-            .width();
+        let top_width = display_width(
+            &block
+                .lines
+                .iter()
+                .find(|line| line.text.contains('┏'))
+                .expect("top border")
+                .text,
+        );
         let file_row = block
             .lines
             .iter()

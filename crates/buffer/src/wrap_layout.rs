@@ -7,8 +7,8 @@
 //! single-source.
 
 use crate::buffer::Buffer;
+use crate::cell_width;
 use crate::wrap::wrap_line_ranges;
-use unicode_width::UnicodeWidthStr;
 
 fn chunks_for_line(
     line: &str,
@@ -26,7 +26,7 @@ fn chunks_for_line(
         && width > 0
         && chunks
             .last()
-            .map(|&(s, e)| UnicodeWidthStr::width(&line[s..e]) >= width as usize)
+            .map(|&(s, e)| cell_width::text_width(&line[s..e]) >= width as usize)
             .unwrap_or(false)
     {
         chunks.push((line.len(), line.len()));
@@ -43,7 +43,7 @@ fn layout_line(
     let chunks = chunks_for_line(line, width, wrap, reserve_full_width_cursor_row);
     let max_width = chunks
         .iter()
-        .map(|&(s, e)| UnicodeWidthStr::width(&line[s..e]).min(u16::MAX as usize) as u16)
+        .map(|&(s, e)| cell_width::text_width_u16(&line[s..e]))
         .max()
         .unwrap_or(0);
     (chunks, max_width)
@@ -122,7 +122,7 @@ impl WrappedLayout {
                 let line = buf.get_line(idx).unwrap_or_default();
                 let line_len = line.len();
                 chunks_per_row.push(vec![(0, line_len)]);
-                let w = UnicodeWidthStr::width(line);
+                let w = cell_width::text_width(line);
                 row_max_widths.push(w.min(u16::MAX as usize) as u16);
                 if w > max_row_width {
                     max_row_width = w;

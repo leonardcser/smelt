@@ -14,4 +14,3 @@ path = "src/lib.rs"
 smelt-term = { workspace = true }
 smelt-buffer = { workspace = true }
 crossterm = { workspace = true }
-unicode-width = { workspace = true }

@@ -9,6 +9,7 @@ use smelt_buffer::attachment::{AttachmentId, AttachmentStore, ATTACHMENT_MARKER}
 use smelt_buffer::buffer::{
     Buffer, BufferCopy, BufferParser, CopyOutput, LineCursorPolicy, LineDecoration, SpanMeta,
 };
+use smelt_buffer::cell_width;
 use smelt_buffer::coords::ProjectionMaps;
 use smelt_core::theme::intern;
 use std::sync::{Arc, Mutex};
@@ -301,7 +302,7 @@ impl BufferParser for PromptBufferParser {
         for (li, (line, kinds)) in visual_lines.iter().enumerate() {
             let mut col = 0u16;
             for (i, (ch, kind)) in line.chars().zip(kinds.iter()).enumerate() {
-                let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                let ch_width = cell_width::char_width_u16(ch);
                 let next_col = col.saturating_add(ch_width);
                 match kind {
                     SpanKind::Attachment | SpanKind::AtRef => {

@@ -1,13 +1,12 @@
 //! Pure text helpers for byte↔cell mapping.
 
-/// Byte offset → terminal column (sum of `unicode-width` cells of preceding chars).
+/// Byte offset → terminal column.
 pub fn byte_to_cell(line: &str, byte: usize) -> usize {
-    use unicode_width::UnicodeWidthStr;
     let mut p = byte.min(line.len());
     while p > 0 && !line.is_char_boundary(p) {
         p -= 1;
     }
-    UnicodeWidthStr::width(&line[..p])
+    crate::cell_width::text_width(&line[..p])
 }
 
 /// Terminal column → byte offset at which the preceding text occupies `cell` columns.
@@ -16,7 +15,6 @@ pub fn byte_to_cell(line: &str, byte: usize) -> usize {
 /// prefixes so presentation selectors and ZWJ/combining sequences are handled
 /// the same way in both directions.
 pub fn cell_to_byte(line: &str, cell: usize) -> usize {
-    use unicode_width::UnicodeWidthStr;
     if cell == 0 {
         return 0;
     }
@@ -24,7 +22,7 @@ pub fn cell_to_byte(line: &str, cell: usize) -> usize {
     let mut exact = None;
     for (b, ch) in line.char_indices() {
         let end = b + ch.len_utf8();
-        let width = UnicodeWidthStr::width(&line[..end]);
+        let width = crate::cell_width::text_width(&line[..end]);
         if width == cell {
             exact = Some(end);
         } else if width > cell {

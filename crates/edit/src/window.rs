@@ -2999,7 +2999,7 @@ impl Window {
     }
 
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
-        use unicode_width::UnicodeWidthChar;
+        use smelt_buffer::cell_width::char_width_u16;
 
         let width = slice.width();
         let height = slice.height();
@@ -3015,7 +3015,7 @@ impl Window {
         let content_width = self
             .config
             .gutters
-            .content_width(width)
+            .content_width_with_gutter(width, gutter_width)
             .min(width.saturating_sub(content_offset));
         // The host's prep pass refreshes the layout before paint. Tests that
         // skip the prep pass build a one-shot fallback so render stays correct
@@ -3127,7 +3127,7 @@ impl Window {
                         let style = merge_styles(base_row_style, g.style);
                         let mut c: u16 = 0;
                         for ch in g.text.chars() {
-                            let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                            let cw = char_width_u16(ch);
                             if c + cw > gutter_width {
                                 break;
                             }
@@ -3167,7 +3167,7 @@ impl Window {
             let mut src_col: u16 = 0;
             let mut dst_col: u16 = 0;
             for (ci, ch) in line_chars.iter().enumerate() {
-                let cw = UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16;
+                let cw = char_width_u16(*ch);
                 if src_col.saturating_add(cw) <= scroll_left {
                     src_col = src_col.saturating_add(cw);
                     continue;
@@ -3293,11 +3293,7 @@ impl Window {
                     .map(|g| ctx.theme.get(g))
                     .unwrap_or_default();
                 let style = merge_styles(row_style, base);
-                let vt_width: u16 = vt
-                    .text
-                    .chars()
-                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0).max(1) as u16)
-                    .sum();
+                let vt_width: u16 = vt.text.chars().map(char_width_u16).sum();
                 let start_col = match vt.pos {
                     VirtTextPos::Eol => content_end_col,
                     VirtTextPos::Inline | VirtTextPos::Overlay => (vt.col as u16)
@@ -3307,7 +3303,7 @@ impl Window {
                 };
                 let mut c = start_col;
                 for ch in vt.text.chars() {
-                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                    let cw = char_width_u16(ch);
                     if c + cw > content_width {
                         break;
                     }
@@ -6252,7 +6248,7 @@ mod tests {
 
     #[test]
     fn render_highlight_does_not_duplicate_wide_char_in_grid() {
-        // ⚡ (U+26A1) reports unicode-width 2. The line walk paints the
+        // ⚡ (U+26A1) occupies two terminal cells. The line walk paints the
         // glyph at col 1 with `\0` continuation at col 2, then the
         // highlight loop overlays the span style. Re-painting the
         // continuation cell would write a second ⚡ + clobber the next
@@ -6618,6 +6614,82 @@ mod tests {
         // At scroll_top=0, thumb paints from row 0; track fills lower rows.
         assert_eq!(grid.cell(19, 0).style.bg, Some(thumb_bg));
         assert_eq!(grid.cell(19, 9).style.bg, Some(track_bg));
+    }
+
+    #[test]
+    fn render_reserves_scrollbar_after_data_gutter_for_wide_content() {
+        struct FixedGutter;
+
+        impl GutterProvider for FixedGutter {
+            fn width(&self, _buf: &Buffer) -> u16 {
+                3
+            }
+
+            fn cell(
+                &self,
+                _buf: &Buffer,
+                _theme: &Theme,
+                _row: usize,
+            ) -> Option<crate::gutter::GutterCell> {
+                Some(crate::gutter::GutterCell {
+                    text: "   ".into(),
+                    style: crate::grid::Style::default(),
+                })
+            }
+        }
+
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(std::iter::repeat_n("abc漢".to_string(), 10).collect());
+
+        let mut w = Window::new(
+            WinId(1),
+            BufId(1),
+            SplitConfig {
+                region: "test".into(),
+                gutters: Gutters::default(),
+            },
+        );
+        w.gutter = Some(std::sync::Arc::new(FixedGutter));
+        let rect = Rect::new(0, 0, 8, 3);
+        let gutter_width = w.gutter_width(&buf);
+        let content_width = w
+            .config
+            .gutters
+            .content_width_with_gutter(rect.width, gutter_width);
+        assert_eq!(content_width, 4);
+        w.ensure_layout(&buf, content_width);
+        w.viewport = Some(
+            WindowViewport::new(rect, content_width, 10, 0, ScrollbarState::new(7, 10, 3))
+                .with_gutter_width(gutter_width),
+        );
+
+        let thumb_bg = crate::grid::Color::AnsiValue(220);
+        let track_bg = crate::grid::Color::AnsiValue(238);
+        let mut theme = Theme::default();
+        theme.set(
+            "SmeltScrollbarThumb",
+            crate::grid::Style::new().bg(thumb_bg),
+        );
+        theme.set(
+            "SmeltScrollbarTrack",
+            crate::grid::Style::new().bg(track_bg),
+        );
+        let ctx = DrawContext {
+            terminal_width: rect.width,
+            terminal_height: rect.height,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
+        };
+        let mut grid = Grid::new(rect.width, rect.height);
+        let mut slice = grid.slice_mut(rect);
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(7, 0).style.bg, Some(thumb_bg));
+        assert_ne!(grid.cell(6, 0).style.bg, Some(thumb_bg));
+        assert_ne!(grid.cell(6, 0).style.bg, Some(track_bg));
+        assert_ne!(grid.cell(7, 0).symbol, '\0');
     }
 
     #[test]
@@ -7022,15 +7094,14 @@ mod tests {
     #[test]
     fn highlight_anchored_after_multibyte_covers_next_glyph() {
         use crate::grid::Color;
-        use unicode_width::UnicodeWidthStr;
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         let last_s = " 969\u{00B5}s";
         let p99_s = "2.69ms";
         buf.set_all_lines(vec![format!("  func {last_s}  {p99_s} 223")]);
 
         let last_col: u16 = 7;
-        let last_w = UnicodeWidthStr::width(last_s) as u16;
-        let p99_w = UnicodeWidthStr::width(p99_s) as u16;
+        let last_w = smelt_buffer::cell_width::text_width_u16(last_s);
+        let p99_w = smelt_buffer::cell_width::text_width_u16(p99_s);
         assert_ne!(last_w, last_s.len() as u16);
 
         let p99_col = last_col + last_w + 2;
@@ -7226,7 +7297,7 @@ mod tests {
             vec![smelt_buffer::buffer::SelectionRange {
                 line: 0,
                 col_start: 0,
-                col_end: unicode_width::UnicodeWidthStr::width(line) as u16,
+                col_end: smelt_buffer::cell_width::text_width_u16(line),
             }],
         );
 

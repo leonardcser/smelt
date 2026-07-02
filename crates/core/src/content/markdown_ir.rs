@@ -506,7 +506,6 @@ fn structural_prefix_spans<'a>(
             style: InlineStyle::default(),
             meta: Default::default(),
             break_policy: BreakPolicy::Normal,
-            width_extra: 0,
         }]
     }
 }

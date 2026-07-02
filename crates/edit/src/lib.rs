@@ -533,6 +533,25 @@ impl Ui {
         self.resolve_splits().get(&win).copied()
     }
 
+    pub fn win_content_width(&self, win: WinId) -> Option<u16> {
+        let window = self.wins.get(&win)?;
+        if let Some(rect) = self.split_rect(win) {
+            let gutter_width = self
+                .bufs
+                .get(&window.buf)
+                .map(|buf| window.gutter_width(buf))
+                .unwrap_or(0)
+                .min(rect.width);
+            return Some(
+                window
+                    .config
+                    .gutters
+                    .content_width_with_gutter(rect.width, gutter_width),
+            );
+        }
+        window.viewport.map(|viewport| viewport.content_width)
+    }
+
     pub fn buf_create(&mut self, opts: BufCreateOpts) -> BufId {
         let id = BufId(self.next_buf_id);
         self.next_buf_id += 1;
@@ -1818,8 +1837,7 @@ impl Ui {
         let content_width = win
             .config
             .gutters
-            .content_width(rect.width)
-            .min(rect.width.saturating_sub(gutter_width));
+            .content_width_with_gutter(rect.width, gutter_width);
         let follow_tail = self.should_follow_tail(win_id);
         let request = MaterializeRequest {
             win: win_id,
@@ -1845,8 +1863,7 @@ impl Ui {
         let content_width = win
             .config
             .gutters
-            .content_width(rect.width)
-            .min(rect.width.saturating_sub(gutter_width));
+            .content_width_with_gutter(rect.width, gutter_width);
         if let Some(buf) = self.bufs.get_mut(&buf_id) {
             buf.ensure_rendered_at(content_width);
         }
@@ -3297,11 +3314,10 @@ impl<'a> layout::LeafSizer for UiLeafSizer<'a> {
         let w = if win.wrap {
             cap.0
         } else {
-            use unicode_width::UnicodeWidthStr;
             let longest = buf
                 .lines()
                 .iter()
-                .map(|l| UnicodeWidthStr::width(l.as_str()).min(u16::MAX as usize) as u16)
+                .map(|l| smelt_buffer::cell_width::text_width_u16(l.as_str()))
                 .max()
                 .unwrap_or(0);
             longest.saturating_add(chrome).min(cap.0)

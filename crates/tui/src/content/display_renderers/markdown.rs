@@ -1201,7 +1201,6 @@ fn markdown_line_spans(
                 },
                 meta: Default::default(),
                 break_policy: BreakPolicy::Normal,
-                width_extra: 0,
             });
         }
         if !prefix.is_empty() {
@@ -1213,7 +1212,6 @@ fn markdown_line_spans(
                 },
                 meta: Default::default(),
                 break_policy: BreakPolicy::Normal,
-                width_extra: 0,
             });
         }
         line_spans.extend(base_spans.iter().cloned().map(|mut span| {

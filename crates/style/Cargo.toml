@@ -12,3 +12,6 @@ categories = ["command-line-interface"]
 [lib]
 name = "smelt_style"
 path = "src/lib.rs"
+
+[dependencies]
+unicode-width = { workspace = true }

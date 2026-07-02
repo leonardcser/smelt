@@ -1,16 +1,16 @@
 //! Minimal selection helpers for core (headless-safe).
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use smelt_buffer::cell_width;
 
 pub fn truncate_str(s: &str, max: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max {
+    if cell_width::text_width(s) <= max {
         return s.to_string();
     }
     let target = max.saturating_sub(1);
     let mut truncated = String::new();
     let mut col = 0;
     for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let w = cell_width::char_width(ch);
         if col + w > target {
             break;
         }
@@ -96,7 +96,7 @@ mod tests {
         let out = truncate_str("hello world", 8);
         // target = max - 1 = 7 cols of original + ellipsis.
         assert_eq!(out, "hello w…");
-        assert_eq!(unicode_width::UnicodeWidthStr::width(out.as_str()), 8);
+        assert_eq!(cell_width::text_width(out.as_str()), 8);
     }
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
         // Each CJK char is width=2; target=4 means at most 2 chars before ellipsis.
         let out = truncate_str("日本語", 5);
         assert!(out.ends_with('…'));
-        assert!(unicode_width::UnicodeWidthStr::width(out.as_str()) <= 5);
+        assert!(cell_width::text_width(out.as_str()) <= 5);
     }
 
     #[test]

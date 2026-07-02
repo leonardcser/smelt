@@ -18,7 +18,6 @@ reqwest = { workspace = true }
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
 sha2 = { workspace = true }
 libc = { workspace = true }
-unicode-width = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 glob = { workspace = true }

@@ -1,4 +1,4 @@
-use super::grid::{to_crossterm_color, CellUpdate, Style};
+use super::grid::{char_width, to_crossterm_color, CellUpdate, Style};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
@@ -21,11 +21,13 @@ pub fn flush_diff<'a, W: Write>(
             emit_style_diff(w, &current, &update.cell.style)?;
             current = update.cell.style;
         }
-        let symbol = printable_symbol(update.cell.symbol);
+        let printable = printable_symbol(update.cell.symbol);
+        let overflow = update.x.saturating_add(char_width(printable)) > update.row_width;
+        let symbol = if overflow { ' ' } else { printable };
         let mut buf = [0u8; 4];
         let s = symbol.encode_utf8(&mut buf);
         w.write_all(s.as_bytes())?;
-        cursor_x = update.x + 1;
+        cursor_x = update.x.saturating_add(char_width(symbol));
         cursor_y = update.y;
     }
 
@@ -397,5 +399,66 @@ mod tests {
         let s = flush_to_string(&curr, &prev);
         // Only one MoveTo at the start; the rest stream after.
         assert!(s.contains("\x1b[1;1HABC"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_tracks_cursor_after_wide_glyphs() {
+        let prev = Grid::new(10, 1);
+        let mut curr = Grid::new(10, 1);
+        curr.set(0, 0, '漢', Style::default());
+        curr.set(2, 0, 'A', Style::default());
+        let s = flush_to_string(&curr, &prev);
+
+        assert!(
+            s.contains("\x1b[1;1H漢A"),
+            "wide glyph and following cell should stream in one run, got {s:?}"
+        );
+    }
+
+    #[test]
+    fn flush_streams_private_use_icons_as_narrow_glyphs() {
+        let prev = Grid::new(10, 1);
+        let mut curr = Grid::new(10, 1);
+        curr.set(0, 0, '\u{e6b2}', Style::default());
+        curr.set(1, 0, 'A', Style::default());
+        let s = flush_to_string(&curr, &prev);
+
+        assert!(
+            s.contains("\x1b[1;1H\u{e6b2}A"),
+            "private-use icon and following cell should stream as narrow glyphs, got {s:?}"
+        );
+    }
+
+    #[test]
+    fn flush_does_not_emit_wide_glyph_at_right_edge() {
+        let prev = Grid::new(2, 1);
+        let mut curr = Grid::new(2, 1);
+        let cell = curr.cell_mut(1, 0).expect("right edge cell");
+        cell.symbol = '漢';
+        cell.style = Style::default();
+
+        let s = flush_to_string(&curr, &prev);
+        assert!(
+            !s.contains('漢'),
+            "right-edge wide glyph would force terminal wrap: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[1;2H "),
+            "expected a clearing space, got {s:?}"
+        );
+    }
+
+    #[test]
+    fn flush_clears_wide_glyph_continuation() {
+        let mut prev = Grid::new(10, 1);
+        prev.set(0, 0, '漢', Style::default());
+        prev.set(2, 0, 'A', Style::default());
+        let curr = Grid::new(10, 1);
+        let s = flush_to_string(&curr, &prev);
+
+        assert!(
+            s.contains("\x1b[1;1H   "),
+            "clearing a wide glyph must rewrite its continuation cell, got {s:?}"
+        );
     }
 }

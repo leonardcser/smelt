@@ -78,12 +78,7 @@ impl LuaTranscriptStream {
         app.ui
             .iter_wins()
             .filter(|(_, win)| win.buf == buf_id)
-            .filter_map(|(win_id, win)| {
-                app.ui
-                    .split_rect(win_id)
-                    .map(|rect| win.config.gutters.content_width(rect.width))
-                    .or_else(|| win.viewport.map(|vp| vp.content_width))
-            })
+            .filter_map(|(win_id, _win)| app.ui.win_content_width(win_id))
             .max()
     }
 

@@ -16,8 +16,7 @@
 //! continuation that `trim_end` ate would be unrecoverable.
 
 use super::grid::{Cell, Grid, Style};
-use smelt_style::style::Color;
-use unicode_width::UnicodeWidthChar;
+use smelt_style::{cell_width, style::Color};
 
 /// Structured copy of one rendered frame. Wide-char continuation cells
 /// (`\0`) collapse to a space in `rows`.
@@ -174,34 +173,14 @@ impl SnapshotFrame {
                     break;
                 }
                 let ch = chars[c];
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+                let cw = cell_width::char_width(ch);
                 let style = self
                     .styles
                     .get(r)
                     .and_then(|row| row.get(c).copied())
                     .unwrap_or_default();
-                if let Some(cell) = grid.cell_mut(x, y) {
-                    cell.symbol = ch;
-                    cell.style = style;
-                }
+                grid.set(x, y, ch, style);
                 if cw == 2 {
-                    // The slot at `c + 1` was the wide char's `\0`
-                    // continuation in the source grid (stored as `' '`
-                    // after `from_grid` collapses). Stamp `\0` into the
-                    // dest so `flush_full` advances by the wide width
-                    // instead of treating it as a literal space.
-                    let cont_x = x_off.saturating_add(c as u16 + 1);
-                    if cont_x < grid.width() {
-                        let cont_style = self
-                            .styles
-                            .get(r)
-                            .and_then(|row| row.get(c + 1).copied())
-                            .unwrap_or(style);
-                        if let Some(cell) = grid.cell_mut(cont_x, y) {
-                            cell.symbol = '\0';
-                            cell.style = cont_style;
-                        }
-                    }
                     c += 2;
                 } else {
                     c += 1;
@@ -265,7 +244,7 @@ fn row_visual_width(row: &str) -> u16 {
     let chars: Vec<char> = row.chars().collect();
     let mut cells = chars.len() as u16;
     if let Some(&last) = chars.last() {
-        if UnicodeWidthChar::width(last).unwrap_or(0) == 2 {
+        if cell_width::char_width(last) == 2 {
             // The continuation slot is missing - `trim_end` ate the
             // collapsed `\0`-as-space. Add it back.
             cells = cells.saturating_add(1);
@@ -285,7 +264,7 @@ fn parse_row(line: &str, width: u16) -> String {
     let mut i = 0;
     while i < chars.len() && cells < width {
         let ch = chars[i];
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+        let cw = cell_width::char_width_u16(ch);
         out.push(ch);
         cells += 1;
         if cw == 2 && cells < width {

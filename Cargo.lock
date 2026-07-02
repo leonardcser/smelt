@@ -2560,7 +2560,6 @@ dependencies = [
  "smelt-perf",
  "smelt-style",
  "tempfile",
- "unicode-width",
 ]
 
 [[package]]
@@ -2599,7 +2598,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "two-face",
- "unicode-width",
  "url",
 ]
 
@@ -2610,7 +2608,6 @@ dependencies = [
  "crossterm",
  "smelt-buffer",
  "smelt-term",
- "unicode-width",
 ]
 
 [[package]]
@@ -2676,6 +2673,9 @@ dependencies = [
 [[package]]
 name = "smelt-style"
 version = "0.2.0"
+dependencies = [
+ "unicode-width",
+]
 
 [[package]]
 name = "smelt-term"
@@ -2685,7 +2685,6 @@ dependencies = [
  "insta",
  "smelt-ansi",
  "smelt-style",
- "unicode-width",
 ]
 
 [[package]]
@@ -2714,7 +2713,6 @@ dependencies = [
  "smelt-term",
  "tempfile",
  "tokio",
- "unicode-width",
 ]
 
 [[package]]
