@@ -144,6 +144,54 @@ pub struct LuaToolDef {
     pub override_core: bool,
 }
 
+fn tool_parameters_json(lua: &Lua, params: &mlua::Table) -> serde_json::Value {
+    let mut json = lua_table_to_json(lua, params);
+    reorder_schema_properties(&mut json);
+    json
+}
+
+fn reorder_schema_properties(value: &mut serde_json::Value) {
+    let serde_json::Value::Object(obj) = value else {
+        return;
+    };
+
+    for child in obj.values_mut() {
+        reorder_schema_properties(child);
+    }
+
+    let required: Vec<String> = obj
+        .get("required")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if required.is_empty() {
+        return;
+    }
+
+    let Some(properties) = obj
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+    else {
+        return;
+    };
+
+    let mut ordered = serde_json::Map::new();
+    for name in required {
+        if let Some(value) = properties.remove(&name) {
+            ordered.insert(name, value);
+        }
+    }
+    for (name, value) in std::mem::take(properties) {
+        ordered.insert(name, value);
+    }
+    *properties = ordered;
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -200,7 +248,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let meta = lua.create_table()?;
                 meta.set("description", def.description)?;
                 if let Some(params) = def.parameters {
-                    if let Ok(json_str) = serde_json::to_string(&lua_table_to_json(lua, &params)) {
+                    let params_json = tool_parameters_json(lua, &params);
+                    if let Ok(json_str) = serde_json::to_string(&params_json) {
                         meta.set("parameters_json", json_str)?;
                     }
                 }

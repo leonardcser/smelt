@@ -3173,6 +3173,45 @@ mod tests {
     }
 
     #[test]
+    fn tool_schema_preserves_parameter_property_order() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.tools.register({
+                    name = "order_probe",
+                    description = "test tool",
+                    parameters = {
+                        type = "object",
+                        properties = {
+                            file_path = { type = "string" },
+                            content = { type = "string" },
+                        },
+                        required = { "file_path", "content" },
+                    },
+                    execute = function(args) return "ok" end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+        let def = defs
+            .iter()
+            .find(|def| def.name == "order_probe")
+            .expect("registered tool definition");
+        let keys: Vec<_> = def.parameters["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(keys, vec!["file_path", "content"]);
+    }
+
+    #[test]
     fn autoload_excludes_optional_plugins() {
         let modules = autoload_modules();
         for optional in OPTIONAL_PLUGINS {
