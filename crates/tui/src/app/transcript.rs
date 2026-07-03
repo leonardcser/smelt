@@ -7411,7 +7411,7 @@ impl TuiApp {
         }
         let appends = std::mem::take(&mut self.pending_history_appends);
         for append in appends {
-            let mode_base = append.mode().map(|_| self.mode_history_base());
+            let mode_base = append.mode().map(|_| self.mode_append_base());
             let history_append = append.history_append(mode_base);
             let replace_note_kind = history_append.replacement_note_kind();
             let result = self.apply_history_append_to_history(&history_append);
@@ -7430,6 +7430,11 @@ impl TuiApp {
             return;
         };
         let append = self.pending_history_appends.remove(idx);
+        if append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange) {
+            if let Some(mode) = append.mode().and_then(protocol::AgentMode::parse) {
+                self.applied_agent_mode = mode;
+            }
+        }
         let result = if append.replacement_note_kind().is_some() {
             protocol::HistoryAppendResult::ReplacedLast
         } else {

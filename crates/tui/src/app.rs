@@ -192,6 +192,8 @@ pub struct TuiApp {
         tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     pub(crate) context_tokens_updated_this_turn: bool,
+    /// Agent mode that is known to be in effect for the active turn/request.
+    pub(crate) applied_agent_mode: protocol::AgentMode,
     /// Reasoning effort that is known to be in effect for the active turn/request.
     pub(crate) applied_reasoning_effort: protocol::ReasoningEffort,
     pub(crate) cancel_generation: u64,
@@ -763,10 +765,11 @@ impl TuiApp {
     }
 
     pub(crate) fn mode_pending(&self) -> bool {
-        self.active_agent_turn_id().is_some()
-            && self.pending_history_appends.iter().any(|append| {
-                append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
-            })
+        self.active_agent_turn_id().is_some() && self.applied_agent_mode != self.core.config.mode
+    }
+
+    pub(crate) fn sync_agent_mode_applied(&mut self) {
+        self.applied_agent_mode = self.core.config.mode.clone();
     }
 
     pub(crate) fn sync_reasoning_effort_applied(&mut self) {
@@ -1089,8 +1092,16 @@ impl TuiApp {
         self.pending_history_appends.push(append);
     }
 
+    pub(crate) fn mode_append_base(&self) -> protocol::AgentMode {
+        if self.agent_is_running() {
+            self.applied_agent_mode.clone()
+        } else {
+            self.mode_history_base()
+        }
+    }
+
     pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
-        let mode_base = append.mode().map(|_| self.mode_history_base());
+        let mode_base = append.mode().map(|_| self.mode_append_base());
         let history_append = append.history_append(mode_base);
         let replace_note_kind = history_append.replacement_note_kind();
 
@@ -1356,6 +1367,7 @@ impl TuiApp {
         resume_preview_cache.set_inline_options(inline_options);
 
         let working_clock = Arc::clone(&clock);
+        let initial_agent_mode = app_config.mode.clone();
         let initial_reasoning_effort = app_config.reasoning_effort;
         let core = smelt_core::Core::new(
             app_config,
@@ -1419,6 +1431,7 @@ impl TuiApp {
             process_completion_rx,
             app_event_rx,
             context_tokens_updated_this_turn: false,
+            applied_agent_mode: initial_agent_mode,
             applied_reasoning_effort: initial_reasoning_effort,
             cancel_generation: 0,
             dispatching_turn_id: None,

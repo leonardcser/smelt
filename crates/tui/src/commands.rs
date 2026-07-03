@@ -620,9 +620,6 @@ impl TuiApp {
         }
         // Publish new mode before Lua/tool snapshots for future requests.
         if old != mode {
-            if record {
-                self.update_session_persist_metadata();
-            }
             self.core
                 .signals
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
@@ -641,6 +638,9 @@ impl TuiApp {
                     self.core.config.mode.as_str().to_string(),
                     note_text,
                 ));
+            }
+            if record {
+                self.update_session_persist_metadata();
             }
         }
     }
@@ -792,6 +792,53 @@ mod tests {
 
         app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
         assert!(!app.app.mode_pending());
+    }
+
+    #[test]
+    fn recorded_mode_change_during_turn_sets_pending_marker() {
+        let mut app = normal_app();
+        app.app.core.session.history = vec![user("hello")];
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
+
+        assert!(app.app.mode_pending());
+        assert_eq!(pending_mode_appends(&app.app).len(), 1);
+    }
+
+    #[test]
+    fn recorded_mode_pending_clears_when_cycling_back_to_applied_mode() {
+        let mut app = normal_app();
+        app.app.core.session.history = vec![user("hello")];
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
+        assert!(app.app.mode_pending());
+
+        app.app.set_mode(AgentMode::parse("normal").unwrap(), true);
+        assert!(!app.app.mode_pending());
+        assert!(pending_mode_appends(&app.app).is_empty());
+    }
+
+    #[test]
+    fn recorded_mode_change_with_history_pushes_mode_block() {
+        let mut app = normal_app();
+        app.app.core.session.history = vec![user("hello")];
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+    }
+
+    #[test]
+    fn recorded_mode_change_without_another_turn_request_commits_at_turn_end() {
+        let mut app = normal_app();
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), true);
+        app.app.discard_turn(crate::app::TurnEnd::Complete);
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
     }
 
     #[test]

@@ -204,6 +204,7 @@ impl TuiApp {
         self.next_turn_id += 1;
 
         let permissions = turn.permissions.clone();
+        self.applied_agent_mode = self.core.config.mode.clone();
         self.applied_reasoning_effort = turn.reasoning_effort;
         self.core
             .engine
@@ -597,7 +598,6 @@ impl TuiApp {
             self.clear_tool_drafts();
             self.finish_transcript_turn();
         }
-        self.sync_reasoning_effort_applied();
 
         let (meta, start_queued) = {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:working_finish");
@@ -667,6 +667,8 @@ impl TuiApp {
         if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
         }
+        self.sync_agent_mode_applied();
+        self.sync_reasoning_effort_applied();
         if matches!(end, TurnEnd::Complete) {
             self.schedule_session_save();
         } else {
