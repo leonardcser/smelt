@@ -1,3 +1,5 @@
+mod daemon;
+mod operations;
 mod semantic;
 
 use semantic::*;
@@ -12,7 +14,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LspServerConfig {
     pub cmd: Vec<String>,
     #[serde(default)]
@@ -33,10 +35,8 @@ pub struct LspServerConfig {
     pub settings: Value,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LspConfig {
-    #[serde(default = "default_start_policy")]
-    pub start: String,
     #[serde(default)]
     pub servers: HashMap<String, LspServerConfig>,
 }
@@ -98,10 +98,6 @@ struct LspClient {
     _child: Mutex<Child>,
 }
 
-fn default_start_policy() -> String {
-    "background".to_string()
-}
-
 fn default_init_timeout_ms() -> u64 {
     120_000
 }
@@ -114,27 +110,80 @@ fn default_startup_wait_ms() -> u64 {
     5_000
 }
 
+pub async fn run_daemon(socket: PathBuf) -> Result<(), String> {
+    daemon::run(socket).await
+}
+
 impl LspManager {
-    pub fn configure_sync(&self, config: LspConfig) {
-        let start_background = config.start == "background";
+    fn reconcile_config(&self, config: LspConfig) -> Vec<Arc<LspClientSlot>> {
+        let mut removed_clients = Vec::new();
         let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
-        servers.clear();
+        servers.retain(|name, entry| {
+            let keep = config
+                .servers
+                .get(name)
+                .is_some_and(|new_config| new_config == &entry.config);
+            if !keep {
+                removed_clients.extend(entry.clients.values().cloned());
+            }
+            keep
+        });
         for (name, config) in config.servers {
-            let mut entry = ServerEntry {
+            servers.entry(name).or_insert_with(|| ServerEntry {
                 config,
                 clients: HashMap::new(),
-            };
-            if start_background {
-                let root = find_root(
-                    &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                    &entry.config.root_markers,
-                );
-                entry.clients.insert(
-                    root.clone(),
-                    LspClientSlot::start(name.clone(), entry.config.clone(), root),
-                );
-            }
-            servers.insert(name, entry);
+            });
+        }
+        removed_clients
+    }
+
+    pub async fn configure(&self, config: LspConfig) {
+        for slot in self.reconcile_config(config) {
+            slot.shutdown().await;
+        }
+    }
+
+    pub fn configure_detached(&self, config: LspConfig) {
+        let removed_clients = self.reconcile_config(config);
+        if !removed_clients.is_empty() {
+            tokio::spawn(async move {
+                for slot in removed_clients {
+                    slot.shutdown().await;
+                }
+            });
+        }
+    }
+
+    pub fn config_snapshot(&self) -> LspConfig {
+        let servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        LspConfig {
+            servers: servers
+                .iter()
+                .map(|(name, entry)| (name.clone(), entry.config.clone()))
+                .collect(),
+        }
+    }
+
+    pub async fn call(&self, operation: &str, args: Value) -> Result<Value, String> {
+        let config = self.config_snapshot();
+        if config.servers.is_empty() {
+            return self.dispatch_local(operation, args).await;
+        }
+        daemon::call(config, operation, args).await
+    }
+
+    pub async fn shutdown_all(&self) {
+        let slots = {
+            let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+            let slots = servers
+                .values_mut()
+                .flat_map(|entry| entry.clients.drain().map(|(_, slot)| slot))
+                .collect::<Vec<_>>();
+            servers.clear();
+            slots
+        };
+        for slot in slots {
+            slot.shutdown().await;
         }
     }
 
@@ -796,6 +845,16 @@ impl LspClientSlot {
     async fn stderr_tail(&self) -> Vec<String> {
         self.stderr_tail.lock().await.iter().cloned().collect()
     }
+
+    async fn shutdown(&self) {
+        let client = match &*self.state.lock().await {
+            LspClientState::Ready { client, .. } => Some(client.clone()),
+            _ => None,
+        };
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+    }
 }
 
 impl LspClient {
@@ -814,6 +873,7 @@ impl LspClient {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        crate::process::without_controlling_terminal(cmd.as_std_mut());
         cmd.kill_on_drop(true);
         let mut child = cmd
             .spawn()
@@ -978,6 +1038,22 @@ impl LspClient {
     async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         self.write(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
             .await
+    }
+
+    async fn shutdown(&self) {
+        let _ = self
+            .request_with_timeout("shutdown", Value::Null, Duration::from_secs(2))
+            .await;
+        let _ = self.notify("exit", Value::Null).await;
+        let mut child = self._child.lock().await;
+        match timeout(Duration::from_secs(2), child.wait()).await {
+            Ok(_) => {}
+            Err(_) => {
+                crate::process::kill_child_process_group_sigkill(&child);
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+        }
     }
 
     async fn write(&self, msg: Value) -> Result<(), String> {
@@ -1172,21 +1248,32 @@ fn pick_server(servers: &HashMap<String, ServerEntry>, file: &Path) -> Option<St
 }
 
 fn find_root(file: &Path, markers: &[String]) -> PathBuf {
-    let mut dir = if file.is_dir() {
+    let start = if file.is_dir() {
         file.to_path_buf()
     } else {
         file.parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf()
     };
+    let mut dirs = Vec::new();
+    let mut dir = start;
     loop {
-        if markers.iter().any(|m| dir.join(m).exists()) {
-            return dir;
-        }
+        dirs.push(dir.clone());
         if !dir.pop() {
-            return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            break;
         }
     }
+
+    for vcs_marker in [".git", ".hg", ".svn"] {
+        if markers.iter().any(|marker| marker == vcs_marker) {
+            if let Some(root) = dirs.iter().find(|dir| dir.join(vcs_marker).exists()) {
+                return root.clone();
+            }
+        }
+    }
+    dirs.into_iter()
+        .find(|dir| markers.iter().any(|marker| dir.join(marker).exists()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn text_document(file_path: &str) -> Result<Value, String> {
@@ -1566,22 +1653,62 @@ mod tests {
         assert_eq!(workspace_candidate_servers(&servers, None).len(), 2);
     }
 
+    #[test]
+    fn find_root_prefers_outer_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let crate_dir = workspace.join("crates/core/src");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        std::fs::write(workspace.join("crates/core/Cargo.toml"), "[package]").unwrap();
+
+        assert_eq!(
+            find_root(
+                &crate_dir.join("lib.rs"),
+                &["Cargo.toml".to_string(), ".git".to_string()]
+            ),
+            workspace
+        );
+    }
+
+    #[test]
+    fn find_root_prefers_nested_repository_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let outer = temp.path().join("outer");
+        let inner = outer.join("vendor/inner/src");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(outer.join("vendor/inner/.git")).unwrap();
+        std::fs::write(outer.join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::write(outer.join("vendor/inner/Cargo.toml"), "[package]").unwrap();
+
+        assert_eq!(
+            find_root(
+                &inner.join("lib.rs"),
+                &["Cargo.toml".to_string(), ".git".to_string()]
+            ),
+            outer.join("vendor/inner")
+        );
+    }
+
     #[tokio::test]
     async fn workspace_symbol_query_without_hint_does_not_start_multiple_servers() {
         let manager = LspManager::default();
-        manager.configure_sync(LspConfig {
-            start: "manual".into(),
-            servers: HashMap::from([
-                (
-                    "rust-analyzer".to_string(),
-                    test_server("rust-analyzer", "rust", &["rs"]).config,
-                ),
-                (
-                    "lua-language-server".to_string(),
-                    test_server("lua-language-server", "lua", &["lua"]).config,
-                ),
-            ]),
-        });
+        manager
+            .configure(LspConfig {
+                servers: HashMap::from([
+                    (
+                        "rust-analyzer".to_string(),
+                        test_server("rust-analyzer", "rust", &["rs"]).config,
+                    ),
+                    (
+                        "lua-language-server".to_string(),
+                        test_server("lua-language-server", "lua", &["lua"]).config,
+                    ),
+                ]),
+            })
+            .await;
 
         let err = manager
             .workspace_symbols("Thing", None, None, 20, false)

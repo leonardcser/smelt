@@ -14,5 +14,5 @@ Generic stdio Language Server Protocol client. Used by the optional LSP tool plu
 fun(config: table): nil
 ```
 
-Configure available language servers. `servers` maps names to `{ cmd, language_id, extensions, root_markers }`; `start` defaults to `background`.
+Configure available language servers. `servers` maps names to `{ cmd, language_id, extensions, root_markers }`.
 

@@ -428,6 +428,24 @@ fn maybe_run_fast_status_command() -> bool {
     true
 }
 
+fn maybe_run_lsp_daemon_command(runtime: &tokio::runtime::Runtime) -> bool {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("lsp-daemon")) {
+        return false;
+    }
+    let Some(socket) = args.next() else {
+        eprintln!("error: lsp-daemon requires a socket path");
+        std::process::exit(2);
+    };
+    let result = runtime.block_on(smelt_core::lsp::run_daemon(PathBuf::from(socket)));
+    if let Err(err) = result {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+    true
+}
+
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
@@ -447,6 +465,9 @@ fn main() {
         .enable_all()
         .build()
         .expect("create tokio runtime");
+    if maybe_run_lsp_daemon_command(&runtime) {
+        return;
+    }
     runtime.block_on(async_main());
 }
 

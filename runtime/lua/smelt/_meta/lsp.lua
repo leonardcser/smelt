@@ -7,7 +7,7 @@
 ---@class smelt.lsp
 local lsp = {}
 
---- Configure available language servers. `servers` maps names to `{ cmd, language_id, extensions, root_markers }`; `start` defaults to `background`.
+--- Configure available language servers. `servers` maps names to `{ cmd, language_id, extensions, root_markers }`.
 ---@type fun(config: table): nil
 lsp.configure = nil
 

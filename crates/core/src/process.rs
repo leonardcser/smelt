@@ -465,6 +465,14 @@ fn kill_process_group(child: &tokio::process::Child) {
 #[cfg(not(unix))]
 fn kill_process_group(_child: &tokio::process::Child) {}
 
+/// Send SIGKILL to the process group whose id is the child's pid.
+///
+/// Children spawned through [`without_controlling_terminal`] are session leaders,
+/// so their pid is also their process group id. No-op on non-Unix platforms.
+pub fn kill_child_process_group_sigkill(child: &tokio::process::Child) {
+    kill_group_sigkill(child);
+}
+
 /// SIGKILL variant used by the process registry stop path (skips SIGTERM grace period).
 #[cfg(unix)]
 fn kill_group_pid_sigkill(pid: u32) {

@@ -5,7 +5,6 @@
 local M = {}
 
 local state = {
-  start = "background",
   servers = {},
   regs = {},
 }
@@ -425,10 +424,9 @@ end
 function M.setup(opts)
   opts = opts or {}
   clear_regs()
-  state.start = opts.start or "background"
   state.servers = opts.servers or {}
   if smelt.lsp and smelt.lsp.configure then
-    smelt.lsp.configure({ start = state.start, servers = state.servers })
+    smelt.lsp.configure({ servers = state.servers })
   end
 
   patch_existing_tools()
