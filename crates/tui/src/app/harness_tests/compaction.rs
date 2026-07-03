@@ -116,6 +116,104 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
 }
 
 #[test]
+fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups() {
+    let mut app = TestApp::builder().build();
+    let mut settings = app.app.core.config.settings.clone();
+    settings.auto_compact = true;
+    settings.compact_threshold = 0.8;
+    settings.compact_keep_recent_groups = 1.0;
+    app.app.set_settings(settings);
+    app.app.core.config.context_window = Some(100);
+
+    app.app
+        .core
+        .session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.push_assistant_text("a1");
+    app.app
+        .core
+        .session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+
+    let messages = protocol::history_to_messages(&app.app.model_history());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_host_call(engine::HostCall::PrepareRequest {
+                messages,
+                estimated_tokens: 200,
+                reply: tx,
+            });
+    }
+    let ask_id = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter_map(|cmd| match cmd {
+            protocol::UiCommand::EngineAsk { id, .. } => Some(id),
+            _ => None,
+        })
+        .next_back()
+        .expect("first prepare request should compact");
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id: ask_id,
+                message: Some(protocol::Message::assistant(
+                    Some(protocol::Content::text("# Goal\nsummary")),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        app.app.drive_lua_tasks();
+    }
+    assert!(matches!(
+        rx.try_recv().expect("first prepare reply"),
+        engine::HostRequestDecision::Replace(_)
+    ));
+    let checkpoint = app
+        .app
+        .core
+        .session
+        .checkpoint
+        .as_ref()
+        .expect("checkpoint installed");
+    assert!(checkpoint.tokens_after_estimate.is_some());
+    assert_eq!(
+        checkpoint.tokens_after_estimate_history_len,
+        Some(app.app.session_history_len())
+    );
+
+    let messages = protocol::history_to_messages(&app.app.model_history());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_host_call(engine::HostCall::PrepareRequest {
+                messages,
+                estimated_tokens: 200,
+                reply: tx,
+            });
+    }
+
+    let sends = app.drain_engine_sends();
+    assert!(
+        sends
+            .iter()
+            .all(|cmd| !matches!(cmd, protocol::UiCommand::EngineAsk { .. })),
+        "second prepare re-entered compaction: {sends:?}"
+    );
+    assert!(matches!(
+        rx.try_recv().expect("second prepare reply"),
+        engine::HostRequestDecision::Continue
+    ));
+}
+
+#[test]
 fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(

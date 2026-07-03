@@ -1067,6 +1067,10 @@ pub(crate) enum SessionMutation {
     SetCheckpoint {
         checkpoint: Option<ContextCheckpoint>,
     },
+    SetCheckpointTokensAfterEstimate {
+        tokens: u32,
+        history_len: usize,
+    },
     RestoreMetadataAfterRewind {
         history_len: usize,
     },
@@ -1256,7 +1260,8 @@ impl SessionDocument {
             }
             SessionMutation::AppendHistoryItem { .. }
             | SessionMutation::TruncateHistoryFrom { .. }
-            | SessionMutation::SetCheckpoint { .. } => {
+            | SessionMutation::SetCheckpoint { .. }
+            | SessionMutation::SetCheckpointTokensAfterEstimate { .. } => {
                 if let Some(live_session) = live_session {
                     (
                         Self::apply_to_live_session(session, live_session, mutation),
@@ -2041,6 +2046,17 @@ impl SessionDocument {
                     ..Default::default()
                 }
             }
+            SessionMutation::SetCheckpointTokensAfterEstimate {
+                tokens,
+                history_len,
+            } => {
+                let changed = session.record_checkpoint_tokens_after_estimate(tokens, history_len);
+                MutationResult {
+                    session_dirty: changed,
+                    applied: changed,
+                    ..Default::default()
+                }
+            }
             SessionMutation::RestoreMetadataAfterRewind { history_len } => {
                 session.restore_metadata_after_rewind(history_len);
                 MutationResult {
@@ -2133,6 +2149,17 @@ impl SessionDocument {
                 session.checkpoint = checkpoint;
                 MutationResult {
                     session_dirty: true,
+                    ..Default::default()
+                }
+            }
+            SessionMutation::SetCheckpointTokensAfterEstimate {
+                tokens,
+                history_len,
+            } => {
+                let changed = session.record_checkpoint_tokens_after_estimate(tokens, history_len);
+                MutationResult {
+                    session_dirty: changed,
+                    applied: changed,
                     ..Default::default()
                 }
             }
@@ -2302,6 +2329,7 @@ impl SessionDocument {
             | SessionMutation::InstallContextCheckpoint { .. }
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
             | SessionMutation::SetCheckpoint { .. }
+            | SessionMutation::SetCheckpointTokensAfterEstimate { .. }
             | SessionMutation::RestoreMetadataAfterRewind { .. }
             | SessionMutation::RestoreRewindableAfterRewind { .. }
             | SessionMutation::PruneRewindableState { .. }
@@ -2405,6 +2433,7 @@ impl SessionDocument {
             | SessionMutation::InstallContextCheckpoint { .. }
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
             | SessionMutation::SetCheckpoint { .. }
+            | SessionMutation::SetCheckpointTokensAfterEstimate { .. }
             | SessionMutation::RestoreMetadataAfterRewind { .. }
             | SessionMutation::RestoreRewindableAfterRewind { .. }
             | SessionMutation::PruneRewindableState { .. }
@@ -4052,6 +4081,7 @@ mod tests {
             created_at_ms: 10,
             tokens_before: Some(100),
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         };

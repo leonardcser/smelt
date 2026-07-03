@@ -1717,6 +1717,7 @@ fn saved_hot_path_app(
             created_at_ms: smelt_core::session::now_ms(),
             tokens_before: Some(10_000),
             tokens_after_estimate: Some(1_000),
+            tokens_after_estimate_history_len: Some(history_len),
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         });

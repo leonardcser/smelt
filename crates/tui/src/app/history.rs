@@ -1967,6 +1967,15 @@ impl TuiApp {
             self.notify("nothing old enough to compact".to_string());
             return false;
         }
+        let tokens_after_estimate =
+            smelt_core::session::estimate_message_tokens(&self.model_history_messages());
+        let history_len = self.session_history_len();
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::SetCheckpointTokensAfterEstimate {
+                tokens: tokens_after_estimate,
+                history_len,
+            },
+        );
         self.session_set_checkpoint(self.core.session.checkpoint.clone());
         let follow_tail = self.transcript_win().is_following_tail();
         self.clear_compaction_preview();
@@ -3994,6 +4003,7 @@ mod checkpoint_tests {
             created_at_ms: 7,
             tokens_before: Some(100),
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: Some(100),
             pre_checkpoint_context_history_len: Some(4),
         });
@@ -4033,6 +4043,7 @@ mod checkpoint_tests {
             created_at_ms: 7,
             tokens_before: Some(100),
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: Some(100),
             pre_checkpoint_context_history_len: Some(4),
         });
@@ -4066,6 +4077,7 @@ mod checkpoint_tests {
             created_at_ms: 7,
             tokens_before: Some(100),
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: Some(100),
             pre_checkpoint_context_history_len: Some(4),
         });

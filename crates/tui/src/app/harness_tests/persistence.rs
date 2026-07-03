@@ -770,6 +770,7 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
                 created_at_ms: 1,
                 tokens_before: None,
                 tokens_after_estimate: None,
+                tokens_after_estimate_history_len: None,
                 pre_checkpoint_context_tokens: None,
                 pre_checkpoint_context_history_len: None,
             }));

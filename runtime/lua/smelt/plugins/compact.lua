@@ -350,6 +350,45 @@ local function suffix_first_live_message_index(history, groups, suffix_start_gro
 	return groups[suffix_start_group].start_idx - 1
 end
 
+local function message_is_checkpoint_summary(msg)
+	return msg and msg.role == "user" and is_checkpoint_summary(trim(content_text(msg.content)))
+end
+
+local function prefix_group_is_compactable(history, prefix_last_group)
+	if prefix_last_group <= 0 then
+		return false
+	end
+	if message_is_checkpoint_summary(history[1]) and prefix_last_group <= 1 then
+		return false
+	end
+	return true
+end
+
+local function compaction_boundary(history)
+	if not history or #history == 0 then
+		return nil
+	end
+	local groups = build_message_groups(history)
+	if #groups == 0 then
+		return nil
+	end
+	local min_postponed_groups = math.max(0, math.floor(smelt.settings.compact_keep_recent_groups or 1))
+	local suffix_start_group = math.max(1, (#groups + 1) - math.min(min_postponed_groups, #groups))
+	local prefix_last_group = suffix_start_group - 1
+	if not prefix_group_is_compactable(history, prefix_last_group) then
+		return nil
+	end
+	return {
+		groups = groups,
+		suffix_start_group = suffix_start_group,
+		prefix_last_group = prefix_last_group,
+	}
+end
+
+local function has_compactable_group_prefix(history)
+	return compaction_boundary(history) ~= nil
+end
+
 local function checkpointed_messages_from_boundary(history, summary, first_live_message_index)
 	local out = {
 		{ role = "user", content = SUMMARY_PREFIX .. "\n" .. summary },
@@ -372,14 +411,14 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 		return
 	end
 
-	local groups = build_message_groups(history)
-	if #groups == 0 then
+	local boundary = compaction_boundary(history)
+	if not boundary then
 		finish_early()
 		return
 	end
 
-	local min_postponed_groups = math.max(0, math.floor(smelt.settings.compact_keep_recent_groups or 1))
-	local suffix_start_group = math.max(1, (#groups + 1) - math.min(min_postponed_groups, #groups))
+	local groups = boundary.groups
+	local suffix_start_group = boundary.suffix_start_group
 	local summary_instructions = combine_instructions(instructions, recent_user_intent_instructions(history))
 	local finished = false
 
@@ -399,7 +438,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 
 	local function attempt()
 		local prefix_last_group = suffix_start_group - 1
-		if prefix_last_group <= 0 then
+		if not prefix_group_is_compactable(history, prefix_last_group) then
 			finish(nil)
 			return
 		end
@@ -462,6 +501,10 @@ local function run_compact(opts)
 	local history = smelt.session.model_messages()
 	if not history or #history == 0 then
 		smelt.notify.error("nothing to compact")
+		return
+	end
+	if not has_compactable_group_prefix(history) then
+		smelt.notify("nothing old enough to compact")
 		return
 	end
 	-- Use the provider's actual prompt-token count.  If no turn has
@@ -528,7 +571,7 @@ end
 
 local function compact_live_session(before_tokens, phase, opts, done)
 	local history = smelt.session.model_messages()
-	if not history or #history == 0 then
+	if not has_compactable_group_prefix(history) then
 		done(nil)
 		return
 	end
@@ -623,6 +666,11 @@ end)
 
 smelt.engine.on_context_limit(function(messages, reply)
 	if not smelt.settings.auto_compact then
+		reply(nil)
+		return
+	end
+
+	if not has_compactable_group_prefix(messages) then
 		reply(nil)
 		return
 	end

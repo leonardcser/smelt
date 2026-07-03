@@ -26,6 +26,8 @@ pub struct ContextCheckpoint {
     pub created_at_ms: u64,
     pub tokens_before: Option<u32>,
     pub tokens_after_estimate: Option<u32>,
+    #[serde(default)]
+    pub tokens_after_estimate_history_len: Option<usize>,
     /// Token baseline that was active just before this checkpoint was
     /// installed. Restored when the session is rewound past the checkpoint.
     #[serde(default)]
@@ -137,6 +139,7 @@ impl Default for ContextCheckpoint {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         }
@@ -997,6 +1000,24 @@ impl Session {
         self.checkpoint.as_ref().map(ContextSnapshotKey::from)
     }
 
+    pub fn record_checkpoint_tokens_after_estimate(
+        &mut self,
+        tokens: u32,
+        history_len: usize,
+    ) -> bool {
+        let Some(checkpoint) = self.checkpoint.as_mut() else {
+            return false;
+        };
+        if checkpoint.tokens_after_estimate == Some(tokens)
+            && checkpoint.tokens_after_estimate_history_len == Some(history_len)
+        {
+            return false;
+        }
+        checkpoint.tokens_after_estimate = Some(tokens);
+        checkpoint.tokens_after_estimate_history_len = Some(history_len);
+        true
+    }
+
     pub fn snapshot_context(&mut self) {
         self.snapshot_context_at(self.history.len());
     }
@@ -1230,6 +1251,7 @@ impl Session {
             created_at_ms: now_ms(),
             tokens_before,
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: self.context_tokens,
             pre_checkpoint_context_history_len: self.context_tokens_history_len,
         });
@@ -3342,6 +3364,7 @@ mod tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         }
@@ -4530,6 +4553,7 @@ mod tests {
             created_at_ms: 0,
             tokens_before: Some(100),
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: Some(100),
             pre_checkpoint_context_history_len: Some(4),
         });
@@ -4557,6 +4581,7 @@ mod tests {
             created_at_ms: 0,
             tokens_before: None,
             tokens_after_estimate: None,
+            tokens_after_estimate_history_len: None,
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         });

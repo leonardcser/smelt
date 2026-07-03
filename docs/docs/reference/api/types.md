@@ -298,7 +298,7 @@ Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta"`. |
+| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "checkpoint_estimate" | "checkpoint_estimate_plus_history_delta"`. |
 | `total_context_tokens` | `integer` | yes | Total active-context estimate used by auto-compaction. |
 | `provider_context_tokens` | `integer` |  | Latest provider-reported active context, when available. |
 | `estimated_delta_tokens` | `integer` | yes | Locally estimated tokens added on top of provider usage. |
@@ -313,7 +313,7 @@ Request object passed to `smelt.engine.on_prepare_request`.
 | --- | --- | --- | --- |
 | `messages` | [smelt.engine.AskMessage[]](types.md#smeltengineaskmessage) | yes | Model-visible conversation excluding the system prompt. |
 | `estimated_tokens` | `integer` | yes | Conservative token estimate for the request about to be sent, including system prompt, messages, and tool definitions. |
-| `estimated_context_tokens` | `integer` | yes | Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the matching token snapshot; before the first usage report it equals `estimated_tokens`. |
+| `estimated_context_tokens` | `integer` | yes | Active-context estimate for auto-compaction. When a provider has reported context usage, this starts from that server-observed count and adds only local messages appended after the matching token snapshot. After a compaction checkpoint and before the next provider usage report, this starts from the checkpoint's post-compaction estimate. Before either baseline exists, it equals `estimated_tokens`. |
 | `context_estimate` | [smelt.engine.PrepareContextEstimate](types.md#smeltenginepreparecontextestimate) | yes | Structured breakdown explaining how `estimated_context_tokens` was computed. |
 
 ### `smelt.engine.RuleOverride`

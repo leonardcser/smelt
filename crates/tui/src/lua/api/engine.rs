@@ -186,7 +186,9 @@ pub struct LuaPrepareRequest {
     /// Active-context estimate for auto-compaction. When a provider has
     /// reported context usage, this starts from that server-observed count
     /// and adds only local messages appended after the matching token
-    /// snapshot; before the first usage report it equals `estimated_tokens`.
+    /// snapshot. After a compaction checkpoint and before the next provider
+    /// usage report, this starts from the checkpoint's post-compaction
+    /// estimate. Before either baseline exists, it equals `estimated_tokens`.
     pub estimated_context_tokens: u32,
     /// Structured breakdown explaining how `estimated_context_tokens` was
     /// computed.
@@ -199,7 +201,8 @@ pub struct LuaPrepareRequest {
 #[lua(name = "smelt.engine.PrepareContextEstimate")]
 pub struct LuaPrepareContextEstimate {
     /// One of `"full_request_estimate" | "provider_snapshot" |
-    /// "provider_snapshot_plus_history_delta"`.
+    /// "provider_snapshot_plus_history_delta" | "checkpoint_estimate" |
+    /// "checkpoint_estimate_plus_history_delta"`.
     pub source: String,
     /// Total active-context estimate used by auto-compaction.
     pub total_context_tokens: u32,
