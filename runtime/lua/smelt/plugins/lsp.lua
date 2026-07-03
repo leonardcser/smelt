@@ -77,7 +77,7 @@ local function limited_json_value(value, depth)
 end
 
 local function format_json_result(result)
-  local preview = limited_json_value(result or {}, 0)
+  local preview = limited_json_value(result, 0)
   return {
     content = smelt.json.encode(preview, { pretty = true }),
     metadata = { syntax = "json" },
@@ -182,7 +182,13 @@ local function append_active_filters(lines, filters)
   if #parts > 0 then table.insert(lines, "Filters: " .. table.concat(parts, ", ")) end
 end
 
-local function format_outline(result)
+local function format_outline(result, args)
+  if result == nil then
+    local path = (args and args.file_path) or "<unknown>"
+    if type(path) == "string" then path = display_path(path) end
+    return "Outline: " .. tostring(path) .. "\nSymbols: 0 shown of 0"
+  end
+  if type(result) ~= "table" or type(result.symbols) ~= "table" then return nil end
   local lines = { "Outline: " .. tostring(result.file_path or "<unknown>") }
   table.insert(lines, string.format("Symbols: %s shown of %s%s", result.shown or table_len(result.symbols), result.total or table_len(result.symbols), (result.omitted and result.omitted > 0) and (" (" .. result.omitted .. " omitted)") or ""))
   append_active_filters(lines, result.filters)
@@ -312,9 +318,12 @@ local function format_rename(result)
 end
 
 local function format_structured_result(name, args, result)
-  if name == "outline" then return { content = format_outline(result) } end
-  if name == "find_symbol" then return { content = format_symbol_results(result) } end
-  if name == "inspect_symbol" or name == "inspect_symbol_at" then return { content = format_inspect(result) } end
+  if name == "outline" then
+    local formatted = format_outline(result, args)
+    if formatted then return { content = formatted } end
+  end
+  if name == "find_symbol" and type(result) == "table" then return { content = format_symbol_results(result) } end
+  if (name == "inspect_symbol" or name == "inspect_symbol_at") and type(result) == "table" then return { content = format_inspect(result) } end
   if name == "find_references" and not (args and args.raw) then
     local formatted = format_references(result)
     if formatted then return { content = formatted } end
@@ -324,7 +333,7 @@ local function format_structured_result(name, args, result)
     if formatted then return { content = formatted } end
   end
   if name == "diagnostics" then return { content = format_diagnostics(result, args) } end
-  if name == "preview_rename" or name == "rename_symbol" then return { content = format_rename(result) } end
+  if (name == "preview_rename" or name == "rename_symbol") and type(result) == "table" then return { content = format_rename(result) } end
   return format_json_result(result)
 end
 

@@ -510,6 +510,74 @@ fn lsp_plugin_formats_semantic_results_as_text() {
 }
 
 #[test]
+fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.lsp = {
+                configure = function(_) end,
+                __call = function(id, operation, _)
+                    assert(operation == "outline")
+                    smelt.task.resume(id, {})
+                end,
+            }
+            for _, name in ipairs({ "glob", "grep", "edit_file" }) do
+                smelt.tools.register({ name = name, execute = function() return "" end })
+            end
+            "#,
+        )
+        .exec()
+        .expect("stub lsp backend");
+    rt.lua
+        .load(LSP_PLUGIN_LUA)
+        .set_name("smelt/plugins/lsp.lua")
+        .exec()
+        .expect("load lsp plugin");
+
+    let mut args = HashMap::new();
+    args.insert("file_path".into(), serde_json::json!("/tmp/empty.rs"));
+    let result = rt.execute_tool(
+        "outline",
+        &args,
+        7,
+        "call-null-outline",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+
+    let (content, is_error) = match result {
+        ToolExecResult::Immediate {
+            content, is_error, ..
+        } => (content, is_error),
+        ToolExecResult::Pending => {
+            rt.pump_task_events();
+            rt.drive_tasks(Instant::now())
+                .into_iter()
+                .find_map(|out| match out {
+                    TaskDriveOutput::ToolComplete {
+                        request_id: 7,
+                        call_id,
+                        content,
+                        is_error,
+                        ..
+                    } if call_id == "call-null-outline" => Some((content, is_error)),
+                    _ => None,
+                })
+                .expect("outline completion")
+        }
+    };
+
+    assert!(!is_error);
+    assert!(content.contains("Outline: /tmp/empty.rs"));
+    assert!(content.contains("Symbols: 0 shown of 0"));
+}
+
+#[test]
 fn lsp_plugin_registers_agent_friendly_semantic_tools() {
     let rt = fresh();
     rt.lua
