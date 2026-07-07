@@ -6,7 +6,7 @@ fn turn_error_preserves_request_queue() {
     app.start_turn(1);
     app.steer("steer during error");
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "connection failed".to_string(),
         kind: None,
         retry_at_ms: None,
@@ -41,7 +41,7 @@ fn turn_error_preserves_turn_queue() {
     app.start_turn(1);
     app.push_queued_message("next turn after error".to_string());
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
         kind: None,
         retry_at_ms: None,
@@ -91,7 +91,7 @@ fn public_status_turn_error_needs_attention() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "connection failed".to_string(),
         kind: None,
         retry_at_ms: None,
@@ -109,7 +109,7 @@ fn resumable_turn_error_publishes_continuation_token() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
         kind: Some(protocol::EngineAskErrorKind::Quota),
         retry_at_ms: Some(123_000),
@@ -132,7 +132,7 @@ fn non_quota_retry_metadata_does_not_publish_continuation_token() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "network failed".to_string(),
         kind: Some(protocol::EngineAskErrorKind::Network),
         retry_at_ms: Some(123_000),
@@ -184,7 +184,7 @@ fn goal_auto_continues_after_recoverable_quota_error() {
     create_auto_goal(&mut app, "finish quota test");
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
         kind: Some(protocol::EngineAskErrorKind::Quota),
         retry_at_ms: Some(0),
@@ -200,7 +200,7 @@ fn auto_continue_off_disables_quota_retry() {
     create_auto_goal(&mut app, "finish quota test");
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
         kind: Some(protocol::EngineAskErrorKind::Quota),
         retry_at_ms: Some(0),
@@ -216,7 +216,7 @@ fn auto_continue_always_continues_without_goal() {
     clear_goal(&mut app);
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: None,
@@ -232,7 +232,7 @@ fn auto_continue_goal_mode_ignores_sessions_without_goal() {
     clear_goal(&mut app);
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: None,
@@ -248,7 +248,7 @@ fn goal_auto_continue_ignores_non_quota_errors() {
     create_auto_goal(&mut app, "finish quota test");
     app.start_turn(1);
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "network failed".to_string(),
         kind: Some(protocol::EngineAskErrorKind::Network),
         retry_at_ms: Some(0),
@@ -263,7 +263,7 @@ fn turn_complete_still_chains_queued_turn() {
     app.start_turn(1);
     app.push_queued_message("next turn after complete".to_string());
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: None,

@@ -195,7 +195,7 @@ fn cancel_or_shutdown_preserves_committed_tool_invocations() {
     for finalizer in [Finalizer::Cancel, Finalizer::Shutdown] {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.start_turn(42);
-        app.feed_one(SourceEvent::Engine(
+        app.feed_one(SourceEvent::engine(
             protocol::EngineEvent::HistoryAppended {
                 turn_id: 42,
                 first_index: 0,
@@ -563,7 +563,7 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
     fake_pending_history_save(&mut resumed, 703, before_len);
 
     resumed.start_turn(7030);
-    resumed.feed_one(SourceEvent::Engine(EngineEvent::TextDelta {
+    resumed.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
         delta: "late streaming text before interrupt".into(),
     }));
     assert!(resumed
@@ -619,16 +619,16 @@ fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
     fake_pending_history_save(&mut resumed, 702, before_len);
 
     resumed.start_turn(7020);
-    resumed.feed_one(SourceEvent::Engine(EngineEvent::ToolStarted {
+    resumed.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
         call_id: "call-late-tool".into(),
         tool_name: "bash".into(),
         args: std::collections::HashMap::new(),
     }));
-    resumed.feed_one(SourceEvent::Engine(EngineEvent::ToolOutput {
+    resumed.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
         call_id: "call-late-tool".into(),
         chunk: "tool output after stale ack\n".into(),
     }));
-    resumed.feed_one(SourceEvent::Engine(EngineEvent::ToolFinished {
+    resumed.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         call_id: "call-late-tool".into(),
         result: ToolOutcome {
             content: "tool output after stale ack\n".into(),

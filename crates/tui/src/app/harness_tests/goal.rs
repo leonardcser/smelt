@@ -47,7 +47,7 @@ fn request_queued_goal_command_waits_for_steered_transcript_ack() {
     );
     assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::Steered {
+    app.feed_one(SourceEvent::engine(EngineEvent::Steered {
         text: "/goal finish steered activation".into(),
         count: 1,
     }));

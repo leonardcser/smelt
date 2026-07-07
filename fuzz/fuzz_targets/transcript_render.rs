@@ -46,29 +46,29 @@ fn run_with_app(input: Input) {
     for op in input.ops.into_iter().take(96) {
         match op {
             Op::StartTurn(id) => app.start_turn(u64::from(id)),
-            Op::Text(content) => app.feed_one(SourceEvent::Engine(EngineEvent::Text { content })),
-            Op::TextDelta(delta) => app.feed_one(SourceEvent::Engine(EngineEvent::TextDelta { delta })),
-            Op::Thinking(content) => app.feed_one(SourceEvent::Engine(EngineEvent::Thinking { content })),
-            Op::ThinkingDelta(delta) => app.feed_one(SourceEvent::Engine(EngineEvent::ThinkingDelta { delta })),
-            Op::ToolStart { id, name } => app.feed_one(SourceEvent::Engine(EngineEvent::ToolStarted {
+            Op::Text(content) => app.feed_one(SourceEvent::engine(EngineEvent::Text { content })),
+            Op::TextDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::TextDelta { delta })),
+            Op::Thinking(content) => app.feed_one(SourceEvent::engine(EngineEvent::Thinking { content })),
+            Op::ThinkingDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::ThinkingDelta { delta })),
+            Op::ToolStart { id, name } => app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
                 call_id: call_id(id),
                 tool_name: name,
                 args: std::collections::HashMap::new(),
             })),
-            Op::ToolOutput { id, text } => app.feed_one(SourceEvent::Engine(EngineEvent::ToolOutput {
+            Op::ToolOutput { id, text } => app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
                 call_id: call_id(id),
                 chunk: text,
             })),
-            Op::ToolFinish { id, is_error, text } => app.feed_one(SourceEvent::Engine(EngineEvent::ToolFinished {
+            Op::ToolFinish { id, is_error, text } => app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
                 call_id: call_id(id),
                 result: protocol::ToolOutcome { content: text, is_error, metadata: None },
                 elapsed_ms: None,
             })),
             Op::KnownToolRoundTrip { id, kind, is_error } => known_tool_round_trip(&mut app, id, kind, is_error),
-            Op::ProcessCompleted { id, code } => app.feed_one(SourceEvent::Engine(EngineEvent::ProcessCompleted { id, exit_code: code })),
+            Op::ProcessCompleted { id, code } => app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted { id, exit_code: code })),
             Op::Complete { count } => {
                 let turn_id = app.current_turn_id().unwrap_or(0);
-                app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+                app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
                     turn_id,
                     first_changed_index: 0,
                     history: Some(history(count)),
@@ -76,7 +76,7 @@ fn run_with_app(input: Input) {
                 }));
             }
             Op::Error(message) => {
-                app.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+                app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
                     message,
                     kind: None,
                     retry_at_ms: None,
@@ -102,16 +102,16 @@ fn known_tool_round_trip(app: &mut TestApp, id: u8, kind: u8, is_error: bool) {
     if app.current_turn_id().is_none() {
         app.start_turn(u64::from(id));
     }
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolStarted {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
         call_id: call_id.clone(),
         tool_name: tool_name.to_string(),
         args,
     }));
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolOutput {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
         call_id: call_id.clone(),
         chunk: content.clone(),
     }));
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolFinished {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         call_id,
         result: protocol::ToolOutcome {
             content,

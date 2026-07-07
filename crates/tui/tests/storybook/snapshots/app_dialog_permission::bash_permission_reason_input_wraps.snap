@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 580
 expression: frame.text()
 ---
 * bash ls -la /tmp/foo
@@ -23,4 +24,4 @@ expression: frame.text()
 
   Needed to inspect the temporary directory before
   deciding whether the generated fixtures can be reused.
- ○ normal                                       1:104 100%
+ ○ normal  permission pending                   1:104 100%

@@ -291,7 +291,7 @@ impl TestApp {
         }
         let mut prediction_ids = Vec::new();
         match variant % 4 {
-            2 => self.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
+            2 => self.feed_one(SourceEvent::engine(EngineEvent::TurnError {
                 message: "fuzz turn error".into(),
                 kind: None,
                 retry_at_ms: None,
@@ -303,7 +303,7 @@ impl TestApp {
                 } else {
                     vec![]
                 };
-                self.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+                self.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
                     turn_id,
                     first_changed_index: 0,
                     history: (!history.is_empty()).then_some(history),

@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 515
+assertion_line: 580
 expression: frame.text()
 ---
 * read_file crates/tui/src/app.rs:120-159
@@ -20,4 +20,4 @@ expression: frame.text()
   4. allow read_file in ~/cwd
 
   press tab to add a reason…
- ○ normal                                                       1:1 0%
+ ○ normal  permission pending                                   1:1 0%

@@ -95,7 +95,7 @@ impl AppStoryCtx {
     pub fn engine(&mut self, ev: EngineEvent) {
         self.start_turn();
         self.app
-            .feed_one(tui::app::test_harness::SourceEvent::Engine(ev));
+            .feed_one(tui::app::test_harness::SourceEvent::engine(ev));
     }
 
     /// Push a `Block::Compacted` summary block - the same committed marker

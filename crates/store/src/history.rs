@@ -1554,8 +1554,10 @@ fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize) {
             if map.contains_key(OBJECT_REF_KEY) {
                 return;
             }
-            for value in map.values() {
-                collect_text_inner(value, out, max_bytes);
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for key in keys {
+                collect_text_inner(&map[key], out, max_bytes);
             }
         }
         _ => {}

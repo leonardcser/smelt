@@ -6,7 +6,7 @@ impl TestApp {
     }
 
     /// Force the app into "agent turn active" state with the given
-    /// `turn_id`. Subsequent `SourceEvent::Engine(_)` events flow through
+    /// `turn_id`. Subsequent engine source events flow through
     /// the active-turn dispatch path (`handle_engine_event` and
     /// `dispatch_control` with tool tracking) instead of the idle
     /// handler. No-op if a turn is already running.

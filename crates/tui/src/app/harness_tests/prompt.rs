@@ -120,7 +120,7 @@ fn queued_turn_preserves_work_elapsed() {
     app.push_queued_message("follow up".to_string());
 
     let before = app.app.working.elapsed().expect("live turn elapsed");
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: None,
@@ -572,7 +572,7 @@ fn keyboard_input_cancels_stale_prompt_mouse_endpoint() {
 fn typing_after_turn_complete_keeps_prompt_cursor_coherent() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_turn(1);
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: None,

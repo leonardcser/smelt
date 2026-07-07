@@ -36,7 +36,7 @@ pub enum TextAlign {
 }
 
 pub fn display_width(text: &str) -> u16 {
-    smelt_style::cell_width::text_width_u16(text)
+    unicode_width::UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
 }
 
 pub fn truncate_width(text: &str, max_width: u16) -> String {
@@ -46,7 +46,10 @@ pub fn truncate_width(text: &str, max_width: u16) -> String {
 }
 
 pub(crate) fn char_width(ch: char) -> u16 {
-    smelt_style::cell_width::char_width_u16(ch)
+    unicode_width::UnicodeWidthChar::width(ch)
+        .unwrap_or(1)
+        .max(1)
+        .min(u16::MAX as usize) as u16
 }
 
 fn write_text(mut col: u16, limit: u16, text: &str, mut write: impl FnMut(u16, char)) -> u16 {

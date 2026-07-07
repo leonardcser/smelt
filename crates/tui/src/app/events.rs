@@ -2288,7 +2288,7 @@ mod tests {
             vec!["request".to_string(), "turn".to_string()]
         );
 
-        app.feed_one(crate::app::test_harness::SourceEvent::Engine(
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::Steered {
                 text: "request now".to_string(),
                 count: 1,

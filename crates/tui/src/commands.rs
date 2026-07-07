@@ -746,7 +746,7 @@ mod tests {
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
         assert!(mode_blocks(&app.app).is_empty());
 
-        app.feed_one(crate::event_source::SourceEvent::Engine(
+        app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
                 first_changed_index: 0,
@@ -768,7 +768,7 @@ mod tests {
         let note = app.app.lua.mode_note("yolo");
         app.app.set_mode(AgentMode::parse("yolo").unwrap(), false);
 
-        app.feed_one(crate::event_source::SourceEvent::Engine(
+        app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
                 first_changed_index: 0,

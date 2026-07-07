@@ -230,12 +230,12 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
     }))
     .unwrap();
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolCallDraftStarted {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
         stream_id: stream_id.clone(),
         call_id: Some(call_id.clone()),
         tool_name: Some("edit_file".into()),
     }));
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolCallDraftFinished {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
         stream_id,
         call_id: call_id.clone(),
         tool_name: "edit_file".into(),
@@ -244,7 +244,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
     let draft_frame = app.render_to_frame().text();
     assert_edit_file_diff_visible(&draft_frame, "draft-finished");
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolStarted {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
         call_id: call_id.clone(),
         tool_name: "edit_file".into(),
         args,
@@ -269,7 +269,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
     let after_write_frame = app.render_to_frame().text();
     assert_edit_file_diff_visible(&after_write_frame, "pending-after-file-state-write");
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolFinished {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
         call_id: call_id.clone(),
         result: protocol::ToolOutcome {
             content: format!("edited {path}"),

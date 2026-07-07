@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 580
 expression: frame.text()
 ---
 * edit_notebook analysis.ipynb
@@ -29,4 +30,4 @@ replace cell 1 [code] id=load
   4. allow edit_notebook in ~/cwd
 
   press tab to add a reason…
- ○ normal                                                                 1:1 0%
+ ○ normal  permission pending                                             1:1 0%

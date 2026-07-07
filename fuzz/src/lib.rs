@@ -1851,23 +1851,23 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         // Side-channel: not a SourceEvent.
         FuzzOp::StartTurn(_) => (None, PostCheck::None),
         FuzzOp::EngineReady => (
-            Some(SourceEvent::Engine(EngineEvent::Ready)),
+            Some(SourceEvent::engine(EngineEvent::Ready)),
             PostCheck::None,
         ),
         FuzzOp::EngineText(s) => (
-            Some(SourceEvent::Engine(EngineEvent::Text { content: s })),
+            Some(SourceEvent::engine(EngineEvent::Text { content: s })),
             PostCheck::TextFlushed,
         ),
         FuzzOp::EngineTextDelta(s) => (
-            Some(SourceEvent::Engine(EngineEvent::TextDelta { delta: s })),
+            Some(SourceEvent::engine(EngineEvent::TextDelta { delta: s })),
             PostCheck::None,
         ),
         FuzzOp::EngineThinking(s) => (
-            Some(SourceEvent::Engine(EngineEvent::Thinking { content: s })),
+            Some(SourceEvent::engine(EngineEvent::Thinking { content: s })),
             PostCheck::ThinkingFlushed,
         ),
         FuzzOp::EngineThinkingDelta(s) => (
-            Some(SourceEvent::Engine(EngineEvent::ThinkingDelta { delta: s })),
+            Some(SourceEvent::engine(EngineEvent::ThinkingDelta { delta: s })),
             PostCheck::None,
         ),
         FuzzOp::EngineToolStart {
@@ -1876,7 +1876,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             args,
         } => {
             let cid = call_id_string(call_id);
-            let ev = SourceEvent::Engine(EngineEvent::ToolStarted {
+            let ev = SourceEvent::engine(EngineEvent::ToolStarted {
                 call_id: cid.clone(),
                 tool_name,
                 args: args.into_map(),
@@ -1885,7 +1885,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::EngineToolOutput { call_id, chunk } => {
             let cid = call_id_string(call_id);
-            let ev = SourceEvent::Engine(EngineEvent::ToolOutput {
+            let ev = SourceEvent::engine(EngineEvent::ToolOutput {
                 call_id: cid.clone(),
                 chunk,
             });
@@ -1897,7 +1897,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             content,
         } => {
             let cid = call_id_string(call_id);
-            let ev = SourceEvent::Engine(EngineEvent::ToolFinished {
+            let ev = SourceEvent::engine(EngineEvent::ToolFinished {
                 call_id: cid.clone(),
                 result: ToolOutcome {
                     content,
@@ -1916,7 +1916,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             unreachable!("EngineTurnComplete handled inline in apply()")
         }
         FuzzOp::EngineTurnError(message) => {
-            let ev = SourceEvent::Engine(EngineEvent::TurnError {
+            let ev = SourceEvent::engine(EngineEvent::TurnError {
                 message,
                 kind: None,
                 retry_at_ms: None,
@@ -1925,11 +1925,11 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         }
         FuzzOp::EngineSteered { text, count } => {
             let n = usize::from(count);
-            let ev = SourceEvent::Engine(EngineEvent::Steered { text, count: n });
+            let ev = SourceEvent::engine(EngineEvent::Steered { text, count: n });
             (Some(ev), PostCheck::Steered { count: n })
         }
         FuzzOp::EngineRetrying { delay_ms, attempt } => {
-            let ev = SourceEvent::Engine(EngineEvent::Retrying {
+            let ev = SourceEvent::engine(EngineEvent::Retrying {
                 delay_ms: u64::from(delay_ms),
                 attempt: u32::from(attempt),
             });
@@ -1953,7 +1953,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 cache_write_tokens: None,
                 reasoning_tokens: None,
             };
-            let ev = SourceEvent::Engine(EngineEvent::TokenUsage {
+            let ev = SourceEvent::engine(EngineEvent::TokenUsage {
                 usage,
                 tokens_per_sec: Some(f64::from(tps)),
                 cost_usd: Some(cost_usd),
@@ -1972,7 +1972,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             unreachable!("PushQueuedMessage handled inline in apply()")
         }
         FuzzOp::EngineProcessCompleted { id, exit_code } => {
-            let ev = SourceEvent::Engine(EngineEvent::ProcessCompleted { id, exit_code });
+            let ev = SourceEvent::engine(EngineEvent::ProcessCompleted { id, exit_code });
             (Some(ev), PostCheck::ProcessCompleted)
         }
         FuzzOp::EngineMessages { .. } => {
@@ -1987,7 +1987,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             summary,
             args,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::RequestPermission {
+            let ev = SourceEvent::engine(EngineEvent::RequestPermission {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
@@ -2004,7 +2004,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         } => {
             let mut args = std::collections::HashMap::new();
             args.insert("command".to_string(), serde_json::Value::String(command));
-            let ev = SourceEvent::Engine(EngineEvent::RequestPermission {
+            let ev = SourceEvent::engine(EngineEvent::RequestPermission {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name: "bash".to_string(),
@@ -2023,7 +2023,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             tool_name,
             args,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::ToolDispatch {
+            let ev = SourceEvent::engine(EngineEvent::ToolDispatch {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
@@ -2037,7 +2037,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             tool_name,
             args,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::ToolEvaluationRequest {
+            let ev = SourceEvent::engine(EngineEvent::ToolEvaluationRequest {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
@@ -2051,7 +2051,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             content,
             is_error,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::CoreToolResult {
+            let ev = SourceEvent::engine(EngineEvent::CoreToolResult {
                 request_id: u64::from(req_id),
                 content,
                 is_error,
@@ -2060,7 +2060,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             (Some(ev), PostCheck::CoreToolResultReceived)
         }
         FuzzOp::EngineShutdown { reason } => {
-            let ev = SourceEvent::Engine(EngineEvent::Shutdown { reason });
+            let ev = SourceEvent::engine(EngineEvent::Shutdown { reason });
             (Some(ev), PostCheck::ShutdownReceived)
         }
         FuzzOp::Cancel
@@ -2090,7 +2090,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             tool_name,
             delta,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::ToolCallDraftDelta {
+            let ev = SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
                 stream_id: call_id.clone(),
                 call_id: Some(call_id),
                 tool_name: Some(tool_name),
@@ -2099,7 +2099,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             (Some(ev), PostCheck::None)
         }
         FuzzOp::EngineAskResponse { id, content } => {
-            let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+            let ev = SourceEvent::engine(EngineEvent::EngineAskResponse {
                 id,
                 message: Some(Message::assistant(Some(Content::text(content)), None, None)),
                 error: None,
@@ -2112,7 +2112,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             message,
         } => {
             let kind = ENGINE_ASK_ERROR_KINDS[(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
-            let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+            let ev = SourceEvent::engine(EngineEvent::EngineAskResponse {
                 id,
                 message: None,
                 error: Some(EngineAskError { kind, message }),
@@ -2302,7 +2302,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         }
         FuzzOp::EngineAskResponsePending { content } => {
             if let Some(id) = app.pending_ask_id() {
-                let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+                let ev = SourceEvent::engine(EngineEvent::EngineAskResponse {
                     id,
                     message: Some(Message::assistant(Some(Content::text(content)), None, None)),
                     error: None,
@@ -2314,7 +2314,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             if let Some(id) = app.pending_ask_id() {
                 let kind = ENGINE_ASK_ERROR_KINDS
                     [(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
-                let ev = SourceEvent::Engine(EngineEvent::EngineAskResponse {
+                let ev = SourceEvent::engine(EngineEvent::EngineAskResponse {
                     id,
                     message: None,
                     error: Some(EngineAskError { kind, message }),
@@ -2430,7 +2430,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         FuzzOp::EngineTurnComplete { msg_count } => {
             let count = usize::from(msg_count);
             let id = app.current_turn_id().unwrap_or(0);
-            let ev = SourceEvent::Engine(EngineEvent::TurnComplete {
+            let ev = SourceEvent::engine(EngineEvent::TurnComplete {
                 turn_id: id,
                 first_changed_index: 0,
                 history: Some(synth_history(count)),
@@ -2447,7 +2447,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         FuzzOp::EngineMessages { msg_count } => {
             let count = usize::from(msg_count);
             let id = app.current_turn_id().unwrap_or(0);
-            let ev = SourceEvent::Engine(EngineEvent::HistoryUpdated {
+            let ev = SourceEvent::engine(EngineEvent::HistoryUpdated {
                 turn_id: id,
                 first_changed_index: 0,
                 history: synth_history(count),

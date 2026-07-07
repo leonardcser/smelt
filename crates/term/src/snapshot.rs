@@ -15,8 +15,8 @@
 //! dimensions losslessly - without it, a trailing wide-char
 //! continuation that `trim_end` ate would be unrecoverable.
 
-use super::grid::{Cell, Grid, Style};
-use smelt_style::{cell_width, style::Color};
+use super::grid::{char_width, Cell, Grid, Style};
+use smelt_style::style::Color;
 
 /// Structured copy of one rendered frame. Wide-char continuation cells
 /// (`\0`) collapse to a space in `rows`.
@@ -173,7 +173,7 @@ impl SnapshotFrame {
                     break;
                 }
                 let ch = chars[c];
-                let cw = cell_width::char_width(ch);
+                let cw = char_width(ch) as usize;
                 let style = self
                     .styles
                     .get(r)
@@ -244,7 +244,7 @@ fn row_visual_width(row: &str) -> u16 {
     let chars: Vec<char> = row.chars().collect();
     let mut cells = chars.len() as u16;
     if let Some(&last) = chars.last() {
-        if cell_width::char_width(last) == 2 {
+        if char_width(last) as usize == 2 {
             // The continuation slot is missing - `trim_end` ate the
             // collapsed `\0`-as-space. Add it back.
             cells = cells.saturating_add(1);
@@ -264,7 +264,7 @@ fn parse_row(line: &str, width: u16) -> String {
     let mut i = 0;
     while i < chars.len() && cells < width {
         let ch = chars[i];
-        let cw = cell_width::char_width_u16(ch);
+        let cw = char_width(ch);
         out.push(ch);
         cells += 1;
         if cw == 2 && cells < width {

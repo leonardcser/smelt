@@ -15,7 +15,7 @@ pub enum SourceEvent {
     /// Raw terminal event (key, mouse, paste, focus, resize).
     Term(TermEvent),
     /// Event emitted by the engine task (turn lifecycle, tool calls, etc).
-    Engine(EngineEvent),
+    Engine { event: Box<EngineEvent> },
     /// A Lua-side task pushed work onto the inbox; the loop should
     /// drain pending callbacks and resume parked coroutines.
     LuaWakeup,
@@ -29,6 +29,14 @@ pub enum SourceEvent {
     /// Terminal window resize (SIGWINCH on Unix). Carries the new
     /// dimensions in cells; production reads them from crossterm.
     Resize { width: u16, height: u16 },
+}
+
+impl SourceEvent {
+    pub fn engine(event: EngineEvent) -> Self {
+        Self::Engine {
+            event: Box::new(event),
+        }
+    }
 }
 
 /// Async iterator over [`SourceEvent`]s. Returns `None` to signal end of

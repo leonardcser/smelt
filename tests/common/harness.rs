@@ -169,5 +169,31 @@ fn parse_jsonl(bytes: &[u8]) -> Vec<Value> {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .map(canonical_json)
         .collect()
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(map) => {
+            let mut entries = map.into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        Value::String(text) => Value::String(canonical_json_suffix(&text).unwrap_or(text)),
+        value => value,
+    }
+}
+
+fn canonical_json_suffix(text: &str) -> Option<String> {
+    let (prefix, json) = text.rsplit_once(": ")?;
+    let value = serde_json::from_str::<Value>(json).ok()?;
+    let canonical = serde_json::to_string(&canonical_json(value)).ok()?;
+    Some(format!("{prefix}: {canonical}"))
 }

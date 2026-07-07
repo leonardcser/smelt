@@ -1494,7 +1494,7 @@ mod tests {
     fn process_status_resize_keeps_transcript_cursor_in_bounds() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.feed_one(crate::app::test_harness::SourceEvent::Engine(
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::ProcessCompleted {
                 id: String::new(),
                 exit_code: None,
@@ -1598,7 +1598,7 @@ mod tests {
             protocol::process_status_note("background process 751225 exited with code 1")
         );
 
-        app.feed_one(crate::app::test_harness::SourceEvent::Engine(
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id,
                 first_changed_index: 0,

@@ -19,8 +19,8 @@ impl TestApp {
                         self.actions.push(Action::Quit);
                     }
                 }
-                SourceEvent::Engine(ev) => {
-                    self.app.dispatch_engine_event(ev);
+                SourceEvent::Engine { event } => {
+                    self.app.dispatch_engine_event(*event);
                 }
                 SourceEvent::Tick(ms) => {
                     self.clock.advance(Duration::from_millis(ms));

@@ -387,7 +387,7 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
         serde_json::json!("# Goal\nShip the parser change.\n"),
     );
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
         request_id: 91,
         call_id: "plan-draft".into(),
         tool_name: "present_plan".into(),
@@ -479,7 +479,7 @@ fn present_plan_existing_path_approves_without_overwriting_plan_body() {
         serde_json::json!(plan_path.to_string_lossy().to_string()),
     );
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
         request_id: 92,
         call_id: "plan-approve".into(),
         tool_name: "present_plan".into(),
@@ -521,7 +521,7 @@ fn present_plan_dismiss_does_not_echo_plan_body() {
         serde_json::json!("# Secret draft\nDo not keep this transcript copy.\n"),
     );
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
         request_id: 94,
         call_id: "plan-dismiss".into(),
         tool_name: "present_plan".into(),
@@ -555,7 +555,7 @@ fn present_plan_dialog_tracks_terminal_width_on_resize() {
         serde_json::json!("# Goal\nShip the parser change.\n"),
     );
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
         request_id: 93,
         call_id: "plan-resize".into(),
         tool_name: "present_plan".into(),
@@ -600,7 +600,7 @@ fn public_status_open_question_needs_attention() {
         ]),
     );
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
         request_id: 77,
         call_id: "status-question".into(),
         tool_name: "ask_user_question".into(),
@@ -649,7 +649,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
         ]),
     );
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolDispatch {
         request_id: 77,
         call_id: "aq-questions".into(),
         tool_name: "ask_user_question".into(),

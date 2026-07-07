@@ -411,7 +411,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     ];
 
     app.start_turn(1);
-    app.feed_one(SourceEvent::Engine(EngineEvent::TokenUsage {
+    app.feed_one(SourceEvent::engine(EngineEvent::TokenUsage {
         usage: protocol::TokenUsage {
             context_tokens: Some(123),
             ..Default::default()
@@ -420,7 +420,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
         cost_usd: None,
         background: false,
     }));
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: Some(completed_history.clone()),
@@ -432,7 +432,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     let mut in_flight_history = completed_history;
     in_flight_history.push(protocol::HistoryItem::user(protocol::Content::text("u2")));
     app.start_turn(2);
-    app.feed_one(SourceEvent::Engine(EngineEvent::HistoryUpdated {
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryUpdated {
         turn_id: 2,
         first_changed_index: 1,
         history: in_flight_history,
@@ -2103,7 +2103,7 @@ fn scheduled_reload_runs_after_turn_is_idle() {
     assert!(app.app.pending_lua_reload);
     assert_eq!(app.lua_int_global("reload_count"), Some(1));
 
-    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
         history: None,

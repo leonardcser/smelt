@@ -2686,6 +2686,7 @@ dependencies = [
  "insta",
  "smelt-ansi",
  "smelt-style",
+ "unicode-width",
 ]
 
 [[package]]
