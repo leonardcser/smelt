@@ -88,3 +88,11 @@ fun(s: string): integer
 
 Return the visual column count of `s`. Lua's `#s` counts bytes; use this for sizing extmark ranges or computing column offsets so multi-byte and wide characters land correctly.
 
+## `smelt.text.wrap_prefixed`
+
+```lua
+fun(text: string, width: integer, opts: table?): string[]
+```
+
+Hard-wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows. Wrapping uses terminal-cell width, preserves every character, and returns an array of strings. `width = 0` disables wrapping.
+

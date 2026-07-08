@@ -123,6 +123,31 @@ fn truncate_bytes(bytes: &[u8], max_bytes: usize, opts: &TruncateOptions) -> Str
     }
 }
 
+fn wrap_prefixed_text(prefix: &str, text: &str, cont_prefix: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![format!("{prefix}{text}")];
+    }
+
+    let mut rows = Vec::new();
+    let mut current_prefix = prefix;
+    let mut current = String::new();
+    let mut used = cell_width::text_width(current_prefix);
+
+    for ch in text.chars() {
+        let ch_width = cell_width::char_width(ch);
+        if !current.is_empty() && used + ch_width > width {
+            rows.push(format!("{current_prefix}{current}"));
+            current_prefix = cont_prefix;
+            current.clear();
+            used = cell_width::text_width(current_prefix);
+        }
+        current.push(ch);
+        used += ch_width;
+    }
+    rows.push(format!("{current_prefix}{current}"));
+    rows
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -185,6 +210,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .and_then(|t| t.get::<Option<String>>("suffix").ok().flatten())
                 .unwrap_or_else(|| "…".into());
             Ok(truncate_to_cells(&s, width, &suffix))
+        },
+    )?;
+    m.fn_(
+        "wrap_prefixed",
+        "Hard-wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows. Wrapping uses terminal-cell width, preserves every character, and returns an array of strings. `width = 0` disables wrapping.",
+        &["text", "width", "opts"],
+        |_,
+         (text, width, opts): (String, usize, Option<mlua::Table>)|
+         -> LuaResult<Vec<String>> {
+            let prefix = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("prefix").ok().flatten())
+                .unwrap_or_default();
+            let cont_prefix = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("cont_prefix").ok().flatten())
+                .unwrap_or_else(|| " ".repeat(cell_width::text_width(&prefix)));
+            Ok(wrap_prefixed_text(&prefix, &text, &cont_prefix, width))
         },
     )?;
     m.fn_(

@@ -151,6 +151,8 @@ Options accepted by `smelt.dialog.menu`.
 | `selected` | `integer` |  | 1-based starting cursor (default 1). |
 | `shortcuts` | `"submit"|"select"|false` |  | Digit-key behavior. Default `"submit"`. |
 | `numbered` | `boolean` |  | Show the dim ` N. ` prefix (default true). |
+| `wrap` | `boolean` |  | Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning. |
+| `wrap_width` | `integer` |  | Initial wrap width used before the first resize event. |
 | `on_submit` | `fun(ctx: any):` |  | any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`. |
 
 ### `smelt.dialog.Opts`
@@ -1071,6 +1073,19 @@ Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.l
 | `min_width` | `any` |  | Optional width floor. |
 | `min_height` | `any` |  | Optional height floor. |
 
+### `smelt.win.RowHighlight`
+
+Window-owned row background highlight. Ranges use absolute visual rows and an exclusive `end`; `{ cursor = true }` follows the window cursor row. `mode` is `always` (default) or `focused`; `width` is `full` (default) or `content`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `start` | `integer` |  | First absolute visual row to highlight (0-based). Required unless `cursor = true`. |
+| `end` | `integer` |  | Exclusive absolute visual row end. Defaults to `start + 1`. |
+| `cursor` | `boolean` |  | When true, highlight the current cursor row instead of a fixed range. |
+| `hl_group` | `string` |  | Theme highlight group to resolve at render time. Default `CursorLine`. |
+| `mode` | `"always"|"focused"` |  | Paint always or only while the window is focused. Default `always`. |
+| `width` | `"full"|"content"` |  | Paint the full window row, including gutter and padding, or only the content region. Default `full`. |
+
 ### `smelt.win.Win`
 
 Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
@@ -1091,6 +1106,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `placeholder` | `fun(text: string, opts: table?): smelt.win.Win` | yes | Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining. |
 | `clear_placeholder` | `fun(): nil` | yes | Clear the window's placeholder text and opts. Idempotent. |
 | `placeholder_text` | `fun(): string?` | yes | Return the current placeholder text, or `nil` if none is set. |
+| `row_highlights` | `fun(specs: table?): smelt.win.Win` | yes | Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text. |
 | `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
 | `scroll` | `fun(arg: any): any` | yes | Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow. |
 

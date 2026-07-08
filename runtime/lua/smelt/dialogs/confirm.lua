@@ -167,6 +167,8 @@ function smelt.confirm.open(handle_id)
   end
 
   local options_leaf, options_ctrl = smelt.dialog.menu(labels, {
+    wrap = true,
+    wrap_width = label_value.initial_dialog_width() - 4,
     on_submit = function(ctx)
       close_with(ctx.index, current_reason())
       ctx.close()

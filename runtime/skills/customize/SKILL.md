@@ -1677,6 +1677,8 @@ Visual-width measurement.
   Return `s` shortened to at most `width` display cells, appending `opts.suffix` (default `"…"`) when truncation happens.
 - `smelt.text.width` :: `fun(s: string): integer`
   Return the visual column count of `s`.
+- `smelt.text.wrap_prefixed` :: `fun(text: string, width: integer, opts: table?): string[]`
+  Hard-wrap `text` into rows with `opts.prefix` on the first row and `opts.cont_prefix` on continuation rows.
 
 #### `smelt.ui`
 

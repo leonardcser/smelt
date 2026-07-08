@@ -97,6 +97,27 @@ app_story!(bash_outside_workspace_extra_options, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_permission_dialog_long_extra_options_wrap, |ctx| {
+    ctx.set_viewport(70, 22);
+    ctx.request_permission(
+        "bash",
+        args([(
+            "command",
+            json!(
+                "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-long-permission-target.log"
+            ),
+        )]),
+        vec![
+            "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-long-permission-target.log"
+                .into(),
+            "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/*".into(),
+        ],
+    );
+    ctx.press_char('j');
+    ctx.press_char('j');
+    ctx.assert_snapshot();
+});
+
 app_story!(write_file_permission_dialog_with_file_view, |ctx| {
     ctx.set_viewport(80, 24);
     ctx.request_permission(

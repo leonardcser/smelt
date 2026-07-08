@@ -374,7 +374,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     let list_focusable = app.ui.win(leaf).is_some_and(|w| w.accepts_focus());
     let (win, buf) = app.ui.win_and_buf_mut(leaf, buf_id);
     if let (Some(win), Some(buf)) = (win, buf) {
-        win.selection_highlight = true;
+        win.set_list_selection_highlight(true);
         win.set_surface(crate::smelt_edit::WindowSurface::list(list_focusable));
         win.jump_to_row(buf, target, viewport);
         if target > 0 {

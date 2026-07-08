@@ -406,6 +406,23 @@ impl mlua::UserData for LuaWin {
             },
         );
 
+        // ── row_highlights(specs?) - chainable ─────────────────────
+        methods.add_function(
+            "row_highlights",
+            |_,
+             (this_ud, specs): (mlua::AnyUserData, Option<mlua::Table>)|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                let highlights = parse_row_highlights(specs.as_ref())?;
+                crate::lua::with_app(|app| {
+                    if let Some(w) = app.ui.win_mut(this.id) {
+                        w.set_row_highlights(highlights);
+                    }
+                });
+                Ok(this_ud)
+            },
+        );
+
         // ── on(event, fn) → Reg ────────────────────────────────────
         //
         // Headless-safe: when no app pointer is installed (e.g. autoload
@@ -668,6 +685,71 @@ fn collect_chords(arr: &mlua::Table, field: &str) -> LuaResult<Vec<crate::smelt_
     Ok(out)
 }
 
+fn parse_row_highlights(
+    specs: Option<&mlua::Table>,
+) -> LuaResult<Vec<crate::smelt_edit::RowHighlight>> {
+    let Some(specs) = specs else {
+        return Ok(Vec::new());
+    };
+    let mut highlights = Vec::new();
+    for spec in specs.clone().sequence_values::<mlua::Table>() {
+        let spec = spec?;
+        let hl_group = smelt_buffer::theme::intern(
+            &spec
+                .get::<Option<String>>("hl_group")?
+                .unwrap_or_else(|| "CursorLine".into()),
+        );
+        let mode = match spec
+            .get::<Option<String>>("mode")?
+            .unwrap_or_else(|| "always".into())
+            .as_str()
+        {
+            "always" => crate::smelt_edit::RowHighlightMode::Always,
+            "focused" => crate::smelt_edit::RowHighlightMode::WhenFocused,
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Win:row_highlights: mode must be 'always' or 'focused', got `{other}`"
+                )));
+            }
+        };
+        let width = match spec
+            .get::<Option<String>>("width")?
+            .unwrap_or_else(|| "full".into())
+            .as_str()
+        {
+            "full" => crate::smelt_edit::RowHighlightWidth::FullWindow,
+            "content" => crate::smelt_edit::RowHighlightWidth::Content,
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Win:row_highlights: width must be 'full' or 'content', got `{other}`"
+                )));
+            }
+        };
+        if spec.get::<Option<bool>>("cursor")?.unwrap_or(false) {
+            highlights.push(crate::smelt_edit::RowHighlight::cursor(
+                hl_group, mode, width,
+            ));
+            continue;
+        }
+        let start = spec.get::<Option<u64>>("start")?.ok_or_else(|| {
+            mlua::Error::RuntimeError("Win:row_highlights: range highlight requires start".into())
+        })? as crate::smelt_edit::RowIndex;
+        let end = spec
+            .get::<Option<u64>>("end")?
+            .unwrap_or_else(|| start.saturating_add(1))
+            as crate::smelt_edit::RowIndex;
+        if start < end {
+            highlights.push(crate::smelt_edit::RowHighlight::range(
+                start..end,
+                hl_group,
+                mode,
+                width,
+            ));
+        }
+    }
+    Ok(highlights)
+}
+
 /// Recover the `LuaShared` from the Lua state's app registry. Used by
 /// methods that need to register Lua callback handles.
 pub(super) fn current_shared(lua: &Lua) -> LuaResult<Arc<LuaShared>> {
@@ -720,6 +802,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.",
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
+            "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
         },
@@ -731,6 +814,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Remove the decoration and any window leaves it owns.",
         },
+    });
+
+    record_class(LuaClassDecl {
+        name: "smelt.win.RowHighlight",
+        doc: "Window-owned row background highlight. Ranges use absolute visual rows and an exclusive `end`; `{ cursor = true }` follows the window cursor row. `mode` is `always` (default) or `focused`; `width` is `full` (default) or `content`.",
+        fields: vec![
+            LuaClassField { name: "start", ty: "integer".into(), optional: true, doc: "First absolute visual row to highlight (0-based). Required unless `cursor = true`." },
+            LuaClassField { name: "end", ty: "integer".into(), optional: true, doc: "Exclusive absolute visual row end. Defaults to `start + 1`." },
+            LuaClassField { name: "cursor", ty: "boolean".into(), optional: true, doc: "When true, highlight the current cursor row instead of a fixed range." },
+            LuaClassField { name: "hl_group", ty: "string".into(), optional: true, doc: "Theme highlight group to resolve at render time. Default `CursorLine`." },
+            LuaClassField { name: "mode", ty: "\"always\"|\"focused\"".into(), optional: true, doc: "Paint always or only while the window is focused. Default `always`." },
+            LuaClassField { name: "width", ty: "\"full\"|\"content\"".into(), optional: true, doc: "Paint the full window row, including gutter and padding, or only the content region. Default `full`." },
+        ],
     });
 
     record_class(LuaClassDecl {
@@ -925,10 +1021,10 @@ fn apply_window_opts(
         w.set_surface(surface);
     }
     if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
-        w.cursor_line = cursor_line;
+        w.set_cursor_line_highlight(cursor_line);
     }
     if let Ok(selection_highlight) = opts.get::<bool>("selection_highlight") {
-        w.selection_highlight = selection_highlight;
+        w.set_list_selection_highlight(selection_highlight);
     }
     if let Ok(hide_cursor) = opts.get::<bool>("hide_cursor") {
         w.hide_cursor = hide_cursor;

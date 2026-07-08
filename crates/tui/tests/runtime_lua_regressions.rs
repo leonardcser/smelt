@@ -265,6 +265,13 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
           ns = function(name) return name end,
           log = { error = function() end },
           notify = __smelt_notify_stub(nil, nil),
+          text = {
+            width = function(s) return #(s or "") end,
+            wrap_prefixed = function(text, width, opts)
+              opts = opts or {}
+              return { (opts.prefix or "") .. (text or "") }
+            end,
+          },
           buf = {
             new = function()
               next_buf_id = next_buf_id + 1
@@ -290,6 +297,8 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
                 self.cursor_row = row
               end
               function leaf:on() end
+              function leaf:content_width() return 80 end
+              function leaf:row_highlights(specs) self.highlights = specs; return self end
               function leaf:focus() end
               function leaf:close() end
               last_leaf = leaf

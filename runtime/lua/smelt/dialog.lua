@@ -211,65 +211,84 @@ end
 --   ctrl:submit()         -- trigger the submit path programmatically
 
 local NS_MENU_NUM      = smelt.ns("smelt.dialog.menu.num")
-local NS_MENU_LABEL    = smelt.ns("smelt.dialog.menu.label")
+local NS_MENU_SELECTED = smelt.ns("smelt.dialog.menu.selected")
 local NS_MENU_DESC     = smelt.ns("smelt.dialog.menu.desc")
 local NS_MENU_DISABLED = smelt.ns("smelt.dialog.menu.disabled")
 
--- Render `items` into `buf`, applying dim numbering and the cursor-row
--- accent. `has_descriptions` toggles the two-row layout.
-local function render_menu(buf, items, has_descriptions, numbered)
+local function wrap_prefixed_text(prefix, text, cont_prefix, width)
+  return smelt.text.wrap_prefixed(tostring(text or ""), width or 0, {
+    prefix      = prefix,
+    cont_prefix = cont_prefix,
+  })
+end
+
+-- Render `items` into `buf`, applying dim numbering and item metadata for
+-- selected-row styling. `has_descriptions` toggles the two-row layout. When
+-- `width` is supplied, label and description rows are hard-wrapped into buffer
+-- lines so fit-height dialogs grow instead of relying on horizontal panning.
+local function render_menu(buf, items, has_descriptions, numbered, width)
   local rendered = {}
   local meta = {}
   local desc_indent = "    "
 
   for i, it in ipairs(items) do
     local prefix = numbered and string.format(" %d. ", i) or " "
-    local label_line = prefix .. (it.label or "")
-    rendered[#rendered + 1] = label_line
-    local label_row = #rendered
+    local cont_prefix = string.rep(" ", smelt.text.width(prefix))
+    local label_lines = wrap_prefixed_text(prefix, it.label or "", cont_prefix, width)
+    local label_row = #rendered + 1
+    local label_spans = {}
+    for n, line in ipairs(label_lines) do
+      rendered[#rendered + 1] = line
+      label_spans[#label_spans + 1] = {
+        row     = #rendered,
+        start   = n == 1 and #prefix or #cont_prefix,
+        end_col = #line,
+      }
+    end
+    local label_last_row = #rendered
 
     local desc_row, desc_end
     if has_descriptions then
       local desc = it.description or ""
-      local desc_line = desc_indent .. desc
-      rendered[#rendered + 1] = desc_line
-      desc_row = #rendered
-      desc_end = #desc_line
+      local desc_lines = wrap_prefixed_text(desc_indent, desc, desc_indent, width)
+      desc_row = #rendered + 1
+      for _, line in ipairs(desc_lines) do rendered[#rendered + 1] = line end
+      desc_end = #(rendered[#rendered] or "")
     end
 
     meta[i] = {
-      label_row   = label_row,
+      label_row      = label_row,
+      label_last_row = label_last_row,
+      last_row    = #rendered,
       label_start = #prefix,
-      label_end   = #label_line,
+      label_spans = label_spans,
+      label_end   = #(rendered[label_row] or ""),
       desc_row    = desc_row,
       desc_end    = desc_end,
     }
   end
 
-  buf:lines(rendered):clear_ns(NS_MENU_NUM):clear_ns(NS_MENU_LABEL):clear_ns(NS_MENU_DESC):clear_ns(NS_MENU_DISABLED)
+  buf:lines(rendered):clear_ns(NS_MENU_NUM):clear_ns(NS_MENU_SELECTED):clear_ns(NS_MENU_DESC):clear_ns(NS_MENU_DISABLED)
   for i, m in ipairs(meta) do
     local item = items[i] or {}
     if item.disabled then
-      buf:mark(NS_MENU_DISABLED, m.label_row, 0, { end_col = m.label_end, dim = true })
-      if m.desc_row and m.desc_end and m.desc_end > 0 then
-        buf:mark(NS_MENU_DISABLED, m.desc_row, 0, { end_col = m.desc_end, dim = true })
+      for row = m.label_row, m.last_row do
+        local line = rendered[row] or ""
+        if #line > 0 then buf:mark(NS_MENU_DISABLED, row, 0, { end_col = #line, dim = true }) end
       end
     else
       if numbered and m.label_start > 0 then
         buf:mark(NS_MENU_NUM, m.label_row, 0, { end_col = m.label_start, dim = true })
       end
-      if m.label_end > m.label_start then
-        buf:mark(NS_MENU_LABEL, m.label_row, m.label_start, {
-          end_col       = m.label_end,
-          hl_group      = "SmeltAccent",
-          on_cursor_row = true,
-        })
-      end
       if m.desc_row and m.desc_end and m.desc_end > 0 then
-        buf:mark(NS_MENU_DESC, m.desc_row, 0, { end_col = m.desc_end, dim = true })
+        for row = m.desc_row, m.last_row do
+          local line = rendered[row] or ""
+          if #line > 0 then buf:mark(NS_MENU_DESC, row, 0, { end_col = #line, dim = true }) end
+        end
       end
     end
   end
+  return meta
 end
 
 -- Normalize `items` into `{ label, description?, key? }` tables.
@@ -308,6 +327,8 @@ end
 ---@field selected? integer 1-based starting cursor (default 1).
 ---@field shortcuts? "submit"|"select"|false Digit-key behavior. Default `"submit"`.
 ---@field numbered? boolean Show the dim ` N. ` prefix (default true).
+---@field wrap? boolean Hard-wrap long labels/descriptions to the menu width so fit-height dialogs grow vertically instead of clipping or panning.
+---@field wrap_width? integer Initial wrap width used before the first resize event.
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
 ---@type fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table
@@ -321,11 +342,24 @@ function smelt.dialog.menu(items, opts)
   local shortcuts = opts.shortcuts
   if shortcuts == nil then shortcuts = "submit" end
 
-  local row_stride = has_descriptions and 2 or 1
+  local wrap = opts.wrap == true
+  local initial_wrap_width = tonumber(opts.wrap_width or 0)
+  if not initial_wrap_width or initial_wrap_width <= 0 then initial_wrap_width = nil end
+  local menu_meta = {}
   local item_count = #normalized
 
-  local function row_of(i) return (i - 1) * row_stride end
-  local function index_of_row(r) return math.floor(r / row_stride) + 1 end
+  local function row_of(i)
+    local m = menu_meta[i]
+    if m and m.label_row then return m.label_row - 1 end
+    return i - 1
+  end
+  local function index_of_row(r)
+    local row = (r or 0) + 1
+    for i, m in ipairs(menu_meta) do
+      if row >= m.label_row and row <= m.last_row then return i end
+    end
+    return math.max(1, math.min(item_count, row))
+  end
   local function enabled(i) return normalized[i] and normalized[i].disabled ~= true end
 
   local function selectable_index(i, dir)
@@ -349,7 +383,10 @@ function smelt.dialog.menu(items, opts)
   local selected = selectable_index(tonumber(opts.selected or 1) or 1, 1)
 
   local buf = smelt.buf.new()
-  render_menu(buf, normalized, has_descriptions, numbered)
+  local function render_current(width)
+    menu_meta = render_menu(buf, normalized, has_descriptions, numbered, wrap and width or nil)
+  end
+  render_current(initial_wrap_width)
 
   local leaf = smelt.win.new(buf, {
     region         = REGION,
@@ -361,16 +398,49 @@ function smelt.dialog.menu(items, opts)
     initial_cursor = row_of(selected),
   })
 
+  local function sync_highlight()
+    buf:clear_ns(NS_MENU_SELECTED)
+    local m = menu_meta[selected]
+    if not m then
+      leaf:row_highlights({})
+      return
+    end
+    for _, span in ipairs(m.label_spans or {}) do
+      if span.end_col > span.start then
+        buf:mark(NS_MENU_SELECTED, span.row, span.start, {
+          end_col  = span.end_col,
+          hl_group = "SmeltAccent",
+        })
+      end
+    end
+    leaf:row_highlights({ {
+      start    = m.label_row - 1,
+      ["end"]  = m.label_last_row,
+      hl_group = "CursorLine",
+      mode     = "always",
+      width    = "full",
+    } })
+  end
+  sync_highlight()
+
+  if wrap then
+    leaf:on("resized", function(ctx)
+      render_current((ctx and ctx.content_width) or leaf:content_width())
+      leaf:cursor(row_of(selected))
+      sync_highlight()
+    end)
+  end
+
   local function sync_menu(next_items)
     local next_has_descriptions
     normalized, next_has_descriptions = normalize_items(next_items)
     if #normalized == 0 then normalized = { { label = "" } } end
     has_descriptions = next_has_descriptions
-    row_stride = has_descriptions and 2 or 1
     item_count = #normalized
-    render_menu(buf, normalized, has_descriptions, numbered)
+    render_current(wrap and leaf:content_width() or nil)
     selected = selectable_index(index_of_row(leaf:cursor() or 0), 1)
     leaf:cursor(row_of(selected))
+    sync_highlight()
   end
 
   local ctrl = {}
@@ -380,6 +450,7 @@ function smelt.dialog.menu(items, opts)
     end
     selected = selectable_index(i, 1)
     leaf:cursor(row_of(selected))
+    sync_highlight()
     return self
   end
   function ctrl:item() return normalized[self:cursor()] end
@@ -401,7 +472,9 @@ function smelt.dialog.menu(items, opts)
   -- `dialog.open`'s `on_submit(ctx)` argument).
   local function submit_at(i)
     if i < 1 or i > item_count or not enabled(i) then return end
+    selected = i
     leaf:cursor(row_of(i))
+    sync_highlight()
     local dlg = smelt.dialog.current() or {}
     local ctx = {
       win          = dlg.win,
@@ -427,6 +500,7 @@ function smelt.dialog.menu(items, opts)
       if target > item_count then target = item_count end
       selected = selectable_index(target, units < 0 and -1 or 1)
       leaf:cursor(row_of(selected))
+      sync_highlight()
     end
   end
   leaf:key("up",   move(-1))

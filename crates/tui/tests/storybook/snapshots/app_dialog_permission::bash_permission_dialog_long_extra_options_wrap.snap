@@ -1,0 +1,26 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/ver
+  y-long-permission-target.log
+
+
+──────────────────────────────────────────────────────────────────────
+ bash: cat
+
+ /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/very-lo
+       ng-permission-target.log
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow cat /var/log/smelt/projects/alpha/beta/gamma/delta/eps
+     ilon/very-long-permission-target.log, /var/log/smelt/project
+     s/alpha/beta/gamma/delta/epsilon for this session
+  4. allow cat /var/log/smelt/projects/alpha/beta/gamma/delta/eps
+     ilon/very-long-permission-target.log, /var/log/smelt/project
+     s/alpha/beta/gamma/delta/epsilon in ~/cwd
+
+  press tab to add a reason…
+ ○ normal  permission pending                                  3:1 28%

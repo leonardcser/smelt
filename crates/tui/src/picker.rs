@@ -145,7 +145,7 @@ pub(crate) fn open(
 
     sync_selected(app, leaf, selected);
     if let Some(w) = app.ui.win_mut(leaf) {
-        w.selection_highlight = true;
+        w.set_list_selection_highlight(true);
         w.set_surface(crate::smelt_edit::WindowSurface::list(focusable));
     }
     if focusable {
