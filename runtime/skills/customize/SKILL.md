@@ -603,13 +603,6 @@ Read and write the system clipboard.
 - `smelt.clipboard.write` :: `fun(text: string): nil`
   Write `text` to the system clipboard.
 
-#### `smelt.clock`
-
-Wall-clock time primitives.
-
-- `smelt.clock.unix_ms` :: `fun(): integer`
-  Return the current Unix timestamp in milliseconds.
-
 #### `smelt.defaults`
 
 Startup fallbacks for new sessions.
@@ -1117,6 +1110,21 @@ Reload-safe periodic work.
 
 - `smelt.tick.every` :: `fun(secs: integer, fn: fun()): smelt.Reg`
   Reload-safe periodic work.
+
+#### `smelt.time`
+
+Wall-clock time parsing and formatting.
+
+- `smelt.time.format` :: `fun(timestamp: integer, format: string): string?`
+  Format Unix seconds in the user's local time zone with a strftime-style format string.
+- `smelt.time.format_utc` :: `fun(timestamp: integer, format: string): string?`
+  Format Unix seconds in UTC with a strftime-style format string.
+- `smelt.time.now` :: `fun(): integer`
+  Return the current Unix timestamp in seconds.
+- `smelt.time.now_ms` :: `fun(): integer`
+  Return the current Unix timestamp in milliseconds.
+- `smelt.time.parse_iso8601` :: `fun(timestamp: string): integer?`
+  Parse an ISO-8601 / RFC3339 timestamp and return Unix seconds, not milliseconds, or nil when the input is invalid.
 
 #### `smelt.timer`
 

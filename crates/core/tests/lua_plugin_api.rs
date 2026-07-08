@@ -78,6 +78,26 @@ fn get_global<T: mlua::FromLua>(rt: &LuaRuntime, name: &str) -> T {
         .unwrap_or_else(|e| panic!("global `{name}`: {e}"))
 }
 
+// -- time ---------------------------------------------------------------
+
+#[test]
+fn time_api_parses_and_formats_iso8601_timestamps() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            assert(smelt.clock == nil)
+            assert(type(smelt.time.now()) == "number")
+            assert(type(smelt.time.now_ms()) == "number")
+            local stamp = assert(smelt.time.parse_iso8601("2026-07-31T20:08:39.887867Z"))
+            assert(smelt.time.format_utc(stamp, "%Y-%m-%d %H:%M") == "2026-07-31 20:08")
+            assert(smelt.time.parse_iso8601("not a timestamp") == nil)
+            "#,
+        )
+        .exec()
+        .expect("time api");
+}
+
 // -- json ---------------------------------------------------------------
 
 #[test]

@@ -284,7 +284,7 @@ impl TestAppBuilder {
             .lua()
             .load(
                 r#"
-                smelt.clock.unix_ms = function() return 0 end
+                smelt.time.now_ms = function() return 0 end
                 smelt.spinner.glyph = function() return '✿' end
                 "#,
             )

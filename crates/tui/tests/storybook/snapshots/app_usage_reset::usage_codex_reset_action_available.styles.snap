@@ -10,6 +10,7 @@ dim: 76 28
  18   1   7 fg=AnsiValue(244)
  19   1  10 fg=AnsiValue(244)
  20   1  21 fg=AnsiValue(244)
+ 20  33  20 fg=AnsiValue(244)
  21   1  14 fg=AnsiValue(244)
  21  15   1 fg=AnsiValue(244) attrs=dim
  21  31   4 fg=AnsiValue(244) attrs=dim

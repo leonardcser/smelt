@@ -16,15 +16,17 @@ expression: frame.text()
 
 
 
+
+
 ─ usage ────────────────────────────────────────────────────────────────────
  cost $0.0000
 
  Codex
    plan plus
-   credits 12
-   usage limit resets 2 available  both expire Jan 31
-   5h limit    |██████████████▋░░░|  82% used  resets Jan 01 00:00
-   7.0d limit  |████████▏░░░░░░░░░|  45% used  resets Jan 01 01:00
+   usage limit resets 3 available
+     2 expire Jul 31
+     1 expires Aug 07
+   5h limit  |██████████████▋░░░|  82% used  resets Jan 01 00:00
 
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
   1. Refresh usage

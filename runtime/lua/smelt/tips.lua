@@ -114,8 +114,8 @@ function M.prompt_tip()
 
   local now = 0
   local have_source = false
-  if smelt.clock and smelt.clock.unix_ms then
-    local ok, value = pcall(smelt.clock.unix_ms)
+  if smelt.time and smelt.time.now_ms then
+    local ok, value = pcall(smelt.time.now_ms)
     if ok and type(value) == "number" then
       now = math.floor(value / 1000)
       have_source = true

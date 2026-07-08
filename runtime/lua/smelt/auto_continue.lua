@@ -74,8 +74,8 @@ local function recoverable_quota_error(ev)
 end
 
 local function now_ms()
-  if smelt.clock and smelt.clock.unix_ms then
-    local ok, value = pcall(smelt.clock.unix_ms)
+  if smelt.time and smelt.time.now_ms then
+    local ok, value = pcall(smelt.time.now_ms)
     if ok and type(value) == "number" then return value end
   end
   return os.time() * 1000

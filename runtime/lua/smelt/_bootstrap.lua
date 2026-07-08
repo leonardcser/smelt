@@ -785,7 +785,7 @@ function smelt.fs.watch(path, handler, opts)
 end
 
 -- Shared spinner - pure Lua, loaded once so plugins see the same table.
-if smelt.clock and smelt.clock.unix_ms then
+if smelt.time and smelt.time.now_ms then
   smelt.spinner = smelt.spinner or require("smelt.spinner")
 end
 

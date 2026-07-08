@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 84 namespace(s), 452 function(s), 85 class(es), 11 alias(es).
+**Coverage:** 84 namespace(s), 456 function(s), 85 class(es), 11 alias(es).
 
 Functions and namespaces marked `Internal` are implementation details for bundled Lua. They are documented for transparency, but user config and plugins should prefer public APIs.
 
@@ -21,7 +21,6 @@ Available in every runtime, including headless mode.
 - [`smelt.builtins`](builtins.md) - 4 function(s)
 - [`smelt.cli`](cli.md) - 3 function(s)
 - [`smelt.clipboard`](clipboard.md) - 2 function(s)
-- [`smelt.clock`](clock.md) - 1 function(s)
 - [`smelt.defaults`](defaults.md) - 1 function(s)
 - [`smelt.events`](events.md) - 3 function(s)
 - [`smelt.files`](files.md) - 4 function(s)
@@ -55,6 +54,7 @@ Available in every runtime, including headless mode.
 - [`smelt.state`](state.md) - 2 function(s)
 - [`smelt.task`](task.md) - 8 function(s)
 - [`smelt.tick`](tick.md) - 1 function(s)
+- [`smelt.time`](time.md) - 5 function(s)
 - [`smelt.timer`](timer.md) - 2 function(s)
 - [`smelt.tools`](tools.md) - 9 function(s)
 - [`smelt.transcript.defaults`](transcript_defaults.md) - 30 function(s)

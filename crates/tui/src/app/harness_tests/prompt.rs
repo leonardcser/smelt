@@ -681,7 +681,7 @@ fn prompt_tips_do_not_rotate_while_terminal_is_unfocused() {
         tips.register({ id = "test.focus.a", text = "test focus tip a" })
         tips.register({ id = "test.focus.b", text = "test focus tip b" })
         _G.smelt_tip_now = 0
-        smelt.clock.unix_ms = function() return _G.smelt_tip_now * 1000 end
+        smelt.time.now_ms = function() return _G.smelt_tip_now * 1000 end
 
         local id = tips.prompt_tip().id
         for _ = 1, #tips.list() + 2 do

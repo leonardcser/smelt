@@ -16,7 +16,7 @@ M.LIGHT_WAVE_HIGH = 185
 -- Frame selection derives from wall-clock time so multiple processes
 -- animate in lockstep without inter-process communication.
 function M.glyph()
-  local unix_ms = smelt.clock.unix_ms()
+  local unix_ms = smelt.time.now_ms()
   local idx = math.floor(unix_ms / M.SPINNER_FRAME_MS) % #M.SPINNER_FRAMES + 1
   return M.SPINNER_FRAMES[idx]
 end
@@ -30,7 +30,7 @@ end
 -- Phase is derived from wall-clock time so every instance shares the
 -- same temporal sync point; `x` provides the spatial offset.
 function M.wave_color_at(x)
-  local unix_ms = smelt.clock.unix_ms()
+  local unix_ms = smelt.time.now_ms()
   local t = unix_ms / M.WAVE_PERIOD_MS
   local phase = (t - x / M.WAVE_WAVELENGTH) * 2 * math.pi
   local intensity = (math.sin(phase) + 1.0) * 0.5

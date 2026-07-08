@@ -77,10 +77,16 @@ local function pct(value)
   return string.format("%.0f%%", n)
 end
 
-local function reset_text(value)
-  local stamp = tonumber(value)
+local function format_time(stamp, format)
+  stamp = tonumber(stamp)
   if not stamp then return nil end
-  return "resets " .. os.date("%b %d %H:%M", stamp)
+  return smelt.time.format(stamp, format)
+end
+
+local function reset_text(value)
+  local formatted = format_time(value, "%b %d %H:%M")
+  if not formatted then return nil end
+  return "resets " .. formatted
 end
 
 local function window_label(seconds, secondary)
@@ -201,12 +207,96 @@ local function codex_reset_credit_count(payload)
   return tonumber(reset_credits.available_count)
 end
 
+local function expiry_less(a, b)
+  if a.expires_at and b.expires_at then return a.expires_at < b.expires_at end
+  if a.expires_at then return true end
+  if b.expires_at then return false end
+  return false
+end
+
+local function parse_expiry(value)
+  if type(value) == "number" then return value end
+  if type(value) == "string" then return smelt.time.parse_iso8601(value) end
+  return nil
+end
+
+local function codex_reset_credit_inventory(count)
+  if not count or count <= 0 then return nil end
+  local payload = fetch_auth_json("codex", "/wham/rate-limit-reset-credits")
+  if type(payload) ~= "table" or type(payload.credits) ~= "table" then return nil end
+
+  local now = smelt.time.now()
+  local credits = {}
+  for _, credit in ipairs(payload.credits) do
+    if type(credit) == "table" and credit.status == "available" then
+      local expires_at = parse_expiry(credit.expires_at)
+      if not expires_at or expires_at > now then
+        credits[#credits + 1] = { expires_at = expires_at }
+      end
+    end
+  end
+  table.sort(credits, expiry_less)
+  return credits
+end
+
+local function codex_reset_credit_groups(inventory)
+  if type(inventory) ~= "table" or #inventory == 0 then return nil end
+  local groups = {}
+  local by_key = {}
+  for _, credit in ipairs(inventory) do
+    local key = credit.expires_at and format_time(credit.expires_at, "%Y-%m-%d") or "none"
+    local group = by_key[key]
+    if not group then
+      group = { count = 0, expires_at = credit.expires_at }
+      by_key[key] = group
+      groups[#groups + 1] = group
+    end
+    group.count = group.count + 1
+    if credit.expires_at and (not group.expires_at or credit.expires_at < group.expires_at) then
+      group.expires_at = credit.expires_at
+    end
+  end
+  table.sort(groups, expiry_less)
+  return groups
+end
+
+local function expiry_group_text(group)
+  if not group.expires_at then
+    return group.count == 1 and "1 does not expire" or tostring(group.count) .. " do not expire"
+  end
+  local verb = group.count == 1 and " expires " or " expire "
+  return tostring(group.count) .. verb .. (format_time(group.expires_at, "%b %d") or "unknown")
+end
+
 local function add_codex_reset_credit_line(lines, payload)
   local count = codex_reset_credit_count(payload)
   last_codex_reset_credits = count
   if count == nil then return end
   local label = count == 1 and "1 available" or tostring(count) .. " available"
-  lines[#lines + 1] = row(span("  usage limit resets ", DIM), span(label, VALUE))
+  local line = row(span("  usage limit resets ", DIM), span(label, VALUE))
+
+  local inventory = codex_reset_credit_inventory(count)
+  local inventory_matches = type(inventory) == "table" and #inventory == count
+  local groups = inventory_matches and codex_reset_credit_groups(inventory) or nil
+  if inventory_matches and #inventory == 1 and inventory[1].expires_at then
+    line[#line + 1] = span("  expires " .. (format_time(inventory[1].expires_at, "%b %d %H:%M") or "unknown"), DIM)
+  elseif groups and #groups == 1 then
+    local group = groups[1]
+    if not group.expires_at then
+      line[#line + 1] = span(group.count == 1 and "  does not expire" or "  do not expire", DIM)
+    elseif group.count == 2 then
+      line[#line + 1] = span("  both expire " .. (format_time(group.expires_at, "%b %d") or "unknown"), DIM)
+    else
+      line[#line + 1] = span("  all expire " .. (format_time(group.expires_at, "%b %d") or "unknown"), DIM)
+    end
+  end
+  lines[#lines + 1] = line
+
+  if groups and #groups > 1 then
+    for _, group in ipairs(groups) do
+      lines[#lines + 1] = row(span("    " .. expiry_group_text(group), DIM))
+    end
+  end
 end
 
 local function redeem_request_id()

@@ -104,6 +104,7 @@ fn usage_command_renders_codex_reset_times_in_local_time() {
           },
           session = { cost = function() return 0 end },
           text = { format_cost = function() return "$0.00" end },
+          time = { format = function(stamp, fmt) return os.date(fmt, stamp) end },
           auth = {
             request = function(provider, opts)
               assert(provider == "codex")

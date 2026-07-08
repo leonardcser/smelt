@@ -78,8 +78,81 @@ app_story!(usage_codex_reset_action_available, |ctx| {
                 },
               }),
             }
+          elseif opts.path == "/wham/rate-limit-reset-credits" then
+            return {
+              status = 200,
+              body = smelt.json.encode({
+                available_count = 2,
+                credits = {
+                  {
+                    id = "a",
+                    reset_type = "codex_rate_limits",
+                    status = "available",
+                    granted_at = "2029-12-01T00:00:00Z",
+                    expires_at = "2030-01-31T20:08:39Z",
+                    title = "Full reset (Weekly + 5 hr)",
+                  },
+                  {
+                    id = "b",
+                    reset_type = "codex_rate_limits",
+                    status = "available",
+                    granted_at = "2029-12-01T00:00:00Z",
+                    expires_at = "2030-01-31T21:08:39Z",
+                    title = "Full reset (Weekly + 5 hr)",
+                  },
+                },
+              }),
+            }
           end
           return { status = 200, body = smelt.json.encode({ code = "reset", windows_reset = 2 }) }
+        end
+        "#,
+    );
+    ctx.run_command("usage");
+    ctx.press_enter();
+    ctx.assert_snapshot();
+});
+
+app_story!(usage_codex_reset_expiry_groups, |ctx| {
+    ctx.set_viewport(76, 30);
+    ctx.run_lua(
+        r#"
+        local primary_reset = os.time({ year = 2030, month = 1, day = 1, hour = 0, min = 0, sec = 0 })
+        smelt.model.current = function() return "gpt-5-codex" end
+        smelt.model.list = function()
+          return { { key = "gpt-5-codex", name = "gpt-5-codex", provider = "codex" } }
+        end
+        smelt.auth.request = function(provider, opts)
+          assert(provider == "codex")
+          if opts.path == "/wham/usage" then
+            return {
+              status = 200,
+              body = smelt.json.encode({
+                plan_type = "plus",
+                rate_limit_reset_credits = { available_count = 3 },
+                rate_limit = {
+                  primary_window = {
+                    used_percent = 82,
+                    limit_window_seconds = 18000,
+                    reset_at = primary_reset,
+                  },
+                },
+              }),
+            }
+          elseif opts.path == "/wham/rate-limit-reset-credits" then
+            return {
+              status = 200,
+              body = smelt.json.encode({
+                available_count = 3,
+                credits = {
+                  { id = "a", status = "available", expires_at = "2030-07-31T20:08:39Z" },
+                  { id = "b", status = "available", expires_at = "2030-07-31T21:08:39Z" },
+                  { id = "c", status = "available", expires_at = "2030-08-07T12:00:00Z" },
+                },
+              }),
+            }
+          end
+          error("unexpected path " .. tostring(opts.path))
         end
         "#,
     );
