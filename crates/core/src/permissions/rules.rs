@@ -21,8 +21,21 @@ pub struct RawRuleSet {
 #[serde(default)]
 pub struct RawModePerms {
     pub tools: RawRuleSet,
+    pub effects: RawEffectRules,
     #[serde(default)]
-    pub subcommands: HashMap<String, RawRuleSet>,
+    pub patterns: HashMap<String, RawRuleSet>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct RawEffectRules {
+    pub read: Option<Decision>,
+    pub write: Option<Decision>,
+    pub network: Option<Decision>,
+    pub process: Option<Decision>,
+    pub config: Option<Decision>,
+    pub user: Option<Decision>,
+    pub other: Option<Decision>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -41,27 +54,40 @@ fn merge_ruleset(default: &RawRuleSet, mode: &RawRuleSet) -> RawRuleSet {
     }
 }
 
+fn merge_effect_rules(default: &RawEffectRules, mode: &RawEffectRules) -> RawEffectRules {
+    RawEffectRules {
+        read: mode.read.clone().or_else(|| default.read.clone()),
+        write: mode.write.clone().or_else(|| default.write.clone()),
+        network: mode.network.clone().or_else(|| default.network.clone()),
+        process: mode.process.clone().or_else(|| default.process.clone()),
+        config: mode.config.clone().or_else(|| default.config.clone()),
+        user: mode.user.clone().or_else(|| default.user.clone()),
+        other: mode.other.clone().or_else(|| default.other.clone()),
+    }
+}
+
 pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawModePerms {
-    let mut subcommands: HashMap<String, RawRuleSet> = HashMap::new();
+    let mut patterns: HashMap<String, RawRuleSet> = HashMap::new();
     let keys: std::collections::HashSet<&String> = default
-        .subcommands
+        .patterns
         .keys()
-        .chain(mode.subcommands.keys())
+        .chain(mode.patterns.keys())
         .collect();
     for key in keys {
-        let d = default.subcommands.get(key);
-        let m = mode.subcommands.get(key);
+        let d = default.patterns.get(key);
+        let m = mode.patterns.get(key);
         let merged = match (d, m) {
             (Some(d), Some(m)) => merge_ruleset(d, m),
             (Some(d), None) => merge_ruleset(d, &RawRuleSet::default()),
             (None, Some(m)) => merge_ruleset(&RawRuleSet::default(), m),
             (None, None) => RawRuleSet::default(),
         };
-        subcommands.insert(key.clone(), merged);
+        patterns.insert(key.clone(), merged);
     }
     RawModePerms {
         tools: merge_ruleset(&default.tools, &mode.tools),
-        subcommands,
+        effects: merge_effect_rules(&default.effects, &mode.effects),
+        patterns,
     }
 }
 
@@ -83,7 +109,6 @@ pub struct ModeBehavior {
     pub default_decision: Decision,
     pub allow_subcommands_by_default: bool,
     pub ask_on_output_redirection: bool,
-    pub read_only: bool,
 }
 
 impl Default for ModeBehavior {
@@ -92,7 +117,6 @@ impl Default for ModeBehavior {
             default_decision: Decision::Ask,
             allow_subcommands_by_default: false,
             ask_on_output_redirection: true,
-            read_only: false,
         }
     }
 }
@@ -100,7 +124,33 @@ impl Default for ModeBehavior {
 #[derive(Debug, Clone)]
 pub(super) struct ModePerms {
     pub(super) tools: HashMap<String, Decision>,
-    pub(super) subcommands: HashMap<String, RuleSet>,
+    pub(super) effects: EffectPerms,
+    pub(super) patterns: HashMap<String, RuleSet>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(super) struct EffectPerms {
+    pub(super) read: Option<Decision>,
+    pub(super) write: Option<Decision>,
+    pub(super) network: Option<Decision>,
+    pub(super) process: Option<Decision>,
+    pub(super) config: Option<Decision>,
+    pub(super) user: Option<Decision>,
+    pub(super) other: Option<Decision>,
+}
+
+impl From<RawEffectRules> for EffectPerms {
+    fn from(raw: RawEffectRules) -> Self {
+        Self {
+            read: raw.read,
+            write: raw.write,
+            network: raw.network,
+            process: raw.process,
+            config: raw.config,
+            user: raw.user,
+            other: raw.other,
+        }
+    }
 }
 
 pub(super) fn compile_patterns(raw: &[String]) -> Vec<glob::Pattern> {
@@ -139,15 +189,14 @@ impl ToolPermDefaults {
 /// Coarse effect declared by a tool at registration time.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ToolEffectKind {
-    PathRead,
-    PathWrite,
+    Read,
+    Write,
     Network,
-    UserInteraction,
-    ProcessRead,
-    ProcessControl,
-    ConfigReload,
+    User,
+    Process,
+    Config,
     #[default]
-    Unknown,
+    Other,
 }
 
 /// Aggregated tool-declared defaults consumed by `Permissions::from_raw`.
@@ -198,33 +247,31 @@ fn build_subcommand_ruleset(
 
 pub(super) fn build_mode(
     raw: &RawModePerms,
-    mode: &AgentMode,
+    _mode: &AgentMode,
     mode_behavior: ModeBehavior,
     tool_defaults: &ToolDefaults,
 ) -> ModePerms {
-    let mut tools = build_tool_map(&raw.tools);
-    // Fill gaps where user config doesn't specify a decision.
-    for (name, perms) in &tool_defaults.tool_decisions {
-        if let Some(d) = perms.for_mode(mode) {
-            tools.entry(name.clone()).or_insert_with(|| d.clone());
-        }
-    }
+    let tools = build_tool_map(&raw.tools);
 
-    let mut subcommands: HashMap<String, RuleSet> = HashMap::new();
-    for (name, rs) in &raw.subcommands {
-        subcommands.insert(
+    let mut patterns: HashMap<String, RuleSet> = HashMap::new();
+    for (name, rs) in &raw.patterns {
+        patterns.insert(
             name.clone(),
             build_subcommand_ruleset(name, rs, &mode_behavior, tool_defaults),
         );
     }
     // Insert default rulesets for tool-declared buckets the user didn't configure.
     for name in tool_defaults.subcommand_allow.keys() {
-        subcommands.entry(name.clone()).or_insert_with(|| {
+        patterns.entry(name.clone()).or_insert_with(|| {
             build_subcommand_ruleset(name, &RawRuleSet::default(), &mode_behavior, tool_defaults)
         });
     }
 
-    ModePerms { tools, subcommands }
+    ModePerms {
+        tools,
+        effects: raw.effects.clone().into(),
+        patterns,
+    }
 }
 
 pub(super) fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
@@ -232,11 +279,11 @@ pub(super) fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
     pat.matches(value) || pat.matches(&format!("{value} "))
 }
 
-pub(super) fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
+pub(super) fn check_ruleset_match(ruleset: &RuleSet, value: &str) -> Option<Decision> {
     // Deny wins unconditionally.
     for pat in &ruleset.deny {
         if matches_rule(pat, value) {
-            return Decision::Deny;
+            return Some(Decision::Deny);
         }
     }
 
@@ -262,15 +309,17 @@ pub(super) fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
     }
 
     match (best_allow, best_ask) {
-        (Some(a), Some(k)) => {
-            if k >= a {
-                Decision::Ask
-            } else {
-                Decision::Allow
-            }
-        }
-        (Some(_), None) => Decision::Allow,
-        (None, Some(_)) => Decision::Ask,
-        (None, None) => Decision::Ask,
+        (Some(a), Some(k)) => Some(if k >= a {
+            Decision::Ask
+        } else {
+            Decision::Allow
+        }),
+        (Some(_), None) => Some(Decision::Allow),
+        (None, Some(_)) => Some(Decision::Ask),
+        (None, None) => None,
     }
+}
+
+pub(super) fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
+    check_ruleset_match(ruleset, value).unwrap_or(Decision::Ask)
 }

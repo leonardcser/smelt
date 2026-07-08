@@ -11,10 +11,10 @@ might auto-approve every `git` command; on an unfamiliar repo you may want the
 agent to ask before every edit. The system lets you set these boundaries per
 mode, per tool, and per workspace.
 
-Permissions are split between **tool-level** rules and **subcommand-level**
+Permissions are split between **tool-level** rules and **pattern-level**
 rules. The tool name (`bash`, `edit_file`, `web_fetch`, …) decides whether the
-call needs gating at all; subcommand buckets (`bash`, `web_fetch`, `mcp`, and
-any tool that registers its own bucket) further refine the decision based on the
+call needs gating at all; pattern buckets (`bash`, `web_fetch`, `mcp`, and any
+tool that registers its own bucket) further refine the decision based on the
 call's arguments.
 
 Each rule list has three slots:
@@ -23,9 +23,9 @@ Each rule list has three slots:
 - **ask**: prompt for confirmation
 - **deny**: block (deny always wins over allow and ask)
 
-Patterns are globs. For subcommand rules, the most specific (longest) matching
-pattern wins; on a tie, **ask** beats **allow**. Anything not matched defaults
-to the active mode's registered default decision.
+Patterns are globs. For pattern rules, the most specific (longest) matching
+pattern wins; on a tie, **ask** beats **allow**. Anything not matched falls back
+to tool, effect, and mode defaults.
 
 ## Default Tool Permissions
 
@@ -42,16 +42,16 @@ to the active mode's registered default decision.
 | `web_fetch`           | Ask    | Ask                | Ask   | Allow |
 | `web_search`          | Ask    | Ask                | Ask   | Allow |
 | `read_process_output` | Allow  | Allow              | Allow | Allow |
+| `enter_worktree`      | Ask    | Ask                | Ask   | Allow |
 | `stop_process`        | Ask    | Deny               | Ask   | Allow |
 | `load_skill`          | Ask    | Ask                | Ask   | Allow |
 | `present_plan`        | N/A    | Allow              | N/A   | N/A   |
 | `smelt_reload`        | Ask    | Deny               | Ask   | Allow |
 
-Plan mode is built in. It enforces a read-only effect policy and adds the
-`present_plan` tool. Read-only tools stay allowed, unknown or networked tools
-require confirmation, and write-capable/process-control/config-reload effects
-are denied without prompting, except mode/tool-specific session path write
-grants created by `present_plan` for saved plan artifacts.
+Plan mode is built in. It ships with a read-only default policy and adds the
+`present_plan` tool. Read-only tools stay allowed, `enter_worktree` and unknown
+or networked tools require confirmation, and write/process/config effects are
+denied without prompting unless your config extends the policy differently.
 
 ## Default Bash Patterns
 
@@ -108,24 +108,32 @@ command. `cd` is always allowed.
 
 ## Configuring Permissions
 
-Set rules in `init.lua` with `smelt.permissions.set_rules`:
+Extend the generated policy in `init.lua` with `smelt.permissions.extend`:
 
 ```lua
-smelt.permissions.set_rules({
+smelt.permissions.extend({
   default = {
     tools = {
       allow = { "web_search" },
     },
-    web_fetch = {
-      allow = { "*" },
+    effects = {
+      network = "ask",
+      write = "ask",
     },
-    bash = {
-      allow = { "git log *", "git diff *" },
+    patterns = {
+      web_fetch = {
+        allow = { "https://docs.rs/*" },
+      },
+      bash = {
+        allow = { "git log *", "git diff *" },
+      },
     },
   },
   apply = {
-    bash = {
-      allow = { "git commit *" },
+    patterns = {
+      bash = {
+        allow = { "git commit *" },
+      },
     },
   },
 })
@@ -133,21 +141,20 @@ smelt.permissions.set_rules({
 
 `default` applies to all registered modes. Mode-specific rules are keyed by mode
 name (`normal`, `apply`, `yolo`, or plugin-registered names such as `plan`) and
-are merged on top: their allow/ask/deny lists are appended to the default lists.
-Since deny always wins, a mode-level deny overrides a default-level allow for
-the same entry.
+are merged on top of the generated base policy.
 
 Each mode table can contain:
 
-| Key       | Value                                                             |
-| --------- | ----------------------------------------------------------------- |
-| `tools`   | `{ allow = {...}, ask = {...}, deny = {...} }`, tool names        |
-| `<other>` | `{ allow = {...}, ask = {...}, deny = {...} }`, subcommand bucket |
+| Key        | Value                                                      |
+| ---------- | ---------------------------------------------------------- |
+| `tools`    | `{ allow = {...}, ask = {...}, deny = {...} }`, tool names |
+| `effects`  | `{ read|write|network|process|config|user|other = decision }` |
+| `patterns` | Tool-specific `{ allow = {...}, ask = {...}, deny = {...} }` buckets |
 
-Any key other than `tools` is treated as a subcommand bucket and routed through
-that tool's parser. Built-in buckets are `bash` (shell-aware parsing),
-`web_fetch` (URL glob), and `mcp` (matched against `servername_toolname`); tools
-that register their own bucket appear here too.
+Pattern buckets are routed through the matching tool's parser. Built-in buckets
+include `bash` (shell-aware parsing), `web_fetch` (URL glob), and `mcp` (matched
+against `servername_toolname`); tools that register their own bucket appear here
+too.
 
 ## The Permission Prompt
 

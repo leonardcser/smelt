@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only.
+List, sync, and extend permission policy state. UiHost-only.
 
 ## `smelt.permissions.check`
 
@@ -14,7 +14,7 @@ List session/workspace rules and sync a Lua-built ruleset back through the App. 
 fun(mode_str: string, bucket: string, value: string): string
 ```
 
-Decide a subcommand bucket (e.g. `("normal", "shell", "git status")`) against the current ruleset. Returns `"allow"`, `"ask"`, or `"deny"`; defaults to `"ask"` when no app context is available.
+Decide a tool-specific pattern bucket (e.g. `("normal", "bash", "git status")`) against the current policy. Returns `"allow"`, `"ask"`, or `"deny"`; defaults to `"ask"` when no app context is available.
 
 ## `smelt.permissions.check_tool`
 
@@ -24,6 +24,16 @@ fun(mode_str: string, name: string): string
 
 Decision primitives for tool `decide` callbacks. Returns "allow"/"ask"/"deny".
 
+## `smelt.permissions.extend`
+
+```lua
+fun(spec: smelt.permissions.PolicySpec): nil
+```
+
+Types: [`smelt.permissions.PolicySpec`](types.md#smeltpermissionspolicyspec)
+
+Extend the generated permission policy with user rules. Supports `tools`, `effects`, and `patterns` sections under `default` or any mode name.
+
 ## `smelt.permissions.grant_session`
 
 ```lua
@@ -32,7 +42,7 @@ fun(grant: smelt.permissions.SessionPathGrant): nil
 
 Types: [`smelt.permissions.SessionPathGrant`](types.md#smeltpermissionssessionpathgrant)
 
-Add one session-scoped grant. Currently supports `{ kind = "path", mode?, tool, access = "read"|"write", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` for a read-only write exception in that mode.
+Add one session-scoped grant. Currently supports `{ kind = "path", mode?, tool, access = "read"|"write", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` to scope the grant to one mode.
 
 ## `smelt.permissions.list`
 
@@ -43,16 +53,6 @@ fun(): smelt.permissions.ListResult
 Types: [`smelt.permissions.ListResult`](types.md#smeltpermissionslistresult)
 
 Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
-
-## `smelt.permissions.set_rules`
-
-```lua
-fun(spec: smelt.permissions.RulesSpec): nil
-```
-
-Types: [`smelt.permissions.RulesSpec`](types.md#smeltpermissionsrulesspec)
-
-Install the per-mode permission ruleset. See [`smelt.permissions.RulesSpec`](types.md#smeltpermissionsrulesspec).
 
 ## `smelt.permissions.sync`
 

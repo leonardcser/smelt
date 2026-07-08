@@ -3,10 +3,12 @@
 
 smelt.settings.show_tips = false
 
-smelt.permissions.set_rules({
+smelt.permissions.extend({
   default = {
-    bash = {
-      allow = { "git status *", "git diff *", "cargo test *" },
+    patterns = {
+      bash = {
+        allow = { "git status *", "git diff *", "cargo test *" },
+      },
     },
   },
 })

@@ -754,7 +754,7 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
             local subcommand_decision = smelt.permissions.check("default", "bash", "git status")
             assert(type(tool_decision) == "string" and #tool_decision > 0, "permission tool decision")
             assert(type(subcommand_decision) == "string" and #subcommand_decision > 0, "permission subcommand decision")
-            smelt.permissions.set_rules({ default = { tools = { ask = { "*" } } } })
+            smelt.permissions.extend({ default = { tools = { ask = { "*" } } } })
 
             smelt.notify.info("hello from lua contract", "coverage")
             smelt.notify.warn("careful from lua contract", "coverage")
@@ -1758,12 +1758,12 @@ fn reload_clears_every_lua_surface() {
                 description = "",
                 parameters = { type = "object", properties = {} },
                 permission_defaults = { normal = "deny" },
-                effect = "config_reload",
+                effect = "config",
                 default_allow = { "seed" },
                 subpattern_parser = "bash",
                 execute = function() return "" end,
             })
-            smelt.permissions.set_rules({ normal = { tools = { deny = { "seed_tool" } } } })
+            smelt.permissions.extend({ normal = { tools = { deny = { "seed_tool" } } } })
             smelt.process.set_default_shell({ program = "/bin/zsh", args = { "-fc" } })
             smelt.provider.register("seed_provider", {
                 type = "openai",

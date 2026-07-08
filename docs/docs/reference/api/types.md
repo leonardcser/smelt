@@ -530,6 +530,20 @@ Grid slice passed to paint callbacks. Methods delegate to the live grid slice fo
 | `put_str` | `fun(row: integer, col: integer, text: string, style: table?): nil` | yes | Write a string with optional style at (row, col). |
 | `fill_rect` | `fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill a rectangle with an optional character and style. |
 
+### `smelt.permissions.EffectRules`
+
+Effect-level decisions that apply to tools without a more specific rule.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `read` | `string` |  |  |
+| `write` | `string` |  |  |
+| `network` | `string` |  |  |
+| `process` | `string` |  |  |
+| `config` | `string` |  |  |
+| `user` | `string` |  |  |
+| `other` | `string` |  |  |
+
 ### `smelt.permissions.ListResult`
 
 Current permission state returned by `smelt.permissions.list()`.
@@ -542,31 +556,32 @@ Current permission state returned by `smelt.permissions.list()`.
 
 ### `smelt.permissions.ModePerms`
 
-Permission slots that apply within a single agent mode. The fixed `tools` key controls the tool itself; any additional key is treated as a subcommand bucket and routed through that tool's subpattern parser (e.g. `bash = { allow = { "git status" } }`).
+Permission slots that apply within a single agent mode.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `tools` | [smelt.permissions.RuleSet](types.md#smeltpermissionsruleset) |  | Per-tool `allow`/`ask`/`deny` patterns. |
-| `[string]` | [smelt.permissions.RuleSet](types.md#smeltpermissionsruleset) |  | Subcommand patterns keyed by tool name (`"bash"`, `"edit"`, …). |
+| `tools` | [smelt.permissions.RuleSet](types.md#smeltpermissionsruleset) |  | Exact tool-name `allow`/`ask`/`deny` entries. |
+| `effects` | [smelt.permissions.EffectRules](types.md#smeltpermissionseffectrules) |  | Effect-level decisions keyed by effect name. |
+| `patterns` | `table<string, smelt.permissions.RuleSet>` |  | Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …). |
+
+### `smelt.permissions.PolicySpec`
+
+Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `default` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Baseline rules applied unless a mode-specific slot overrides. |
+| `[string]` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Mode-specific rules keyed by registered mode name. |
 
 ### `smelt.permissions.RuleSet`
 
-`allow`/`ask`/`deny` pattern arrays accepted by every permission slot.
+`allow`/`ask`/`deny` arrays accepted by permission policy sections.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `allow` | `string[]` |  | Patterns that auto-allow without prompting. |
 | `ask` | `string[]` |  | Patterns that always prompt. |
 | `deny` | `string[]` |  | Patterns that auto-deny. |
-
-### `smelt.permissions.RulesSpec`
-
-Spec for `smelt.permissions.set_rules`. Each mode falls back to `default` (and then to host-level rules) when its slot is `nil`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `default` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Baseline rules applied unless a mode-specific slot overrides. |
-| `[string]` | [smelt.permissions.ModePerms](types.md#smeltpermissionsmodeperms) |  | Mode-specific rules keyed by registered mode name. |
 
 ### `smelt.permissions.SessionEntry`
 
@@ -579,12 +594,12 @@ A single session permission entry (one approved tool/pattern pair).
 
 ### `smelt.permissions.SessionPathGrant`
 
-A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, write grants also allow that tool to write under `path_prefix` in that read-only mode.
+A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, the grant applies only in that mode.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `kind` | `string` | yes | Grant kind. Currently only `"path"` is supported. |
-| `mode` | `string` |  | Optional mode for read-only write exceptions, e.g. `"plan"`. Omit for mode-independent path trust. |
+| `mode` | `string` |  | Optional mode, e.g. `"plan"`. Omit for mode-independent path trust. |
 | `tool` | `string` | yes | Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`. |
 | `access` | `string` | yes | Path access granted: `"read"` or `"write"`. |
 | `path_prefix` | `string` | yes | Directory prefix covered by the grant. |
@@ -874,7 +889,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `description` | `string` |  | Human-readable description shown to the model. |
 | `parameters` | `table` |  | JSON-schema parameters table passed through to the model. |
 | `permission_defaults` | [smelt.tools.PermissionDefaults](types.md#smelttoolspermissiondefaults) |  | Per-mode default decisions. |
-| `effect` | [smelt.tools.Effect](types.md#smelttoolseffect) |  | Coarse side-effect classification used by read-only permission modes. |
+| `effect` | [smelt.tools.Effect](types.md#smelttoolseffect) |  | Coarse side-effect classification used by permission policy. |
 | `default_allow` | `string[]` |  | Subcommand patterns that auto-allow without prompting. |
 | `subpattern_parser` | `string` |  | Built-in subpattern parser kind (e.g. `"bash"`). |
 | `modes` | `table` |  | Agent modes the tool is available in; nil means all modes. |
@@ -1129,9 +1144,9 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 
 ### `smelt.tools.Effect`
 
-Coarse side-effect classification for read-only modes.
+Coarse side-effect classification used by permission policy.
 
-Variants: `"read"` \| `"write"` \| `"network"` \| `"user_interaction"` \| `"process_read"` \| `"process_control"` \| `"config_reload"` \| `"unknown"`
+Variants: `"read"` \| `"write"` \| `"network"` \| `"user"` \| `"process"` \| `"config"` \| `"other"`
 
 ### `smelt.vim.Mode`
 

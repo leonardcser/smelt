@@ -160,12 +160,12 @@ smelt.settings.transcript = {
 
 -- Permission rules
 -- Default is to ask for tools that require permission. Uncomment to customize.
--- smelt.permissions.set_rules({
+-- smelt.permissions.extend({
 --   default = {
---     bash = { allow = { "git status *", "git diff *" } },
+--     patterns = { bash = { allow = { "git status *", "git diff *" } } },
 --   },
 --   apply = {
---     bash = { allow = { "git commit *" } },
+--     patterns = { bash = { allow = { "git commit *" } } },
 --   },
 -- })
 

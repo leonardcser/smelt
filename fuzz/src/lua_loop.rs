@@ -803,13 +803,15 @@ end)
         ),
         1 => out.push_str(
             r#"pcall(function()
-  smelt.permissions.set_rules({
+  smelt.permissions.extend({
     default = {
       tools = { allow = { "bash", "web_fetch" }, ask = { "edit" }, deny = { "danger" } },
-      bash = { allow = { "git status*", "ls*" }, ask = { "cat *" }, deny = { "rm*", "sudo*" } },
-      web_fetch = { allow = { "https://example.com/*" }, deny = { "http://*" } },
+      patterns = {
+        bash = { allow = { "git status*", "ls*" }, ask = { "cat *" }, deny = { "rm*", "sudo*" } },
+        web_fetch = { allow = { "https://example.com/*" }, deny = { "http://*" } },
+      },
     },
-    plan = { tools = { ask = { "bash" } }, bash = { allow = { "pwd" } } },
+    plan = { tools = { ask = { "bash" } }, patterns = { bash = { allow = { "pwd" } } } },
   })
   smelt.permissions.check_tool("normal", "bash")
   smelt.permissions.check("normal", "bash", "git status --short")
@@ -840,10 +842,12 @@ end)
         ),
         _ => out.push_str(
             r#"pcall(function()
-  smelt.permissions.set_rules({
+  smelt.permissions.extend({
     default = {
       tools = { allow = { "bash" }, ask = { "web_fetch" }, deny = { "danger" } },
-      bash = { allow = { "pwd", "echo *" }, ask = { "cat *" }, deny = { "rm*" } },
+      patterns = {
+        bash = { allow = { "pwd", "echo *" }, ask = { "cat *" }, deny = { "rm*" } },
+      },
     },
   })
   smelt.permissions.list()

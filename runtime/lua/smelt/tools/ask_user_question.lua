@@ -9,7 +9,7 @@ smelt.tools.register({
   execution_mode = "sequential",
   headless = false,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
-  effect = "user_interaction",
+  effect = "user",
   parameters = {
     type = "object",
     properties = {

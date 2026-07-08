@@ -209,15 +209,15 @@ For common workflows, add a few narrow allow rules instead of switching to Yolo
 mode everywhere:
 
 ```lua
-smelt.permissions.set_rules({
+smelt.permissions.extend({
   default = {
-    bash = {
-      allow = { "git status *", "git diff *", "git log *" },
+    patterns = {
+      bash = { allow = { "git status *", "git diff *", "git log *" } },
     },
   },
   apply = {
-    bash = {
-      allow = { "cargo test *", "cargo clippy *" },
+    patterns = {
+      bash = { allow = { "cargo test *", "cargo clippy *" } },
     },
   },
 })

@@ -17,7 +17,7 @@ struct Input {
     default: ModeSpec,
     normal: ModeSpec,
     plan: ModeSpec,
-    read_only: bool,
+    plan_mode: bool,
     allow_subcommands_by_default: bool,
     ask_on_output_redirection: bool,
     tool: String,
@@ -73,7 +73,7 @@ impl<'a> Arbitrary<'a> for Input {
             default: u.arbitrary()?,
             normal: u.arbitrary()?,
             plan: u.arbitrary()?,
-            read_only: u.arbitrary()?,
+            plan_mode: u.arbitrary()?,
             allow_subcommands_by_default: u.arbitrary()?,
             ask_on_output_redirection: u.arbitrary()?,
             tool: choose_or_string(u, &["bash", "web_fetch", "edit", "read", "danger"] )?,
@@ -125,15 +125,16 @@ fn raw_rules(spec: RuleSpec) -> RawRuleSet {
 }
 
 fn raw_mode(spec: ModeSpec) -> RawModePerms {
-    let mut subcommands = HashMap::new();
-    subcommands.insert("bash".to_string(), raw_rules(spec.bash));
-    subcommands.insert("web_fetch".to_string(), raw_rules(spec.web_fetch));
+    let mut patterns = HashMap::new();
+    patterns.insert("bash".to_string(), raw_rules(spec.bash));
+    patterns.insert("web_fetch".to_string(), raw_rules(spec.web_fetch));
     if !spec.extra_bucket.is_empty() {
-        subcommands.insert(spec.extra_bucket, raw_rules(spec.extra));
+        patterns.insert(spec.extra_bucket, raw_rules(spec.extra));
     }
     RawModePerms {
         tools: raw_rules(spec.tools),
-        subcommands,
+        patterns,
+        ..Default::default()
     }
 }
 
@@ -197,8 +198,8 @@ fuzz_target!(|input: Input| {
     defaults.subcommand_allow.insert("bash".into(), vec!["git status*".into(), "ls*".into()]);
     defaults.subcommand_allow.insert("web_fetch".into(), vec!["https://*".into()]);
     defaults.subpattern_parsers.insert("bash".into(), builtin_subpattern_parser("shell").unwrap());
-    defaults.tool_effects.insert("read".into(), ToolEffectKind::PathRead);
-    defaults.tool_effects.insert("edit".into(), ToolEffectKind::PathWrite);
+    defaults.tool_effects.insert("read".into(), ToolEffectKind::Read);
+    defaults.tool_effects.insert("edit".into(), ToolEffectKind::Write);
     defaults.tool_decisions.insert(
         "read".into(),
         ToolPermDefaults {
@@ -210,7 +211,6 @@ fuzz_target!(|input: Input| {
         (
             "normal".to_string(),
             ModeBehavior {
-                read_only: input.read_only,
                 allow_subcommands_by_default: input.allow_subcommands_by_default,
                 ask_on_output_redirection: input.ask_on_output_redirection,
                 ..ModeBehavior::default()
@@ -218,10 +218,7 @@ fuzz_target!(|input: Input| {
         ),
         (
             "plan".to_string(),
-            ModeBehavior {
-                read_only: true,
-                ..ModeBehavior::default()
-            },
+            ModeBehavior::default(),
         ),
     ]);
 
@@ -229,7 +226,7 @@ fuzz_target!(|input: Input| {
     perms.set_workspace(std::env::current_dir().unwrap_or_default());
     perms.set_paths_fn(path_resolver());
 
-    let mode = protocol::AgentMode::parse(if input.read_only { "plan" } else { "normal" }).unwrap();
+    let mode = protocol::AgentMode::parse(if input.plan_mode { "plan" } else { "normal" }).unwrap();
     let request_origin = origin(input.origin);
     let _tool_decision = perms.check_tool(mode.clone(), &input.tool);
     let _sub_decision = perms.check_subcommand(mode.clone(), &input.bucket, &input.value);

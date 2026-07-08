@@ -18,8 +18,8 @@ use bash::{has_output_redirection, is_cd_command};
 
 use protocol::AgentMode;
 use rules::{
-    build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig, RawPerms,
-    RuleSet,
+    build_mode, check_ruleset_match, compile_patterns, merge_mode, ModePerms, RawConfig, RawPerms,
+    RuleSet, ToolPermDefaults,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -155,19 +155,6 @@ pub enum ToolEffect {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ReadOnlyDisposition {
-    Read,
-    Ask,
-    Deny,
-}
-
-impl ReadOnlyDisposition {
-    fn merge(self, other: Self) -> Self {
-        self.max(other)
-    }
-}
-
 pub struct PermissionRequest<'a> {
     pub mode: AgentMode,
     pub tool_name: &'a str,
@@ -286,6 +273,7 @@ pub struct Permissions {
     active_root: PathBuf,
     allowed_roots: Vec<PathBuf>,
     paths_fn: Option<Arc<PathsFn>>,
+    tool_decisions: HashMap<String, ToolPermDefaults>,
     tool_effects: HashMap<String, ToolEffectKind>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
     /// Interior-mutable so `Arc<Permissions>` holders can grant approvals without a writable handle.
@@ -304,6 +292,7 @@ impl std::fmt::Debug for Permissions {
             .field("active_root", &self.active_root)
             .field("allowed_roots", &self.allowed_roots)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
+            .field("tool_decisions", &self.tool_decisions)
             .field("tool_effects", &self.tool_effects)
             .field(
                 "subpattern_parsers",
@@ -348,6 +337,7 @@ impl Permissions {
             active_root: PathBuf::new(),
             allowed_roots: Vec::new(),
             paths_fn: None,
+            tool_decisions: tool_defaults.tool_decisions.clone(),
             tool_effects: tool_defaults.tool_effects.clone(),
             subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
             approvals: Arc::new(RwLock::new(RuntimeApprovals::new())),
@@ -392,7 +382,7 @@ impl Permissions {
                 }
             }
             for (bucket, rs) in &overrides.subcommands {
-                let entry = mode.subcommands.entry(bucket.clone()).or_insert(RuleSet {
+                let entry = mode.patterns.entry(bucket.clone()).or_insert(RuleSet {
                     allow: vec![],
                     ask: vec![],
                     deny: vec![],
@@ -466,7 +456,7 @@ impl Permissions {
         self.tool_effects
             .get(tool_name)
             .copied()
-            .unwrap_or(ToolEffectKind::Unknown)
+            .unwrap_or(ToolEffectKind::Other)
     }
 
     fn declared_effects_for_tool(
@@ -475,18 +465,13 @@ impl Permissions {
         args: &HashMap<String, Value>,
     ) -> Vec<ToolEffect> {
         match self.tool_effect_kind(tool_name) {
-            ToolEffectKind::PathRead => {
-                self.path_effects_for_tool(tool_name, args, PathAccess::Read)
-            }
-            ToolEffectKind::PathWrite => {
-                self.path_effects_for_tool(tool_name, args, PathAccess::Write)
-            }
+            ToolEffectKind::Read => self.path_effects_for_tool(tool_name, args, PathAccess::Read),
+            ToolEffectKind::Write => self.path_effects_for_tool(tool_name, args, PathAccess::Write),
             ToolEffectKind::Network => vec![ToolEffect::Network],
-            ToolEffectKind::UserInteraction => vec![ToolEffect::UserInteraction],
-            ToolEffectKind::ProcessRead => vec![ToolEffect::ProcessRead],
-            ToolEffectKind::ProcessControl => vec![ToolEffect::ProcessControl],
-            ToolEffectKind::ConfigReload => vec![ToolEffect::ConfigReload],
-            ToolEffectKind::Unknown => vec![ToolEffect::Unknown],
+            ToolEffectKind::User => vec![ToolEffect::UserInteraction],
+            ToolEffectKind::Process => vec![ToolEffect::ProcessControl],
+            ToolEffectKind::Config => vec![ToolEffect::ConfigReload],
+            ToolEffectKind::Other => vec![ToolEffect::Unknown],
         }
     }
 
@@ -609,14 +594,61 @@ impl Permissions {
     }
 
     pub fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
-        let behavior = self.mode_behavior(&mode);
         self.mode_perms(&mode)
             .and_then(|perms| perms.tools.get(tool_name).cloned())
-            .unwrap_or(behavior.default_decision)
+            .unwrap_or_else(|| self.fallback_tool_decision(&mode, tool_name))
+    }
+
+    fn fallback_tool_decision(&self, mode: &AgentMode, tool_name: &str) -> Decision {
+        self.effect_decision(mode, self.tool_effect_kind(tool_name))
+            .or_else(|| {
+                self.tool_decisions
+                    .get(tool_name)
+                    .and_then(|perms| perms.for_mode(mode).cloned())
+            })
+            .unwrap_or_else(|| self.mode_behavior(mode).default_decision)
+    }
+
+    fn effect_decision(&self, mode: &AgentMode, effect: ToolEffectKind) -> Option<Decision> {
+        let effects = &self.mode_perms(mode)?.effects;
+        match effect {
+            ToolEffectKind::Read => effects.read.clone(),
+            ToolEffectKind::Write => effects.write.clone(),
+            ToolEffectKind::Network => effects.network.clone(),
+            ToolEffectKind::Process => effects.process.clone(),
+            ToolEffectKind::Config => effects.config.clone(),
+            ToolEffectKind::User => effects.user.clone(),
+            ToolEffectKind::Other => effects.other.clone(),
+        }
+    }
+
+    fn shell_effect_decision(
+        &self,
+        mode: &AgentMode,
+        command: &str,
+        background: bool,
+    ) -> Option<Decision> {
+        if background {
+            return self.effect_decision(mode, ToolEffectKind::Process);
+        }
+        let analysis = bash::analyze_shell_command(command, &self.active_root);
+        let writes_path = analysis
+            .paths
+            .iter()
+            .any(|path| path.access == PathAccess::Write);
+        let effect = match analysis.risk {
+            ShellRisk::ReadOnly if !writes_path => ToolEffectKind::Read,
+            ShellRisk::ReadOnly | ShellRisk::Writes | ShellRisk::Destructive => {
+                ToolEffectKind::Write
+            }
+            ShellRisk::Unknown if writes_path => ToolEffectKind::Write,
+            ShellRisk::Unknown => ToolEffectKind::Other,
+        };
+        self.effect_decision(mode, effect)
     }
 
     pub fn subcommand_ruleset(&self, mode: AgentMode, bucket: &str) -> Option<&RuleSet> {
-        self.mode_perms(&mode)?.subcommands.get(bucket)
+        self.mode_perms(&mode)?.patterns.get(bucket)
     }
 
     /// Check `value` against the bucket's ruleset. Custom parsers (e.g. `bash`'s shell parser)
@@ -624,17 +656,27 @@ impl Permissions {
     /// decision when no bucket is registered.
     pub fn check_subcommand(&self, mode: AgentMode, bucket: &str, value: &str) -> Decision {
         let behavior = self.mode_behavior(&mode);
-        let Some(rs) = self.subcommand_ruleset(mode.clone(), bucket) else {
-            return behavior.default_decision;
-        };
+        self.check_pattern(mode, bucket, value)
+            .unwrap_or(behavior.default_decision)
+    }
+
+    fn check_pattern(&self, mode: AgentMode, bucket: &str, value: &str) -> Option<Decision> {
+        let behavior = self.mode_behavior(&mode);
+        let rs = self.subcommand_ruleset(mode.clone(), bucket)?;
         if let Some(parser) = self.subpattern_parsers.get(bucket) {
-            return parser(rs, value, mode);
-        }
-        let decision = check_ruleset(rs, value);
-        if decision == Decision::Ask && behavior.allow_subcommands_by_default {
-            Decision::Allow
+            let decision = parser(rs, value, mode);
+            if decision == Decision::Ask && behavior.allow_subcommands_by_default {
+                Some(Decision::Allow)
+            } else {
+                Some(decision)
+            }
         } else {
-            decision
+            let decision = check_ruleset_match(rs, value)?;
+            if decision == Decision::Ask && behavior.allow_subcommands_by_default {
+                Some(Decision::Allow)
+            } else {
+                Some(decision)
+            }
         }
     }
 
@@ -678,11 +720,6 @@ impl Permissions {
             if outcome.missing_requirements.is_empty() {
                 outcome.decision = Decision::Allow;
             }
-        } else if outcome.decision == Decision::Deny
-            && self.mode_behavior(&mode).read_only
-            && read_only_session_write_approved(&mode, tool_name, &effects, &approvals)
-        {
-            outcome.decision = Decision::Allow;
         }
         outcome
     }
@@ -765,7 +802,6 @@ impl Permissions {
     }
 
     pub fn evaluate_request(&self, request: PermissionRequest<'_>) -> PermissionOutcome {
-        let behavior = self.mode_behavior(&request.mode);
         let base = base_evaluation(self, &request);
         if base.decision == Decision::Deny {
             return PermissionOutcome {
@@ -774,16 +810,8 @@ impl Permissions {
             };
         }
 
-        let adjusted = read_only_adjusted_decision(&behavior, base.decision, &request.effects);
-        if adjusted == Decision::Deny {
-            return PermissionOutcome {
-                decision: Decision::Deny,
-                missing_requirements: Vec::new(),
-            };
-        }
-
         let mut missing = base.missing_requirements;
-        if adjusted == Decision::Ask && missing.is_empty() {
+        if base.decision == Decision::Ask && missing.is_empty() {
             missing.push(PermissionRequirement::Tool {
                 tool: request.tool_name.to_string(),
             });
@@ -933,23 +961,33 @@ fn bash_evaluation(
     args: &HashMap<String, Value>,
 ) -> BaseEvaluation {
     let tool = permissions.check_tool(mode.clone(), "bash");
-    if tool == Decision::Deny {
-        return BaseEvaluation {
-            decision: Decision::Deny,
-            missing_requirements: Vec::new(),
-        };
-    }
-
     let command = args.get("command").and_then(Value::as_str).unwrap_or("");
-    let sub = permissions.check_subcommand(mode.clone(), "bash", command);
-    if sub == Decision::Deny {
+    let pattern = permissions
+        .subcommand_ruleset(mode.clone(), "bash")
+        .and_then(|rs| shell_parser_decide_match(rs, command));
+    if pattern == Some(Decision::Deny) {
         return BaseEvaluation {
             decision: Decision::Deny,
             missing_requirements: Vec::new(),
         };
     }
-    let asks_for_command = sub == Decision::Ask
-        || (sub == Decision::Allow
+    let background = args
+        .get("background")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let decision = pattern.unwrap_or_else(|| {
+        if background {
+            permissions
+                .effect_decision(&mode, ToolEffectKind::Process)
+                .unwrap_or(tool)
+        } else {
+            permissions
+                .shell_effect_decision(&mode, command, background)
+                .unwrap_or(tool)
+        }
+    });
+    let asks_for_command = decision == Decision::Ask
+        || (decision == Decision::Allow
             && permissions.mode_behavior(&mode).ask_on_output_redirection
             && shell_has_output_redirection(command));
     if asks_for_command {
@@ -962,7 +1000,7 @@ fn bash_evaluation(
         };
     }
     BaseEvaluation {
-        decision: sub,
+        decision,
         missing_requirements: Vec::new(),
     }
 }
@@ -973,18 +1011,13 @@ fn web_fetch_evaluation(
     args: &HashMap<String, Value>,
 ) -> BaseEvaluation {
     let tool = permissions.check_tool(mode.clone(), "web_fetch");
-    if tool == Decision::Deny {
-        return BaseEvaluation {
-            decision: Decision::Deny,
-            missing_requirements: Vec::new(),
-        };
-    }
-
     let url = args.get("url").and_then(Value::as_str).unwrap_or("");
-    let pattern = permissions.check_subcommand(mode, "web_fetch", url);
-    if pattern == Decision::Deny || pattern == Decision::Allow {
+    let decision = permissions
+        .check_pattern(mode, "web_fetch", url)
+        .unwrap_or(tool);
+    if decision == Decision::Deny || decision == Decision::Allow {
         return BaseEvaluation {
-            decision: pattern,
+            decision,
             missing_requirements: Vec::new(),
         };
     }
@@ -994,22 +1027,6 @@ fn web_fetch_evaluation(
             tool: "web_fetch".to_string(),
             command: url.to_string(),
         }],
-    }
-}
-
-fn read_only_adjusted_decision(
-    behavior: &ModeBehavior,
-    base: Decision,
-    effects: &[ToolEffect],
-) -> Decision {
-    if !behavior.read_only || base == Decision::Deny {
-        return base;
-    }
-
-    match read_only_disposition(effects) {
-        ReadOnlyDisposition::Deny => Decision::Deny,
-        ReadOnlyDisposition::Ask if base == Decision::Allow => Decision::Ask,
-        _ => base,
     }
 }
 
@@ -1069,92 +1086,6 @@ fn path_grant_satisfied(
         )
 }
 
-fn read_only_session_write_approved(
-    mode: &AgentMode,
-    tool_name: &str,
-    effects: &[ToolEffect],
-    approvals: &RuntimeApprovals,
-) -> bool {
-    let mut saw_write = false;
-    for effect in effects {
-        match effect {
-            ToolEffect::Fs(path) if path.access == PathAccess::Write => {
-                saw_write = true;
-                if !approvals.session_path_write_exception_approved_for_path(
-                    mode,
-                    tool_name,
-                    &display_dir_for_effect(path),
-                ) {
-                    return false;
-                }
-            }
-            ToolEffect::FsAccess(PathAccess::Write)
-            | ToolEffect::Shell {
-                risk: ShellRisk::Writes | ShellRisk::Destructive,
-                ..
-            }
-            | ToolEffect::ProcessControl
-            | ToolEffect::ConfigReload => return false,
-            _ => {}
-        }
-    }
-    saw_write
-}
-
-fn read_only_disposition(effects: &[ToolEffect]) -> ReadOnlyDisposition {
-    effects
-        .iter()
-        .map(effect_read_only_disposition)
-        .fold(ReadOnlyDisposition::Read, ReadOnlyDisposition::merge)
-}
-
-fn effect_read_only_disposition(effect: &ToolEffect) -> ReadOnlyDisposition {
-    match effect {
-        ToolEffect::Fs(path) => path_access_disposition(&path.access),
-        ToolEffect::FsAccess(access) => path_access_disposition(access),
-        ToolEffect::Shell { risk, paths, .. } => {
-            let path_disposition = paths
-                .iter()
-                .map(|path| path_access_disposition(&path.access))
-                .fold(ReadOnlyDisposition::Read, ReadOnlyDisposition::merge);
-            shell_risk_disposition(risk).merge(path_disposition)
-        }
-        ToolEffect::Network | ToolEffect::Unknown => ReadOnlyDisposition::Ask,
-        ToolEffect::Mcp { tool } => mcp_tool_name_disposition(tool),
-        ToolEffect::UserInteraction | ToolEffect::ProcessRead => ReadOnlyDisposition::Read,
-        ToolEffect::ProcessControl | ToolEffect::ConfigReload => ReadOnlyDisposition::Deny,
-    }
-}
-
-fn path_access_disposition(access: &PathAccess) -> ReadOnlyDisposition {
-    match access {
-        PathAccess::Read => ReadOnlyDisposition::Read,
-        PathAccess::Write => ReadOnlyDisposition::Deny,
-        PathAccess::Unknown => ReadOnlyDisposition::Ask,
-    }
-}
-
-fn shell_risk_disposition(risk: &ShellRisk) -> ReadOnlyDisposition {
-    match risk {
-        ShellRisk::ReadOnly => ReadOnlyDisposition::Read,
-        ShellRisk::Unknown => ReadOnlyDisposition::Ask,
-        ShellRisk::Writes | ShellRisk::Destructive => ReadOnlyDisposition::Deny,
-    }
-}
-
-fn mcp_tool_name_disposition(name: &str) -> ReadOnlyDisposition {
-    let lower = name.to_ascii_lowercase();
-    let write_words = [
-        "write", "edit", "create", "delete", "remove", "update", "patch", "rename", "move",
-        "mkdir", "rmdir",
-    ];
-    if write_words.iter().any(|word| lower.contains(word)) {
-        ReadOnlyDisposition::Deny
-    } else {
-        ReadOnlyDisposition::Ask
-    }
-}
-
 #[cfg(test)]
 fn decide_base(
     permissions: &Permissions,
@@ -1178,27 +1109,40 @@ fn decide_base(
 /// Shell-aware decision: splits on operators, folds subcommands to the worst decision,
 /// trusts `cd` unconditionally.
 pub fn shell_parser_decide(rs: &RuleSet, command: &str, _mode: AgentMode) -> Decision {
+    shell_parser_decide_match(rs, command).unwrap_or(Decision::Ask)
+}
+
+fn shell_parser_decide_match(rs: &RuleSet, command: &str) -> Option<Decision> {
     let command = command.trim();
     let subcmds = split_shell_commands(command);
     if subcmds.len() <= 1 {
         if is_cd_command(command) {
-            return Decision::Allow;
+            return Some(Decision::Allow);
         }
-        return check_ruleset(rs, command);
+        return check_ruleset_match(rs, command);
     }
-    let mut worst = Decision::Allow;
+    let mut worst = None;
+    let mut unmatched = false;
     for subcmd in subcmds {
         if is_cd_command(&subcmd) {
             continue;
         }
-        let d = check_ruleset(rs, &subcmd);
+        let Some(d) = check_ruleset_match(rs, &subcmd) else {
+            unmatched = true;
+            continue;
+        };
         match d {
-            Decision::Deny => return Decision::Deny,
-            Decision::Ask if worst == Decision::Allow => worst = Decision::Ask,
+            Decision::Deny => return Some(Decision::Deny),
+            Decision::Ask => worst = Some(Decision::Ask),
+            Decision::Allow if worst.is_none() => worst = Some(Decision::Allow),
             _ => {}
         }
     }
-    worst
+    if unmatched && worst.is_some() && worst != Some(Decision::Ask) {
+        Some(Decision::Ask)
+    } else {
+        worst
+    }
 }
 
 pub fn shell_has_output_redirection(command: &str) -> bool {

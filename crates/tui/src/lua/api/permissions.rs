@@ -1,6 +1,6 @@
-//! `smelt.permissions` bindings - list current session + workspace
-//! rules, sync a Lua-built ruleset back through the App. Sits over
-//! `RuntimeApprovals` + [`crate::permissions::store`].
+//! `smelt.permissions` bindings - list, sync, and extend permission policy state.
+//! Session/workspace entries sit over `RuntimeApprovals` + [`crate::permissions::store`];
+//! policy extensions layer on top of generated defaults.
 
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
@@ -21,14 +21,13 @@ pub struct LuaPermissionSessionEntry {
 
 /// A tool-specific session path grant. Grants are in-memory only and can
 /// satisfy workspace path checks for the matching tool. When `mode` is set,
-/// write grants also allow that tool to write under `path_prefix` in that
-/// read-only mode.
+/// the grant applies only in that mode.
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.SessionPathGrant")]
 pub struct LuaPermissionSessionPathGrant {
     /// Grant kind. Currently only `"path"` is supported.
     pub kind: String,
-    /// Optional mode for read-only write exceptions, e.g. `"plan"`. Omit for mode-independent path trust.
+    /// Optional mode, e.g. `"plan"`. Omit for mode-independent path trust.
     pub mode: Option<String>,
     /// Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`.
     pub tool: String,
@@ -102,7 +101,7 @@ pub struct LuaPermissionSyncSpec {
     pub workspace: Vec<LuaPermissionWorkspaceRule>,
 }
 
-/// `allow`/`ask`/`deny` pattern arrays accepted by every permission slot.
+/// `allow`/`ask`/`deny` arrays accepted by permission policy sections.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.RuleSet")]
 pub struct LuaRuleSet {
@@ -127,26 +126,53 @@ impl From<LuaRuleSet> for crate::permissions::rules::RawRuleSet {
     }
 }
 
-/// Permission slots that apply within a single agent mode. The fixed
-/// `tools` key controls the tool itself; any additional key is treated
-/// as a subcommand bucket and routed through that tool's subpattern
-/// parser (e.g. `bash = { allow = { "git status" } }`).
+/// Effect-level decisions that apply to tools without a more specific rule.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.EffectRules")]
+pub struct LuaEffectRules {
+    pub read: Option<String>,
+    pub write: Option<String>,
+    pub network: Option<String>,
+    pub process: Option<String>,
+    pub config: Option<String>,
+    pub user: Option<String>,
+    pub other: Option<String>,
+}
+
+impl From<LuaEffectRules> for crate::permissions::rules::RawEffectRules {
+    fn from(e: LuaEffectRules) -> Self {
+        Self {
+            read: e.read.as_deref().map(parse_decision),
+            write: e.write.as_deref().map(parse_decision),
+            network: e.network.as_deref().map(parse_decision),
+            process: e.process.as_deref().map(parse_decision),
+            config: e.config.as_deref().map(parse_decision),
+            user: e.user.as_deref().map(parse_decision),
+            other: e.other.as_deref().map(parse_decision),
+        }
+    }
+}
+
+/// Permission slots that apply within a single agent mode.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.ModePerms")]
 pub struct LuaModePerms {
-    /// Per-tool `allow`/`ask`/`deny` patterns.
+    /// Exact tool-name `allow`/`ask`/`deny` entries.
     pub tools: Option<LuaRuleSet>,
-    /// Subcommand patterns keyed by tool name (`"bash"`, `"edit"`, …).
-    #[lua(rest)]
-    pub subcommands: std::collections::HashMap<String, LuaRuleSet>,
+    /// Effect-level decisions keyed by effect name.
+    pub effects: Option<LuaEffectRules>,
+    /// Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …).
+    pub patterns: Option<std::collections::HashMap<String, LuaRuleSet>>,
 }
 
 impl From<LuaModePerms> for crate::permissions::rules::RawModePerms {
     fn from(m: LuaModePerms) -> Self {
         Self {
             tools: m.tools.map(Into::into).unwrap_or_default(),
-            subcommands: m
-                .subcommands
+            effects: m.effects.map(Into::into).unwrap_or_default(),
+            patterns: m
+                .patterns
+                .unwrap_or_default()
                 .into_iter()
                 .map(|(k, v)| (k, v.into()))
                 .collect(),
@@ -154,11 +180,10 @@ impl From<LuaModePerms> for crate::permissions::rules::RawModePerms {
     }
 }
 
-/// Spec for `smelt.permissions.set_rules`. Each mode falls back to
-/// `default` (and then to host-level rules) when its slot is `nil`.
+/// Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
 #[derive(Default, Debug, LuaOpts)]
-#[lua(name = "smelt.permissions.RulesSpec")]
-pub struct LuaPermissionRulesSpec {
+#[lua(name = "smelt.permissions.PolicySpec")]
+pub struct LuaPermissionPolicySpec {
     /// Baseline rules applied unless a mode-specific slot overrides.
     pub default: Option<LuaModePerms>,
     /// Mode-specific rules keyed by registered mode name.
@@ -175,7 +200,7 @@ pub(super) fn register(
         lua,
         smelt,
         "permissions",
-        "List session/workspace rules and sync a Lua-built ruleset back through the App. UiHost-only.",
+        "List, sync, and extend permission policy state. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
@@ -266,7 +291,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "grant_session",
-        "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode?, tool, access = \"read\"|\"write\", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` for a read-only write exception in that mode.",
+        "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode?, tool, access = \"read\"|\"write\", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` to scope the grant to one mode.",
         &["grant"],
         |_, grant: LuaPermissionSessionPathGrant| -> LuaResult<()> {
             let grant = lua_path_grant_to_runtime(grant)?;
@@ -279,11 +304,11 @@ pub(super) fn register(
     {
         let shared = Arc::clone(shared);
         m.fn_(
-            "set_rules",
-            "Install the per-mode permission ruleset. See [`smelt.permissions.RulesSpec`](types.md#smeltpermissionsrulesspec).",
+            "extend",
+            "Extend the generated permission policy with user rules. Supports `tools`, `effects`, and `patterns` sections under `default` or any mode name.",
             &["spec"],
-            move |_, spec: LuaPermissionRulesSpec| -> LuaResult<()> {
-                let rules = crate::permissions::rules::RawPerms {
+            move |_, spec: LuaPermissionPolicySpec| -> LuaResult<()> {
+                let incoming = crate::permissions::rules::RawPerms {
                     default: spec.default.map(Into::into).unwrap_or_default(),
                     modes: spec
                         .modes
@@ -295,7 +320,7 @@ pub(super) fn register(
                     .permission_rules
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                *guard = Some(rules);
+                merge_policy(guard.get_or_insert_with(Default::default), incoming);
                 Ok(())
             },
         )?;
@@ -315,7 +340,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "check",
-        "Decide a subcommand bucket (e.g. `(\"normal\", \"shell\", \"git status\")`) against the current ruleset. Returns `\"allow\"`, `\"ask\"`, or `\"deny\"`; defaults to `\"ask\"` when no app context is available.",
+        "Decide a tool-specific pattern bucket (e.g. `(\"normal\", \"bash\", \"git status\")`) against the current policy. Returns `\"allow\"`, `\"ask\"`, or `\"deny\"`; defaults to `\"ask\"` when no app context is available.",
         &["mode_str", "bucket", "value"],
         |_, (mode_str, bucket, value): (String, String, String)| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
@@ -377,6 +402,71 @@ fn path_access_label(access: &smelt_core::permissions::PathAccess) -> &'static s
         smelt_core::permissions::PathAccess::Read => "read",
         smelt_core::permissions::PathAccess::Write => "write",
         smelt_core::permissions::PathAccess::Unknown => "unknown",
+    }
+}
+
+fn parse_decision(value: &str) -> protocol::Decision {
+    match value {
+        "allow" => protocol::Decision::Allow,
+        "deny" => protocol::Decision::Deny,
+        _ => protocol::Decision::Ask,
+    }
+}
+
+fn merge_ruleset(
+    base: &mut crate::permissions::rules::RawRuleSet,
+    incoming: crate::permissions::rules::RawRuleSet,
+) {
+    base.allow.extend(incoming.allow);
+    base.ask.extend(incoming.ask);
+    base.deny.extend(incoming.deny);
+}
+
+fn merge_effects(
+    base: &mut crate::permissions::rules::RawEffectRules,
+    incoming: crate::permissions::rules::RawEffectRules,
+) {
+    if incoming.read.is_some() {
+        base.read = incoming.read;
+    }
+    if incoming.write.is_some() {
+        base.write = incoming.write;
+    }
+    if incoming.network.is_some() {
+        base.network = incoming.network;
+    }
+    if incoming.process.is_some() {
+        base.process = incoming.process;
+    }
+    if incoming.config.is_some() {
+        base.config = incoming.config;
+    }
+    if incoming.user.is_some() {
+        base.user = incoming.user;
+    }
+    if incoming.other.is_some() {
+        base.other = incoming.other;
+    }
+}
+
+fn merge_mode(
+    base: &mut crate::permissions::rules::RawModePerms,
+    incoming: crate::permissions::rules::RawModePerms,
+) {
+    merge_ruleset(&mut base.tools, incoming.tools);
+    merge_effects(&mut base.effects, incoming.effects);
+    for (name, rules) in incoming.patterns {
+        merge_ruleset(base.patterns.entry(name).or_default(), rules);
+    }
+}
+
+fn merge_policy(
+    base: &mut crate::permissions::rules::RawPerms,
+    incoming: crate::permissions::rules::RawPerms,
+) {
+    merge_mode(&mut base.default, incoming.default);
+    for (name, mode) in incoming.modes {
+        merge_mode(base.modes.entry(name).or_default(), mode);
     }
 }
 

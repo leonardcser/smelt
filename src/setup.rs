@@ -533,12 +533,14 @@ fn default_config_lua() -> String {
     lua.push_str(
         "-- Default is to ask for tools that require permission. Uncomment to customize.\n",
     );
-    lua.push_str("-- smelt.permissions.set_rules({\n");
+    lua.push_str("-- smelt.permissions.extend({\n");
     lua.push_str("--   default = {\n");
-    lua.push_str("--     bash = { allow = { \"git status *\", \"git diff *\" } },\n");
+    lua.push_str(
+        "--     patterns = { bash = { allow = { \"git status *\", \"git diff *\" } } },\n",
+    );
     lua.push_str("--   },\n");
     lua.push_str("--   apply = {\n");
-    lua.push_str("--     bash = { allow = { \"git commit *\" } },\n");
+    lua.push_str("--     patterns = { bash = { allow = { \"git commit *\" } } },\n");
     lua.push_str("--   },\n");
     lua.push_str("-- })\n\n");
 

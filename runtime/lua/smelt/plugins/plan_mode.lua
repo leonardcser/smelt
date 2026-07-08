@@ -44,6 +44,7 @@ Allowed tools:
 - bash, but only for read-only commands
 - ask_user_question when requirements or trade-offs need user input
 - present_plan when the user asks for a written plan, a durable draft would help, or the plan is ready to implement
+- enter_worktree after user confirmation when the user asks to implement in a new worktree
 - edit_file only when revising the full saved plan.md path returned by present_plan
 
 Unavailable or forbidden:
@@ -76,7 +77,40 @@ Your turn should only end with ask_user_question for clarification or present_pl
     default_decision = "ask",
     allow_subcommands_by_default = false,
     ask_on_output_redirection = true,
-    read_only = true,
+  },
+})
+
+smelt.permissions.extend({
+  plan = {
+    tools = {
+      allow = {
+        "read_file",
+        "glob",
+        "grep",
+        "read_process_output",
+        "ask_user_question",
+        "present_plan",
+      },
+      ask = {
+        "enter_worktree",
+      },
+      deny = {
+        "edit_file",
+        "write_file",
+        "edit_notebook",
+        "stop_process",
+        "smelt_reload",
+      },
+    },
+    effects = {
+      read = "allow",
+      write = "deny",
+      network = "ask",
+      process = "deny",
+      config = "deny",
+      user = "allow",
+      other = "ask",
+    },
   },
 })
 
@@ -276,7 +310,7 @@ local function register_present_plan()
     description = "Present a written plan for the user to save as a draft, approve with normal permissions, or approve in apply mode. Call this after discussing the plan with the user.",
     modes = { "plan" },
     permission_defaults = { plan = "allow" },
-    effect = "user_interaction",
+    effect = "user",
     execution_mode = "sequential",
     parameters = {
       type = "object",

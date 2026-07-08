@@ -10,7 +10,7 @@ smelt.tools.register({
   name = "smelt_reload",
   description = "Reload smelt's Lua config (init.lua, plugins, commands, completers, tools, colorschemes, keymaps) so edits the agent just made take effect. The reload is scheduled for the end of the current turn, so it does not cancel this in-flight tool call. Call this once at the end of your turn after editing any file under ~/.config/smelt/ or ./.smelt/. Multiple calls in the same turn collapse into a single reload.",
   parameters = { type = "object", properties = {} },
-  effect = "config_reload",
+  effect = "config",
   summary = function() return "schedule end-of-turn reload" end,
   execute = function()
     if smelt.engine.reload_when_idle() then

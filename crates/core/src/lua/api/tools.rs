@@ -31,31 +31,29 @@ impl From<LuaDecision> for protocol::Decision {
     }
 }
 
-/// Coarse side-effect classification for read-only modes.
+/// Coarse side-effect classification used by permission policy.
 #[derive(Clone, Copy, Debug, LuaAlias)]
 #[lua(name = "smelt.tools.Effect")]
 pub enum LuaToolEffect {
     Read,
     Write,
     Network,
-    UserInteraction,
-    ProcessRead,
-    ProcessControl,
-    ConfigReload,
-    Unknown,
+    User,
+    Process,
+    Config,
+    Other,
 }
 
 impl From<LuaToolEffect> for crate::permissions::ToolEffectKind {
     fn from(effect: LuaToolEffect) -> Self {
         match effect {
-            LuaToolEffect::Read => crate::permissions::ToolEffectKind::PathRead,
-            LuaToolEffect::Write => crate::permissions::ToolEffectKind::PathWrite,
+            LuaToolEffect::Read => crate::permissions::ToolEffectKind::Read,
+            LuaToolEffect::Write => crate::permissions::ToolEffectKind::Write,
             LuaToolEffect::Network => crate::permissions::ToolEffectKind::Network,
-            LuaToolEffect::UserInteraction => crate::permissions::ToolEffectKind::UserInteraction,
-            LuaToolEffect::ProcessRead => crate::permissions::ToolEffectKind::ProcessRead,
-            LuaToolEffect::ProcessControl => crate::permissions::ToolEffectKind::ProcessControl,
-            LuaToolEffect::ConfigReload => crate::permissions::ToolEffectKind::ConfigReload,
-            LuaToolEffect::Unknown => crate::permissions::ToolEffectKind::Unknown,
+            LuaToolEffect::User => crate::permissions::ToolEffectKind::User,
+            LuaToolEffect::Process => crate::permissions::ToolEffectKind::Process,
+            LuaToolEffect::Config => crate::permissions::ToolEffectKind::Config,
+            LuaToolEffect::Other => crate::permissions::ToolEffectKind::Other,
         }
     }
 }
@@ -89,7 +87,7 @@ pub struct LuaToolDef {
     pub parameters: Option<mlua::Table>,
     /// Per-mode default decisions.
     pub permission_defaults: Option<LuaToolPermissionDefaults>,
-    /// Coarse side-effect classification used by read-only permission modes.
+    /// Coarse side-effect classification used by permission policy.
     pub effect: Option<LuaToolEffect>,
     /// Subcommand patterns that auto-allow without prompting.
     #[lua(default)]

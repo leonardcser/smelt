@@ -3637,7 +3637,7 @@ mod tests {
         rt.shared.remember.lock().unwrap().model = false;
         rt.shared.tool_defaults.lock().unwrap().tool_effects.insert(
             "bash".into(),
-            crate::permissions::rules::ToolEffectKind::ProcessControl,
+            crate::permissions::rules::ToolEffectKind::Process,
         );
         *rt.shared.default_shell.lock().unwrap() = Some(crate::lua::DefaultShell {
             program: "zsh".into(),

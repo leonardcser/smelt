@@ -388,10 +388,10 @@ Pass `override = true` to replace a built-in tool with the same name.
 ### Permission rules
 
 ```lua
-smelt.permissions.set_rules({
-  default = { bash = { allow = { "git log *", "git status *" } } },
-  apply   = { bash = { allow = { "git commit *", "git push *" } } },
-  yolo    = { mcp  = { allow = { "*" } } },
+smelt.permissions.extend({
+  default = { patterns = { bash = { allow = { "git log *", "git status *" } } } },
+  apply   = { patterns = { bash = { allow = { "git commit *", "git push *" } } } },
+  yolo    = { patterns = { mcp  = { allow = { "*" } } } },
 })
 ```
 
@@ -1462,18 +1462,18 @@ Register Lua callbacks against custom paint regions.
 
 #### `smelt.permissions`
 
-List session/workspace rules and sync a Lua-built ruleset back through the App.
+List, sync, and extend permission policy state.
 
 - `smelt.permissions.check` :: `fun(mode_str: string, bucket: string, value: string): string`
-  Decide a subcommand bucket (e.g.
+  Decide a tool-specific pattern bucket (e.g.
 - `smelt.permissions.check_tool` :: `fun(mode_str: string, name: string): string`
   Decision primitives for tool `decide` callbacks.
+- `smelt.permissions.extend` :: `fun(spec: smelt.permissions.PolicySpec): nil`
+  Extend the generated permission policy with user rules.
 - `smelt.permissions.grant_session` :: `fun(grant: smelt.permissions.SessionPathGrant): nil`
   Add one session-scoped grant.
 - `smelt.permissions.list` :: `fun(): smelt.permissions.ListResult`
   Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`.
-- `smelt.permissions.set_rules` :: `fun(spec: smelt.permissions.RulesSpec): nil`
-  Install the per-mode permission ruleset.
 - `smelt.permissions.sync` :: `fun(spec: smelt.permissions.SyncSpec): nil`
   Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`.
 

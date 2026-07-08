@@ -17,7 +17,7 @@ smelt.tools.register({
   description = "Stop a running background bash process by id and return its buffered output.",
   override = true,
   elapsed_visible = true,
-  effect = "process_control",
+  effect = "process",
   parameters = {
     type = "object",
     properties = {

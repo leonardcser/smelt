@@ -372,37 +372,48 @@
 ---@field put_str fun(row: integer, col: integer, text: string, style: table?): nil Write a string with optional style at (row, col).
 ---@field fill_rect fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with an optional character and style.
 
+--- Effect-level decisions that apply to tools without a more specific rule.
+---@class smelt.permissions.EffectRules
+---@field read? string
+---@field write? string
+---@field network? string
+---@field process? string
+---@field config? string
+---@field user? string
+---@field other? string
+
 --- Current permission state returned by `smelt.permissions.list()`.
 ---@class smelt.permissions.ListResult
 ---@field session smelt.permissions.SessionEntry[] Session-scoped tool/pattern approvals for this run.
 ---@field path_grants smelt.permissions.SessionPathGrant[] Session-scoped path grants for this run.
 ---@field workspace smelt.permissions.WorkspaceRule[] Workspace rules loaded from the on-disk store rooted at the current cwd.
 
---- Permission slots that apply within a single agent mode. The fixed `tools` key controls the tool itself; any additional key is treated as a subcommand bucket and routed through that tool's subpattern parser (e.g. `bash = { allow = { "git status" } }`).
+--- Permission slots that apply within a single agent mode.
 ---@class smelt.permissions.ModePerms
----@field tools? smelt.permissions.RuleSet Per-tool `allow`/`ask`/`deny` patterns.
----@field [string] smelt.permissions.RuleSet Subcommand patterns keyed by tool name (`"bash"`, `"edit"`, …).
+---@field tools? smelt.permissions.RuleSet Exact tool-name `allow`/`ask`/`deny` entries.
+---@field effects? smelt.permissions.EffectRules Effect-level decisions keyed by effect name.
+---@field patterns? table<string, smelt.permissions.RuleSet> Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …).
 
---- `allow`/`ask`/`deny` pattern arrays accepted by every permission slot.
+--- Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
+---@class smelt.permissions.PolicySpec
+---@field default? smelt.permissions.ModePerms Baseline rules applied unless a mode-specific slot overrides.
+---@field [string] smelt.permissions.ModePerms Mode-specific rules keyed by registered mode name.
+
+--- `allow`/`ask`/`deny` arrays accepted by permission policy sections.
 ---@class smelt.permissions.RuleSet
 ---@field allow? string[] Patterns that auto-allow without prompting.
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
-
---- Spec for `smelt.permissions.set_rules`. Each mode falls back to `default` (and then to host-level rules) when its slot is `nil`.
----@class smelt.permissions.RulesSpec
----@field default? smelt.permissions.ModePerms Baseline rules applied unless a mode-specific slot overrides.
----@field [string] smelt.permissions.ModePerms Mode-specific rules keyed by registered mode name.
 
 --- A single session permission entry (one approved tool/pattern pair).
 ---@class smelt.permissions.SessionEntry
 ---@field tool string Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access.
 ---@field pattern string Pattern matched against the tool's argument bucket.
 
---- A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, write grants also allow that tool to write under `path_prefix` in that read-only mode.
+--- A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, the grant applies only in that mode.
 ---@class smelt.permissions.SessionPathGrant
 ---@field kind string Grant kind. Currently only `"path"` is supported.
----@field mode? string Optional mode for read-only write exceptions, e.g. `"plan"`. Omit for mode-independent path trust.
+---@field mode? string Optional mode, e.g. `"plan"`. Omit for mode-independent path trust.
 ---@field tool string Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`.
 ---@field access string Path access granted: `"read"` or `"write"`.
 ---@field path_prefix string Directory prefix covered by the grant.
@@ -600,7 +611,7 @@
 ---@field description? string Human-readable description shown to the model.
 ---@field parameters? table JSON-schema parameters table passed through to the model.
 ---@field permission_defaults? smelt.tools.PermissionDefaults Per-mode default decisions.
----@field effect? smelt.tools.Effect Coarse side-effect classification used by read-only permission modes.
+---@field effect? smelt.tools.Effect Coarse side-effect classification used by permission policy.
 ---@field default_allow? string[] Subcommand patterns that auto-allow without prompting.
 ---@field subpattern_parser? string Built-in subpattern parser kind (e.g. `"bash"`).
 ---@field modes? table Agent modes the tool is available in; nil means all modes.
@@ -778,8 +789,8 @@
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 ---@alias smelt.tools.Decision "allow"|"ask"|"deny"
 
---- Coarse side-effect classification for read-only modes.
----@alias smelt.tools.Effect "read"|"write"|"network"|"user_interaction"|"process_read"|"process_control"|"config_reload"|"unknown"
+--- Coarse side-effect classification used by permission policy.
+---@alias smelt.tools.Effect "read"|"write"|"network"|"user"|"process"|"config"|"other"
 
 --- Vim mode string literal.
 ---@alias smelt.vim.Mode "insert"|"normal"|"visual"|"visual_line"

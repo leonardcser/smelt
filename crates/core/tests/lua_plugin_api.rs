@@ -122,7 +122,7 @@ fn tools_register_records_effect_metadata() {
             })
             smelt.tools.register({
                 name = "test_process_tool",
-                effect = "process_control",
+                effect = "process",
                 execute = function() return "ok" end,
             })
             "#,
@@ -133,11 +133,11 @@ fn tools_register_records_effect_metadata() {
     let defaults = rt.tool_defaults();
     assert_eq!(
         defaults.tool_effects.get("test_write_tool"),
-        Some(&ToolEffectKind::PathWrite)
+        Some(&ToolEffectKind::Write)
     );
     assert_eq!(
         defaults.tool_effects.get("test_process_tool"),
-        Some(&ToolEffectKind::ProcessControl)
+        Some(&ToolEffectKind::Process)
     );
 }
 

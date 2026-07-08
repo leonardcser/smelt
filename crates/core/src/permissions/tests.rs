@@ -54,11 +54,15 @@ fn empty_ruleset() -> RuleSet {
 }
 
 fn mode_perms(tools: HashMap<String, Decision>, buckets: &[(&str, RuleSet)]) -> ModePerms {
-    let mut subcommands = HashMap::new();
+    let mut patterns = HashMap::new();
     for (name, rs) in buckets {
-        subcommands.insert((*name).to_string(), rs.clone());
+        patterns.insert((*name).to_string(), rs.clone());
     }
-    ModePerms { tools, subcommands }
+    ModePerms {
+        tools,
+        effects: EffectPerms::default(),
+        patterns,
+    }
 }
 
 /// Mirrors the `subpattern_parser = "shell"` wiring from `tools/bash.lua`.
@@ -72,18 +76,19 @@ fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::permissions::Subpa
 
 fn test_tool_effects() -> HashMap<String, ToolEffectKind> {
     [
-        ("read_file", ToolEffectKind::PathRead),
-        ("glob", ToolEffectKind::PathRead),
-        ("grep", ToolEffectKind::PathRead),
-        ("edit_file", ToolEffectKind::PathWrite),
-        ("write_file", ToolEffectKind::PathWrite),
-        ("edit_notebook", ToolEffectKind::PathWrite),
+        ("read_file", ToolEffectKind::Read),
+        ("glob", ToolEffectKind::Read),
+        ("grep", ToolEffectKind::Read),
+        ("edit_file", ToolEffectKind::Write),
+        ("write_file", ToolEffectKind::Write),
+        ("edit_notebook", ToolEffectKind::Write),
+        ("enter_worktree", ToolEffectKind::Write),
         ("web_fetch", ToolEffectKind::Network),
         ("web_search", ToolEffectKind::Network),
-        ("ask_user_question", ToolEffectKind::UserInteraction),
-        ("read_process_output", ToolEffectKind::ProcessRead),
-        ("stop_process", ToolEffectKind::ProcessControl),
-        ("smelt_reload", ToolEffectKind::ConfigReload),
+        ("ask_user_question", ToolEffectKind::User),
+        ("read_process_output", ToolEffectKind::Process),
+        ("stop_process", ToolEffectKind::Process),
+        ("smelt_reload", ToolEffectKind::Config),
     ]
     .into_iter()
     .map(|(name, effect)| (name.to_string(), effect))
@@ -105,7 +110,6 @@ fn permissions_from_mode(
             default_decision: Decision::Allow,
             allow_subcommands_by_default: true,
             ask_on_output_redirection: false,
-            read_only: false,
         },
     )]);
     Permissions {
@@ -119,6 +123,7 @@ fn permissions_from_mode(
             vec![workspace]
         },
         paths_fn: None,
+        tool_decisions: HashMap::new(),
         tool_effects: test_tool_effects(),
         subpattern_parsers: bash_parser_map(),
         approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
@@ -1632,7 +1637,6 @@ fn yolo_allow_permissions() -> Permissions {
                 default_decision: Decision::Allow,
                 allow_subcommands_by_default: true,
                 ask_on_output_redirection: false,
-                read_only: false,
             },
         )]),
     )
@@ -1668,7 +1672,7 @@ fn normal_unknown_tool_defaults_ask() {
     assert_eq!(p.check_tool(normal(), "some_unknown_tool"), Decision::Ask);
 }
 
-fn read_only_permissions() -> Permissions {
+fn plan_policy_permissions() -> Permissions {
     let mut tools = HashMap::new();
     for name in [
         "read_file",
@@ -1676,36 +1680,28 @@ fn read_only_permissions() -> Permissions {
         "grep",
         "ask_user_question",
         "read_process_output",
-        "edit_file",
-        "write_file",
-        "edit_notebook",
-        "bash",
-        "web_fetch",
-        "web_search",
-        "stop_process",
-        "smelt_reload",
-        "custom_tool",
     ] {
         tools.insert(name.to_string(), Decision::Allow);
     }
-    let mode = mode_perms(tools, &[("bash", ruleset(&["*"], &[], &[]))]);
+    tools.insert("enter_worktree".to_string(), Decision::Ask);
+    let mut mode = mode_perms(tools, &[("bash", ruleset(&["ls *"], &[], &[]))]);
+    mode.effects = EffectPerms {
+        read: Some(Decision::Allow),
+        write: Some(Decision::Deny),
+        network: Some(Decision::Ask),
+        process: Some(Decision::Deny),
+        config: Some(Decision::Deny),
+        user: Some(Decision::Allow),
+        other: Some(Decision::Ask),
+    };
     let mut p = permissions_from_mode(mode, false, PathBuf::new());
-    p.mode_behaviors.insert(
-        "plan".to_string(),
-        ModeBehavior {
-            default_decision: Decision::Ask,
-            allow_subcommands_by_default: false,
-            ask_on_output_redirection: true,
-            read_only: true,
-        },
-    );
     p.set_paths_fn(stub_paths_fn());
     p
 }
 
 #[test]
-fn read_only_mode_classifies_registered_tools() {
-    let p = read_only_permissions();
+fn plan_policy_classifies_registered_tools() {
+    let p = plan_policy_permissions();
     let cases = [
         (
             "read_file",
@@ -1741,6 +1737,7 @@ fn read_only_mode_classifies_registered_tools() {
             Decision::Ask,
         ),
         ("web_search", HashMap::new(), Decision::Ask),
+        ("enter_worktree", HashMap::new(), Decision::Ask),
         ("stop_process", HashMap::new(), Decision::Deny),
         ("smelt_reload", HashMap::new(), Decision::Deny),
     ];
@@ -1750,10 +1747,10 @@ fn read_only_mode_classifies_registered_tools() {
 }
 
 #[test]
-fn read_only_mode_classifies_bash_by_effects() {
-    let p = read_only_permissions();
-    let mut background_ls = args_with("command", "ls src");
-    background_ls.insert("background".to_string(), Value::Bool(true));
+fn plan_policy_classifies_bash_by_effects() {
+    let p = plan_policy_permissions();
+    let mut background_pwd = args_with("command", "pwd");
+    background_pwd.insert("background".to_string(), Value::Bool(true));
     let cases = [
         (args_with("command", "ls src"), Decision::Allow),
         (args_with("command", "python3 script.py"), Decision::Ask),
@@ -1761,7 +1758,7 @@ fn read_only_mode_classifies_bash_by_effects() {
         (args_with("command", "cargo test"), Decision::Deny),
         (args_with("command", "cargo +nightly test"), Decision::Deny),
         (args_with("command", "rm -rf target"), Decision::Deny),
-        (background_ls, Decision::Deny),
+        (background_pwd, Decision::Deny),
     ];
     for (args, expected) in cases {
         let command = args.get("command").and_then(Value::as_str).unwrap_or("");
@@ -1774,136 +1771,46 @@ fn read_only_mode_classifies_bash_by_effects() {
 }
 
 #[test]
-fn read_only_mode_classifies_mcp_by_name() {
-    let p = read_only_permissions();
-    let cases = [
-        ("filesystem_write_file", Decision::Deny),
-        ("filesystem_read_file", Decision::Ask),
-    ];
-    for (tool, expected) in cases {
-        assert_eq!(
-            p.evaluate_tool(plan(), ToolOrigin::Mcp, tool, &HashMap::new())
-                .decision,
-            expected,
-            "tool={tool}"
-        );
-    }
+fn bash_pattern_allow_overrides_process_effect_for_background_tool_run() {
+    let p = plan_policy_permissions();
+    let mut args = args_with("command", "ls src");
+    args.insert("background".to_string(), Value::Bool(true));
+    assert_eq!(decide(&p, plan(), "bash", &args), Decision::Allow);
 }
 
 #[test]
-fn read_only_mode_allows_session_approved_path_grant_edits() {
-    let p = read_only_permissions();
-    let temp = tempfile::tempdir().unwrap();
-    let artifact_dir = temp.path().join("session/plans/20260101-000000-demo");
-    std::fs::create_dir_all(&artifact_dir).unwrap();
-    let plan_path = artifact_dir.join("plan.md");
-    std::fs::write(&plan_path, "# Plan\n").unwrap();
-    let args = args_with("file_path", plan_path.to_str().unwrap());
-
-    assert_eq!(decide(&p, plan(), "edit_file", &args), Decision::Deny);
-
-    p.approvals.write().unwrap().add_session_path_grant(
-        plan(),
-        "edit_file",
-        PathAccess::Write,
-        artifact_dir.clone(),
+fn plan_policy_mcp_defaults_to_ask() {
+    let p = plan_policy_permissions();
+    assert_eq!(
+        p.evaluate_tool(
+            plan(),
+            ToolOrigin::Mcp,
+            "filesystem_write_file",
+            &HashMap::new()
+        )
+        .decision,
+        Decision::Ask
     );
-
-    let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
-    assert_eq!(outcome.decision, Decision::Allow);
-    assert!(outcome.missing_requirements.is_empty());
 }
 
 #[test]
-fn read_only_mode_generic_directory_approval_does_not_allow_writes() {
-    let p = read_only_permissions();
-    let temp = tempfile::tempdir().unwrap();
-    let approved_dir = temp.path().join("approved");
-    std::fs::create_dir_all(&approved_dir).unwrap();
-    let args = args_with("file_path", approved_dir.join("notes.md").to_str().unwrap());
-
-    p.approvals
-        .write()
+fn plan_policy_tool_rule_overrides_write_effect() {
+    let mut p = plan_policy_permissions();
+    p.modes
+        .get_mut("plan")
         .unwrap()
-        .add_session_dir(approved_dir.clone());
-
-    let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
-    assert_eq!(outcome.decision, Decision::Deny);
+        .tools
+        .insert("edit_file".into(), Decision::Ask);
+    let args = args_with("file_path", "src/lib.rs");
+    assert_eq!(decide(&p, plan(), "edit_file", &args), Decision::Ask);
 }
 
 #[test]
-fn read_only_mode_path_trust_does_not_allow_writes() {
-    let p = read_only_permissions();
-    let temp = tempfile::tempdir().unwrap();
-    let approved_dir = temp.path().join("approved");
-    std::fs::create_dir_all(&approved_dir).unwrap();
-    let args = args_with("file_path", approved_dir.join("notes.md").to_str().unwrap());
-
-    p.approvals.write().unwrap().add_session_path_trust(
-        "edit_file",
-        PathAccess::Write,
-        approved_dir.clone(),
-    );
-
-    let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
-    assert_eq!(outcome.decision, Decision::Deny);
-}
-
-#[test]
-fn read_only_mode_path_grants_are_mode_and_tool_scoped() {
-    let p = read_only_permissions();
-    let temp = tempfile::tempdir().unwrap();
-    let approved_dir = temp.path().join("approved");
-    std::fs::create_dir_all(&approved_dir).unwrap();
-    let args = args_with("file_path", approved_dir.join("notes.md").to_str().unwrap());
-
-    p.approvals.write().unwrap().add_session_path_grant(
-        normal(),
-        "edit_file",
-        PathAccess::Write,
-        approved_dir.clone(),
-    );
-    assert_eq!(
-        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args)
-            .decision,
-        Decision::Deny
-    );
-
-    p.approvals.write().unwrap().add_session_path_grant(
-        plan(),
-        "write_file",
-        PathAccess::Write,
-        approved_dir.clone(),
-    );
-    assert_eq!(
-        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args)
-            .decision,
-        Decision::Deny
-    );
-}
-
-#[test]
-fn read_only_mode_keeps_unapproved_or_shell_writes_denied() {
-    let p = read_only_permissions();
+fn plan_policy_keeps_shell_writes_denied() {
+    let p = plan_policy_permissions();
     let temp = tempfile::tempdir().unwrap();
     let artifact_dir = temp.path().join("session/plans/20260101-000000-demo");
-    let sibling_dir = temp.path().join("session/plans/20260101-000000-other");
     std::fs::create_dir_all(&artifact_dir).unwrap();
-    std::fs::create_dir_all(&sibling_dir).unwrap();
-    p.approvals.write().unwrap().add_session_path_grant(
-        plan(),
-        "edit_file",
-        PathAccess::Write,
-        artifact_dir.clone(),
-    );
-
-    let sibling_args = args_with("file_path", sibling_dir.join("plan.md").to_str().unwrap());
-    assert_eq!(
-        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &sibling_args)
-            .decision,
-        Decision::Deny
-    );
-
     let shell_args = args_with(
         "command",
         &format!("echo hi > {}", artifact_dir.join("plan.md").display()),
@@ -2152,7 +2059,7 @@ fn web_fetch_pattern_allow_short_circuits_tool_ask() {
 }
 
 #[test]
-fn web_fetch_tool_deny_dominates_pattern_allow() {
+fn web_fetch_pattern_allow_overrides_tool_deny() {
     let mut tools = HashMap::new();
     tools.insert("web_fetch".to_string(), Decision::Deny);
     let mode = mode_perms(
@@ -2163,7 +2070,7 @@ fn web_fetch_tool_deny_dominates_pattern_allow() {
     let args = args_with("url", "https://example.com/docs");
     assert_eq!(
         decide_base(&perms, normal(), "web_fetch", &args),
-        Decision::Deny
+        Decision::Allow
     );
 }
 
@@ -2440,7 +2347,6 @@ fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Perm
     tools.insert("edit_file".to_string(), Decision::Allow);
     tools.insert("glob".to_string(), Decision::Allow);
     tools.insert("grep".to_string(), Decision::Allow);
-    tools.insert("bash".to_string(), Decision::Allow);
     let mode = mode_perms(tools, &[("bash", ruleset(bash_allow, &[], &[]))]);
     let mut p = permissions_from_mode(mode, true, PathBuf::from(workspace));
     p.set_paths_fn(stub_paths_fn());
@@ -2758,7 +2664,7 @@ fn approvals_is_approved_returns_false_when_no_entry_exists() {
 }
 
 #[test]
-fn approvals_is_approved_requires_all_subcommands_match() {
+fn approvals_is_approved_requires_all_patterns_match() {
     let mut rt = RuntimeApprovals::new();
     // Seed via set_session so the patterns actually persist.
     let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
@@ -2771,7 +2677,7 @@ fn approvals_is_approved_requires_all_subcommands_match() {
 // ── rules.rs (backfill: merge_mode / build_mode / for_mode) ─────────
 
 #[test]
-fn merge_mode_combines_default_and_mode_tools_and_subcommands() {
+fn merge_mode_combines_default_and_mode_tools_and_patterns() {
     use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
     let default = RawModePerms {
         tools: RawRuleSet {
@@ -2779,7 +2685,7 @@ fn merge_mode_combines_default_and_mode_tools_and_subcommands() {
             ask: vec!["write".into()],
             deny: vec![],
         },
-        subcommands: HashMap::from([(
+        patterns: HashMap::from([(
             "bash".into(),
             RawRuleSet {
                 allow: vec!["ls *".into()],
@@ -2787,6 +2693,7 @@ fn merge_mode_combines_default_and_mode_tools_and_subcommands() {
                 deny: vec![],
             },
         )]),
+        ..Default::default()
     };
     let mode = RawModePerms {
         tools: RawRuleSet {
@@ -2794,7 +2701,7 @@ fn merge_mode_combines_default_and_mode_tools_and_subcommands() {
             ask: vec![],
             deny: vec!["delete".into()],
         },
-        subcommands: HashMap::from([(
+        patterns: HashMap::from([(
             "bash".into(),
             RawRuleSet {
                 allow: vec!["cat *".into()],
@@ -2802,13 +2709,14 @@ fn merge_mode_combines_default_and_mode_tools_and_subcommands() {
                 deny: vec!["rm *".into()],
             },
         )]),
+        ..Default::default()
     };
     let merged = merge_mode(&default, &mode);
     assert!(merged.tools.allow.contains(&"read".to_string()));
     assert!(merged.tools.allow.contains(&"exec".to_string()));
     assert!(merged.tools.ask.contains(&"write".to_string()));
     assert!(merged.tools.deny.contains(&"delete".to_string()));
-    let bash = &merged.subcommands["bash"];
+    let bash = &merged.patterns["bash"];
     assert!(bash.allow.contains(&"ls *".to_string()));
     assert!(bash.allow.contains(&"cat *".to_string()));
     assert!(bash.deny.contains(&"rm *".to_string()));
@@ -2819,20 +2727,22 @@ fn merge_mode_handles_subcommand_present_only_in_default() {
     use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
     let default = RawModePerms {
         tools: RawRuleSet::default(),
-        subcommands: HashMap::from([(
+        patterns: HashMap::from([(
             "bash".into(),
             RawRuleSet {
                 allow: vec!["ls *".into()],
                 ..Default::default()
             },
         )]),
+        ..Default::default()
     };
     let mode = RawModePerms {
         tools: RawRuleSet::default(),
-        subcommands: HashMap::new(),
+        patterns: HashMap::new(),
+        ..Default::default()
     };
     let merged = merge_mode(&default, &mode);
-    let bash = &merged.subcommands["bash"];
+    let bash = &merged.patterns["bash"];
     assert!(bash.allow.contains(&"ls *".to_string()));
 }
 
@@ -2841,20 +2751,22 @@ fn merge_mode_handles_subcommand_present_only_in_mode() {
     use crate::permissions::rules::{merge_mode, RawModePerms, RawRuleSet};
     let default = RawModePerms {
         tools: RawRuleSet::default(),
-        subcommands: HashMap::new(),
+        patterns: HashMap::new(),
+        ..Default::default()
     };
     let mode = RawModePerms {
         tools: RawRuleSet::default(),
-        subcommands: HashMap::from([(
+        patterns: HashMap::from([(
             "bash".into(),
             RawRuleSet {
                 allow: vec!["git *".into()],
                 ..Default::default()
             },
         )]),
+        ..Default::default()
     };
     let merged = merge_mode(&default, &mode);
-    let bash = &merged.subcommands["bash"];
+    let bash = &merged.patterns["bash"];
     assert!(bash.allow.contains(&"git *".to_string()));
 }
 
