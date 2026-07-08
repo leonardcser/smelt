@@ -297,7 +297,7 @@ impl LiveSession {
         template: &Session,
         reason: &'static str,
     ) -> Result<Session, String> {
-        smelt_perf::perf::record_value("compat:session:full_materialized", 1);
+        smelt_perf::perf::record_value("session:full_materialized", 1);
         smelt_perf::perf::record_value(reason, 1);
         let mut session = template.clone();
         session.history = self.history_range(0..self.history_len())?;
@@ -358,13 +358,12 @@ mod tests {
                 created_at: 1,
                 updated_at: 2,
             },
-            meta_json: None,
             history_start_idx: 0,
             history_len: persisted.len(),
             history: persisted,
             turn_metas: Vec::new(),
             metadata_snapshots: Vec::new(),
-            accounting_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
         })
         .expect("save snapshot");
 
@@ -387,7 +386,6 @@ mod tests {
                 history_len: Some(2),
                 checkpoint: None,
                 text_bytes: None,
-                migration: None,
             },
             history_len: 2,
             revision: 1,
@@ -454,13 +452,12 @@ mod tests {
                 created_at: 1,
                 updated_at: 2,
             },
-            meta_json: None,
             history_start_idx: 0,
             history_len: history.len(),
             history,
             turn_metas: Vec::new(),
             metadata_snapshots: Vec::new(),
-            accounting_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
         })
         .expect("save snapshot");
         let header = SessionHeader {
@@ -482,7 +479,6 @@ mod tests {
                 history_len: Some(3),
                 checkpoint: None,
                 text_bytes: None,
-                migration: None,
             },
             history_len: 3,
             revision: 1,

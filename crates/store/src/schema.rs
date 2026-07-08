@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -42,6 +42,9 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
             found: current,
             expected: SCHEMA_VERSION,
         });
+    }
+    if current == 1 {
+        migrate_v1_to_v2(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -154,6 +157,84 @@ fn set_user_version(conn: &Connection, version: i32) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        DROP INDEX IF EXISTS transcript_search_history_idx;
+        DROP INDEX IF EXISTS transcript_search_terms_block_idx;
+        DROP TABLE IF EXISTS transcript_search_terms;
+
+        ALTER TABLE transcript_search RENAME TO transcript_search_old;
+        ALTER TABLE transcript_blocks RENAME TO transcript_blocks_old;
+
+        CREATE TABLE transcript_blocks (
+            block_idx INTEGER PRIMARY KEY,
+            descriptor_idx INTEGER,
+            history_idx INTEGER REFERENCES history_items(idx) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            tool_call_id TEXT,
+            tool_name TEXT,
+            content_hash TEXT,
+            sidecar_hash TEXT,
+            estimated_text_bytes INTEGER NOT NULL DEFAULT 0,
+            estimated_rows INTEGER,
+            preview_text TEXT,
+            descriptor_json TEXT,
+            origin_json TEXT,
+            tool_state_json TEXT
+        );
+
+        CREATE TABLE transcript_search (
+            block_idx INTEGER PRIMARY KEY REFERENCES transcript_blocks(block_idx) ON DELETE CASCADE,
+            history_idx INTEGER,
+            indexed_text TEXT NOT NULL
+        );
+
+        CREATE VIRTUAL TABLE transcript_search_fts USING fts5(
+            indexed_text,
+            content='transcript_search',
+            content_rowid='block_idx',
+            tokenize='trigram'
+        );
+
+        CREATE TRIGGER transcript_search_ai AFTER INSERT ON transcript_search BEGIN
+            INSERT INTO transcript_search_fts(rowid, indexed_text)
+            VALUES (new.block_idx, new.indexed_text);
+        END;
+        CREATE TRIGGER transcript_search_ad AFTER DELETE ON transcript_search BEGIN
+            INSERT INTO transcript_search_fts(transcript_search_fts, rowid, indexed_text)
+            VALUES ('delete', old.block_idx, old.indexed_text);
+        END;
+        CREATE TRIGGER transcript_search_au AFTER UPDATE OF indexed_text ON transcript_search BEGIN
+            INSERT INTO transcript_search_fts(transcript_search_fts, rowid, indexed_text)
+            VALUES ('delete', old.block_idx, old.indexed_text);
+            INSERT INTO transcript_search_fts(rowid, indexed_text)
+            VALUES (new.block_idx, new.indexed_text);
+        END;
+
+        INSERT INTO transcript_blocks (
+            block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+            sidecar_hash, estimated_text_bytes, estimated_rows, preview_text, descriptor_json,
+            origin_json, tool_state_json
+        )
+        SELECT block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+               sidecar_hash, estimated_text_bytes, estimated_rows, preview_text, descriptor_json,
+               origin_json, tool_state_json
+        FROM transcript_blocks_old
+        ORDER BY block_idx;
+
+        INSERT INTO transcript_search (block_idx, history_idx, indexed_text)
+        SELECT block_idx, history_idx, text
+        FROM transcript_search_old
+        ORDER BY block_idx;
+
+        DROP TABLE transcript_search_old;
+        DROP TABLE transcript_blocks_old;
+        "#,
+    )?;
+    Ok(())
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS store_meta (
     key TEXT PRIMARY KEY,
@@ -208,7 +289,6 @@ CREATE TABLE IF NOT EXISTS transcript_blocks (
     estimated_text_bytes INTEGER NOT NULL DEFAULT 0,
     estimated_rows INTEGER,
     preview_text TEXT,
-    search_text TEXT,
     descriptor_json TEXT,
     origin_json TEXT,
     tool_state_json TEXT
@@ -327,21 +407,154 @@ CREATE TABLE IF NOT EXISTS accounting_snapshots (
 CREATE TABLE IF NOT EXISTS transcript_search (
     block_idx INTEGER PRIMARY KEY REFERENCES transcript_blocks(block_idx) ON DELETE CASCADE,
     history_idx INTEGER,
-    text TEXT NOT NULL
+    indexed_text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS transcript_search_history_idx ON transcript_search(history_idx, block_idx);
 
-CREATE TABLE IF NOT EXISTS transcript_search_terms (
-    term TEXT NOT NULL,
-    block_idx INTEGER NOT NULL REFERENCES transcript_search(block_idx) ON DELETE CASCADE,
-    PRIMARY KEY (term, block_idx)
+CREATE VIRTUAL TABLE IF NOT EXISTS transcript_search_fts USING fts5(
+    indexed_text,
+    content='transcript_search',
+    content_rowid='block_idx',
+    tokenize='trigram'
 );
-CREATE INDEX IF NOT EXISTS transcript_search_terms_block_idx ON transcript_search_terms(block_idx);
+
+CREATE TRIGGER IF NOT EXISTS transcript_search_ai AFTER INSERT ON transcript_search BEGIN
+    INSERT INTO transcript_search_fts(rowid, indexed_text)
+    VALUES (new.block_idx, new.indexed_text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcript_search_ad AFTER DELETE ON transcript_search BEGIN
+    INSERT INTO transcript_search_fts(transcript_search_fts, rowid, indexed_text)
+    VALUES ('delete', old.block_idx, old.indexed_text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcript_search_au AFTER UPDATE OF indexed_text ON transcript_search BEGIN
+    INSERT INTO transcript_search_fts(transcript_search_fts, rowid, indexed_text)
+    VALUES ('delete', old.block_idx, old.indexed_text);
+    INSERT INTO transcript_search_fts(rowid, indexed_text)
+    VALUES (new.block_idx, new.indexed_text);
+END;
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_sqlite_supports_fts5_trigram_search() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE transcript_search_fts_probe USING fts5(
+                indexed_text,
+                tokenize='trigram'
+            );
+            INSERT INTO transcript_search_fts_probe(rowid, indexed_text)
+            VALUES (7, 'alpha needle omega');
+            "#,
+        )
+        .unwrap();
+
+        let rowids = conn
+            .prepare(
+                "SELECT rowid FROM transcript_search_fts_probe
+                 WHERE indexed_text MATCH 'needle'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rowids, vec![7]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM transcript_search_fts_probe
+                 WHERE indexed_text MATCH 'zzzz'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn v1_to_v2_migration_moves_search_text_to_fts_indexed_text() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE history_items (
+                idx INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                json TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                model_visible_hash TEXT,
+                search_text TEXT,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE transcript_blocks (
+                block_idx INTEGER PRIMARY KEY,
+                descriptor_idx INTEGER,
+                history_idx INTEGER REFERENCES history_items(idx) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                tool_call_id TEXT,
+                tool_name TEXT,
+                content_hash TEXT,
+                sidecar_hash TEXT,
+                estimated_text_bytes INTEGER NOT NULL DEFAULT 0,
+                estimated_rows INTEGER,
+                preview_text TEXT,
+                search_text TEXT,
+                descriptor_json TEXT,
+                origin_json TEXT,
+                tool_state_json TEXT
+            );
+            CREATE TABLE transcript_search (
+                block_idx INTEGER PRIMARY KEY REFERENCES transcript_blocks(block_idx) ON DELETE CASCADE,
+                history_idx INTEGER,
+                text TEXT NOT NULL
+            );
+            CREATE TABLE transcript_search_terms (
+                term TEXT NOT NULL,
+                block_idx INTEGER NOT NULL REFERENCES transcript_search(block_idx) ON DELETE CASCADE,
+                PRIMARY KEY (term, block_idx)
+            );
+            CREATE INDEX transcript_search_terms_block_idx ON transcript_search_terms(block_idx);
+            INSERT INTO transcript_blocks (
+                block_idx, descriptor_idx, kind, content_hash, estimated_text_bytes,
+                preview_text, search_text, descriptor_json
+            ) VALUES (7, 0, 'text', 'hash', 12, 'preview', 'needle text', '{}');
+            INSERT INTO transcript_search (block_idx, history_idx, text)
+            VALUES (7, NULL, 'needle text');
+            INSERT INTO transcript_search_terms (term, block_idx) VALUES ('nee', 7);
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .unwrap();
+
+        migrate(&mut conn, "test").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(!column_exists(&conn, "transcript_blocks", "search_text").unwrap());
+        assert!(!table_exists(&conn, "transcript_search_terms").unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT indexed_text FROM transcript_search WHERE block_idx = 7",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "needle text"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT rowid FROM transcript_search_fts WHERE indexed_text MATCH '\"needle\"'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            7
+        );
+    }
 
     #[test]
     fn read_only_validation_rejects_same_version_wrong_shape() {
@@ -359,7 +572,7 @@ mod tests {
                 title TEXT,
                 slug TEXT
             );
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             "#,
         )
         .unwrap();
@@ -380,7 +593,7 @@ mod tests {
 
         let err = validate_read_only_schema(&conn).unwrap_err();
         assert!(
-            err.to_string().contains("unsupported schema version 2"),
+            err.to_string().contains("unsupported schema version 3"),
             "{err}"
         );
     }

@@ -4285,6 +4285,43 @@ impl TranscriptDocument {
         self.descriptors.sparse.total_count = Some(total.saturating_add(count));
     }
 
+    pub(crate) fn reconcile_dense_descriptor_count(&mut self, total_count: usize) -> bool {
+        let active_records = self.descriptors.records_for_active_range();
+        if active_records.len() > total_count {
+            return false;
+        }
+
+        let start = total_count.saturating_sub(active_records.len());
+        let end = start.saturating_add(active_records.len());
+        let mut sparse = SparseTranscriptDescriptors {
+            total_count: Some(total_count),
+            loaded_ranges: Vec::new(),
+            records: BTreeMap::new(),
+        };
+        for (offset, record) in active_records.into_iter().enumerate() {
+            sparse.records.insert(
+                smelt_store::TranscriptDescriptorIndex::new(start.saturating_add(offset)),
+                record,
+            );
+        }
+        if start < end {
+            sparse.add_loaded_range(
+                smelt_store::TranscriptDescriptorIndex::new(start)
+                    ..smelt_store::TranscriptDescriptorIndex::new(end),
+            );
+            self.descriptors.active_range = Some(
+                smelt_store::TranscriptDescriptorIndex::new(start)
+                    ..smelt_store::TranscriptDescriptorIndex::new(end),
+            );
+        } else {
+            self.descriptors.active_range = None;
+        }
+        self.descriptors.sparse = sparse;
+        self.extent_index.clear_persisted_descriptor_estimates();
+        self.clear_transcript_layout_caches();
+        true
+    }
+
     #[cfg(test)]
     fn loaded_descriptor_count(&self) -> usize {
         self.descriptors.sparse.loaded_descriptor_count()
@@ -6694,11 +6731,6 @@ impl ResumePreviewCache {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.views.clear();
-        self.order.clear();
-    }
-
     pub(crate) fn take(&mut self, key: &str) -> Option<TranscriptDocument> {
         self.views.remove(key)
     }
@@ -7868,6 +7900,7 @@ mod tests {
     }
 
     fn test_descriptor_record(idx: u64) -> smelt_store::TranscriptDescriptorRecord {
+        let indexed_text = format!("block {idx}");
         smelt_store::TranscriptDescriptorRecord {
             block_idx: idx,
             history_idx: None,
@@ -7876,10 +7909,10 @@ mod tests {
             tool_name: None,
             content_hash: format!("{idx}"),
             estimated_text_bytes: 8,
-            preview_text: format!("block {idx}"),
-            search_text: format!("block {idx}"),
+            preview_text: indexed_text.clone(),
+            indexed_text: indexed_text.clone(),
             descriptor_json: serde_json::to_string(&smelt_core::TranscriptBlockDescriptor::Text {
-                content: format!("block {idx}"),
+                content: indexed_text,
             })
             .unwrap(),
             origin_json: Some(
@@ -7894,7 +7927,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..4).map(test_descriptor_record).collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.replace_transcript_descriptor_records_for_repair(&records)
+            .unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(1).unwrap();
         drop(db);
 
@@ -7916,7 +7950,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..6).map(test_descriptor_record).collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.replace_transcript_descriptor_records_for_repair(&records)
+            .unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
         drop(db);
 
@@ -7982,12 +8017,56 @@ mod tests {
     }
 
     #[test]
+    fn transcript_reconciles_stale_descriptor_extent_after_dense_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = test_descriptor_record(302);
+        record.origin_json =
+            Some(serde_json::to_string(&smelt_core::BlockOrigin::History(0)).unwrap());
+        let slice = smelt_store::TranscriptDescriptorSlice::new(
+            smelt_store::TranscriptDescriptorIndex::new(302),
+            303,
+            smelt_store::TranscriptDescriptorHydration::ObjectBacked,
+            vec![record],
+        );
+        let loaded =
+            super::LoadedTranscript::from_descriptor_slice(slice, dir.path().to_path_buf())
+                .expect("loaded stale tail");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+        document.push_with_origin(
+            smelt_core::Block::Text {
+                content: "new tail".into(),
+            },
+            smelt_core::BlockOrigin::History(1),
+        );
+
+        let before = document.descriptor_save_suffix(true, None);
+        assert!(matches!(
+            before,
+            super::TranscriptDescriptorSaveSuffix::Suffix {
+                descriptor_start_idx: 303,
+                ..
+            }
+        ));
+
+        assert!(document.reconcile_dense_descriptor_count(111));
+        let after = document.descriptor_save_suffix(true, None);
+        assert!(matches!(
+            after,
+            super::TranscriptDescriptorSaveSuffix::Suffix {
+                descriptor_start_idx: 111,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn approximate_row_seek_uses_descriptor_prefix_estimates() {
         let dir = tempfile::tempdir().unwrap();
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..300).map(test_descriptor_record).collect::<Vec<_>>();
         records[0].estimated_text_bytes = 1_000;
-        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.replace_transcript_descriptor_records_for_repair(&records)
+            .unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
         drop(db);
 
@@ -8014,7 +8093,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..16).map(test_descriptor_record).collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.replace_transcript_descriptor_records_for_repair(&records)
+            .unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(4).unwrap();
         drop(db);
 

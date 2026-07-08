@@ -1,12 +1,10 @@
 //! Background session persistence.
 //!
 //! Serialisation and disk I/O run on a worker thread. The main loop sends
-//! a `PersistRequest`; the worker writes requests in FIFO order. Call
+//! a session backend command; the worker writes requests in FIFO order. Call
 //! [`Persister::flush`] when the on-disk state must be current (session load,
 //! fork, shutdown).
 
-use crate::content::transcript_search_text::descriptor_search_text;
-use smelt_core::TranscriptBlockRecordWithId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -18,31 +16,9 @@ pub(crate) struct Blob {
 }
 
 pub(crate) struct PersistRequest {
-    pub(crate) save_id: u64,
-    pub(crate) session_id: String,
     pub(crate) session_dir: PathBuf,
-    pub(crate) delta: PersistDelta,
+    pub(crate) command: smelt_store::SessionCommit,
     pub(crate) blobs: Vec<Blob>,
-}
-
-#[derive(Clone)]
-pub(crate) struct PersistDelta {
-    pub(crate) history: smelt_store::SessionHistorySuffix,
-    pub(crate) descriptors: Option<PersistDescriptorDelta>,
-}
-
-#[derive(Clone)]
-pub(crate) struct PersistDescriptorDelta {
-    pub(crate) start_descriptor_idx: usize,
-    pub(crate) records: Vec<TranscriptBlockRecordWithId>,
-}
-
-pub(crate) struct PersistMetadataRequest {
-    pub(crate) save_id: u64,
-    pub(crate) session_id: String,
-    pub(crate) session_dir: PathBuf,
-    pub(crate) state: smelt_store::SessionState,
-    pub(crate) side_tables: smelt_store::SessionSideTableSuffixes,
 }
 
 pub(crate) struct PersistRequestAudit {
@@ -58,45 +34,32 @@ pub(crate) struct PersistRequestAuditFailure {
     pub(crate) message: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PersistSaveKind {
-    History,
-    Metadata,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PersistAck {
-    pub(crate) save_id: u64,
-    pub(crate) session_id: String,
-    pub(crate) kind: PersistSaveKind,
-    pub(crate) history_len: usize,
-    pub(crate) revision: u64,
-}
+pub(crate) type PersistSaveKind = smelt_core::session_save::SessionSaveKind;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PersistFailure {
     pub(crate) save_id: u64,
     pub(crate) session_id: String,
     pub(crate) message: String,
+    pub(crate) commit_failure: Option<smelt_store::SessionCommitFailure>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum PersistReport {
-    Saved(PersistAck),
+pub(crate) enum SessionBackendEvent {
+    Saved(smelt_store::SaveReceipt),
     Failed(PersistFailure),
     RequestAuditFailed(PersistRequestAuditFailure),
 }
 
-enum Cmd {
-    Save(Box<PersistRequest>),
-    SaveMetadata(Box<PersistMetadataRequest>),
+enum SessionBackendCommand {
+    CommitSession(Box<PersistRequest>),
     AppendRequestAudit(Box<PersistRequestAudit>),
     Flush(Sender<()>),
 }
 
 pub(crate) struct Persister {
-    tx: Option<Sender<Cmd>>,
-    reports: Receiver<PersistReport>,
+    tx: Option<Sender<SessionBackendCommand>>,
+    reports: Receiver<SessionBackendEvent>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -117,23 +80,17 @@ impl Persister {
 
     pub(crate) fn save(&self, req: PersistRequest) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Cmd::Save(Box::new(req)));
-        }
-    }
-
-    pub(crate) fn save_metadata(&self, req: PersistMetadataRequest) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Cmd::SaveMetadata(Box::new(req)));
+            let _ = tx.send(SessionBackendCommand::CommitSession(Box::new(req)));
         }
     }
 
     pub(crate) fn append_request_audit(&self, req: PersistRequestAudit) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Cmd::AppendRequestAudit(Box::new(req)));
+            let _ = tx.send(SessionBackendCommand::AppendRequestAudit(Box::new(req)));
         }
     }
 
-    pub(crate) fn drain_reports(&self) -> Vec<PersistReport> {
+    pub(crate) fn drain_reports(&self) -> Vec<SessionBackendEvent> {
         let mut reports = Vec::new();
         while let Ok(report) = self.reports.try_recv() {
             reports.push(report);
@@ -148,7 +105,7 @@ impl Persister {
             return;
         }
         let (done_tx, done_rx) = mpsc::channel();
-        if tx.send(Cmd::Flush(done_tx)).is_ok() {
+        if tx.send(SessionBackendCommand::Flush(done_tx)).is_ok() {
             let _ = done_rx.recv();
         }
     }
@@ -183,69 +140,39 @@ impl PersistDbCache {
     }
 }
 
-fn worker_loop(rx: Receiver<Cmd>, reports: Sender<PersistReport>) {
+fn worker_loop(rx: Receiver<SessionBackendCommand>, reports: Sender<SessionBackendEvent>) {
     let mut db_cache = PersistDbCache { current: None };
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            Cmd::Save(req) => {
-                report_history_result(write(&req, &mut db_cache), &req, &reports);
+            SessionBackendCommand::CommitSession(req) => {
+                report_save_result(write(&req, &mut db_cache), &req, &reports);
             }
-            Cmd::SaveMetadata(req) => {
-                report_metadata_result(write_metadata(&req, &mut db_cache), &req, &reports);
-            }
-            Cmd::AppendRequestAudit(req) => {
+            SessionBackendCommand::AppendRequestAudit(req) => {
                 report_request_audit_result(
                     write_request_audit(&req, &mut db_cache),
                     &req,
                     &reports,
                 );
             }
-            Cmd::Flush(done) => {
+            SessionBackendCommand::Flush(done) => {
                 let _ = done.send(());
             }
         }
     }
 }
 
-fn report_history_result(
-    result: Result<smelt_store::SessionSaveReport, String>,
+fn report_save_result(
+    result: Result<smelt_store::SaveReceipt, PersistWriteError>,
     req: &PersistRequest,
-    reports: &Sender<PersistReport>,
+    reports: &Sender<SessionBackendEvent>,
 ) {
     let report = match result {
-        Ok(save_report) => PersistReport::Saved(PersistAck {
-            save_id: req.save_id,
-            session_id: req.session_id.clone(),
-            kind: PersistSaveKind::History,
-            history_len: req.delta.history.history_len,
-            revision: save_report.revision,
-        }),
-        Err(message) => PersistReport::Failed(PersistFailure {
-            save_id: req.save_id,
-            session_id: req.session_id.clone(),
-            message,
-        }),
-    };
-    let _ = reports.send(report);
-}
-
-fn report_metadata_result(
-    result: Result<smelt_store::SessionSaveReport, String>,
-    req: &PersistMetadataRequest,
-    reports: &Sender<PersistReport>,
-) {
-    let report = match result {
-        Ok(save_report) => PersistReport::Saved(PersistAck {
-            save_id: req.save_id,
-            session_id: req.session_id.clone(),
-            kind: PersistSaveKind::Metadata,
-            history_len: req.state.history_len as usize,
-            revision: save_report.revision,
-        }),
-        Err(message) => PersistReport::Failed(PersistFailure {
-            save_id: req.save_id,
-            session_id: req.session_id.clone(),
-            message,
+        Ok(receipt) => SessionBackendEvent::Saved(receipt),
+        Err(err) => SessionBackendEvent::Failed(PersistFailure {
+            save_id: req.command.save_id.get(),
+            session_id: req.command.session_id.clone(),
+            message: err.message(),
+            commit_failure: err.commit_failure(),
         }),
     };
     let _ = reports.send(report);
@@ -254,10 +181,10 @@ fn report_metadata_result(
 fn report_request_audit_result(
     result: Result<i64, String>,
     req: &PersistRequestAudit,
-    reports: &Sender<PersistReport>,
+    reports: &Sender<SessionBackendEvent>,
 ) {
     if let Err(message) = result {
-        let _ = reports.send(PersistReport::RequestAuditFailed(
+        let _ = reports.send(SessionBackendEvent::RequestAuditFailed(
             PersistRequestAuditFailure {
                 session_id: req.session_id.clone(),
                 message,
@@ -266,110 +193,164 @@ fn report_request_audit_result(
     }
 }
 
-fn record_save_report(save_report: &smelt_store::SessionSaveReport) {
-    smelt_perf::perf::record_value("persist:write:history_deleted", save_report.history_deleted);
+#[derive(Clone, Debug)]
+enum PersistWriteError {
+    Message(String),
+    Commit(smelt_store::SessionCommitFailure),
+}
+
+impl PersistWriteError {
+    fn message(&self) -> String {
+        match self {
+            Self::Message(message) => message.clone(),
+            Self::Commit(failure) => format!(
+                "save session database: {}",
+                describe_commit_failure(failure)
+            ),
+        }
+    }
+
+    fn commit_failure(&self) -> Option<smelt_store::SessionCommitFailure> {
+        match self {
+            Self::Commit(failure) => Some(failure.clone()),
+            Self::Message(_) => None,
+        }
+    }
+}
+
+fn persist_write_error(message: impl Into<String>) -> PersistWriteError {
+    PersistWriteError::Message(message.into())
+}
+
+fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> String {
+    match failure {
+        smelt_store::SessionCommitFailure::SessionMismatch { expected, actual } => {
+            format!(
+                "session id mismatch: expected {expected}, actual {:?}",
+                actual
+            )
+        }
+        smelt_store::SessionCommitFailure::StaleRevision { base, current } => {
+            format!(
+                "stale revision: base {}, current {}",
+                base.get(),
+                current.get()
+            )
+        }
+        smelt_store::SessionCommitFailure::StaleHistoryBase { base, current } => {
+            format!(
+                "stale history base: base {}, current {}",
+                base.get(),
+                current.get()
+            )
+        }
+        smelt_store::SessionCommitFailure::StaleDescriptorBase { base, current } => format!(
+            "stale descriptor base: base {}, current {}",
+            base.get(),
+            current.get()
+        ),
+        smelt_store::SessionCommitFailure::InvalidHistorySuffix {
+            start,
+            final_len,
+            item_count,
+        } => format!(
+            "invalid history suffix: start {}, final_len {}, item_count {}",
+            start.get(),
+            final_len.get(),
+            item_count
+        ),
+        smelt_store::SessionCommitFailure::InvalidDescriptorSuffix { start, current_len } => {
+            format!(
+                "invalid descriptor suffix: start {}, current_len {}",
+                start.get(),
+                current_len.get()
+            )
+        }
+        smelt_store::SessionCommitFailure::InvalidSideTableSuffix { start, final_len } => {
+            format!(
+                "invalid side-table suffix: start {}, final history length {}",
+                start.get(),
+                final_len.get()
+            )
+        }
+        smelt_store::SessionCommitFailure::InvalidSideTableRow {
+            table,
+            index,
+            final_len,
+            bound,
+        } => {
+            let boundary = match bound {
+                smelt_store::HistoryIndexBound::BeforeFinalLen => "before",
+                smelt_store::HistoryIndexBound::AtOrBeforeFinalLen => "at or before",
+            };
+            format!(
+                "invalid side-table row: {table} index {} must be {boundary} final history length {}",
+                index.get(),
+                final_len.get()
+            )
+        }
+        smelt_store::SessionCommitFailure::Integrity { message } => message.clone(),
+    }
+}
+
+fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
     smelt_perf::perf::record_value(
-        "persist:write:history_inserted",
-        save_report.history_inserted,
+        "persist:write:previous_revision",
+        receipt.previous_revision.get(),
     );
-    smelt_perf::perf::record_value(
-        "persist:write:history_unchanged",
-        save_report.history_unchanged,
-    );
+    smelt_perf::perf::record_value("persist:write:revision", receipt.revision.get());
+    smelt_perf::perf::record_value("persist:write:history_len", receipt.history_len.get());
+    smelt_perf::perf::record_value("persist:write:descriptor_len", receipt.descriptor_len.get());
 }
 
 fn write(
     req: &PersistRequest,
     db_cache: &mut PersistDbCache,
-) -> Result<smelt_store::SessionSaveReport, String> {
+) -> Result<smelt_store::SaveReceipt, PersistWriteError> {
     let _perf = smelt_perf::perf::begin("persist:write");
     smelt_perf::perf::record_value(
         "persist:write:history_items",
-        req.delta.history.history.len() as u64,
+        req.command.history.items.len() as u64,
     );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
+    let descriptor_records = req
+        .command
+        .descriptors
+        .as_ref()
+        .map_or(0, |descriptors| descriptors.records.len() as u64);
+    smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
+
     std::fs::create_dir_all(&req.session_dir)
-        .map_err(|err| format!("create session directory: {err}"))?;
+        .map_err(|err| persist_write_error(format!("create session directory: {err}")))?;
     let blob_dir = req.session_dir.join("blobs");
-    let url_to_blob = write_blobs(&blob_dir, &req.blobs)?;
-    let mut delta = req.delta.clone();
+    let url_to_blob = write_blobs(&blob_dir, &req.blobs).map_err(persist_write_error)?;
+    let mut command = req.command.clone();
     if !url_to_blob.is_empty() {
-        smelt_core::session::externalize_blobs(&mut delta.history.history, &url_to_blob);
+        smelt_core::session::externalize_blobs(&mut command.history.items, &url_to_blob);
     }
     let db_path = req.session_dir.join("session.db");
     let db = db_cache
         .db(&db_path)
-        .map_err(|err| format!("open session database: {err}"))?;
-    let descriptor_delta = delta
+        .map_err(|err| persist_write_error(format!("open session database: {err}")))?;
+    let receipt = db
+        .commit_session(&command)
+        .map_err(PersistWriteError::Commit)?;
+    record_save_receipt(&receipt);
+    let (descriptor_start_idx, descriptor_records) = command
         .descriptors
         .as_ref()
-        .map(|descriptors| {
-            let records = descriptors
-                .records
-                .iter()
-                .enumerate()
-                .map(|(offset, record)| {
-                    transcript_descriptor_row(
-                        descriptors.start_descriptor_idx + offset,
-                        record,
-                        &delta.history,
-                    )
-                })
-                .collect::<Result<Vec<_>, smelt_store::StoreError>>()
-                .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
-            Ok::<_, String>(smelt_store::TranscriptDescriptorSuffix {
-                start_descriptor_idx: descriptors.start_descriptor_idx,
-                records,
-            })
-        })
-        .transpose()?;
-    let store_delta = smelt_store::SessionDelta {
-        history: delta.history,
-        descriptors: descriptor_delta,
-    };
-    let save_report = db
-        .apply_session_delta_as_writer(&store_delta)
-        .map_err(|err| format!("save session database: {err}"))?;
-    record_save_report(&save_report);
-    let (descriptor_start_idx, descriptor_records) = store_delta
-        .descriptors
-        .as_ref()
-        .map(|descriptors| {
-            (
-                descriptors.start_descriptor_idx as u64,
-                descriptors.records.len() as u64,
-            )
-        })
+        .map(|descriptors| (descriptors.start.get(), descriptors.records.len() as u64))
         .unwrap_or((0, 0));
     smelt_perf::perf::record_value("persist:write:descriptor_start_idx", descriptor_start_idx);
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
-    smelt_core::session::write_db_meta_sidecar(&req.session_dir)
-        .map_err(|err| format!("write session metadata: {err}"))?;
-    Ok(save_report)
-}
-
-fn write_metadata(
-    req: &PersistMetadataRequest,
-    db_cache: &mut PersistDbCache,
-) -> Result<smelt_store::SessionSaveReport, String> {
-    let _perf = smelt_perf::perf::begin("persist:write_metadata");
-    smelt_perf::perf::record_value("persist:write:history_items", 0);
-    smelt_perf::perf::record_value("persist:write:blobs", 0);
-    smelt_perf::perf::record_value("persist:write:descriptor_records", 0);
-    smelt_perf::perf::record_value("persist:write:metadata_only", 1);
-    std::fs::create_dir_all(&req.session_dir)
-        .map_err(|err| format!("create session directory: {err}"))?;
-    let db_path = req.session_dir.join("session.db");
-    let db = db_cache
-        .db(&db_path)
-        .map_err(|err| format!("open session database: {err}"))?;
-    let save_report = db
-        .save_session_state_and_side_table_suffixes_as_writer(&req.state, &req.side_tables)
-        .map_err(|err| format!("save session metadata: {err}"))?;
-    record_save_report(&save_report);
-    smelt_core::session::write_db_meta_sidecar(&req.session_dir)
-        .map_err(|err| format!("write session metadata: {err}"))?;
-    Ok(save_report)
+    if let Err(err) = smelt_core::session::refresh_derived_files(&req.session_dir) {
+        smelt_perf::perf::record_value("persist:write:derived_refresh_failed", 1);
+        eprintln!(
+            "smelt: failed to refresh derived files for session {}: {err}",
+            receipt.session_id
+        );
+    }
+    Ok(receipt)
 }
 
 fn write_request_audit(
@@ -420,203 +401,23 @@ pub(crate) fn write_transcript_descriptor_suffix(
         .enumerate()
         .map(|(offset, record)| {
             let descriptor_idx = start_descriptor_idx + offset;
-            let record = TranscriptBlockRecordWithId {
+            let record = smelt_core::TranscriptBlockRecordWithId {
                 block_id: smelt_core::BlockId::new(descriptor_idx as u64),
                 record: record.clone(),
             };
-            let search_text = descriptor_search_text(
-                &record.record.descriptor,
-                record.record.tool_state.as_ref().map(|(_, state)| state),
-            );
             smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
                 descriptor_idx,
                 record.block_id.get(),
                 &record.record,
-                search_text,
             )
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
-    db.replace_transcript_descriptor_suffix(start_descriptor_idx, &rows)
-}
-
-fn transcript_descriptor_row(
-    descriptor_idx: usize,
-    record: &TranscriptBlockRecordWithId,
-    history: &smelt_store::SessionHistorySuffix,
-) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
-    let search_text = descriptor_search_text(
-        &record.record.descriptor,
-        record.record.tool_state.as_ref().map(|(_, state)| state),
-    );
-    let owned_record;
-    let record_ref = match record.record.origin {
-        Some(smelt_core::BlockOrigin::History(idx))
-            if !history_suffix_contains_matching_descriptor_origin(history, idx, record) =>
-        {
-            owned_record = smelt_core::TranscriptBlockRecord {
-                origin: None,
-                ..record.record.clone()
-            };
-            &owned_record
-        }
-        _ => &record.record,
-    };
-    smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
-        descriptor_idx,
-        record.block_id.get(),
-        record_ref,
-        search_text,
-    )
-}
-
-fn history_suffix_contains_matching_descriptor_origin(
-    history: &smelt_store::SessionHistorySuffix,
-    history_idx: usize,
-    record: &TranscriptBlockRecordWithId,
-) -> bool {
-    if history_idx >= history.history_len {
-        return false;
-    }
-    if history_idx < history.history_start_idx {
-        return true;
-    }
-    history
-        .history
-        .get(history_idx - history.history_start_idx)
-        .is_some_and(|item| descriptor_origin_matches_history_item(&record.record.descriptor, item))
-}
-
-fn descriptor_origin_matches_history_item(
-    descriptor: &smelt_core::TranscriptBlockDescriptor,
-    item: &protocol::HistoryItem,
-) -> bool {
-    matches!(
-        (descriptor.kind(), item),
-        ("user", protocol::HistoryItem::User { .. })
-            | (
-                "assistant" | "thinking" | "tool" | "exec" | "code",
-                protocol::HistoryItem::Assistant(_),
-            )
-    )
+    db.replace_transcript_descriptor_suffix_for_repair(start_descriptor_idx, &rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn suffix(
-        history_start_idx: usize,
-        history_len: usize,
-        history: Vec<protocol::HistoryItem>,
-    ) -> smelt_store::SessionHistorySuffix {
-        smelt_store::SessionHistorySuffix {
-            state: smelt_store::SessionState {
-                id: "test".into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                parent_id: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 0,
-                history_len: history_len as u64,
-                created_at: 0,
-                updated_at: 0,
-            },
-            history_start_idx,
-            history_len,
-            history,
-            side_tables: None,
-        }
-    }
-
-    #[test]
-    fn transcript_descriptor_row_preserves_sparse_block_id() {
-        let record = TranscriptBlockRecordWithId {
-            block_id: smelt_core::BlockId::new(302),
-            record: smelt_core::TranscriptBlockRecord {
-                descriptor: smelt_core::TranscriptBlockDescriptor::User {
-                    text: "follow up".to_string(),
-                    image_labels: Vec::new(),
-                },
-                content_hash: 0,
-                origin: Some(smelt_core::BlockOrigin::History(11)),
-                tool_state: None,
-            },
-        };
-
-        let history = suffix(
-            11,
-            12,
-            vec![protocol::HistoryItem::user(protocol::Content::text(
-                "follow up",
-            ))],
-        );
-        let row = transcript_descriptor_row(1, &record, &history).expect("descriptor row");
-
-        assert_eq!(row.block_idx, 302);
-        assert_eq!(row.history_idx, Some(11));
-    }
-
-    #[test]
-    fn transcript_descriptor_row_omits_unsaved_history_origin() {
-        let record = TranscriptBlockRecordWithId {
-            block_id: smelt_core::BlockId::new(303),
-            record: smelt_core::TranscriptBlockRecord {
-                descriptor: smelt_core::TranscriptBlockDescriptor::User {
-                    text: "follow up".to_string(),
-                    image_labels: Vec::new(),
-                },
-                content_hash: 0,
-                origin: Some(smelt_core::BlockOrigin::History(12)),
-                tool_state: None,
-            },
-        };
-
-        let history = suffix(12, 12, Vec::new());
-        let row = transcript_descriptor_row(2, &record, &history).expect("descriptor row");
-
-        assert_eq!(row.block_idx, 303);
-        assert_eq!(row.history_idx, None);
-        assert_eq!(row.origin_json, None);
-    }
-
-    #[test]
-    fn transcript_descriptor_row_omits_origin_that_points_to_nonmatching_suffix_item() {
-        let record = TranscriptBlockRecordWithId {
-            block_id: smelt_core::BlockId::new(304),
-            record: smelt_core::TranscriptBlockRecord {
-                descriptor: smelt_core::TranscriptBlockDescriptor::User {
-                    text: "follow up".to_string(),
-                    image_labels: Vec::new(),
-                },
-                content_hash: 0,
-                origin: Some(smelt_core::BlockOrigin::History(3)),
-                tool_state: None,
-            },
-        };
-        let history = suffix(
-            3,
-            4,
-            vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
-                "cwd changed",
-            ))],
-        );
-
-        let row = transcript_descriptor_row(3, &record, &history).expect("descriptor row");
-
-        assert_eq!(row.block_idx, 304);
-        assert_eq!(row.history_idx, None);
-        assert_eq!(row.origin_json, None);
-    }
 
     #[test]
     fn request_audit_is_written_by_worker() {

@@ -493,6 +493,37 @@ impl TuiApp {
         })
     }
 
+    fn record_finished_turn_state(&mut self, ui_meta: protocol::TurnMeta) {
+        let mut meta = match self.pending_turn_meta.take() {
+            Some(engine_meta) => protocol::TurnMeta {
+                elapsed_ms: ui_meta.elapsed_ms,
+                avg_tps: engine_meta.avg_tps.or(ui_meta.avg_tps),
+                display_tps: engine_meta.display_tps.or(ui_meta.display_tps),
+                interrupted: engine_meta.interrupted,
+                tool_elapsed: engine_meta.tool_elapsed,
+            },
+            None => ui_meta,
+        };
+        if meta.display_tps.is_none() {
+            meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
+        }
+        let history_len = self.session_history_len();
+        let snapshot_context = !self.session_is_read_only();
+        let update_context_token_history_len =
+            snapshot_context && self.context_tokens_updated_this_turn;
+        if snapshot_context {
+            self.context_tokens_updated_this_turn = false;
+        }
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::FinishTurnState {
+                history_len,
+                meta,
+                snapshot_context,
+                update_context_token_history_len,
+            },
+        );
+    }
+
     /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
@@ -510,9 +541,8 @@ impl TuiApp {
         self.clear_tool_drafts();
         self.clear_compaction_preview();
         self.pending_history_appends.clear();
-        {
-            self.working.finish(TurnOutcome::Cancelled);
-        };
+        let meta = self.working.finish(TurnOutcome::Cancelled);
+        self.record_finished_turn_state(meta);
         self.queued_inputs.clear();
     }
 
@@ -633,36 +663,9 @@ impl TuiApp {
             }
         };
 
-        let mut meta = match self.pending_turn_meta.take() {
-            Some(engine_meta) => protocol::TurnMeta {
-                elapsed_ms: meta.elapsed_ms,
-                avg_tps: engine_meta.avg_tps.or(meta.avg_tps),
-                display_tps: engine_meta.display_tps.or(meta.display_tps),
-                interrupted: engine_meta.interrupted,
-                tool_elapsed: engine_meta.tool_elapsed,
-            },
-            None => meta,
-        };
-        if meta.display_tps.is_none() {
-            meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
-        }
         {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:document_state");
-            let history_len = self.session_history_len();
-            let snapshot_context = !self.session_is_read_only();
-            let update_context_token_history_len =
-                snapshot_context && self.context_tokens_updated_this_turn;
-            if snapshot_context {
-                self.context_tokens_updated_this_turn = false;
-            }
-            self.apply_session_document_mutation(
-                crate::app::session_document::SessionMutation::FinishTurnState {
-                    history_len,
-                    meta,
-                    snapshot_context,
-                    update_context_token_history_len,
-                },
-            );
+            self.record_finished_turn_state(meta);
         }
         if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
@@ -1235,9 +1238,7 @@ mod tests {
             "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
-            "compat:session:load_full_fallback",
-            "compat:session:preview_full_fallback",
-            "compat:session:rebuild_transcript_full_fallback",
+            "session:rebuild_transcript_full_fallback",
             "session:display_only_load_full",
             "transcript:build_from_session:history_items",
         ] {

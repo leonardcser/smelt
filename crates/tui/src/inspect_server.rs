@@ -477,10 +477,10 @@ async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
 
 fn session_requests_json(id: &str) -> std::result::Result<String, String> {
     let dir = session_dir(id);
-    if let Err(err) = smelt_core::session::ensure_session_db(&dir) {
+    if let Err(err) = smelt_core::session::ensure_session_db_read_only(&dir) {
         if matches!(
             err,
-            smelt_core::session::SessionMigrationError::MissingDatabase { .. }
+            smelt_core::session::SessionStoreError::MissingDatabase { .. }
         ) {
             return Ok("[]".to_string());
         }
@@ -522,10 +522,10 @@ fn request_payload_json(id: &str, request_id: &str) -> std::result::Result<Optio
         .parse::<i64>()
         .map_err(|err| format!("invalid request id: {err}"))?;
     let dir = session_dir(id);
-    if let Err(err) = smelt_core::session::ensure_session_db(&dir) {
+    if let Err(err) = smelt_core::session::ensure_session_db_read_only(&dir) {
         if matches!(
             err,
-            smelt_core::session::SessionMigrationError::MissingDatabase { .. }
+            smelt_core::session::SessionStoreError::MissingDatabase { .. }
         ) {
             return Ok(None);
         }

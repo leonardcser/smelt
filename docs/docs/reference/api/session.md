@@ -144,7 +144,7 @@ Return current session metadata as a table. Includes id, title, slug, timestamps
 fun(): table
 ```
 
-List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, `size_bytes` when available, and `migration_status` / `migration_message` when a legacy import is pending or failed.
+List persisted SQLite sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.
 
 ## `smelt.session.load`
 
@@ -224,7 +224,7 @@ Currently-assembled system prompt sent on the next turn. Reflects the configured
 fun(id: string): string?
 ```
 
-Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text when available, refreshing the `content.txt` sidecar for compatibility; falls back to legacy sidecars/importers for old sessions.
+Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text, refreshing the `content.txt` sidecar when needed.
 
 ## `smelt.session.texts`
 

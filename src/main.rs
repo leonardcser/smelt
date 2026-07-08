@@ -826,7 +826,6 @@ async fn async_main() {
     };
 
     if args.headless {
-        smelt_core::session::spawn_background_migration();
         let output_format = match args.format {
             OutputFormat::Text => smelt_core::OutputFormat::Text,
             OutputFormat::Json => smelt_core::OutputFormat::Json,
@@ -906,12 +905,6 @@ async fn async_main() {
             remember: cfg.remember.clone(),
             context_window: None,
         };
-        smelt_core::session::spawn_background_migration_with_event({
-            let app_event_tx = app_event_tx.clone();
-            move |event| {
-                let _ = app_event_tx.send(tui::app::AppEvent::SessionMigration(event));
-            }
-        });
         let session_persistence = if args.ephemeral {
             match tui::app::SessionPersistence::ephemeral() {
                 Ok(persistence) => persistence,

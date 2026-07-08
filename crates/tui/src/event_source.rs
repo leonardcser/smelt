@@ -10,6 +10,7 @@ use crossterm::event::Event as TermEvent;
 use protocol::EngineEvent;
 
 /// One unit of input to the main loop.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum SourceEvent {
     /// Raw terminal event (key, mouse, paste, focus, resize).

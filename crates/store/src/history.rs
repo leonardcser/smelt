@@ -63,7 +63,7 @@ impl From<Range<usize>> for TranscriptDescriptorRange {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct TranscriptDescriptorRecord {
     pub block_idx: u64,
     pub history_idx: Option<u64>,
@@ -73,7 +73,7 @@ pub struct TranscriptDescriptorRecord {
     pub content_hash: String,
     pub estimated_text_bytes: u64,
     pub preview_text: String,
-    pub search_text: String,
+    pub indexed_text: String,
     pub descriptor_json: String,
     pub origin_json: Option<String>,
     pub tool_state_json: Option<String>,
@@ -146,8 +146,6 @@ impl TranscriptDescriptorSlice {
     }
 }
 
-const SEARCH_DRIVER_TERM_POSTING_CAP: u64 = 1024;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptSearchCandidate {
     pub block_idx: u64,
@@ -181,15 +179,6 @@ pub(crate) fn item_hash(item: &HistoryItem) -> Result<String> {
     let normalized = normalized_history_value(item, ObjectCompression::none(), None)?;
     let json = serde_json::to_string(&normalized.value)?;
     Ok(sha256_hex(json.as_bytes()))
-}
-
-pub(crate) fn write_history_item(
-    conn: &Connection,
-    idx: usize,
-    item: &HistoryItem,
-    compression: ObjectCompression,
-) -> Result<()> {
-    write_history_item_at_block(conn, idx, idx, item, compression)
 }
 
 fn write_history_item_at_block(
@@ -477,8 +466,9 @@ pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {
 
 pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     let _perf = perf::begin("store:transcript:search_blob_full");
-    let mut stmt =
-        conn.prepare("SELECT text FROM transcript_search WHERE text != '' ORDER BY block_idx")?;
+    let mut stmt = conn.prepare(
+        "SELECT indexed_text FROM transcript_search WHERE indexed_text != '' ORDER BY block_idx",
+    )?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut out = String::new();
     let mut row_count = 0u64;
@@ -710,8 +700,8 @@ fn insert_transcript_descriptor_record(
         "INSERT INTO transcript_blocks (
             block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
             estimated_text_bytes, descriptor_json, origin_json, tool_state_json,
-            preview_text, search_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            preview_text
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             block_idx,
             descriptor_idx,
@@ -725,10 +715,9 @@ fn insert_transcript_descriptor_record(
             record.origin_json,
             tool_state_json,
             record.preview_text,
-            record.search_text,
         ],
     )?;
-    insert_transcript_search(conn, block_idx, history_idx, &record.search_text)?;
+    insert_transcript_search(conn, block_idx, history_idx, &record.indexed_text)?;
     Ok(())
 }
 
@@ -836,12 +825,13 @@ pub(crate) fn read_transcript_descriptor_records(
 ) -> Result<Vec<TranscriptDescriptorRecord>> {
     let _perf = perf::begin("store:transcript:read_descriptors_full");
     let mut stmt = conn.prepare(
-        "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, search_text, descriptor_json,
-                origin_json, tool_state_json
-         FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL
-         ORDER BY descriptor_idx",
+        "SELECT b.block_idx, b.history_idx, b.kind, b.tool_call_id, b.tool_name, b.content_hash,
+                b.estimated_text_bytes, b.preview_text, COALESCE(s.indexed_text, '') AS indexed_text,
+                b.descriptor_json, b.origin_json, b.tool_state_json
+         FROM transcript_blocks b
+         LEFT JOIN transcript_search s ON s.block_idx = b.block_idx
+         WHERE b.descriptor_json IS NOT NULL
+         ORDER BY b.descriptor_idx",
     )?;
     let records = read_transcript_descriptor_records_from_stmt(
         conn,
@@ -887,8 +877,8 @@ pub(crate) fn read_transcript_descriptor_slice_with_total(
     let offset = checked_i64(start as u64, "descriptor_range_start")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
-                origin_json, tool_state_json
+                estimated_text_bytes, preview_text, '' AS indexed_text,
+                descriptor_json, origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_idx >= ?2
            AND descriptor_idx < ?2 + ?1
@@ -943,8 +933,8 @@ pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
     let limit = checked_i64(count as u64, "descriptor_tail_len")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
-                origin_json, tool_state_json
+                estimated_text_bytes, preview_text, '' AS indexed_text,
+                descriptor_json, origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
          ORDER BY descriptor_idx DESC
@@ -998,8 +988,8 @@ pub(crate) fn read_transcript_descriptor_before_kind_at_index(
     )?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
-                origin_json, tool_state_json
+                estimated_text_bytes, preview_text, '' AS indexed_text,
+                descriptor_json, origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
            AND kind = ?1
@@ -1025,8 +1015,8 @@ pub(crate) fn read_transcript_descriptor_after_kind_at_index(
     let after_or_at = checked_i64(after_or_at_descriptor_index, "after_or_at_descriptor_index")?;
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-                estimated_text_bytes, preview_text, '' AS search_text, descriptor_json,
-                origin_json, tool_state_json
+                estimated_text_bytes, preview_text, '' AS indexed_text,
+                descriptor_json, origin_json, tool_state_json
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
            AND kind = ?1
@@ -1062,7 +1052,7 @@ where
             content_hash: row.get(5)?,
             estimated_text_bytes: row.get::<_, i64>(6)? as u64,
             preview_text: row.get(7)?,
-            search_text: row.get(8)?,
+            indexed_text: row.get(8)?,
             descriptor_json: row.get(9)?,
             origin_json: row.get(10)?,
             tool_state_json: row.get(11)?,
@@ -1129,19 +1119,7 @@ pub(crate) fn search_transcript_candidate_page(
         perf::record_value("store:transcript:search_candidates_loaded", 0);
         return Ok(Vec::new());
     }
-    let terms = search_terms(query);
-    if terms.is_empty() {
-        perf::record_value("store:transcript:search_candidate_rows_scanned", 0);
-        perf::record_value("store:transcript:search_candidates_loaded", 0);
-        return Ok(Vec::new());
-    }
 
-    let driver = search_driver_term(conn, &terms)?;
-    let other_terms = terms
-        .iter()
-        .filter(|term| *term != &driver)
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     let page_size = if limit == usize::MAX {
         1024usize
     } else {
@@ -1152,18 +1130,19 @@ pub(crate) fn search_transcript_candidate_page(
     let mut inclusive = origin_block_idx.is_some();
     let mut scanned = 0usize;
     let mut batches = 0usize;
+    let use_fts = query.chars().count() >= 3;
+    perf::record_value("store:transcript:search_fts", u64::from(use_fts));
 
     loop {
         let batch = search_transcript_candidate_batch(
             conn,
             TranscriptCandidateBatchQuery {
-                driver: &driver,
-                other_terms: &other_terms,
+                query,
                 bound,
                 inclusive,
                 direction,
-                query,
                 page_size,
+                use_fts,
             },
         )?;
         batches = batches.saturating_add(1);
@@ -1209,51 +1188,13 @@ struct TranscriptCandidateRow {
     history_idx: Option<u64>,
 }
 
-fn search_driver_term(conn: &Connection, terms: &[String]) -> Result<String> {
-    if terms.len() == 1 {
-        perf::record_value("store:transcript:search_driver_terms", 1);
-        return Ok(terms[0].clone());
-    }
-    let _perf = perf::begin("store:transcript:search_driver_term");
-    let cap = checked_i64(
-        SEARCH_DRIVER_TERM_POSTING_CAP,
-        "search_driver_term_posting_cap",
-    )?;
-    let mut stmt = conn.prepare(
-        "SELECT COUNT(*) FROM (
-             SELECT 1 FROM transcript_search_terms WHERE term = ?1 LIMIT ?2
-         )",
-    )?;
-    let mut best: Option<(String, u64)> = None;
-    for term in terms {
-        let postings = stmt
-            .query_row(params![term, cap], |row| row.get::<_, i64>(0))?
-            .max(0) as u64;
-        if best
-            .as_ref()
-            .is_none_or(|(_, best_postings)| postings < *best_postings)
-        {
-            best = Some((term.clone(), postings));
-        }
-    }
-    let (term, postings) = best.expect("search terms are non-empty");
-    perf::record_value("store:transcript:search_driver_terms", terms.len() as u64);
-    perf::record_value(
-        "store:transcript:search_driver_posting_cap",
-        SEARCH_DRIVER_TERM_POSTING_CAP,
-    );
-    perf::record_value("store:transcript:search_driver_postings", postings);
-    Ok(term)
-}
-
 struct TranscriptCandidateBatchQuery<'a> {
-    driver: &'a str,
-    other_terms: &'a [&'a str],
+    query: &'a str,
     bound: Option<u64>,
     inclusive: bool,
     direction: TranscriptSearchDirection,
-    query: &'a str,
     page_size: usize,
+    use_fts: bool,
 }
 
 fn search_transcript_candidate_batch(
@@ -1265,48 +1206,42 @@ fn search_transcript_candidate_batch(
         TranscriptSearchDirection::Backward => "DESC",
     };
     let bound_filter = match (query.bound, query.inclusive, query.direction) {
-        (Some(_), true, TranscriptSearchDirection::Forward) => "AND d.block_idx >= ?",
-        (Some(_), false, TranscriptSearchDirection::Forward) => "AND d.block_idx > ?",
-        (Some(_), true, TranscriptSearchDirection::Backward) => "AND d.block_idx <= ?",
-        (Some(_), false, TranscriptSearchDirection::Backward) => "AND d.block_idx < ?",
+        (Some(_), true, TranscriptSearchDirection::Forward) => "AND s.block_idx >= ?",
+        (Some(_), false, TranscriptSearchDirection::Forward) => "AND s.block_idx > ?",
+        (Some(_), true, TranscriptSearchDirection::Backward) => "AND s.block_idx <= ?",
+        (Some(_), false, TranscriptSearchDirection::Backward) => "AND s.block_idx < ?",
         (None, _, _) => "",
     };
-    let exists_filters = query
-        .other_terms
-        .iter()
-        .map(|_| {
-            "AND EXISTS (
-                SELECT 1 FROM transcript_search_terms t
-                WHERE t.term = ? AND t.block_idx = d.block_idx
-            )"
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let sql = format!(
-        "SELECT s.block_idx, s.history_idx
-         FROM transcript_search_terms d
-         JOIN transcript_search s ON s.block_idx = d.block_idx
-         WHERE d.term = ? {bound_filter} {exists_filters}
-           AND instr(s.text, ?) > 0
-         ORDER BY d.block_idx {order}
-         LIMIT ?"
-    );
-    let mut values =
-        Vec::with_capacity(3 + query.other_terms.len() + usize::from(query.bound.is_some()));
-    values.push(SqlValue::from(query.driver.to_string()));
+    let sql = if query.use_fts {
+        format!(
+            "SELECT s.block_idx, s.history_idx
+             FROM transcript_search_fts f
+             JOIN transcript_search s ON s.block_idx = f.rowid
+             WHERE f.indexed_text MATCH ?
+               AND instr(s.indexed_text, ?) > 0 {bound_filter}
+             ORDER BY s.block_idx {order}
+             LIMIT ?"
+        )
+    } else {
+        format!(
+            "SELECT s.block_idx, s.history_idx
+             FROM transcript_search s
+             WHERE instr(s.indexed_text, ?) > 0 {bound_filter}
+             ORDER BY s.block_idx {order}
+             LIMIT ?"
+        )
+    };
+    let mut values = Vec::with_capacity(3 + usize::from(query.bound.is_some()));
+    if query.use_fts {
+        values.push(SqlValue::from(fts5_phrase_query(query.query)));
+    }
+    values.push(SqlValue::from(query.query.to_string()));
     if let Some(bound) = query.bound {
         values.push(SqlValue::from(checked_i64(
             bound,
             "search_candidate_bound",
         )?));
     }
-    values.extend(
-        query
-            .other_terms
-            .iter()
-            .map(|term| SqlValue::from((*term).to_string())),
-    );
-    values.push(SqlValue::from(query.query.to_string()));
     values.push(SqlValue::from(checked_i64(
         query.page_size as u64,
         "search_candidate_page_size",
@@ -1327,59 +1262,31 @@ fn search_transcript_candidate_batch(
     Ok(out)
 }
 
+fn fts5_phrase_query(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 2);
+    out.push('"');
+    for ch in query.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
 fn insert_transcript_search(
     conn: &Connection,
     block_idx: i64,
     history_idx: Option<i64>,
-    text: &str,
+    indexed_text: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO transcript_search (block_idx, history_idx, text)
+        "INSERT INTO transcript_search (block_idx, history_idx, indexed_text)
          VALUES (?1, ?2, ?3)",
-        params![block_idx, history_idx, text],
+        params![block_idx, history_idx, indexed_text],
     )?;
-    insert_transcript_search_terms(conn, block_idx, text)
-}
-
-fn insert_transcript_search_terms(conn: &Connection, block_idx: i64, text: &str) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT OR IGNORE INTO transcript_search_terms (term, block_idx)
-         VALUES (?1, ?2)",
-    )?;
-    for term in index_terms(text) {
-        stmt.execute(params![term, block_idx])?;
-    }
     Ok(())
-}
-
-fn search_terms(text: &str) -> Vec<String> {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.is_empty() {
-        return Vec::new();
-    }
-    grams_for_sizes(&chars, std::iter::once(chars.len().min(3)))
-}
-
-fn index_terms(text: &str) -> Vec<String> {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.is_empty() {
-        return Vec::new();
-    }
-    grams_for_sizes(&chars, 1..=chars.len().min(3))
-}
-
-fn grams_for_sizes(chars: &[char], sizes: impl IntoIterator<Item = usize>) -> Vec<String> {
-    let mut terms = Vec::new();
-    for n in sizes {
-        terms.extend(
-            chars
-                .windows(n)
-                .map(|window| window.iter().collect::<String>()),
-        );
-    }
-    terms.sort_unstable();
-    terms.dedup();
-    terms
 }
 
 struct NormalizedHistoryItem {
@@ -1509,8 +1416,8 @@ fn insert_transcript_block(
     conn.execute(
         "INSERT INTO transcript_blocks (
             block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
-            estimated_text_bytes, preview_text, search_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            estimated_text_bytes, preview_text
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             block_idx,
             history_idx,
@@ -1519,8 +1426,7 @@ fn insert_transcript_block(
             tool_name,
             content_hash,
             checked_i64(search_text.len() as u64, "estimated_text_bytes")?,
-            preview,
-            search_text
+            preview
         ],
     )?;
     insert_transcript_search(conn, block_idx, Some(history_idx), search_text)?;
@@ -1637,25 +1543,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transcript_search_candidate_plan_uses_term_index() {
+    fn transcript_search_candidate_plan_uses_fts_index() {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::schema::migrate(&mut conn, "test").unwrap();
         let details = query_plan_details(
             &conn,
             "SELECT s.block_idx, s.history_idx
-             FROM transcript_search_terms d
-             JOIN transcript_search s ON s.block_idx = d.block_idx
-             WHERE d.term = ?1
-               AND instr(s.text, ?2) > 0
-             ORDER BY d.block_idx ASC
+             FROM transcript_search_fts f
+             JOIN transcript_search s ON s.block_idx = f.rowid
+             WHERE f.indexed_text MATCH ?1
+               AND instr(s.indexed_text, ?2) > 0
+             ORDER BY s.block_idx ASC
              LIMIT ?3",
-            rusqlite::params!["abc", "abcdef", 64_i64],
+            rusqlite::params!["\"abcdef\"", "abcdef", 64_i64],
         );
 
         assert!(
             details
                 .iter()
-                .any(|detail| detail.contains("SEARCH d USING COVERING INDEX")),
+                .any(|detail| detail.contains("SCAN f VIRTUAL TABLE")),
             "{details:#?}"
         );
         assert!(
@@ -1664,12 +1570,12 @@ mod tests {
                 .any(|detail| detail.contains("SEARCH s USING INTEGER PRIMARY KEY")),
             "{details:#?}"
         );
-        assert!(
-            details
-                .iter()
-                .all(|detail| !detail.contains("USE TEMP B-TREE")),
-            "{details:#?}"
-        );
+    }
+
+    #[test]
+    fn fts5_phrase_query_quotes_literal_search_text() {
+        assert_eq!(fts5_phrase_query("foo_bar%"), "\"foo_bar%\"");
+        assert_eq!(fts5_phrase_query("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     fn query_plan_details<P: rusqlite::Params>(

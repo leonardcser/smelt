@@ -10,6 +10,17 @@ use smelt_core::session::{
     ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionMeta, SessionStoreRef,
 };
 use smelt_core::session_runtime::LiveSession;
+#[cfg(test)]
+use smelt_core::session_save::DurableCursor;
+#[cfg(test)]
+use smelt_core::session_save::SubmittedHistoryRange;
+pub(crate) use smelt_core::session_save::{
+    DescriptorAppendSubmission, DocumentGeneration, SessionSaveSkipReason,
+};
+use smelt_core::session_save::{
+    DocumentDirtyState, PersistDelta, PersistDescriptorDelta, SaveAckPlan, SessionPersistState,
+    SessionSavePlan, SessionSaveState,
+};
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
 use crate::app::transcript::TranscriptDocument;
@@ -76,8 +87,9 @@ impl TuiSessionDocument {
     }
 
     pub(crate) fn install_materialized_session(&mut self, descriptors_persisted: bool) {
+        let descriptor_len = durable_descriptor_len_for_transcript(&self.transcript);
         self.persist
-            .install_materialized_session(descriptors_persisted);
+            .install_materialized_session(descriptors_persisted, descriptor_len);
     }
 
     pub(crate) fn install_loaded_full_session(
@@ -88,9 +100,10 @@ impl TuiSessionDocument {
         revision: u64,
     ) {
         self.live_session = None;
-        self.persist
-            .install_loaded_full_session(writable, history_len, revision);
         self.transcript.replace_loaded_transcript(transcript);
+        let descriptor_len = durable_descriptor_len_for_transcript(&self.transcript);
+        self.persist
+            .install_loaded_full_session(writable, history_len, descriptor_len, revision);
     }
 
     pub(crate) fn install_loaded_store_session(
@@ -102,9 +115,10 @@ impl TuiSessionDocument {
     ) {
         let revision = live_session.header.revision;
         self.live_session = Some(live_session);
-        self.persist
-            .install_loaded_store_session(writable, history_len, revision);
         self.transcript.replace_loaded_transcript(transcript);
+        let descriptor_len = durable_descriptor_len_for_transcript(&self.transcript);
+        self.persist
+            .install_loaded_store_session(writable, history_len, descriptor_len, revision);
     }
 
     #[cfg(test)]
@@ -293,21 +307,31 @@ impl TuiSessionDocument {
         self.persist.has_pending_save()
     }
 
-    pub(crate) fn mark_submitted(
+    pub(crate) fn submit_metadata_save(
         &mut self,
         session_id: String,
-        kind: crate::persist::PersistSaveKind,
         generation: DocumentGeneration,
-        history: SubmittedHistoryRange,
-        descriptor_append: Option<DescriptorAppendSubmission>,
-    ) -> Option<u64> {
+        state: smelt_store::SessionState,
+        side_tables: smelt_store::SideTableSuffixes,
+    ) -> Option<smelt_core::session_save::SubmittedSessionCommit> {
         self.persist
-            .begin_save(session_id, kind, generation, history, descriptor_append)
+            .begin_metadata_commit(session_id, generation, state, side_tables)
+    }
+
+    pub(crate) fn submit_history_save(
+        &mut self,
+        session_id: String,
+        generation: DocumentGeneration,
+        delta: PersistDelta,
+        descriptor_append: Option<DescriptorAppendSubmission>,
+    ) -> Result<Option<smelt_core::session_save::SubmittedSessionCommit>, String> {
+        self.persist
+            .begin_history_commit(session_id, generation, delta, descriptor_append)
     }
 
     pub(crate) fn mark_persisted(
         &mut self,
-        ack: &crate::persist::PersistAck,
+        receipt: &smelt_store::SaveReceipt,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> bool {
         SessionDocument::mark_persisted(
@@ -315,12 +339,17 @@ impl TuiSessionDocument {
             &mut self.transcript,
             self.live_session.as_mut(),
             checkpoint,
-            ack,
+            receipt,
         )
     }
 
     pub(crate) fn mark_persist_failed(&mut self, err: &crate::persist::PersistFailure) {
-        SessionDocument::mark_persist_failed(&mut self.persist, self.live_session.as_mut(), err);
+        SessionDocument::mark_persist_failed(
+            &mut self.persist,
+            &mut self.transcript,
+            self.live_session.as_mut(),
+            err,
+        );
     }
 
     pub(crate) fn mark_ephemeral_persisted(
@@ -354,7 +383,8 @@ impl TuiSessionDocument {
                 model: metadata.model,
             },
         );
-        self.persist.record_session_mutation(&result);
+        self.persist
+            .record_mutation(result.session_dirty, result.history_dirty_from);
     }
 }
 
@@ -369,51 +399,6 @@ pub(crate) struct StoreBackedSessionDocument {
     pub(crate) live_session: smelt_core::session_runtime::LiveSession,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct DocumentDirtyState {
-    pending_or_queued_save: bool,
-    session_dirty: bool,
-    dirty_history_from: Option<usize>,
-    descriptor_dirty_from: Option<usize>,
-    store_ready: bool,
-    descriptors_persisted: bool,
-    history_len: usize,
-    transcript_empty: bool,
-}
-
-impl Default for DocumentDirtyState {
-    fn default() -> Self {
-        Self {
-            pending_or_queued_save: false,
-            session_dirty: false,
-            dirty_history_from: None,
-            descriptor_dirty_from: None,
-            store_ready: true,
-            descriptors_persisted: true,
-            history_len: 0,
-            transcript_empty: true,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SessionSaveSkipReason {
-    EmptyUnstored,
-    Unchanged,
-}
-
-enum SessionSavePlan {
-    Skip(SessionSaveSkipReason),
-    MetadataOnly {
-        generation: DocumentGeneration,
-    },
-    History {
-        generation: DocumentGeneration,
-        history_start_idx: usize,
-        descriptor_delta: Option<SessionDescriptorSavePlan>,
-    },
-}
-
 struct SessionDescriptorSavePlan {
     start_descriptor_idx: usize,
     records: Vec<smelt_core::TranscriptBlockRecordWithId>,
@@ -424,36 +409,23 @@ pub(crate) enum PreparedSessionSave {
     MetadataOnly {
         generation: DocumentGeneration,
         state: Box<smelt_store::SessionState>,
-        side_tables: Box<smelt_store::SessionSideTableSuffixes>,
+        side_tables: Box<smelt_store::SideTableSuffixes>,
     },
     History {
         generation: DocumentGeneration,
-        delta: Box<crate::persist::PersistDelta>,
+        delta: Box<PersistDelta>,
     },
     RequestHistoryAppend {
         generation: DocumentGeneration,
-        delta: Box<crate::persist::PersistDelta>,
+        delta: Box<PersistDelta>,
         descriptor_append: DescriptorAppendSubmission,
     },
 }
 
 struct RequestHistoryAppendSavePlan {
     generation: DocumentGeneration,
-    delta: Box<crate::persist::PersistDelta>,
+    delta: Box<PersistDelta>,
     descriptor_append: DescriptorAppendSubmission,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct SessionSaveState {
-    generation: DocumentGeneration,
-    store_ready: bool,
-    descriptors_persisted: bool,
-    session_dirty: bool,
-    dirty_history_from: Option<usize>,
-    history_len: usize,
-    durable_history_len: usize,
-    blobs_pending: bool,
-    supports_metadata_only: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -468,37 +440,6 @@ struct SessionSaveInput<'a> {
     history: SessionHistoryRef<'a>,
     transcript: &'a TranscriptDocument,
     state: SessionSaveState,
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) enum SessionSaveRequest<'a> {
-    Full {
-        persist: &'a SessionPersistState,
-        session: &'a Session,
-        transcript: &'a TranscriptDocument,
-        blobs_pending: bool,
-    },
-    Live {
-        persist: &'a SessionPersistState,
-        session: &'a Session,
-        live_session: &'a LiveSession,
-        transcript: &'a TranscriptDocument,
-        blobs_pending: bool,
-    },
-    RequestHistoryAppend(RequestHistoryAppendSaveInput<'a>),
-}
-
-#[cfg(test)]
-pub(crate) struct RequestHistoryAppendSaveInput<'a> {
-    pub(crate) persist: &'a SessionPersistState,
-    pub(crate) session: &'a Session,
-    pub(crate) transcript: &'a TranscriptDocument,
-    pub(crate) live_session: Option<&'a LiveSession>,
-    pub(crate) history_index: usize,
-    pub(crate) descriptor_order_start: usize,
-    pub(crate) item: &'a HistoryItem,
-    pub(crate) include_side_tables: bool,
 }
 
 impl<'a> SessionHistoryRef<'a> {
@@ -521,18 +462,6 @@ impl<'a> SessionHistoryRef<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DocumentGeneration {
-    pub(crate) session: u64,
-    pub(crate) transcript_descriptors: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DescriptorAppendSubmission {
-    pub(crate) count: usize,
-    pub(crate) had_descriptor_total: bool,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeSessionMetadata {
     pub(crate) updated_at_ms: u64,
@@ -550,196 +479,25 @@ pub(crate) struct RuntimeRequestHistoryAppendSave<'a> {
     pub(crate) blobs_pending: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SubmittedHistoryRange {
-    pub(crate) start_idx: usize,
-    pub(crate) len: usize,
+trait SessionPersistStateTuiExt {
+    fn current_generation(&self, transcript: &TranscriptDocument) -> DocumentGeneration;
+    fn full_save_state(
+        &self,
+        transcript: &TranscriptDocument,
+        history_len: usize,
+        blobs_pending: bool,
+    ) -> SessionSaveState;
+    fn live_save_state(
+        &self,
+        transcript: &TranscriptDocument,
+        live_session: &LiveSession,
+        blobs_pending: bool,
+    ) -> SessionSaveState;
 }
 
-impl SubmittedHistoryRange {
-    pub(crate) fn from_delta(delta: &crate::persist::PersistDelta) -> Self {
-        Self {
-            start_idx: delta.history.history_start_idx,
-            len: delta.history.history_len,
-        }
-    }
-
-    pub(crate) fn metadata_only(history_len: u64) -> Self {
-        let len = history_len as usize;
-        Self {
-            start_idx: len,
-            len,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PendingSessionSave {
-    save_id: u64,
-    session_id: String,
-    kind: crate::persist::PersistSaveKind,
-    generation: DocumentGeneration,
-    history: SubmittedHistoryRange,
-    descriptor_append: Option<DescriptorAppendSubmission>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct DurableCursor {
-    store_history_len: usize,
-    revision: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SessionPersistState {
-    save_pending: bool,
-    pending_save: Option<PendingSessionSave>,
-    next_save_id: u64,
-    dirty_generation: u64,
-    durable: DurableCursor,
-    store_ready: bool,
-    descriptors_persisted: bool,
-    session_dirty: bool,
-    dirty_history_from: Option<usize>,
-}
-
-impl SessionPersistState {
-    pub(crate) fn new() -> Self {
-        Self {
-            save_pending: false,
-            pending_save: None,
-            next_save_id: 1,
-            dirty_generation: 0,
-            durable: DurableCursor::default(),
-            store_ready: false,
-            descriptors_persisted: false,
-            session_dirty: false,
-            dirty_history_from: None,
-        }
-    }
-
-    fn begin_save(
-        &mut self,
-        session_id: String,
-        kind: crate::persist::PersistSaveKind,
-        generation: DocumentGeneration,
-        history: SubmittedHistoryRange,
-        descriptor_append: Option<DescriptorAppendSubmission>,
-    ) -> Option<u64> {
-        if self.pending_save.is_some() {
-            self.save_pending = true;
-            return None;
-        }
-        let save_id = self.next_save_id;
-        self.next_save_id = self.next_save_id.saturating_add(1);
-        self.pending_save = Some(PendingSessionSave {
-            save_id,
-            session_id,
-            kind,
-            generation,
-            history,
-            descriptor_append,
-        });
-        Some(save_id)
-    }
-
-    fn ack_save(
-        &mut self,
-        ack: &crate::persist::PersistAck,
-        current_generation: DocumentGeneration,
-    ) -> Option<(SaveAckPlan, Option<DescriptorAppendSubmission>)> {
-        let pending = self.pending_save.take()?;
-        if pending.save_id != ack.save_id
-            || pending.session_id != ack.session_id
-            || pending.kind != ack.kind
-        {
-            self.pending_save = Some(pending);
-            return None;
-        }
-        if pending.history.len != ack.history_len {
-            self.mark_history_dirty_from(pending.history.start_idx);
-            self.save_pending = true;
-            return Some((SaveAckPlan::SaveAgain, None));
-        }
-        debug_assert!(pending.history.start_idx <= pending.history.len);
-        self.store_ready = true;
-        self.durable.store_history_len = ack.history_len;
-        self.durable.revision = ack.revision;
-        if matches!(ack.kind, crate::persist::PersistSaveKind::History) {
-            self.descriptors_persisted = true;
-        }
-        let plan = SessionDocument::plan_save_ack(pending.generation, current_generation, ack.kind);
-        match plan {
-            SaveAckPlan::MarkClean { .. } => self.mark_clean(),
-            SaveAckPlan::SaveAgain => self.save_pending = true,
-        }
-        Some((plan, pending.descriptor_append))
-    }
-
-    fn is_save_queued(&self) -> bool {
-        self.save_pending
-    }
-
-    fn clear_queued_save(&mut self) {
-        self.save_pending = false;
-    }
-
-    fn queue_save(&mut self) {
-        self.save_pending = true;
-    }
-
-    fn has_pending_save(&self) -> bool {
-        self.pending_save.is_some()
-    }
-
+impl SessionPersistStateTuiExt for SessionPersistState {
     fn current_generation(&self, transcript: &TranscriptDocument) -> DocumentGeneration {
-        DocumentGeneration::current(self.dirty_generation, transcript)
-    }
-
-    fn install_loaded_full_session(&mut self, writable: bool, history_len: usize, revision: u64) {
-        self.store_ready = writable;
-        self.durable = DurableCursor {
-            store_history_len: history_len,
-            revision,
-        };
-        self.descriptors_persisted = false;
-        self.mark_clean();
-    }
-
-    fn install_loaded_store_session(&mut self, writable: bool, history_len: usize, revision: u64) {
-        self.store_ready = writable;
-        self.durable = DurableCursor {
-            store_history_len: history_len,
-            revision,
-        };
-        self.descriptors_persisted = true;
-        self.mark_clean();
-    }
-
-    fn install_materialized_session(&mut self, descriptors_persisted: bool) {
-        self.store_ready = true;
-        self.descriptors_persisted = descriptors_persisted;
-        self.mark_clean();
-    }
-
-    fn mark_descriptors_unpersisted(&mut self) {
-        self.descriptors_persisted = false;
-    }
-
-    fn forget_pending_save_if_matches(&mut self, save_id: u64, session_id: &str) -> bool {
-        let Some(pending) = self.pending_save.take() else {
-            return false;
-        };
-        if pending.save_id == save_id && pending.session_id == session_id {
-            true
-        } else {
-            self.pending_save = Some(pending);
-            false
-        }
-    }
-
-    fn mark_persist_failure_retry(&mut self) {
-        self.mark_history_dirty_from(0);
-        self.queue_save();
+        self.generation_for_descriptor(transcript.history().descriptor_dirty_generation())
     }
 
     fn full_save_state(
@@ -748,17 +506,13 @@ impl SessionPersistState {
         history_len: usize,
         blobs_pending: bool,
     ) -> SessionSaveState {
-        SessionSaveState {
-            generation: self.current_generation(transcript),
-            store_ready: self.store_ready,
-            descriptors_persisted: self.descriptors_persisted,
-            session_dirty: self.session_dirty,
-            dirty_history_from: self.dirty_history_from,
+        self.save_state(
+            self.current_generation(transcript),
+            transcript.history().descriptor_dirty_from(),
             history_len,
-            durable_history_len: self.durable.store_history_len,
             blobs_pending,
-            supports_metadata_only: true,
-        }
+            true,
+        )
     }
 
     fn live_save_state(
@@ -767,151 +521,14 @@ impl SessionPersistState {
         live_session: &LiveSession,
         blobs_pending: bool,
     ) -> SessionSaveState {
-        SessionSaveState {
-            generation: self.current_generation(transcript),
-            store_ready: self.store_ready,
-            descriptors_persisted: self.descriptors_persisted,
-            session_dirty: self.session_dirty,
-            dirty_history_from: self.dirty_history_from,
-            history_len: live_session.history_len(),
-            durable_history_len: self.durable.store_history_len,
+        self.save_state(
+            self.current_generation(transcript),
+            transcript.history().descriptor_dirty_from(),
+            live_session.history_len(),
             blobs_pending,
-            supports_metadata_only: false,
-        }
+            false,
+        )
     }
-
-    fn dirty_state(
-        &self,
-        descriptor_dirty_from: Option<usize>,
-        history_len: usize,
-        transcript_empty: bool,
-    ) -> DocumentDirtyState {
-        DocumentDirtyState {
-            pending_or_queued_save: self.has_pending_save() || self.is_save_queued(),
-            session_dirty: self.session_dirty,
-            dirty_history_from: self.dirty_history_from,
-            descriptor_dirty_from,
-            store_ready: self.store_ready,
-            descriptors_persisted: self.descriptors_persisted,
-            history_len,
-            transcript_empty,
-        }
-    }
-
-    fn has_session_work(&self) -> bool {
-        self.session_dirty || self.dirty_history_from.is_some() || !self.store_ready
-    }
-
-    fn descriptors_persisted(&self) -> bool {
-        self.descriptors_persisted
-    }
-
-    fn can_persist_descriptor_suffix_at(&self, history_index: usize) -> bool {
-        (self.dirty_history_from.is_none() || self.dirty_history_from == Some(history_index))
-            && ((self.store_ready && self.descriptors_persisted) || history_index == 0)
-    }
-
-    fn can_persist_request_append_at(&self, history_index: usize) -> bool {
-        history_index == self.durable.store_history_len
-            && !self.has_pending_save()
-            && self.can_persist_descriptor_suffix_at(history_index)
-    }
-
-    #[cfg(test)]
-    fn set_pending_save_for_test(
-        &mut self,
-        save_id: u64,
-        session_id: String,
-        kind: crate::persist::PersistSaveKind,
-        generation: DocumentGeneration,
-        history_len: usize,
-    ) {
-        self.pending_save = Some(PendingSessionSave {
-            save_id,
-            session_id,
-            kind,
-            generation,
-            history: SubmittedHistoryRange {
-                start_idx: history_len,
-                len: history_len,
-            },
-            descriptor_append: None,
-        });
-        self.durable.store_history_len = history_len;
-    }
-
-    fn require_history_resave_from(&mut self, idx: usize) {
-        self.mark_history_dirty_from(idx);
-    }
-
-    fn record_session_mutation(&mut self, result: &MutationResult) {
-        if let Some(idx) = result.history_dirty_from {
-            self.mark_history_dirty_from(idx);
-        } else if result.session_dirty {
-            self.mark_session_dirty();
-        }
-    }
-
-    fn record_live_session_mutation(&mut self, result: &MutationResult) {
-        if let Some(idx) = result.history_dirty_from {
-            self.mark_history_dirty_from(idx);
-        } else if result.session_dirty {
-            self.mark_session_dirty();
-        }
-    }
-
-    fn record_transcript_mutation(&mut self, result: &MutationResult) {
-        if result.descriptors_unpersisted {
-            self.mark_descriptors_unpersisted();
-        }
-    }
-
-    fn mark_session_dirty(&mut self) {
-        self.session_dirty = true;
-        self.bump_dirty_generation();
-    }
-
-    fn bump_dirty_generation(&mut self) {
-        self.dirty_generation = self.dirty_generation.saturating_add(1);
-    }
-
-    fn mark_history_dirty_from(&mut self, idx: usize) {
-        self.mark_session_dirty();
-        self.dirty_history_from = Some(
-            self.dirty_history_from
-                .map_or(idx, |current| current.min(idx)),
-        );
-    }
-
-    fn mark_clean(&mut self) {
-        self.session_dirty = false;
-        self.dirty_history_from = None;
-    }
-
-    fn reset_unpersisted(&mut self) {
-        self.store_ready = false;
-        self.durable = DurableCursor::default();
-        self.descriptors_persisted = false;
-    }
-}
-
-impl DocumentGeneration {
-    pub(crate) fn new(session: u64, transcript_descriptors: u64) -> Self {
-        Self {
-            session,
-            transcript_descriptors,
-        }
-    }
-
-    pub(crate) fn current(session: u64, transcript: &TranscriptDocument) -> Self {
-        Self::new(session, transcript.history().descriptor_dirty_generation())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SaveAckPlan {
-    MarkClean { clear_descriptors: bool },
-    SaveAgain,
 }
 
 pub(crate) enum SessionMutation {
@@ -1325,32 +942,27 @@ impl SessionDocument {
             SessionMutationPersistence::ReadOnly => {}
             SessionMutationPersistence::Full(persist) => {
                 if target.touches_session() {
-                    persist.record_session_mutation(result);
+                    persist.record_mutation(result.session_dirty, result.history_dirty_from);
                 }
                 if target.touches_transcript() {
-                    persist.record_transcript_mutation(result);
+                    persist
+                        .record_transcript_descriptors_unpersisted(result.descriptors_unpersisted);
                 }
             }
             SessionMutationPersistence::Live(persist) => {
-                if target.touches_live_session() {
-                    persist.record_live_session_mutation(result);
-                } else if target.touches_session() {
-                    persist.record_session_mutation(result);
+                if target.touches_live_session() || target.touches_session() {
+                    persist.record_mutation(result.session_dirty, result.history_dirty_from);
                 }
                 if target.touches_transcript() {
-                    persist.record_transcript_mutation(result);
+                    persist
+                        .record_transcript_descriptors_unpersisted(result.descriptors_unpersisted);
                 }
             }
         }
     }
 
     fn has_unflushed_work(state: DocumentDirtyState) -> bool {
-        state.pending_or_queued_save
-            || state.session_dirty
-            || state.dirty_history_from.is_some()
-            || state.descriptor_dirty_from.is_some()
-            || (!state.store_ready && state.history_len > 0)
-            || (!state.descriptors_persisted && !state.transcript_empty)
+        smelt_core::session_save::has_unflushed_work(state)
     }
 
     pub(crate) fn has_unflushed_work_for(
@@ -1367,18 +979,13 @@ impl SessionDocument {
         ))
     }
 
+    #[cfg(test)]
     fn plan_save_ack(
         submitted: DocumentGeneration,
         current: DocumentGeneration,
         kind: crate::persist::PersistSaveKind,
     ) -> SaveAckPlan {
-        if submitted == current {
-            SaveAckPlan::MarkClean {
-                clear_descriptors: matches!(kind, crate::persist::PersistSaveKind::History),
-            }
-        } else {
-            SaveAckPlan::SaveAgain
-        }
+        smelt_core::session_save::plan_save_ack_for_kind(submitted, current, kind)
     }
 
     pub(crate) fn mark_persisted(
@@ -1386,22 +993,26 @@ impl SessionDocument {
         transcript: &mut TranscriptDocument,
         live_session: Option<&mut LiveSession>,
         checkpoint: Option<&ContextCheckpoint>,
-        ack: &crate::persist::PersistAck,
+        receipt: &smelt_store::SaveReceipt,
     ) -> bool {
+        let history_len = receipt
+            .history_len
+            .as_usize()
+            .expect("saved history length originated as usize");
         let current_generation = persist.current_generation(transcript);
-        let Some((plan, descriptor_append)) = persist.ack_save(ack, current_generation) else {
+        let Some(outcome) = persist.ack_save(receipt, current_generation) else {
             return false;
         };
-        if let Some(descriptor_append) = descriptor_append {
+        if let Some(descriptor_append) = outcome.descriptor_append {
             Self::mark_request_history_append_persisted(transcript, descriptor_append);
         }
-        match plan {
+        match outcome.plan {
             SaveAckPlan::MarkClean { clear_descriptors } => {
                 if let Some(live_session) = live_session {
-                    if matches!(ack.kind, crate::persist::PersistSaveKind::History) {
+                    if matches!(outcome.kind, crate::persist::PersistSaveKind::History) {
                         live_session.compact_saved_prefix(
-                            ack.history_len,
-                            ack.revision,
+                            history_len,
+                            receipt.revision.get(),
                             checkpoint,
                         );
                     }
@@ -1417,11 +1028,21 @@ impl SessionDocument {
 
     pub(crate) fn mark_persist_failed(
         persist: &mut SessionPersistState,
-        _live_session: Option<&mut LiveSession>,
+        transcript: &mut TranscriptDocument,
+        live_session: Option<&mut LiveSession>,
         failure: &crate::persist::PersistFailure,
     ) {
-        persist.forget_pending_save_if_matches(failure.save_id, &failure.session_id);
-        persist.mark_persist_failure_retry();
+        let plan = persist.record_save_failure(
+            failure.save_id,
+            &failure.session_id,
+            failure.commit_failure.as_ref(),
+        );
+        if live_session.is_some() && failure.commit_failure.is_none() {
+            persist.mark_history_dirty_from(0);
+        }
+        if let Some(current) = plan.reconcile_descriptor_len {
+            transcript.reconcile_dense_descriptor_count(current);
+        }
     }
 
     pub(crate) fn mark_ephemeral_persisted(
@@ -1438,7 +1059,7 @@ impl SessionDocument {
     }
 
     fn select_save_plan(input: SessionSaveInput<'_>) -> SessionSavePlan {
-        Self::plan_session_save(input.transcript, input.state)
+        smelt_core::session_save::plan_session_save(input.state)
     }
 
     fn build_request_history_append_save(
@@ -1461,22 +1082,27 @@ impl SessionDocument {
         let descriptor_count = descriptor_records.len();
         let history_len = history_index.saturating_add(1);
         let state = smelt_core::session::store_state_from_session(session, history_len)?;
-        let side_tables = include_side_tables
-            .then(|| {
-                smelt_core::session::store_side_table_suffixes_from_session(session, history_index)
-            })
-            .transpose()?;
+        let side_tables = if include_side_tables {
+            smelt_core::session::store_side_table_suffixes_from_session(session, history_index)?
+        } else {
+            smelt_store::SideTableSuffixes {
+                start: smelt_store::HistoryIndex::new(history_index as u64),
+                turn_metas: Vec::new(),
+                metadata_snapshots: Vec::new(),
+                context_snapshots: Vec::new(),
+            }
+        };
         Ok(RequestHistoryAppendSavePlan {
             generation,
-            delta: Box::new(crate::persist::PersistDelta {
-                history: smelt_store::SessionHistorySuffix {
-                    state,
-                    history_start_idx: history_index,
-                    history_len,
-                    history: vec![item.clone()],
-                    side_tables,
+            delta: Box::new(PersistDelta {
+                state,
+                history: smelt_store::HistorySuffix {
+                    start: smelt_store::HistoryIndex::new(history_index as u64),
+                    final_len: smelt_store::HistoryLen::new(history_len as u64),
+                    items: vec![item.clone()],
                 },
-                descriptors: Some(crate::persist::PersistDescriptorDelta {
+                side_tables,
+                descriptors: Some(PersistDescriptorDelta {
                     start_descriptor_idx: descriptor_start_idx,
                     records: descriptor_records,
                 }),
@@ -1486,81 +1112,6 @@ impl SessionDocument {
                 had_descriptor_total: transcript.descriptor_total_count().is_some(),
             },
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prepare_save(
-        request: SessionSaveRequest<'_>,
-    ) -> Result<PreparedSessionSave, String> {
-        let input = match request {
-            SessionSaveRequest::Full {
-                persist,
-                session,
-                transcript,
-                blobs_pending,
-            } => SessionSaveInput {
-                session,
-                history: SessionHistoryRef::Materialized(&session.history),
-                transcript,
-                state: persist.full_save_state(transcript, session.history.len(), blobs_pending),
-            },
-            SessionSaveRequest::Live {
-                persist,
-                session,
-                live_session,
-                transcript,
-                blobs_pending,
-            } => SessionSaveInput {
-                session,
-                history: SessionHistoryRef::StoreBacked(live_session),
-                transcript,
-                state: persist.live_save_state(transcript, live_session, blobs_pending),
-            },
-            SessionSaveRequest::RequestHistoryAppend(input) => {
-                let can_persist_suffix = input
-                    .persist
-                    .can_persist_request_append_at(input.history_index);
-                if can_persist_suffix {
-                    let plan = Self::build_request_history_append_save(
-                        input.session,
-                        input.transcript,
-                        input.persist.current_generation(input.transcript),
-                        input.history_index,
-                        input.descriptor_order_start,
-                        input.item,
-                        input.include_side_tables,
-                    )
-                    .map_err(|err| err.to_string())?;
-                    return Ok(PreparedSessionSave::RequestHistoryAppend {
-                        generation: plan.generation,
-                        delta: plan.delta,
-                        descriptor_append: plan.descriptor_append,
-                    });
-                }
-                if let Some(live_session) = input.live_session {
-                    SessionSaveInput {
-                        session: input.session,
-                        history: SessionHistoryRef::StoreBacked(live_session),
-                        transcript: input.transcript,
-                        state: input
-                            .persist
-                            .live_save_state(input.transcript, live_session, false),
-                    }
-                } else {
-                    SessionSaveInput {
-                        session: input.session,
-                        history: SessionHistoryRef::Materialized(&input.session.history),
-                        transcript: input.transcript,
-                        state: input.persist.full_save_state(
-                            input.transcript,
-                            input.session.history.len(),
-                            false,
-                        ),
-                    }
-                }
-            }
-        };
-        Self::prepare_save_from_input(input)
     }
 
     fn prepare_save_from_input(input: SessionSaveInput<'_>) -> Result<PreparedSessionSave, String> {
@@ -1594,8 +1145,13 @@ impl SessionDocument {
             SessionSavePlan::History {
                 generation,
                 history_start_idx,
-                descriptor_delta,
+                dirty_history_from,
             } => {
+                let descriptor_delta = descriptor_save_plan(
+                    input.transcript,
+                    input.state.descriptors_persisted,
+                    dirty_history_from,
+                );
                 let history_len = input.state.history_len;
                 debug_assert_eq!(history_len, input.history.len());
                 debug_assert!(history_start_idx <= input.state.durable_history_len);
@@ -1611,108 +1167,21 @@ impl SessionDocument {
                 .map_err(|err| err.to_string())?;
                 Ok(PreparedSessionSave::History {
                     generation,
-                    delta: Box::new(crate::persist::PersistDelta {
-                        history: smelt_store::SessionHistorySuffix {
-                            state,
-                            history_start_idx,
-                            history_len,
-                            history,
-                            side_tables: Some(side_tables),
+                    delta: Box::new(PersistDelta {
+                        state,
+                        history: smelt_store::HistorySuffix {
+                            start: smelt_store::HistoryIndex::new(history_start_idx as u64),
+                            final_len: smelt_store::HistoryLen::new(history_len as u64),
+                            items: history,
                         },
-                        descriptors: descriptor_delta.map(|delta| {
-                            crate::persist::PersistDescriptorDelta {
-                                start_descriptor_idx: delta.start_descriptor_idx,
-                                records: delta.records,
-                            }
+                        side_tables,
+                        descriptors: descriptor_delta.map(|delta| PersistDescriptorDelta {
+                            start_descriptor_idx: delta.start_descriptor_idx,
+                            records: delta.records,
                         }),
                     }),
                 })
             }
-        }
-    }
-
-    fn bounded_history_save_start(
-        dirty_history_from: Option<usize>,
-        history_len: usize,
-        durable_history_len: usize,
-    ) -> usize {
-        dirty_history_from
-            .unwrap_or(history_len)
-            .min(history_len)
-            .min(durable_history_len)
-    }
-
-    fn plan_session_save(
-        transcript: &TranscriptDocument,
-        state: SessionSaveState,
-    ) -> SessionSavePlan {
-        let descriptor_dirty_from = transcript.history().descriptor_dirty_from();
-        if state.history_len == 0
-            && !state.session_dirty
-            && !state.store_ready
-            && descriptor_dirty_from.is_none()
-            && !state.blobs_pending
-        {
-            return SessionSavePlan::Skip(SessionSaveSkipReason::EmptyUnstored);
-        }
-        if !state.session_dirty
-            && state.store_ready
-            && state.dirty_history_from.is_none()
-            && state.descriptors_persisted
-            && descriptor_dirty_from.is_none()
-            && !state.blobs_pending
-        {
-            return SessionSavePlan::Skip(SessionSaveSkipReason::Unchanged);
-        }
-
-        let no_history_work = state.store_ready && state.dirty_history_from.is_none();
-        let no_descriptor_work = state.descriptors_persisted && descriptor_dirty_from.is_none();
-        if state.supports_metadata_only
-            && state.session_dirty
-            && no_history_work
-            && no_descriptor_work
-            && !state.blobs_pending
-            && state.durable_history_len == state.history_len
-        {
-            return SessionSavePlan::MetadataOnly {
-                generation: state.generation,
-            };
-        }
-
-        let dirty_history_from = if state.supports_metadata_only
-            && state.session_dirty
-            && no_history_work
-            && no_descriptor_work
-            && !state.blobs_pending
-        {
-            Some(0)
-        } else {
-            state.dirty_history_from
-        };
-        let durable_history_len = if state.store_ready {
-            state.durable_history_len
-        } else {
-            0
-        };
-        let history_start_idx = Self::bounded_history_save_start(
-            dirty_history_from,
-            state.history_len,
-            durable_history_len,
-        );
-        let descriptor_delta =
-            descriptor_save_plan(transcript, state.descriptors_persisted, dirty_history_from);
-        if descriptor_delta.is_none()
-            && !state.blobs_pending
-            && dirty_history_from.is_none()
-            && !state.session_dirty
-        {
-            return SessionSavePlan::Skip(SessionSaveSkipReason::Unchanged);
-        }
-
-        SessionSavePlan::History {
-            generation: state.generation,
-            history_start_idx,
-            descriptor_delta,
         }
     }
 
@@ -1985,13 +1454,12 @@ impl SessionDocument {
                 snapshot_context,
                 update_context_token_history_len,
             } => {
-                session.turn_metas.push((history_len, meta));
-                if snapshot_context {
-                    if update_context_token_history_len && session.context_tokens.is_some() {
-                        session.context_tokens_history_len = Some(history_len);
-                    }
-                    session.snapshot_context();
-                }
+                session.finish_turn_state(
+                    history_len,
+                    meta,
+                    snapshot_context,
+                    update_context_token_history_len,
+                );
                 MutationResult {
                     session_dirty: true,
                     applied: true,
@@ -2480,6 +1948,12 @@ impl SessionDocument {
     }
 }
 
+fn durable_descriptor_len_for_transcript(transcript: &TranscriptDocument) -> usize {
+    transcript
+        .descriptor_total_count()
+        .unwrap_or_else(|| transcript.history().descriptor_records().len())
+}
+
 fn descriptor_save_plan(
     transcript: &TranscriptDocument,
     descriptors_persisted: bool,
@@ -2526,6 +2000,49 @@ mod tests {
     use protocol::{Content, ReasoningEffort};
     use smelt_core::session::ContextTokenIdentity;
 
+    fn save_receipt(save_id: u64, history_len: usize, revision: u64) -> smelt_store::SaveReceipt {
+        smelt_store::SaveReceipt {
+            session_id: "session-a".into(),
+            save_id: smelt_store::SaveId::new(save_id),
+            previous_revision: smelt_store::Revision::new(revision.saturating_sub(1)),
+            revision: smelt_store::Revision::new(revision),
+            history_len: smelt_store::HistoryLen::new(history_len as u64),
+            descriptor_len: smelt_store::DescriptorLen::ZERO,
+        }
+    }
+
+    fn prepare_request_append(
+        persist: SessionPersistState,
+        session: &mut Session,
+        transcript: TranscriptDocument,
+        live_session: Option<LiveSession>,
+        history_index: usize,
+        descriptor_order_start: usize,
+        item: HistoryItem,
+    ) -> Result<PreparedSessionSave, String> {
+        let mut document = TuiSessionDocument {
+            transcript,
+            live_session,
+            persist,
+        };
+        document.prepare_request_history_append_save(
+            session,
+            RuntimeSessionMetadata {
+                updated_at_ms: 20,
+                mode: "agent".into(),
+                reasoning_effort: ReasoningEffort::Low,
+                model: "model-a".into(),
+            },
+            RuntimeRequestHistoryAppendSave {
+                history_index,
+                descriptor_order_start,
+                item: &item,
+                include_side_tables: true,
+                blobs_pending: false,
+            },
+        )
+    }
+
     fn token_identity() -> ContextTokenIdentity {
         ContextTokenIdentity {
             model: "model-a".into(),
@@ -2554,7 +2071,6 @@ mod tests {
             history_len: Some(3),
             checkpoint: None,
             text_bytes: Some(128),
-            migration: None,
         }
     }
 
@@ -3653,6 +3169,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: true,
                 dirty_history_from: None,
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: session.history.len(),
                 blobs_pending: false,
@@ -3679,6 +3196,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: true,
                 dirty_history_from: None,
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 0,
                 blobs_pending: false,
@@ -3691,7 +3209,7 @@ mod tests {
             SessionSavePlan::History {
                 generation: _,
                 history_start_idx: 0,
-                descriptor_delta: None,
+                dirty_history_from: Some(0),
             }
         ));
     }
@@ -3716,6 +3234,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: true,
                 dirty_history_from: Some(5),
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 2,
                 blobs_pending: false,
@@ -3751,6 +3270,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: true,
                 dirty_history_from: Some(5),
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 5,
                 blobs_pending: false,
@@ -3770,7 +3290,7 @@ mod tests {
     #[test]
     fn request_history_append_falls_back_when_append_index_is_not_durable_len() {
         let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 1, 0);
+        persist.install_loaded_store_session(true, 1, 0, 0);
         persist.mark_history_dirty_from(2);
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![
@@ -3781,24 +3301,13 @@ mod tests {
         let transcript = TranscriptDocument::new();
         let item = session.history[2].clone();
 
-        let prepared = SessionDocument::prepare_save(SessionSaveRequest::RequestHistoryAppend(
-            RequestHistoryAppendSaveInput {
-                persist: &persist,
-                session: &session,
-                transcript: &transcript,
-                live_session: None,
-                history_index: 2,
-                descriptor_order_start: 0,
-                item: &item,
-                include_side_tables: true,
-            },
-        ))
-        .expect("prepare request append fallback");
+        let prepared = prepare_request_append(persist, &mut session, transcript, None, 2, 0, item)
+            .expect("prepare request append fallback");
 
         assert!(matches!(
             prepared,
             PreparedSessionSave::History { ref delta, .. }
-                if delta.history.history_start_idx == 1 && delta.history.history_len == 3
+                if delta.history.start.get() == 1 && delta.history.final_len.get() == 3
         ));
     }
 
@@ -3811,7 +3320,7 @@ mod tests {
             content: "descriptor-only text".into(),
         });
 
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
+        let prepared = SessionDocument::prepare_save_from_input(SessionSaveInput {
             session: &session,
             history: SessionHistoryRef::Materialized(&session.history),
             transcript: &transcript,
@@ -3821,22 +3330,21 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: false,
                 dirty_history_from: None,
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: session.history.len(),
                 blobs_pending: false,
                 supports_metadata_only: true,
             },
-        });
+        })
+        .expect("prepare save");
 
-        match plan {
-            SessionSavePlan::History {
-                generation: _,
-                history_start_idx,
-                descriptor_delta: Some(delta),
-            } => {
-                assert_eq!(history_start_idx, session.history.len());
-                assert_eq!(delta.start_descriptor_idx, 0);
-                assert_eq!(delta.records.len(), 1);
+        match prepared {
+            PreparedSessionSave::History { delta, .. } => {
+                assert_eq!(delta.history.start.get(), session.history.len() as u64);
+                let descriptors = delta.descriptors.expect("descriptor delta");
+                assert_eq!(descriptors.start_descriptor_idx, 0);
+                assert_eq!(descriptors.records.len(), 1);
             }
             _ => panic!("expected descriptor history save"),
         }
@@ -3876,10 +3384,10 @@ mod tests {
             (plan.generation, plan.delta, plan.descriptor_append);
 
         assert_eq!(plan_generation, generation);
-        assert_eq!(delta.history.history_start_idx, 1);
-        assert_eq!(delta.history.history_len, 2);
-        assert_eq!(delta.history.history.len(), 1);
-        assert!(delta.history.side_tables.is_some());
+        assert_eq!(delta.history.start.get(), 1);
+        assert_eq!(delta.history.final_len.get(), 2);
+        assert_eq!(delta.history.items.len(), 1);
+        assert_eq!(delta.side_tables.start.get(), 1);
         let descriptors = delta.descriptors.as_ref().expect("descriptor delta");
         assert_eq!(descriptors.start_descriptor_idx, 1);
         assert_eq!(descriptor_append.count, 1);
@@ -3890,7 +3398,7 @@ mod tests {
     #[test]
     fn request_history_append_planner_falls_back_to_full_save_when_dirty_range_exists() {
         let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 1, 0);
+        persist.install_loaded_store_session(true, 1, 0, 0);
         persist.mark_history_dirty_from(0);
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![
@@ -3900,82 +3408,65 @@ mod tests {
         let transcript = TranscriptDocument::new();
         let item = session.history[1].clone();
 
-        let prepared = SessionDocument::prepare_save(SessionSaveRequest::RequestHistoryAppend(
-            RequestHistoryAppendSaveInput {
-                persist: &persist,
-                session: &session,
-                transcript: &transcript,
-                live_session: None,
-                history_index: 1,
-                descriptor_order_start: 0,
-                item: &item,
-                include_side_tables: true,
-            },
-        ))
-        .expect("prepare request append fallback");
+        let prepared = prepare_request_append(persist, &mut session, transcript, None, 1, 0, item)
+            .expect("prepare request append fallback");
 
         assert!(matches!(
             prepared,
             PreparedSessionSave::History { ref delta, .. }
-                if delta.history.history_start_idx == 0 && delta.history.history_len == 2
+                if delta.history.start.get() == 0 && delta.history.final_len.get() == 2
         ));
     }
 
     #[test]
     fn request_history_append_planner_falls_back_when_live_dirty_range_exists() {
         let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 0, 0);
+        persist.install_loaded_store_session(true, 0, 0, 0);
         persist.mark_history_dirty_from(0);
-        let session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         let mut live_session = empty_live_session_for(&session, 0);
         live_session.append_history(HistoryItem::user(Content::text("dirty")));
         live_session.append_history(HistoryItem::user(Content::text("new")));
         let transcript = TranscriptDocument::new();
         let item = HistoryItem::user(Content::text("new"));
 
-        let prepared = SessionDocument::prepare_save(SessionSaveRequest::RequestHistoryAppend(
-            RequestHistoryAppendSaveInput {
-                persist: &persist,
-                session: &session,
-                transcript: &transcript,
-                live_session: Some(&live_session),
-                history_index: 1,
-                descriptor_order_start: 0,
-                item: &item,
-                include_side_tables: true,
-            },
-        ))
+        let prepared = prepare_request_append(
+            persist,
+            &mut session,
+            transcript,
+            Some(live_session),
+            1,
+            0,
+            item,
+        )
         .expect("prepare request append fallback");
 
         assert!(matches!(
             prepared,
             PreparedSessionSave::History { ref delta, .. }
-                if delta.history.history_start_idx == 0 && delta.history.history_len == 2
+                if delta.history.start.get() == 0 && delta.history.final_len.get() == 2
         ));
     }
 
     #[test]
     fn request_history_append_planner_builds_current_live_append() {
         let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 1, 0);
-        let session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        persist.install_loaded_store_session(true, 1, 0, 0);
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         let mut live_session = empty_live_session_for(&session, 1);
         let item = HistoryItem::user(Content::text("new"));
         live_session.append_history(item.clone());
         let transcript = TranscriptDocument::new();
 
-        let prepared = SessionDocument::prepare_save(SessionSaveRequest::RequestHistoryAppend(
-            RequestHistoryAppendSaveInput {
-                persist: &persist,
-                session: &session,
-                transcript: &transcript,
-                live_session: Some(&live_session),
-                history_index: 1,
-                descriptor_order_start: 0,
-                item: &item,
-                include_side_tables: true,
-            },
-        ))
+        let prepared = prepare_request_append(
+            persist,
+            &mut session,
+            transcript,
+            Some(live_session),
+            1,
+            0,
+            item,
+        )
         .expect("prepare request append");
 
         assert!(matches!(
@@ -4006,6 +3497,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: true,
                 dirty_history_from: Some(1),
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 1,
                 blobs_pending: false,
@@ -4019,17 +3511,10 @@ mod tests {
                 generation: _,
                 delta,
             } => {
-                assert_eq!(delta.history.history_start_idx, 1);
-                assert_eq!(delta.history.history_len, 2);
-                assert_eq!(delta.history.history.len(), 1);
-                assert_eq!(
-                    delta
-                        .history
-                        .side_tables
-                        .as_ref()
-                        .map(|tables| tables.start_idx),
-                    Some(1)
-                );
+                assert_eq!(delta.history.start.get(), 1);
+                assert_eq!(delta.history.final_len.get(), 2);
+                assert_eq!(delta.history.items.len(), 1);
+                assert_eq!(delta.side_tables.start.get(), 1);
                 let descriptors = delta.descriptors.expect("descriptor delta");
                 assert_eq!(descriptors.start_descriptor_idx, 0);
                 assert_eq!(descriptors.records.len(), 1);
@@ -4054,6 +3539,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: false,
                 dirty_history_from: None,
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: 2,
                 durable_history_len: 2,
                 blobs_pending: false,
@@ -4071,7 +3557,7 @@ mod tests {
     fn live_session_metadata_mutation_forces_metadata_save() {
         let transcript = TranscriptDocument::new();
         let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 2, 0);
+        persist.install_loaded_store_session(true, 2, 0, 0);
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         let mut live_session = empty_live_session_for(&session, 2);
         let checkpoint = ContextCheckpoint {
@@ -4095,7 +3581,7 @@ mod tests {
                 checkpoint: Some(checkpoint),
             },
         );
-        persist.record_live_session_mutation(&result);
+        persist.record_mutation(result.session_dirty, result.history_dirty_from);
 
         let plan = SessionDocument::select_save_plan(SessionSaveInput {
             session: &session,
@@ -4109,7 +3595,7 @@ mod tests {
             SessionSavePlan::History {
                 generation: _,
                 history_start_idx: 2,
-                descriptor_delta: None,
+                dirty_history_from: None,
             }
         ));
     }
@@ -4130,6 +3616,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: false,
                 dirty_history_from: Some(1),
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: 3,
                 durable_history_len: 3,
                 blobs_pending: false,
@@ -4142,7 +3629,7 @@ mod tests {
             SessionSavePlan::History {
                 generation: _,
                 history_start_idx: 1,
-                descriptor_delta: None,
+                dirty_history_from: Some(1),
             }
         ));
     }
@@ -4172,6 +3659,7 @@ mod tests {
                 descriptors_persisted: true,
                 session_dirty: false,
                 dirty_history_from: Some(0),
+                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: live_session.history_len(),
                 durable_history_len: 0,
                 blobs_pending: false,
@@ -4185,17 +3673,10 @@ mod tests {
                 generation: _,
                 delta,
             } => {
-                assert_eq!(delta.history.history_start_idx, 0);
-                assert_eq!(delta.history.history_len, 1);
-                assert_eq!(delta.history.history.len(), 1);
-                assert_eq!(
-                    delta
-                        .history
-                        .side_tables
-                        .as_ref()
-                        .map(|tables| tables.start_idx),
-                    Some(0)
-                );
+                assert_eq!(delta.history.start.get(), 0);
+                assert_eq!(delta.history.final_len.get(), 1);
+                assert_eq!(delta.history.items.len(), 1);
+                assert_eq!(delta.side_tables.start.get(), 0);
                 assert!(delta.descriptors.is_none());
             }
             _ => panic!("expected prepared live history save"),
@@ -4235,38 +3716,30 @@ mod tests {
         state.mark_history_dirty_from(2);
         state.descriptors_persisted = false;
         let generation = DocumentGeneration::new(state.dirty_generation, 5);
-        let save_id = state
-            .begin_save(
-                "session-a".into(),
-                crate::persist::PersistSaveKind::History,
-                generation,
-                SubmittedHistoryRange {
-                    start_idx: 2,
-                    len: 3,
-                },
-                None,
-            )
-            .expect("save begins");
-
-        let plan = state.ack_save(
-            &crate::persist::PersistAck {
-                save_id,
-                session_id: "session-a".into(),
-                kind: crate::persist::PersistSaveKind::History,
-                history_len: 3,
-                revision: 7,
-            },
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::History,
             generation,
+            SubmittedHistoryRange {
+                start_idx: 2,
+                len: 3,
+            },
+            None,
         );
+
+        let plan = state.ack_save(&save_receipt(save_id, 3, 7), generation);
 
         assert_eq!(
             plan,
-            Some((
-                SaveAckPlan::MarkClean {
+            Some(smelt_core::session_save::SaveAckOutcome {
+                plan: SaveAckPlan::MarkClean {
                     clear_descriptors: true
                 },
-                None
-            ))
+                kind: crate::persist::PersistSaveKind::History,
+                descriptor_append: None,
+            })
         );
         assert!(!state.session_dirty);
         assert_eq!(state.dirty_history_from, None);
@@ -4277,38 +3750,37 @@ mod tests {
     #[test]
     fn persist_state_ack_with_unexpected_history_len_forces_retry() {
         let mut state = SessionPersistState::new();
-        state.install_loaded_store_session(true, 1, 7);
-        let save_id = state
-            .begin_save(
-                "session-a".into(),
-                crate::persist::PersistSaveKind::History,
-                DocumentGeneration::new(0, 0),
-                SubmittedHistoryRange {
-                    start_idx: 1,
-                    len: 2,
-                },
-                None,
-            )
-            .expect("save begins");
-
-        let plan = state.ack_save(
-            &crate::persist::PersistAck {
-                save_id,
-                session_id: "session-a".into(),
-                kind: crate::persist::PersistSaveKind::History,
-                history_len: 1,
-                revision: 8,
-            },
+        state.install_loaded_store_session(true, 1, 0, 7);
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::History,
             DocumentGeneration::new(0, 0),
+            SubmittedHistoryRange {
+                start_idx: 1,
+                len: 2,
+            },
+            None,
         );
 
-        assert_eq!(plan, Some((SaveAckPlan::SaveAgain, None)));
+        let plan = state.ack_save(&save_receipt(save_id, 1, 8), DocumentGeneration::new(0, 0));
+
+        assert_eq!(
+            plan,
+            Some(smelt_core::session_save::SaveAckOutcome {
+                plan: SaveAckPlan::SaveAgain,
+                kind: crate::persist::PersistSaveKind::History,
+                descriptor_append: None,
+            })
+        );
         assert!(state.is_save_queued());
         assert_eq!(state.dirty_history_from, Some(1));
         assert_eq!(
             state.durable,
             DurableCursor {
                 store_history_len: 1,
+                descriptor_len: 0,
                 revision: 7,
             }
         );
@@ -4323,31 +3795,25 @@ mod tests {
             content: "dirty descriptor".into(),
         });
         let generation = state.current_generation(&transcript);
-        let save_id = state
-            .begin_save(
-                "session-a".into(),
-                crate::persist::PersistSaveKind::History,
-                generation,
-                SubmittedHistoryRange {
-                    start_idx: 0,
-                    len: 1,
-                },
-                None,
-            )
-            .expect("save begins");
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::History,
+            generation,
+            SubmittedHistoryRange {
+                start_idx: 0,
+                len: 1,
+            },
+            None,
+        );
 
         let save_queued = SessionDocument::mark_persisted(
             &mut state,
             &mut transcript,
             None,
             None,
-            &crate::persist::PersistAck {
-                save_id,
-                session_id: "session-a".into(),
-                kind: crate::persist::PersistSaveKind::History,
-                history_len: 1,
-                revision: 7,
-            },
+            &save_receipt(save_id, 1, 7),
         );
 
         assert!(!save_queued);
@@ -4369,7 +3835,7 @@ mod tests {
             content_hash: "old".into(),
             estimated_text_bytes: 3,
             preview_text: "old".into(),
-            search_text: "old".into(),
+            indexed_text: "old".into(),
             descriptor_json: serde_json::to_string(&smelt_core::TranscriptBlockDescriptor::Text {
                 content: "old".into(),
             })
@@ -4395,34 +3861,28 @@ mod tests {
             .descriptor_total_count()
             .expect("descriptor total");
         let generation = state.current_generation(&transcript);
-        let save_id = state
-            .begin_save(
-                "session-a".into(),
-                crate::persist::PersistSaveKind::History,
-                generation,
-                SubmittedHistoryRange {
-                    start_idx: 1,
-                    len: 2,
-                },
-                Some(DescriptorAppendSubmission {
-                    count: 1,
-                    had_descriptor_total: true,
-                }),
-            )
-            .expect("save begins");
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::History,
+            generation,
+            SubmittedHistoryRange {
+                start_idx: 1,
+                len: 2,
+            },
+            Some(DescriptorAppendSubmission {
+                count: 1,
+                had_descriptor_total: true,
+            }),
+        );
 
         let save_queued = SessionDocument::mark_persisted(
             &mut state,
             &mut transcript,
             None,
             None,
-            &crate::persist::PersistAck {
-                save_id,
-                session_id: "session-a".into(),
-                kind: crate::persist::PersistSaveKind::History,
-                history_len: 2,
-                revision: 7,
-            },
+            &save_receipt(save_id, 2, 7),
         );
 
         assert!(!save_queued);
@@ -4437,67 +3897,71 @@ mod tests {
     fn persist_state_ack_queues_mismatched_generation() {
         let mut state = SessionPersistState::new();
         state.mark_session_dirty();
-        let save_id = state
-            .begin_save(
-                "session-a".into(),
-                crate::persist::PersistSaveKind::Metadata,
-                DocumentGeneration::new(state.dirty_generation, 1),
-                SubmittedHistoryRange {
-                    start_idx: 0,
-                    len: 0,
-                },
-                None,
-            )
-            .expect("save begins");
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::Metadata,
+            DocumentGeneration::new(state.dirty_generation, 1),
+            SubmittedHistoryRange {
+                start_idx: 0,
+                len: 0,
+            },
+            None,
+        );
         state.mark_session_dirty();
 
         let plan = state.ack_save(
-            &crate::persist::PersistAck {
-                save_id,
-                session_id: "session-a".into(),
-                kind: crate::persist::PersistSaveKind::Metadata,
-                history_len: 0,
-                revision: 7,
-            },
+            &save_receipt(save_id, 0, 7),
             DocumentGeneration::new(state.dirty_generation, 1),
         );
 
-        assert_eq!(plan, Some((SaveAckPlan::SaveAgain, None)));
+        assert_eq!(
+            plan,
+            Some(smelt_core::session_save::SaveAckOutcome {
+                plan: SaveAckPlan::SaveAgain,
+                kind: crate::persist::PersistSaveKind::Metadata,
+                descriptor_append: None,
+            })
+        );
         assert!(state.save_pending);
         assert!(state.session_dirty);
     }
 
     #[test]
-    fn document_failure_queues_conservative_retry() {
+    fn unrecoverable_document_failure_forgets_pending_save_without_retry() {
         let session = Session::new(1, std::path::PathBuf::from("/tmp"));
         let mut live_session = empty_live_session_for(&session, 3);
         let mut state = SessionPersistState::new();
-        state.install_loaded_store_session(true, 3, 7);
-        let save_id = state
-            .begin_save(
-                "session-a".into(),
-                crate::persist::PersistSaveKind::History,
-                DocumentGeneration::new(0, 0),
-                SubmittedHistoryRange {
-                    start_idx: 0,
-                    len: 3,
-                },
-                None,
-            )
-            .expect("save begins");
+        state.install_loaded_store_session(true, 3, 0, 7);
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::History,
+            DocumentGeneration::new(0, 0),
+            SubmittedHistoryRange {
+                start_idx: 0,
+                len: 3,
+            },
+            None,
+        );
 
+        let mut transcript = TranscriptDocument::new();
         SessionDocument::mark_persist_failed(
             &mut state,
+            &mut transcript,
             Some(&mut live_session),
             &crate::persist::PersistFailure {
                 save_id,
                 session_id: "session-a".into(),
                 message: "disk full".into(),
+                commit_failure: None,
             },
         );
 
         assert!(!state.has_pending_save());
-        assert!(state.is_save_queued());
+        assert!(!state.is_save_queued());
         assert!(state.session_dirty);
         assert_eq!(state.dirty_history_from, Some(0));
         assert!(state.store_ready);
@@ -4506,9 +3970,48 @@ mod tests {
             state.durable,
             DurableCursor {
                 store_history_len: 3,
+                descriptor_len: 0,
                 revision: 7,
             }
         );
+    }
+
+    #[test]
+    fn document_failure_reconciles_structured_stale_descriptor_base() {
+        let mut state = SessionPersistState::new();
+        state.install_loaded_store_session(true, 1, 303, 7);
+        let save_id = 1;
+        state.set_pending_save_submission_for_test(
+            save_id,
+            "session-a".into(),
+            crate::persist::PersistSaveKind::History,
+            DocumentGeneration::new(0, 0),
+            SubmittedHistoryRange {
+                start_idx: 1,
+                len: 1,
+            },
+            None,
+        );
+        let mut transcript = TranscriptDocument::new();
+
+        SessionDocument::mark_persist_failed(
+            &mut state,
+            &mut transcript,
+            None,
+            &crate::persist::PersistFailure {
+                save_id,
+                session_id: "session-a".into(),
+                message: "save session database: stale descriptor base".into(),
+                commit_failure: Some(smelt_store::SessionCommitFailure::StaleDescriptorBase {
+                    base: smelt_store::DescriptorLen::new(303),
+                    current: smelt_store::DescriptorLen::new(111),
+                }),
+            },
+        );
+
+        assert_eq!(state.durable.descriptor_len, 111);
+        assert_eq!(transcript.descriptor_total_count(), Some(111));
+        assert!(state.is_save_queued());
     }
 
     #[test]

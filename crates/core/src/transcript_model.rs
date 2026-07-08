@@ -856,36 +856,389 @@ impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecordW
     }
 }
 
-pub fn transcript_descriptor_search_text(
+const TRANSCRIPT_INDEXED_TEXT_MAX_BYTES: usize = 128 * 1024;
+const TOOL_ARG_INDEXED_TEXT_MAX_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptIndexedText {
+    pub indexed_text: String,
+    pub estimated_text_bytes: u64,
+}
+
+pub fn transcript_indexed_text(
+    descriptor: &TranscriptBlockDescriptor,
+    tool_state: Option<&ToolState>,
+) -> TranscriptIndexedText {
+    let full_text = transcript_descriptor_full_indexed_text(descriptor, tool_state);
+    let estimated_text_bytes = full_text.len() as u64;
+    let indexed_text = cap_indexed_text(&full_text, TRANSCRIPT_INDEXED_TEXT_MAX_BYTES);
+    TranscriptIndexedText {
+        indexed_text,
+        estimated_text_bytes,
+    }
+}
+
+fn cap_indexed_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let head_end = smelt_buffer::text::snap(text, max_bytes / 2);
+    let tail_min = text.len().saturating_sub(max_bytes - head_end);
+    let snapped_tail = smelt_buffer::text::snap(text, tail_min);
+    let tail_start = if snapped_tail == tail_min {
+        snapped_tail
+    } else {
+        smelt_buffer::text::next_char_boundary(text, tail_min)
+    };
+    let omitted_bytes = tail_start.saturating_sub(head_end);
+    let marker = format!("\n… {omitted_bytes} bytes omitted from persistent search index …\n");
+    format!(
+        "{}{}{}",
+        smelt_buffer::text::slice(text, 0..head_end),
+        marker,
+        smelt_buffer::text::slice(text, tail_start..text.len())
+    )
+}
+
+fn transcript_descriptor_full_indexed_text(
     descriptor: &TranscriptBlockDescriptor,
     tool_state: Option<&ToolState>,
 ) -> String {
-    tool_state
+    if descriptor.tool_name().is_some() {
+        return tool_indexed_text(descriptor, tool_state);
+    }
+
+    let mut text = descriptor.raw_text().unwrap_or_default();
+    append_indexed_line(&mut text, thinking_summary(descriptor).as_deref());
+    append_indexed_line(&mut text, compacted_label(descriptor));
+    append_indexed_line(&mut text, compacted_separator(descriptor));
+    text
+}
+
+fn tool_indexed_text(
+    descriptor: &TranscriptBlockDescriptor,
+    tool_state: Option<&ToolState>,
+) -> String {
+    let mut text = String::new();
+    append_indexed_line(&mut text, descriptor.tool_name());
+    append_indexed_line(&mut text, tool_state.map(|state| state.status.label()));
+    append_indexed_line(&mut text, tool_summary_text(descriptor).as_deref());
+    append_indexed_line(&mut text, tool_arg_indexed_text(descriptor).as_deref());
+    append_indexed_line(
+        &mut text,
+        tool_state.and_then(|state| state.user_message.as_deref()),
+    );
+    append_indexed_line(
+        &mut text,
+        tool_state
+            .and_then(|state| state.preview_output.as_ref())
+            .map(|output| output.content.as_str()),
+    );
+    append_indexed_line(
+        &mut text,
+        tool_state
+            .and_then(|state| state.output.as_ref())
+            .map(|output| output.content.as_str()),
+    );
+    append_indexed_line(
+        &mut text,
+        edit_file_indexed_text(descriptor, tool_state).as_deref(),
+    );
+    if let Some(display_count) = tool_state.and_then(display_count_indexed_text) {
+        append_indexed_line(&mut text, Some(&display_count));
+    }
+    text
+}
+
+fn tool_summary_text(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
+    match descriptor {
+        TranscriptBlockDescriptor::ToolDraft { summary, .. }
+        | TranscriptBlockDescriptor::ToolCall { summary, .. } => Some(summary.as_plain_text()),
+        _ => None,
+    }
+    .filter(|summary| !summary.is_empty())
+}
+
+fn tool_arg_indexed_text(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
+    let (tool_name, args) = match descriptor {
+        TranscriptBlockDescriptor::ToolDraft { name, args, .. }
+        | TranscriptBlockDescriptor::ToolCall { name, args, .. } => (name.as_str(), args),
+        _ => return None,
+    };
+    if tool_name == "edit_file" {
+        return None;
+    }
+
+    let mut fields = args.iter().collect::<Vec<_>>();
+    fields.sort_by_key(|(key, _)| *key);
+    let mut text = String::new();
+    for (key, value) in fields {
+        if !searchable_tool_arg_key(key) || bulky_tool_arg_key(key) {
+            continue;
+        }
+        let Some(value) = tool_arg_value_text(value) else {
+            continue;
+        };
+        if value.len() > TOOL_ARG_INDEXED_TEXT_MAX_BYTES {
+            continue;
+        }
+        append_indexed_line(&mut text, Some(&format!("{key}: {value}")));
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+fn searchable_tool_arg_key(key: &str) -> bool {
+    matches!(
+        key,
+        "base"
+            | "cell_number"
+            | "cell_type"
+            | "command"
+            | "description"
+            | "edit_mode"
+            | "file_path"
+            | "format"
+            | "glob"
+            | "name"
+            | "notebook_path"
+            | "output_mode"
+            | "path"
+            | "pattern"
+            | "prompt"
+            | "query"
+            | "type"
+            | "url"
+    )
+}
+
+fn bulky_tool_arg_key(key: &str) -> bool {
+    matches!(
+        key,
+        "content"
+            | "new_content"
+            | "new_source"
+            | "new_string"
+            | "old_content"
+            | "old_string"
+            | "source"
+    )
+}
+
+fn tool_arg_value_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(value).ok()
+        }
+        serde_json::Value::Null => None,
+    }
+}
+
+fn append_indexed_line(out: &mut String, text: Option<&str>) {
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return;
+    };
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(text);
+}
+
+fn thinking_summary(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
+    let TranscriptBlockDescriptor::Thinking { title, content, .. } = descriptor else {
+        return None;
+    };
+    let (inferred_label, line_count) = thinking_summary_label(content);
+    let label = title.as_deref().unwrap_or(&inferred_label);
+    let collapsed_lines = if title.is_some() || inferred_label == "thinking" {
+        line_count
+    } else {
+        line_count.saturating_sub(1)
+    };
+    Some(format!(
+        "{label}\n… {} …",
+        pluralize(collapsed_lines, "line collapsed", "lines collapsed")
+    ))
+}
+
+fn thinking_summary_label(content: &str) -> (String, usize) {
+    let mut label = None;
+    let mut lines = 0usize;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines += 1;
+        if label.is_none()
+            && trimmed.starts_with("**")
+            && trimmed.ends_with("**")
+            && trimmed.len() > 4
+        {
+            label = trimmed
+                .strip_prefix("**")
+                .and_then(|inner| inner.strip_suffix("**"))
+                .map(str::trim)
+                .filter(|inner| !inner.is_empty())
+                .map(str::to_string);
+        }
+    }
+    (label.unwrap_or_else(|| "thinking".to_string()), lines)
+}
+
+fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+fn compacted_label(descriptor: &TranscriptBlockDescriptor) -> Option<&'static str> {
+    matches!(descriptor, TranscriptBlockDescriptor::Compacted { .. }).then_some("compacted")
+}
+
+fn compacted_separator(descriptor: &TranscriptBlockDescriptor) -> Option<&'static str> {
+    matches!(descriptor, TranscriptBlockDescriptor::Compacted { .. }).then_some("─")
+}
+
+fn edit_file_indexed_text(
+    descriptor: &TranscriptBlockDescriptor,
+    tool_state: Option<&ToolState>,
+) -> Option<String> {
+    let args = edit_file_args(descriptor)?;
+    let mut text = String::new();
+    let old_string = string_field(args, "old_string").unwrap_or_default();
+    let new_string = string_field(args, "new_string").unwrap_or_default();
+    append_indexed_line(
+        &mut text,
+        Some(&replacement_line_detail(old_string, new_string)),
+    );
+    append_indexed_line(&mut text, string_field(args, "file_path"));
+
+    let metadata = tool_state
         .and_then(|state| state.output.as_ref())
-        .map(|output| output.content.clone())
-        .or_else(|| descriptor.raw_text())
-        .unwrap_or_default()
+        .and_then(|output| output.metadata.as_ref())
+        .and_then(serde_json::Value::as_object);
+    let has_snapshot = metadata.is_some_and(|metadata| {
+        let old_content = metadata
+            .get("old_content")
+            .and_then(serde_json::Value::as_str);
+        let new_content = metadata
+            .get("new_content")
+            .and_then(serde_json::Value::as_str);
+        append_indexed_line(&mut text, old_content);
+        append_indexed_line(&mut text, new_content);
+        old_content.is_some() || new_content.is_some()
+    });
+    if !has_snapshot {
+        append_indexed_line(&mut text, Some(old_string));
+        append_indexed_line(&mut text, Some(new_string));
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+fn edit_file_args(
+    descriptor: &TranscriptBlockDescriptor,
+) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+    match descriptor {
+        TranscriptBlockDescriptor::ToolDraft { name, args, .. }
+        | TranscriptBlockDescriptor::ToolCall { name, args, .. }
+            if name == "edit_file" =>
+        {
+            Some(args)
+        }
+        _ => None,
+    }
+}
+
+fn string_field<'a>(
+    fields: &'a std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    fields.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn replacement_line_detail(old_text: &str, new_text: &str) -> String {
+    format!(
+        "{}, {}",
+        line_label(line_count(old_text), "old line"),
+        line_label(line_count(new_text), "new line")
+    )
+}
+
+fn line_count(text: &str) -> usize {
+    text.lines().count()
+}
+
+fn line_label(count: usize, label: &str) -> String {
+    format!("{} {}{}", count, label, if count == 1 { "" } else { "s" })
+}
+
+fn display_count_indexed_text(state: &ToolState) -> Option<String> {
+    let metadata = state.output.as_ref()?.metadata.as_ref()?;
+    let display_count = metadata.get("display_count")?.as_object()?;
+    let (count, count_text) = display_count_count_text(display_count.get("value"));
+    let unit = display_count
+        .get("unit")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("item");
+    let plural = display_count
+        .get("plural")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if unit == "match" {
+                "matches".to_string()
+            } else {
+                format!("{unit}s")
+            }
+        });
+    let label = if count == 1.0 { unit } else { &plural };
+    Some(format!("{count_text} {label}"))
+}
+
+fn display_count_count_text(value: Option<&serde_json::Value>) -> (f64, String) {
+    let count = value.and_then(display_count_count).unwrap_or(0.0);
+    (count, format_lua_number(count))
+}
+
+fn display_count_count(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|value| value.is_finite())
+}
+
+fn format_lua_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        (value as i64).to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 pub fn transcript_descriptor_row(
     descriptor_idx: usize,
     record: &TranscriptBlockRecord,
-    search_text: String,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
-    transcript_descriptor_row_with_block_idx(
-        descriptor_idx,
-        descriptor_idx as u64,
-        record,
-        search_text,
-    )
+    transcript_descriptor_row_with_block_idx(descriptor_idx, descriptor_idx as u64, record)
 }
 
 pub fn transcript_descriptor_row_with_block_idx(
     _descriptor_idx: usize,
     block_idx: u64,
     record: &TranscriptBlockRecord,
-    search_text: String,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
+    let indexed_text = transcript_indexed_text(
+        &record.descriptor,
+        record.tool_state.as_ref().map(|(_, state)| state),
+    );
     let descriptor_json = serde_json::to_string(&record.descriptor)?;
     let origin_json = record
         .origin
@@ -908,9 +1261,9 @@ pub fn transcript_descriptor_row_with_block_idx(
         tool_call_id: record.descriptor.tool_call_id().map(str::to_string),
         tool_name: record.descriptor.tool_name().map(str::to_string),
         content_hash: record.content_hash.to_string(),
-        estimated_text_bytes: search_text.len() as u64,
-        preview_text: preview(&search_text, 512),
-        search_text,
+        estimated_text_bytes: indexed_text.estimated_text_bytes,
+        preview_text: preview(&indexed_text.indexed_text, 512),
+        indexed_text: indexed_text.indexed_text,
         descriptor_json,
         origin_json,
         tool_state_json,
@@ -921,14 +1274,7 @@ fn preview(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let mut end = 0;
-    for (idx, _) in text.char_indices() {
-        if idx > max_bytes {
-            break;
-        }
-        end = idx;
-    }
-    text[..end].to_string()
+    smelt_buffer::text::slice(text, 0..max_bytes).to_string()
 }
 
 struct LazyBlock {
@@ -1872,6 +2218,216 @@ pub fn is_command_like(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn indexed_tool_state_with_content(content: &str, metadata: serde_json::Value) -> ToolState {
+        ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: Some(Box::new(ToolOutput {
+                content: content.to_string(),
+                is_error: false,
+                metadata: Some(metadata),
+            })),
+            user_message: None,
+            preview_output: None,
+        }
+    }
+
+    fn indexed_tool_state(metadata: serde_json::Value) -> ToolState {
+        indexed_tool_state_with_content("output", metadata)
+    }
+
+    fn edit_file_descriptor(old_string: &str, new_string: &str) -> TranscriptBlockDescriptor {
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "file_path".to_string(),
+            serde_json::Value::String("/tmp/example.rs".to_string()),
+        );
+        args.insert(
+            "old_string".to_string(),
+            serde_json::Value::String(old_string.to_string()),
+        );
+        args.insert(
+            "new_string".to_string(),
+            serde_json::Value::String(new_string.to_string()),
+        );
+        TranscriptBlockDescriptor::ToolCall {
+            call_id: "call-1".to_string(),
+            name: "edit_file".to_string(),
+            summary: protocol::StyledLines::from_plain("example.rs"),
+            args,
+        }
+    }
+
+    #[test]
+    fn indexed_text_preserves_full_size_for_extent_estimation() {
+        let descriptor = TranscriptBlockDescriptor::Text {
+            content: "alpha λ".to_string(),
+        };
+
+        let indexed = transcript_indexed_text(&descriptor, None);
+
+        assert_eq!(indexed.indexed_text, "alpha λ");
+        assert_eq!(indexed.estimated_text_bytes, "alpha λ".len() as u64);
+    }
+
+    #[test]
+    fn indexed_text_cap_is_utf8_safe() {
+        let text = format!("α{}ω", "日".repeat(100));
+
+        let capped = cap_indexed_text(&text, 17);
+
+        assert!(capped.starts_with("α"));
+        assert!(capped.ends_with("ω"));
+        assert!(capped.contains("bytes omitted"));
+    }
+
+    #[test]
+    fn descriptor_row_computes_indexed_text_from_record() {
+        let record = TranscriptBlockRecord {
+            descriptor: TranscriptBlockDescriptor::ToolCall {
+                call_id: "call-1".to_string(),
+                name: "bash".to_string(),
+                summary: protocol::StyledLines::from_plain("bash"),
+                args: std::collections::HashMap::new(),
+            },
+            content_hash: 42,
+            origin: None,
+            tool_state: Some((
+                "call-1".to_string(),
+                indexed_tool_state_with_content("alpha λ", serde_json::json!({})),
+            )),
+        };
+
+        let row = transcript_descriptor_row(7, &record).expect("descriptor row");
+
+        assert_eq!(row.block_idx, 7);
+        let expected = "bash\nok\nbash\nalpha λ";
+        assert_eq!(row.indexed_text, expected);
+        assert_eq!(row.estimated_text_bytes, expected.len() as u64);
+    }
+
+    #[test]
+    fn indexed_text_includes_tool_identity_args_and_bounded_output() {
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "command".to_string(),
+            serde_json::Value::String("printf needle".to_string()),
+        );
+        args.insert(
+            "api_key".to_string(),
+            serde_json::Value::String("secret needle".to_string()),
+        );
+        let descriptor = TranscriptBlockDescriptor::ToolCall {
+            call_id: "call-1".to_string(),
+            name: "bash".to_string(),
+            summary: protocol::StyledLines::from_plain("printf needle"),
+            args,
+        };
+        let output = format!(
+            "visible head\n{}\nhidden needle\n{}\nvisible tail",
+            "a".repeat(TRANSCRIPT_INDEXED_TEXT_MAX_BYTES * 2),
+            "b".repeat(TRANSCRIPT_INDEXED_TEXT_MAX_BYTES * 2)
+        );
+        let state = indexed_tool_state_with_content(&output, serde_json::json!({}));
+
+        let indexed = transcript_indexed_text(&descriptor, Some(&state));
+
+        assert!(indexed.indexed_text.contains("bash"));
+        assert!(indexed.indexed_text.contains("command: printf needle"));
+        assert!(!indexed.indexed_text.contains("secret needle"));
+        assert!(indexed.indexed_text.contains("visible head"));
+        assert!(indexed.indexed_text.contains("visible tail"));
+        assert!(indexed.indexed_text.contains("bytes omitted"));
+        assert!(!indexed.indexed_text.contains("hidden needle"));
+        assert!((indexed.indexed_text.len() as u64) < indexed.estimated_text_bytes);
+    }
+
+    #[test]
+    fn display_count_indexed_text_matches_default_lua_plural_rules() {
+        let state = indexed_tool_state(serde_json::json!({
+            "display_count": { "value": 2, "unit": "match" }
+        }));
+        assert_eq!(
+            display_count_indexed_text(&state).as_deref(),
+            Some("2 matches")
+        );
+
+        let state = indexed_tool_state(serde_json::json!({
+            "display_count": { "value": 1, "unit": "file", "plural": "files" }
+        }));
+        assert_eq!(
+            display_count_indexed_text(&state).as_deref(),
+            Some("1 file")
+        );
+    }
+
+    #[test]
+    fn indexed_text_includes_thinking_summary_chrome() {
+        let descriptor = TranscriptBlockDescriptor::Thinking {
+            title: Some("Analyzing the bug".to_string()),
+            summary_titles: vec![
+                "Inspecting the report".to_string(),
+                "Analyzing the bug".to_string(),
+            ],
+            content: "Checking files\nReviewing output".to_string(),
+            kind: protocol::ReasoningKind::Summary,
+        };
+        assert_eq!(
+            transcript_indexed_text(&descriptor, None).indexed_text,
+            "**Inspecting the report**\n**Analyzing the bug**\nChecking files\nReviewing output\nAnalyzing the bug\n… 2 lines collapsed …"
+        );
+
+        let descriptor = TranscriptBlockDescriptor::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            content: "Checking files\nReviewing output".to_string(),
+            kind: protocol::ReasoningKind::Raw,
+        };
+        assert_eq!(
+            transcript_indexed_text(&descriptor, None).indexed_text,
+            "Checking files\nReviewing output\nthinking\n… 2 lines collapsed …"
+        );
+    }
+
+    #[test]
+    fn indexed_text_includes_default_compacted_chrome() {
+        let descriptor = TranscriptBlockDescriptor::Compacted {
+            summary: "archived".to_string(),
+        };
+        assert_eq!(
+            transcript_indexed_text(&descriptor, None).indexed_text,
+            "archived\ncompacted\n─"
+        );
+    }
+
+    #[test]
+    fn indexed_text_includes_edit_file_snapshot_metadata() {
+        let descriptor = edit_file_descriptor("old needle", "new needle");
+        let state = indexed_tool_state_with_content(
+            "edited example.rs",
+            serde_json::json!({
+                "path": "/tmp/example.rs",
+                "old_content": "fn old_snapshot() {}\n",
+                "new_content": "fn new_snapshot() {}\n",
+            }),
+        );
+
+        assert_eq!(
+            transcript_indexed_text(&descriptor, Some(&state)).indexed_text,
+            "edit_file\nok\nexample.rs\nedited example.rs\n1 old line, 1 new line\n/tmp/example.rs\nfn old_snapshot() {}\nfn new_snapshot() {}\n"
+        );
+    }
+
+    #[test]
+    fn indexed_text_includes_edit_file_planned_strings_without_snapshot() {
+        let descriptor = edit_file_descriptor("alpha\nbeta", "gamma");
+
+        assert_eq!(
+            transcript_indexed_text(&descriptor, None).indexed_text,
+            "edit_file\nexample.rs\n2 old lines, 1 new line\n/tmp/example.rs\nalpha\nbeta\ngamma"
+        );
+    }
 
     #[test]
     fn rewrite_preserves_id_and_bumps_generation() {

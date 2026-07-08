@@ -779,7 +779,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "list",
-        "List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, `size_bytes` when available, and `migration_status` / `migration_message` when a legacy import is pending or failed.",
+        "List persisted SQLite sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let current_id =
@@ -802,15 +802,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 if let Some(size) = meta.text_bytes {
                     row.set("size_bytes", size)?;
                 }
-                if let Some(migration) = meta.migration {
-                    row.set("migration_status", migration.state.as_str())?;
-                    if let Some(message) = migration.message {
-                        row.set("migration_message", message)?;
-                    }
-                    if migration.updated_at_ms > 0 {
-                        row.set("migration_updated_at_ms", migration.updated_at_ms)?;
-                    }
-                }
                 out.set(idx, row)?;
                 idx += 1;
             }
@@ -828,7 +819,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "text",
-        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text when available, refreshing the `content.txt` sidecar for compatibility; falls back to legacy sidecars/importers for old sessions.",
+        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text, refreshing the `content.txt` sidecar when needed.",
         &["id"],
         |_, id: String| -> LuaResult<Option<String>> {
             Ok(smelt_core::session::load_search_blob(&id))
@@ -885,31 +876,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 if cached_view.is_none() {
                     let cache_key = cache_key_hint.clone().unwrap_or_else(|| id.clone());
                     cached_key = Some(cache_key.clone());
-                    if cached_view.is_none() {
-                        if let Some(transcript) = crate::app::history::load_transcript_tail_from_sqlite_id(&id, width, height) {
-                            let mut view = crate::app::transcript::TranscriptDocument::from_loaded_transcript(transcript);
-                            view.set_inline_options(app.inline_options());
-                            cached_view = Some(view);
-                        } else {
-                            // COMPAT(legacy-session-full-load-fallbacks): preview uses a full legacy load only when sparse SQLite transcript records are unavailable.
-                            if let Some(session) = crate::app::history::materialize_full_session(
-                                &id,
-                                crate::app::history::FullSessionMaterializationReason::LegacyPreviewFallback,
-                            ) {
-                                let cache_key = format!("{}:{}", session.id, session.updated_at_ms);
-                                if cached_key.as_deref() != Some(cache_key.as_str()) {
-                                    cached_view = app.resume_preview_cache.take(&cache_key);
-                                }
-                                cached_key = Some(cache_key);
-                                if cached_view.is_none() {
-                                    let mut view = crate::app::transcript::TranscriptDocument::from_transcript(
-                                        crate::app::history::build_transcript_from_session(&app.lua, &session),
-                                    );
-                                    view.set_inline_options(app.inline_options());
-                                    cached_view = Some(view);
-                                }
-                            }
-                        }
+                    if let Some(transcript) = crate::app::history::load_transcript_tail_from_sqlite_id(&id, width, height) {
+                        let mut view = crate::app::transcript::TranscriptDocument::from_loaded_transcript(transcript);
+                        view.set_inline_options(app.inline_options());
+                        cached_view = Some(view);
                     }
                 }
 

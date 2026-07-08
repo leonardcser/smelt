@@ -11,7 +11,6 @@ pub(crate) mod render_plan;
 pub(crate) mod source_view;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
-pub(crate) mod transcript_search_text;
 
 pub(crate) use smelt_core::content::{display_safe_char, display_safe_text};
 

@@ -191,19 +191,6 @@ impl RequestAuditRecord {
     }
 }
 
-pub(crate) fn import_request_value(
-    conn: &Connection,
-    value: &Value,
-    compression: ObjectCompression,
-) -> Result<i64> {
-    insert_request_record(
-        conn,
-        legacy_record(value)?,
-        compression,
-        RequestAuditPayloadMode::Full,
-    )
-}
-
 pub(crate) fn append_request_attempt(
     conn: &Connection,
     entry: &RequestLogEntry,
@@ -545,54 +532,6 @@ fn nonnegative_u64(value: i64) -> u64 {
     value.max(0) as u64
 }
 
-fn legacy_record(value: &Value) -> Result<RequestAuditRecord> {
-    let started_at = value
-        .get("timestamp_ms")
-        .and_then(Value::as_i64)
-        .unwrap_or_default();
-    let completed_at = value
-        .get("elapsed_ms")
-        .and_then(Value::as_i64)
-        .map(|elapsed| started_at.saturating_add(elapsed));
-    let usage = value
-        .get("usage")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()?;
-    Ok(RequestAuditRecord {
-        request_id: scalar_string(value.get("request_id")),
-        kind: optional_string(value, "kind"),
-        turn_id: scalar_string(value.get("turn_id")),
-        ask_id: scalar_string(value.get("ask_id")),
-        started_at,
-        completed_at,
-        provider: optional_string_multi(value, &["provider_kind", "provider"]),
-        model: optional_string(value, "model"),
-        history_len: value.get("history_len").and_then(Value::as_i64),
-        body: value.get("body").cloned(),
-        response: value.get("response").cloned(),
-        error: value.get("error").cloned(),
-        error_summary: request_error_value_summary(value.get("error")),
-        background: value
-            .get("background")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        api_base: optional_string(value, "api_base"),
-        url: optional_string(value, "url"),
-        http_status: value.get("http_status").and_then(Value::as_i64),
-        prompt_cache_key: optional_string(value, "prompt_cache_key"),
-        stream: value
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        attempt: value.get("attempt").and_then(Value::as_i64).unwrap_or(1),
-        response_summary: request_response_value_summary(value.get("response")),
-        usage,
-        cost_usd: value.get("cost_usd").and_then(Value::as_f64),
-        tokens_per_sec: value.get("tokens_per_sec").and_then(Value::as_f64),
-    })
-}
-
 pub(crate) fn request_payloads(
     conn: &Connection,
     request_attempt_id: i64,
@@ -919,44 +858,6 @@ fn request_error_summary(error: &protocol::request_log::RequestError) -> String 
     } else {
         error.message.clone()
     }
-}
-
-fn request_error_value_summary(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    value
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("kind").and_then(Value::as_str))
-        .map(ToString::to_string)
-}
-
-fn request_response_value_summary(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    value
-        .get("content")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("reasoning").and_then(Value::as_str))
-        .map(|text| preview(text, 512))
-}
-
-fn scalar_string(value: Option<&Value>) -> Option<String> {
-    match value? {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn optional_string(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-}
-
-fn optional_string_multi(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| optional_string(value, key))
 }
 
 fn response_summary(response: &protocol::request_log::RequestResponse) -> Option<String> {

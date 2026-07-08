@@ -288,7 +288,6 @@ pub(crate) struct PromptResizeClick {
 
 #[derive(Debug)]
 pub enum AppEvent {
-    SessionMigration(smelt_core::session::SessionMigrationEvent),
     ShutdownSignal,
 }
 
@@ -2178,21 +2177,14 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn notify_sticky(&mut self, message: String) {
-        self.record_notice_with_lifetime(
-            smelt_core::messages::MessageKind::Info,
-            "smelt".into(),
-            message,
-            NotificationLifetime::Sticky,
-        );
-    }
-
     pub(crate) fn drain_persist_reports(&mut self) {
         for report in self.persister.drain_reports() {
             match report {
-                crate::persist::PersistReport::Saved(ack) => self.ack_persist_save(ack),
-                crate::persist::PersistReport::Failed(err) => self.fail_persist_save(err),
-                crate::persist::PersistReport::RequestAuditFailed(err) => {
+                crate::persist::SessionBackendEvent::Saved(receipt) => {
+                    self.ack_persist_save(receipt)
+                }
+                crate::persist::SessionBackendEvent::Failed(err) => self.fail_persist_save(err),
+                crate::persist::SessionBackendEvent::RequestAuditFailed(err) => {
                     self.notify_warn(format!(
                         "request audit write failed for session {}: {}",
                         err.session_id, err.message
@@ -2204,43 +2196,7 @@ impl TuiApp {
 
     pub(crate) fn handle_app_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::SessionMigration(event) => self.handle_session_migration_event(event),
             AppEvent::ShutdownSignal => self.pending_quit = true,
-        }
-    }
-
-    pub(crate) fn handle_session_migration_event(
-        &mut self,
-        event: smelt_core::session::SessionMigrationEvent,
-    ) {
-        match event {
-            smelt_core::session::SessionMigrationEvent::Started { pending } => {
-                self.notify(format!("session migration started: {pending} pending"));
-            }
-            smelt_core::session::SessionMigrationEvent::Completed(report) => {
-                self.handle_session_migration_report(report);
-            }
-        }
-    }
-
-    pub(crate) fn handle_session_migration_report(
-        &mut self,
-        report: smelt_core::session::SessionMigrationBatchReport,
-    ) {
-        self.resume_preview_cache.clear();
-        if report.migrated == 0 && report.repaired == 0 && report.failed == 0 {
-            return;
-        }
-        if report.failed > 0 {
-            self.notify_error_sticky(format!(
-                "session migration completed: {} migrated, {} repaired, {} failed",
-                report.migrated, report.repaired, report.failed
-            ));
-        } else {
-            self.notify_sticky(format!(
-                "session migration completed: {} migrated, {} repaired",
-                report.migrated, report.repaired
-            ));
         }
     }
 

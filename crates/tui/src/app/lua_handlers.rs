@@ -324,7 +324,7 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom. Silent no-op on miss.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        let store_backed = smelt_core::session::load_store_header_or_import_bounded(id);
+        let store_backed = smelt_core::session::load_store_header(id);
         if let Some((header, store_ref)) = store_backed {
             let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
                 store_ref.session_dir.clone(),
@@ -343,17 +343,6 @@ impl TuiApp {
             );
             let document = document.into_store_backed();
             self.load_store_backed_session(document);
-            self.finish_transcript_turn();
-            self.transcript_win_mut().follow_tail();
-            return;
-        }
-        // COMPAT(legacy-session-full-load-fallbacks): if the sparse SQLite transcript path is unavailable, fall back to legacy full session open.
-        if let Some(loaded) = crate::app::history::materialize_full_session(
-            id,
-            crate::app::history::FullSessionMaterializationReason::LegacyOpenFallback,
-        ) {
-            self.load_session(loaded);
-            self.restore_screen();
             self.finish_transcript_turn();
             self.transcript_win_mut().follow_tail();
         }

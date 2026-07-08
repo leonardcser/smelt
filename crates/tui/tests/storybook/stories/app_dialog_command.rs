@@ -310,10 +310,8 @@ app_story!(resume_dialog, |ctx| {
             history_len: None,
             checkpoint: None,
             text_bytes: Some(bytes),
-            migration: None,
         };
-        let json = serde_json::to_string(&meta).expect("serialize SessionMeta fixture");
-        ctx.write_session_meta(id, &json);
+        ctx.write_session_meta(&meta);
     }
     ctx.run_command("resume");
     ctx.assert_snapshot();

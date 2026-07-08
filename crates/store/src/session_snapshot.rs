@@ -5,16 +5,14 @@ use smelt_perf::perf;
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
-use crate::history::{self, TranscriptDescriptorRecord};
+use crate::history;
 use crate::meta::{self, SessionState, WriterLease};
 use crate::object::checked_i64;
-
-pub const SESSION_META_JSON_KEY: &str = "session_meta_json";
+use crate::session_commit::{HistorySuffix, SideTableSuffixes};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSnapshot {
     pub state: SessionState,
-    pub meta_json: Option<Value>,
     /// Changed history suffix. `history_start_idx == 0` means this is a full
     /// snapshot; otherwise rows below `history_start_idx` are an expected
     /// unchanged prefix already present in SQLite.
@@ -23,36 +21,7 @@ pub struct SessionSnapshot {
     pub history: Vec<HistoryItem>,
     pub turn_metas: Vec<(u64, Value)>,
     pub metadata_snapshots: Vec<(u64, Value)>,
-    pub accounting_snapshots: Vec<(u64, Value)>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionHistorySuffix {
-    pub state: SessionState,
-    pub history_start_idx: usize,
-    pub history_len: usize,
-    pub history: Vec<HistoryItem>,
-    pub side_tables: Option<SessionSideTableSuffixes>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TranscriptDescriptorSuffix {
-    pub start_descriptor_idx: usize,
-    pub records: Vec<TranscriptDescriptorRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionDelta {
-    pub history: SessionHistorySuffix,
-    pub descriptors: Option<TranscriptDescriptorSuffix>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionSideTableSuffixes {
-    pub start_idx: usize,
-    pub turn_metas: Vec<(u64, Value)>,
-    pub metadata_snapshots: Vec<(u64, Value)>,
-    pub accounting_snapshots: Vec<(u64, Value)>,
+    pub context_snapshots: Vec<(u64, Value)>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -162,19 +131,10 @@ pub(crate) fn save_session_snapshot_in_transaction(
         )?;
     }
 
-    let meta_json = snapshot
-        .meta_json
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
-    let current_meta_json = meta::meta(conn, SESSION_META_JSON_KEY)?;
     let snapshot_tables_changed = replace_snapshot_tables_if_changed(conn, snapshot)?;
     let state_changed = session_state_changed(current_state.as_ref(), &snapshot.state);
-    let changed = history_deleted > 0
-        || history_inserted > 0
-        || state_changed
-        || current_meta_json != meta_json
-        || snapshot_tables_changed;
+    let changed =
+        history_deleted > 0 || history_inserted > 0 || state_changed || snapshot_tables_changed;
 
     let mut state = snapshot.state.clone();
     state.history_len = snapshot.history_len as u64;
@@ -186,15 +146,6 @@ pub(crate) fn save_session_snapshot_in_transaction(
             .map_or(snapshot.state.revision, |state| state.revision)
     };
     meta::upsert_session_state(conn, &state)?;
-    match meta_json {
-        Some(meta_json) => meta::set_meta(conn, SESSION_META_JSON_KEY, &meta_json)?,
-        None => {
-            conn.execute(
-                "DELETE FROM store_meta WHERE key = ?1",
-                [SESSION_META_JSON_KEY],
-            )?;
-        }
-    }
 
     let report = SessionSaveReport {
         history_deleted,
@@ -207,36 +158,11 @@ pub(crate) fn save_session_snapshot_in_transaction(
     Ok(report)
 }
 
-pub(crate) fn save_session_history_suffix(
+pub(crate) fn apply_session_commit_history_in_transaction(
     conn: &Connection,
-    suffix: &SessionHistorySuffix,
-    expected_revision: Option<u64>,
-    writer_lease: Option<&WriterLease>,
-    compression: ObjectCompression,
-) -> Result<SessionSaveReport> {
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = save_session_history_suffix_in_transaction(
-        conn,
-        suffix,
-        expected_revision,
-        writer_lease,
-        compression,
-    );
-    match result {
-        Ok(report) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(report)
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
-        }
-    }
-}
-
-pub(crate) fn save_session_history_suffix_in_transaction(
-    conn: &Connection,
-    suffix: &SessionHistorySuffix,
+    state: &SessionState,
+    history: &HistorySuffix,
+    side_tables: &SideTableSuffixes,
     expected_revision: Option<u64>,
     writer_lease: Option<&WriterLease>,
     compression: ObjectCompression,
@@ -244,12 +170,9 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     let _perf = perf::begin("store:session:save_history_suffix_transaction");
     perf::record_value(
         "store:session:dirty_suffix_history_rows",
-        suffix.history.len() as u64,
+        history.items.len() as u64,
     );
-    perf::record_value(
-        "store:session:total_history_rows",
-        suffix.history_len as u64,
-    );
+    perf::record_value("store:session:total_history_rows", history.final_len.get());
     if let Some(lease) = writer_lease {
         meta::acquire_writer_lease(conn, lease, 30 * 60)?;
     }
@@ -266,12 +189,22 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     let current_len = current_state
         .as_ref()
         .map_or(0, |state| state.history_len as usize);
-    let history_start = suffix.history_start_idx.min(suffix.history_len);
-    if suffix.history_len != history_start + suffix.history.len() {
+    let history_start = history.start.as_usize().ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "history index {} does not fit usize",
+            history.start.get()
+        ))
+    })?;
+    let history_len = history.final_len.as_usize().ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "history length {} does not fit usize",
+            history.final_len.get()
+        ))
+    })?;
+    if history_start.checked_add(history.items.len()) != Some(history_len) {
         return Err(StoreError::Integrity(format!(
-            "history suffix shape is invalid: start {history_start}, suffix {}, final {}",
-            suffix.history.len(),
-            suffix.history_len
+            "history suffix shape is invalid: start {history_start}, suffix {}, final {history_len}",
+            history.items.len(),
         )));
     }
     if history_start > current_len {
@@ -281,89 +214,17 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     }
 
     let history_deleted = current_len.saturating_sub(history_start) as u64;
-    let history_inserted = suffix.history_len.saturating_sub(history_start) as u64;
+    let history_inserted = history_len.saturating_sub(history_start) as u64;
     if history_deleted > 0 || history_inserted > 0 {
-        history::replace_history_suffix(conn, history_start, &suffix.history, compression)?;
+        history::replace_history_suffix(conn, history_start, &history.items, compression)?;
     }
 
-    let state_changed = session_state_changed(current_state.as_ref(), &suffix.state);
-    let side_tables_changed = match &suffix.side_tables {
-        Some(tables) => replace_side_table_suffixes_if_changed(
-            conn,
-            tables.start_idx as u64,
-            &tables.turn_metas,
-            &tables.metadata_snapshots,
-            &tables.accounting_snapshots,
-        )?,
-        None => false,
-    };
+    let state_changed = session_state_changed(current_state.as_ref(), state);
+    let side_tables_changed = replace_typed_side_table_suffixes_if_changed(conn, side_tables)?;
     let changed =
         history_deleted > 0 || history_inserted > 0 || state_changed || side_tables_changed;
-    let mut state = suffix.state.clone();
-    state.history_len = suffix.history_len as u64;
-    state.revision = if changed {
-        current_state.as_ref().map_or(1, |state| state.revision + 1)
-    } else {
-        current_state
-            .as_ref()
-            .map_or(suffix.state.revision, |state| state.revision)
-    };
-    meta::upsert_session_state(conn, &state)?;
-
-    let report = SessionSaveReport {
-        history_deleted,
-        history_inserted,
-        history_unchanged: history_start as u64,
-        revision: state.revision,
-        changed,
-    };
-    record_session_save_report(&report);
-    Ok(report)
-}
-
-pub(crate) fn save_session_state_and_side_table_suffixes_in_transaction(
-    conn: &Connection,
-    state: &SessionState,
-    side_tables: &SessionSideTableSuffixes,
-    expected_revision: Option<u64>,
-    writer_lease: Option<&WriterLease>,
-) -> Result<SessionSaveReport> {
-    let _perf = perf::begin("store:session:save_metadata_transaction");
-    perf::record_value("store:session:dirty_suffix_history_rows", 0);
-    perf::record_value("store:session:total_history_rows", state.history_len);
-    if let Some(lease) = writer_lease {
-        meta::acquire_writer_lease(conn, lease, 30 * 60)?;
-    }
-    let current_state = meta::session_state(conn)?;
-    if let Some(expected_revision) = expected_revision {
-        let current_revision = current_state.as_ref().map_or(0, |state| state.revision);
-        if current_revision != expected_revision {
-            return Err(StoreError::Integrity(format!(
-                "session revision changed: expected {expected_revision}, found {current_revision}"
-            )));
-        }
-    }
-
-    let current_len = current_state
-        .as_ref()
-        .map_or(0, |state| state.history_len as usize);
-    if current_len as u64 != state.history_len {
-        return Err(StoreError::Integrity(format!(
-            "metadata-only save history length changed: stored {current_len}, next {}",
-            state.history_len
-        )));
-    }
-
-    let side_tables_changed = replace_side_table_suffixes_if_changed(
-        conn,
-        side_tables.start_idx as u64,
-        &side_tables.turn_metas,
-        &side_tables.metadata_snapshots,
-        &side_tables.accounting_snapshots,
-    )?;
-    let state_changed = session_state_changed(current_state.as_ref(), state);
-    let changed = state_changed || side_tables_changed;
     let mut state = state.clone();
+    state.history_len = history.final_len.get();
     state.revision = if changed {
         current_state.as_ref().map_or(1, |state| state.revision + 1)
     } else {
@@ -374,9 +235,9 @@ pub(crate) fn save_session_state_and_side_table_suffixes_in_transaction(
     meta::upsert_session_state(conn, &state)?;
 
     let report = SessionSaveReport {
-        history_deleted: 0,
-        history_inserted: 0,
-        history_unchanged: current_len as u64,
+        history_deleted,
+        history_inserted,
+        history_unchanged: history_start as u64,
         revision: state.revision,
         changed,
     };
@@ -434,8 +295,19 @@ fn replace_snapshot_tables_if_changed(
         snapshot_start,
         &snapshot.turn_metas,
         &snapshot.metadata_snapshots,
-        &snapshot.accounting_snapshots,
+        &snapshot.context_snapshots,
     )
+}
+
+fn replace_typed_side_table_suffixes_if_changed(
+    conn: &Connection,
+    side_tables: &SideTableSuffixes,
+) -> Result<bool> {
+    let start = side_tables.start.get();
+    let turn_metas = typed_snapshot_rows_json_from(&side_tables.turn_metas, start)?;
+    let metadata = typed_snapshot_rows_json_from(&side_tables.metadata_snapshots, start)?;
+    let context = typed_snapshot_rows_json_from(&side_tables.context_snapshots, start)?;
+    sync_serialized_side_table_suffixes(conn, start, &turn_metas, &metadata, &context)
 }
 
 fn replace_side_table_suffixes_if_changed(
@@ -443,26 +315,24 @@ fn replace_side_table_suffixes_if_changed(
     snapshot_start: u64,
     turn_metas: &[(u64, Value)],
     metadata_snapshots: &[(u64, Value)],
-    accounting_snapshots: &[(u64, Value)],
+    context_snapshots: &[(u64, Value)],
 ) -> Result<bool> {
     let turn_metas = snapshot_rows_json_from(turn_metas, snapshot_start)?;
     let metadata = snapshot_rows_json_from(metadata_snapshots, snapshot_start)?;
-    let accounting = snapshot_rows_json_from(accounting_snapshots, snapshot_start)?;
+    let context = snapshot_rows_json_from(context_snapshots, snapshot_start)?;
+    sync_serialized_side_table_suffixes(conn, snapshot_start, &turn_metas, &metadata, &context)
+}
 
-    let mut changed =
-        sync_side_table_suffix(conn, SnapshotTable::TurnMetas, snapshot_start, &turn_metas)?;
-    changed |= sync_side_table_suffix(
-        conn,
-        SnapshotTable::MetadataSnapshots,
-        snapshot_start,
-        &metadata,
-    )?;
-    changed |= sync_side_table_suffix(
-        conn,
-        SnapshotTable::AccountingSnapshots,
-        snapshot_start,
-        &accounting,
-    )?;
+fn sync_serialized_side_table_suffixes(
+    conn: &Connection,
+    start: u64,
+    turn_metas: &[(u64, String)],
+    metadata: &[(u64, String)],
+    context: &[(u64, String)],
+) -> Result<bool> {
+    let mut changed = sync_side_table_suffix(conn, SnapshotTable::TurnMetas, start, turn_metas)?;
+    changed |= sync_side_table_suffix(conn, SnapshotTable::MetadataSnapshots, start, metadata)?;
+    changed |= sync_side_table_suffix(conn, SnapshotTable::ContextSnapshots, start, context)?;
     Ok(changed)
 }
 
@@ -470,14 +340,14 @@ fn replace_side_table_suffixes_if_changed(
 enum SnapshotTable {
     TurnMetas,
     MetadataSnapshots,
-    AccountingSnapshots,
+    ContextSnapshots,
 }
 
 impl SnapshotTable {
     fn idx_col(self) -> &'static str {
         match self {
             Self::TurnMetas => "turn_idx",
-            Self::MetadataSnapshots | Self::AccountingSnapshots => "history_idx",
+            Self::MetadataSnapshots | Self::ContextSnapshots => "history_idx",
         }
     }
 
@@ -489,7 +359,7 @@ impl SnapshotTable {
             Self::MetadataSnapshots => {
                 "SELECT history_idx, metadata_json FROM metadata_snapshots WHERE history_idx >= ?1 ORDER BY history_idx"
             }
-            Self::AccountingSnapshots => {
+            Self::ContextSnapshots => {
                 "SELECT history_idx, accounting_json FROM accounting_snapshots WHERE history_idx >= ?1 ORDER BY history_idx"
             }
         }
@@ -501,7 +371,7 @@ impl SnapshotTable {
             Self::MetadataSnapshots => {
                 "SELECT history_idx, metadata_json FROM metadata_snapshots ORDER BY history_idx"
             }
-            Self::AccountingSnapshots => {
+            Self::ContextSnapshots => {
                 "SELECT history_idx, accounting_json FROM accounting_snapshots ORDER BY history_idx"
             }
         }
@@ -511,7 +381,7 @@ impl SnapshotTable {
         match self {
             Self::TurnMetas => "DELETE FROM turn_metas WHERE turn_idx >= ?1",
             Self::MetadataSnapshots => "DELETE FROM metadata_snapshots WHERE history_idx >= ?1",
-            Self::AccountingSnapshots => "DELETE FROM accounting_snapshots WHERE history_idx >= ?1",
+            Self::ContextSnapshots => "DELETE FROM accounting_snapshots WHERE history_idx >= ?1",
         }
     }
 
@@ -525,7 +395,7 @@ impl SnapshotTable {
                 "INSERT INTO metadata_snapshots (history_idx, metadata_json) VALUES (?1, ?2)
                  ON CONFLICT(history_idx) DO UPDATE SET metadata_json = excluded.metadata_json"
             }
-            Self::AccountingSnapshots => {
+            Self::ContextSnapshots => {
                 "INSERT INTO accounting_snapshots (history_idx, accounting_json) VALUES (?1, ?2)
                  ON CONFLICT(history_idx) DO UPDATE SET accounting_json = excluded.accounting_json"
             }
@@ -594,6 +464,19 @@ fn read_snapshot_rows_json_from(
     Ok(rows)
 }
 
+fn typed_snapshot_rows_json_from(
+    rows: &[(crate::session_commit::HistoryIndex, Value)],
+    start_idx: u64,
+) -> Result<Vec<(u64, String)>> {
+    rows.iter()
+        .map(|(idx, value)| (idx.get(), value))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_iter()
+        .filter(|(idx, _)| *idx >= start_idx)
+        .map(|(idx, value)| Ok((idx, serde_json::to_string(value)?)))
+        .collect()
+}
+
 fn snapshot_rows_json_from(rows: &[(u64, Value)], start_idx: u64) -> Result<Vec<(u64, String)>> {
     rows.iter()
         .filter(|(idx, _)| *idx >= start_idx)
@@ -607,13 +490,10 @@ pub(crate) fn load_session_snapshot(conn: &Connection) -> Result<Option<SessionS
         perf::record_value("store:session:full_snapshot_rows_read", 0);
         return Ok(None);
     };
-    let meta_json = meta::meta(conn, SESSION_META_JSON_KEY)?
-        .map(|value| serde_json::from_str(&value).map_err(StoreError::from))
-        .transpose()?;
     let history = history::read_history_items(conn)?;
     let turn_metas = read_snapshot_rows(conn, SnapshotTable::TurnMetas)?;
     let metadata_snapshots = read_snapshot_rows(conn, SnapshotTable::MetadataSnapshots)?;
-    let accounting_snapshots = read_snapshot_rows(conn, SnapshotTable::AccountingSnapshots)?;
+    let context_snapshots = read_snapshot_rows(conn, SnapshotTable::ContextSnapshots)?;
     perf::record_value(
         "store:session:full_snapshot_rows_read",
         history.len() as u64,
@@ -623,17 +503,16 @@ pub(crate) fn load_session_snapshot(conn: &Connection) -> Result<Option<SessionS
         turn_metas
             .len()
             .saturating_add(metadata_snapshots.len())
-            .saturating_add(accounting_snapshots.len()) as u64,
+            .saturating_add(context_snapshots.len()) as u64,
     );
     Ok(Some(SessionSnapshot {
         state,
-        meta_json,
         history_start_idx: 0,
         history_len: history.len(),
         history,
         turn_metas,
         metadata_snapshots,
-        accounting_snapshots,
+        context_snapshots,
     }))
 }
 

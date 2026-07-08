@@ -1,5 +1,5 @@
 use super::*;
-use crate::persist::{PersistAck, PersistFailure, PersistSaveKind};
+use crate::persist::{PersistFailure, PersistSaveKind};
 use protocol::{
     AssistantStep, Content, EngineEvent, HistoryAppend, HistoryAppendResult, HistoryItem, Role,
     TokenUsage, ToolInvocation, ToolOutcome,
@@ -13,6 +13,23 @@ fn loaded_session(id: &str) -> smelt_core::session::Session {
         crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
     )
     .expect("session saved")
+}
+
+fn save_receipt(
+    save_id: u64,
+    session_id: &str,
+    history_len: usize,
+    descriptor_len: usize,
+    revision: u64,
+) -> smelt_store::SaveReceipt {
+    smelt_store::SaveReceipt {
+        session_id: session_id.to_string(),
+        save_id: smelt_store::SaveId::new(save_id),
+        previous_revision: smelt_store::Revision::new(revision.saturating_sub(1)),
+        revision: smelt_store::Revision::new(revision),
+        history_len: smelt_store::HistoryLen::new(history_len as u64),
+        descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+    }
 }
 
 fn tool_history() -> Vec<HistoryItem> {
@@ -158,6 +175,91 @@ fn shutdown_flushes_descriptor_only_transcript_blocks() {
 }
 
 #[test]
+fn sparse_descriptor_resume_interrupt_save_compacts_and_appends_again() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app.commit_request_history_item(
+            HistoryItem::user(Content::text("sparse descriptor prompt")),
+            Some(Block::User {
+                text: "sparse descriptor prompt".into(),
+                image_labels: Vec::new(),
+            }),
+        );
+        app.app.push_block(Block::Text {
+            content: "persisted before sparse rewrite".into(),
+        });
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+
+    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
+    let db = smelt_store::SessionDb::open(&db_path).unwrap();
+    assert_eq!(db.transcript_descriptor_count().unwrap(), 2);
+    db.connection()
+        .execute(
+            "UPDATE transcript_blocks SET descriptor_idx = 302 WHERE descriptor_idx = 1",
+            [],
+        )
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert_eq!(
+        resumed
+            .app
+            .session_document
+            .transcript
+            .descriptor_total_count(),
+        Some(2)
+    );
+    resumed.start_turn(3030);
+    resumed.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "interrupted after sparse descriptor load".into(),
+    }));
+    resumed.cancel();
+    resumed.app.save_session_and_flush();
+    assert!(
+        resumed.app.notification.is_none(),
+        "sparse descriptor save should not surface an integrity failure: {:?}",
+        resumed.app.notification
+    );
+    drop(resumed);
+
+    let db = smelt_store::SessionDb::open_read_only(&db_path).unwrap();
+    let (count, min, max): (i64, Option<i64>, Option<i64>) = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*), MIN(descriptor_idx), MAX(descriptor_idx)
+             FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((count, min, max), (3, Some(0), Some(2)));
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    resumed.app.push_block(Block::Thinking {
+        title: None,
+        summary_titles: Vec::new(),
+        content: "append after dense reconciliation".into(),
+        kind: protocol::ReasoningKind::Raw,
+    });
+    resumed.app.save_session_and_flush();
+    assert!(resumed.app.notification.is_none());
+
+    let db = smelt_store::SessionDb::open_read_only(&db_path).unwrap();
+    let rows = db.read_all_transcript_descriptor_records().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().any(|row| row
+        .preview_text
+        .contains("append after dense reconciliation")));
+}
+
+#[test]
 fn store_backed_resume_preserves_context_token_identity() {
     let guard = test_home_guard();
     let session_id = {
@@ -185,6 +287,84 @@ fn store_backed_resume_preserves_context_token_identity() {
         .core
         .session
         .display_context_tokens_stale(&identity));
+}
+
+#[test]
+fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app.commit_request_history_item(
+            HistoryItem::user(Content::text("first prompt")),
+            Some(Block::User {
+                text: "first prompt".into(),
+                image_labels: Vec::new(),
+            }),
+        );
+        app.app.commit_request_history_item(
+            HistoryItem::assistant(AssistantStep::terminal(
+                Some(Content::text("first reply")),
+                None,
+                Vec::new(),
+            )),
+            Some(Block::Text {
+                content: "first reply".into(),
+            }),
+        );
+        app.start_turn(1);
+        app.feed_one(SourceEvent::engine(EngineEvent::TokenUsage {
+            usage: TokenUsage {
+                context_tokens: Some(100),
+                ..Default::default()
+            },
+            tokens_per_sec: None,
+            cost_usd: None,
+            background: false,
+        }));
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id: 1,
+            first_changed_index: 0,
+            history: None,
+            meta: None,
+        }));
+        app.app.save_session_and_flush();
+
+        let second_prompt_block_idx = app.app.session_document.transcript.history().len();
+        app.app.commit_request_history_item(
+            HistoryItem::user(Content::text("second prompt")),
+            Some(Block::User {
+                text: "second prompt".into(),
+                image_labels: Vec::new(),
+            }),
+        );
+        app.start_turn(2);
+        app.feed_one(SourceEvent::engine(EngineEvent::TokenUsage {
+            usage: TokenUsage {
+                context_tokens: Some(250),
+                ..Default::default()
+            },
+            tokens_per_sec: None,
+            cost_usd: None,
+            background: false,
+        }));
+
+        app.app
+            .rewind_to_block(Some(second_prompt_block_idx), false);
+        app.app.save_session_and_flush();
+        assert_eq!(app.app.session_history_len(), 2);
+        assert_eq!(app.app.core.session.display_context_tokens(), Some(100));
+        app.app.core.session.id.clone()
+    };
+
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), 2);
+    assert_eq!(loaded.current_context_tokens(), Some(100));
+    assert_eq!(loaded.display_context_tokens(), Some(100));
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert_eq!(resumed.app.session_history_len(), 2);
+    assert_eq!(resumed.app.core.session.display_context_tokens(), Some(100));
 }
 
 #[test]
@@ -478,13 +658,9 @@ fn stale_live_save_ack_does_not_drop_later_live_history() {
         .session_append_history(HistoryItem::user(Content::text("appended after stale ack")));
     assert_eq!(resumed.app.session_history_len(), before_len + 1);
 
-    resumed.app.ack_persist_save(PersistAck {
-        save_id: 700,
-        session_id: session_id.clone(),
-        kind: PersistSaveKind::History,
-        history_len: before_len,
-        revision: 7,
-    });
+    resumed
+        .app
+        .ack_persist_save(save_receipt(700, &session_id, before_len, before_len, 7));
 
     assert_eq!(
         resumed.app.session_history_len(),
@@ -526,13 +702,9 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
         .descriptor_dirty_from()
         .is_some());
 
-    resumed.app.ack_persist_save(PersistAck {
-        save_id: 701,
-        session_id: session_id.clone(),
-        kind: PersistSaveKind::History,
-        history_len: before_len,
-        revision: 7,
-    });
+    resumed
+        .app
+        .ack_persist_save(save_receipt(701, &session_id, before_len, before_len, 7));
 
     assert!(
         resumed
@@ -581,13 +753,9 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
         .descriptor_dirty_from()
         .is_some());
 
-    resumed.app.ack_persist_save(PersistAck {
-        save_id: 703,
-        session_id: session_id.clone(),
-        kind: PersistSaveKind::History,
-        history_len: before_len,
-        revision: 7,
-    });
+    resumed
+        .app
+        .ack_persist_save(save_receipt(703, &session_id, before_len, before_len, 7));
 
     assert!(
         resumed
@@ -645,13 +813,9 @@ fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
         elapsed_ms: Some(5),
     }));
 
-    resumed.app.ack_persist_save(PersistAck {
-        save_id: 702,
-        session_id: session_id.clone(),
-        kind: PersistSaveKind::History,
-        history_len: before_len,
-        revision: 7,
-    });
+    resumed
+        .app
+        .ack_persist_save(save_receipt(702, &session_id, before_len, before_len, 7));
     assert!(
         resumed
             .app
@@ -697,6 +861,7 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
         save_id: 900,
         session_id: session_id.clone(),
         message: "save session database: integrity error: history unchanged prefix exceeds stored rows: prefix 2, stored 1".into(),
+        commit_failure: None,
     });
     assert_eq!(
         resumed.app.session_document.dirty_history_from_for_test(),
@@ -715,6 +880,45 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
     assert!(matches!(
         loaded.history.last(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "recover after failure"
+    ));
+}
+
+#[test]
+fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    let before_len = resumed.app.session_history_len();
+    resumed
+        .app
+        .session_append_history(HistoryItem::user(Content::text(
+            "recover after stale descriptor",
+        )));
+    fake_pending_history_save(&mut resumed, 901, before_len);
+
+    resumed.app.fail_persist_save(PersistFailure {
+        save_id: 901,
+        session_id: session_id.clone(),
+        message: "save session database: stale descriptor base: base 303, current 1".into(),
+        commit_failure: Some(smelt_store::SessionCommitFailure::StaleDescriptorBase {
+            base: smelt_store::DescriptorLen::new(303),
+            current: smelt_store::DescriptorLen::new(before_len as u64),
+        }),
+    });
+
+    assert!(
+        resumed.app.notification.is_none(),
+        "recoverable stale commit failures should retry without sticky user-facing errors"
+    );
+    resumed.app.save_session_and_flush();
+
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), before_len + 1);
+    assert!(matches!(
+        loaded.history.last(),
+        Some(HistoryItem::User { content, .. }) if content.text_content() == "recover after stale descriptor"
     ));
 }
 

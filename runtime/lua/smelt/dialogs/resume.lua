@@ -36,11 +36,6 @@ local function display_title(entry)
     local line = raw:match("([^\n]*)") or raw
     title = line:match("^%s*(.-)%s*$") or line
   end
-  if entry.migration_status == "failed" then
-    return title .. " [migration failed]"
-  elseif entry.migration_status == "pending" then
-    return title .. " [migrating]"
-  end
   return title
 end
 

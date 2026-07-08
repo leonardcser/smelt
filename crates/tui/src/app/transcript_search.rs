@@ -4,7 +4,6 @@ use crate::app::transcript::{
 };
 use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
-use crate::content::transcript_search_text::descriptor_search_text;
 use crate::smelt_edit::{DocPosition, RowIndex};
 use std::collections::{HashMap, HashSet};
 
@@ -110,19 +109,19 @@ fn build_transcript_search_index(
     key: TranscriptSearchKey,
     layout: &TranscriptSearchLayout,
     index_trigrams: bool,
-    mut search_text_for_entry: impl FnMut(&TranscriptSearchLayoutEntry) -> String,
+    mut indexed_text_for_entry: impl FnMut(&TranscriptSearchLayoutEntry) -> String,
 ) -> TranscriptSearchIndex {
     let mut entries = Vec::with_capacity(layout.entries.len());
     let mut block_entries: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut trigrams: HashMap<u32, Vec<usize>> = HashMap::new();
     for layout_entry in &layout.entries {
-        let search_text = index_trigrams.then(|| search_text_for_entry(layout_entry));
+        let indexed_text = index_trigrams.then(|| indexed_text_for_entry(layout_entry));
         push_search_entry(
             &mut entries,
             &mut block_entries,
             &mut trigrams,
             layout_entry,
-            search_text.as_deref(),
+            indexed_text.as_deref(),
         );
     }
     TranscriptSearchIndex {
@@ -138,7 +137,7 @@ fn push_search_entry(
     block_entries: &mut HashMap<u64, Vec<usize>>,
     trigrams: &mut HashMap<u32, Vec<usize>>,
     layout_entry: &TranscriptSearchLayoutEntry,
-    search_text: Option<&str>,
+    indexed_text: Option<&str>,
 ) {
     let entry_index = entries.len();
     entries.push(TranscriptSearchEntry {
@@ -152,8 +151,8 @@ fn push_search_entry(
             .or_default()
             .push(entry_index);
     }
-    if let Some(search_text) = search_text {
-        for gram in unique_trigrams(search_text) {
+    if let Some(indexed_text) = indexed_text {
+        for gram in unique_trigrams(indexed_text) {
             trigrams.entry(gram).or_default().push(entry_index);
         }
     }
@@ -183,7 +182,7 @@ impl TuiApp {
         }
     }
 
-    fn transcript_search_text_for_entry(&self, entry: &TranscriptSearchLayoutEntry) -> String {
+    fn transcript_indexed_text_for_entry(&self, entry: &TranscriptSearchLayoutEntry) -> String {
         let history = self.session_document.transcript.history();
         let mut text = String::new();
         for id in &entry.block_ids {
@@ -193,7 +192,9 @@ impl TuiApp {
             let tool_state = descriptor
                 .tool_call_id()
                 .and_then(|call_id| history.tool_state(call_id));
-            let block_text = descriptor_search_text(&descriptor, tool_state);
+            let block_text =
+                smelt_core::transcript_model::transcript_indexed_text(&descriptor, tool_state)
+                    .indexed_text;
             if !text.is_empty() {
                 text.push('\n');
             }
@@ -251,7 +252,10 @@ impl TuiApp {
             let tool_state = descriptor
                 .tool_call_id()
                 .and_then(|call_id| history.tool_state(call_id));
-            if descriptor_search_text(&descriptor, tool_state).contains(query) {
+            if smelt_core::transcript_model::transcript_indexed_text(&descriptor, tool_state)
+                .indexed_text
+                .contains(query)
+            {
                 out.push(id.get());
             }
         }
@@ -403,7 +407,7 @@ impl TuiApp {
             key,
             &layout,
             index_trigrams,
-            |layout_entry| self.transcript_search_text_for_entry(layout_entry),
+            |layout_entry| self.transcript_indexed_text_for_entry(layout_entry),
         ));
         record_index_size(self.search.transcript_index.as_ref()?);
         self.search.transcript_index.as_ref()

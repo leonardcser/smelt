@@ -6769,6 +6769,7 @@ mod tests {
         let descriptor = smelt_core::transcript_model::TranscriptBlockDescriptor::Text {
             content: content.clone(),
         };
+        let indexed_text = format!("resume benchmark block {block_idx}");
         smelt_store::TranscriptDescriptorRecord {
             block_idx: block_idx as u64,
             history_idx: None,
@@ -6778,7 +6779,7 @@ mod tests {
             content_hash: (block_idx as u64).saturating_add(1).to_string(),
             estimated_text_bytes: content.len() as u64,
             preview_text: format!("resume benchmark response {block_idx}"),
-            search_text: format!("resume benchmark block {block_idx}"),
+            indexed_text,
             descriptor_json: serde_json::to_string(&descriptor)
                 .expect("serialize resume descriptor"),
             origin_json: None,
@@ -6808,7 +6809,7 @@ mod tests {
                 descriptor_count += 1;
             }
             let start_descriptor_idx = descriptor_count.saturating_sub(records.len());
-            db.replace_transcript_descriptor_suffix(start_descriptor_idx, &records)
+            db.replace_transcript_descriptor_suffix_for_repair(start_descriptor_idx, &records)
                 .expect("write descriptor resume fixture chunk");
         }
         let setup_ms = elapsed_ms(setup_start.elapsed());

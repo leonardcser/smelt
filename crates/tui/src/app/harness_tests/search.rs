@@ -32,7 +32,8 @@ fn sparse_display_only_search_app(
             test_descriptor_record(idx, &content)
         })
         .collect::<Vec<_>>();
-    db.replace_transcript_descriptor_records(&records).unwrap();
+    db.replace_transcript_descriptor_records_for_repair(&records)
+        .unwrap();
     drop(db);
 
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)
@@ -69,7 +70,7 @@ fn test_descriptor_record(
         content_hash: "0".to_string(),
         estimated_text_bytes: content.len() as u64,
         preview_text: content.to_string(),
-        search_text: content.to_string(),
+        indexed_text: content.to_string(),
         descriptor_json: serde_json::to_string(
             &smelt_core::transcript_model::TranscriptBlockDescriptor::Text {
                 content: content.to_string(),

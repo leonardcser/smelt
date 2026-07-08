@@ -75,7 +75,7 @@ session.id = nil
 ---@type fun(): table
 session.info = nil
 
---- List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, `size_bytes` when available, and `migration_status` / `migration_message` when a legacy import is pending or failed.
+--- List persisted SQLite sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.
 ---@type fun(): table
 session.list = nil
 
@@ -115,7 +115,7 @@ session.switch_cwd = nil
 ---@type fun(): string
 session.system = nil
 
---- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text when available, refreshing the `content.txt` sidecar for compatibility; falls back to legacy sidecars/importers for old sessions.
+--- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text, refreshing the `content.txt` sidecar when needed.
 ---@type fun(id: string): string?
 session.text = nil
 

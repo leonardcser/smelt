@@ -352,16 +352,57 @@ impl AppStoryCtx {
         self.app.cwd_str()
     }
 
-    /// Write a `meta.json` fixture for a persisted session so
-    /// `smelt.session.list()` returns it. Goes under
-    /// `<XDG_STATE_HOME>/smelt/sessions/<id>/meta.json` to match the
-    /// production `state_dir()` layout used by `list_sessions`.
-    pub fn write_session_meta(&self, id: &str, meta_json: &str) {
+    /// Write a canonical database-backed session fixture with a derived
+    /// `meta.json` cache so `smelt.session.list()` exercises its production path.
+    pub fn write_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
         let state_home = std::env::var_os("XDG_STATE_HOME")
             .map(std::path::PathBuf::from)
             .expect("XDG_STATE_HOME set by test harness");
-        let dir = state_home.join("smelt").join("sessions").join(id);
+        let dir = state_home.join("smelt").join("sessions").join(&meta.id);
         std::fs::create_dir_all(&dir).expect("create session fixture dir");
+        let db = smelt_store::SessionDb::open(dir.join("session.db"))
+            .expect("create session fixture database");
+        let history_len = meta.history_len.unwrap_or_default();
+        let history = (0..history_len)
+            .map(|idx| {
+                protocol::HistoryItem::user(protocol::Content::text(format!(
+                    "storybook session fixture row {idx}"
+                )))
+            })
+            .collect::<Vec<_>>();
+        db.save_session_snapshot_for_import(&smelt_store::SessionSnapshot {
+            state: smelt_store::SessionState {
+                id: meta.id.clone(),
+                title: meta.title.clone(),
+                slug: meta.slug.clone(),
+                first_user_message: meta.first_user_message.clone(),
+                cwd: meta.cwd.clone(),
+                mode: meta.mode.clone(),
+                reasoning_effort: meta
+                    .reasoning_effort
+                    .map(|effort| effort.label().to_string()),
+                model: meta.model.clone(),
+                parent_id: meta.parent_id.clone(),
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: meta.context_tokens.map(u64::from),
+                context_tokens_history_len: None,
+                display_context_tokens: meta.context_tokens.map(u64::from),
+                session_cost_usd: 0.0,
+                revision: 0,
+                history_len: history_len as u64,
+                created_at: meta.created_at_ms as i64,
+                updated_at: meta.updated_at_ms as i64,
+            },
+            history_start_idx: 0,
+            history_len,
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
+        })
+        .expect("write canonical session fixture");
+        let meta_json = serde_json::to_string(meta).expect("serialize session fixture metadata");
         std::fs::write(dir.join("meta.json"), meta_json).expect("write session meta fixture");
     }
 

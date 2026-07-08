@@ -667,9 +667,9 @@ pub fn effective_mode_at<'a>(
 
 // Provider-wire `Vec<Message>` ↔ semantic `Vec<HistoryItem>` conversion.
 //
-// `history_to_messages` is the current provider request path. `history_from_messages`
-// is COMPAT(session-v1-messages): it loads old session files and repairs orphan
-// tool_use blocks by synthesizing an "interrupted" result (see issue #8).
+// `history_to_messages` builds provider requests. `history_from_messages` accepts
+// host-hook replacements that still speak the provider message shape and repairs
+// orphan tool_use blocks by synthesizing an "interrupted" result.
 
 use crate::message::{Message, Role};
 
@@ -686,8 +686,8 @@ pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
 
 /// Convert user-role wire content into semantic history.
 ///
-/// COMPAT(session-v1-messages): reserved `[smelt:*]` prefixes are old
-/// model-visible encodings for internal notes, not real user turns.
+/// Reserved `[smelt:*]` prefixes are model-visible encodings for internal
+/// notes, not real user turns.
 pub fn history_item_from_user_content(content: Content) -> HistoryItem {
     match note_from_user_content(&content) {
         Some(note) => HistoryItem::Note(note),
@@ -698,9 +698,9 @@ pub fn history_item_from_user_content(content: Content) -> HistoryItem {
     }
 }
 
-/// COMPAT(session-v1-messages): fold old `Vec<Message>` session logs into
-/// `Vec<HistoryItem>`.
+/// Fold provider-wire messages into semantic history.
 ///
+/// This is used when host hooks replace a request with provider messages.
 /// Pairs each assistant message that has `tool_calls` with the immediately
 /// following `Role::Tool` messages by `tool_call_id`. Any `tool_call` whose
 /// id isn't satisfied by a following tool message gets a synthetic
@@ -792,8 +792,8 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
     out
 }
 
-/// Render a slice of `HistoryItem`s back into the legacy `Vec<Message>`
-/// shape used by the provider wire layer. The result satisfies the
+/// Render a slice of `HistoryItem`s back into the provider-wire `Vec<Message>`
+/// shape. The result satisfies the
 /// assistant-tool_calls ↔ tool_call_id pairing invariant by construction.
 pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(items.len() * 2);
@@ -851,68 +851,6 @@ pub fn history_item_message_count(item: &HistoryItem) -> usize {
         HistoryItem::System { .. } | HistoryItem::User { .. } | HistoryItem::Note(_) => 1,
         HistoryItem::Assistant(turn) => 1 + turn.invocations.len(),
     }
-}
-
-/// For each input `Message` index, return the index into the produced
-/// `Vec<HistoryItem>`. Useful for remapping snapshot keys when loading an
-/// older session whose `token_snapshots` etc. were keyed by message
-/// position.
-///
-/// The returned vector has the same length as `messages`. Indexing is
-/// "message position N maps to the HistoryItem that absorbed N".
-pub fn message_to_history_positions(messages: &[Message]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(messages.len());
-    let mut hist_idx = 0usize;
-    let mut i = 0usize;
-    while i < messages.len() {
-        let m = &messages[i];
-        match m.role {
-            Role::System | Role::User => {
-                out.push(hist_idx);
-                hist_idx += 1;
-                i += 1;
-            }
-            Role::Assistant => {
-                out.push(hist_idx);
-                let mut j = i + 1;
-                while j < messages.len() && matches!(messages[j].role, Role::Tool) {
-                    out.push(hist_idx);
-                    j += 1;
-                }
-                hist_idx += 1;
-                i = j;
-            }
-            Role::Tool => {
-                // Stray Tool with no preceding assistant - dropped by
-                // history_from_messages. Map to the current hist_idx so
-                // the caller can still use the table without panicking.
-                out.push(hist_idx);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
-/// Walk a `&[HistoryItem]` once, yielding `(history_index, message_index)`
-/// pairs for every `Message` that `history_to_messages` would emit. Useful
-/// for remapping snapshot keys when serializing a `Session` back to the
-/// legacy wire shape.
-pub fn history_to_message_positions(items: &[HistoryItem]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(items.len());
-    let mut msg_idx = 0usize;
-    for item in items {
-        out.push(msg_idx);
-        match item {
-            HistoryItem::System { .. } | HistoryItem::User { .. } | HistoryItem::Note(_) => {
-                msg_idx += 1;
-            }
-            HistoryItem::Assistant(turn) => {
-                msg_idx += 1 + turn.invocations.len();
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1031,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_with_invocations_round_trips_through_legacy_messages() {
+    fn assistant_with_invocations_round_trips_through_provider_messages() {
         let inv = ToolInvocation {
             call_id: "call-1".into(),
             name: "f".into(),
@@ -1055,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_round_trip_through_legacy_user_messages() {
+    fn notes_round_trip_through_provider_user_messages() {
         let item = HistoryItem::note(HistoryNote::mode_change("now in apply mode"));
         let messages = history_to_messages(std::slice::from_ref(&item));
         assert!(matches!(messages[0].role, Role::User));
@@ -1225,10 +1163,10 @@ mod tests {
         assert_eq!(back, item);
     }
     #[test]
-    fn orphan_tool_use_in_legacy_session_is_repaired_with_interrupted_result() {
+    fn orphan_tool_use_in_provider_messages_is_repaired_with_interrupted_result() {
         // Mimic the broken state from issue #8: assistant with tool_calls
         // followed by no Tool messages.
-        let legacy = vec![
+        let messages = vec![
             Message::user(Content::text("go")),
             Message::assistant_with_reasoning(
                 None,
@@ -1237,7 +1175,7 @@ mod tests {
                 Some(vec![tc("web_fetch:36", "web_fetch")]),
             ),
         ];
-        let history = history_from_messages(legacy);
+        let history = history_from_messages(messages);
         let assistant = history
             .iter()
             .find_map(|i| i.as_assistant())
@@ -1252,7 +1190,7 @@ mod tests {
 
     #[test]
     fn pairs_assistant_with_immediately_following_tool_messages() {
-        let legacy = vec![
+        let messages = vec![
             Message::user(Content::text("go")),
             Message::assistant_with_reasoning(
                 None,
@@ -1263,7 +1201,7 @@ mod tests {
             Message::tool("a".into(), "result-a", false),
             Message::tool("b".into(), "result-b", true),
         ];
-        let history = history_from_messages(legacy);
+        let history = history_from_messages(messages);
         let assistant = history
             .iter()
             .find_map(|i| i.as_assistant())

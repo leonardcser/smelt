@@ -3008,15 +3008,14 @@ mod tests {
                 created_at: 10,
                 updated_at: 20,
             },
-            meta_json: None,
             history_start_idx: 0,
             history_len: 3,
             history: vec![old, recent.clone(), reply.clone()],
             turn_metas: Vec::new(),
             metadata_snapshots: Vec::new(),
-            accounting_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
         };
-        db.save_session_snapshot(&snapshot, None).unwrap();
+        db.save_session_snapshot_for_import(&snapshot).unwrap();
 
         let history = load_model_history(
             protocol::ModelHistorySource::store(

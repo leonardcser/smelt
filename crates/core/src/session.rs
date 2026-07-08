@@ -1,21 +1,16 @@
 use crate::config;
 use protocol::{
-    history_from_messages, history_item_message_count, message_to_history_positions, HistoryItem,
-    Message, ReasoningEffort, TokenUsage, TurnMeta,
+    history_item_message_count, HistoryItem, Message, ReasoningEffort, TokenUsage, TurnMeta,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::BufRead;
-#[cfg(test)]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static SESSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static MIGRATION_IMPORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextCheckpoint {
@@ -75,10 +70,6 @@ impl ContextTokenReading {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSnapshot {
-    /// Legacy spend reading from older `accounting_snapshots` entries. New
-    /// snapshots keep cumulative spend only at the session level.
-    #[serde(default, rename = "cost_usd", skip_serializing)]
-    legacy_cost_usd: f64,
     pub context_tokens: Option<u32>,
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
@@ -95,7 +86,6 @@ pub struct ContextSnapshot {
 impl ContextSnapshot {
     fn from_session(session: &Session) -> Self {
         Self {
-            legacy_cost_usd: 0.0,
             context_tokens: session.context_tokens,
             context_tokens_history_len: session.context_tokens_history_len,
             context_token_identity: session.context_token_identity.clone(),
@@ -149,11 +139,7 @@ impl Default for ContextCheckpoint {
 /// In-memory conversation state.
 ///
 /// Storage shape is `Vec<HistoryItem>` (the sum-type history that makes
-/// orphan tool_calls impossible). Current session files persist that history
-/// directly. Older files with legacy `messages: Vec<Message>` still load via a
-/// compatibility reader that converts them into history and repairs orphan
-/// tool_use blocks by synthesizing an "interrupted" tool result (see
-/// [`protocol::history_from_messages`]).
+/// orphan tool_calls impossible).
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
@@ -197,13 +183,9 @@ pub struct Session {
 
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
 
-pub use crate::session_migration::{
-    ensure_session_db, export_history_jsonl, export_requests_jsonl, migrate_all_sessions_once,
-    migrate_session_dir_to_db, pending_session_migration_count, spawn_background_migration,
-    spawn_background_migration_with_event, spawn_background_migration_with_report,
-    SessionMigrationBatchReport, SessionMigrationError, SessionMigrationEvent,
-    SessionMigrationFailure, SessionMigrationOutcome, SessionMigrationState,
-    SessionMigrationStatus,
+pub use crate::session_store::{
+    ensure_session_db_read_only, ensure_session_db_writable, export_history_jsonl,
+    export_requests_jsonl, SessionStoreError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,64 +198,6 @@ pub enum SessionAccessDecision {
 pub struct LoadedSession {
     pub session: Session,
     pub access: SessionAccessDecision,
-}
-
-// COMPAT(session-v1-messages): load old session.json files that stored
-// provider-style messages instead of native HistoryItem rows.
-/// Legacy on-disk JSON shape. Older sessions stored provider-style messages;
-/// snapshot keys are in `Vec<Message>` position space and get remapped to
-/// `Vec<HistoryItem>` positions on load.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionWire {
-    pub id: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub slug: Option<String>,
-    #[serde(default)]
-    pub first_user_message: Option<String>,
-    #[serde(default)]
-    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
-    #[serde(default)]
-    pub created_at_ms: u64,
-    #[serde(default)]
-    pub updated_at_ms: u64,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_legacy_messages")]
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub checkpoint: Option<ContextCheckpoint>,
-    #[serde(default)]
-    pub context_tokens: Option<u32>,
-    #[serde(default)]
-    pub context_tokens_history_len: Option<usize>,
-    #[serde(default)]
-    pub context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
-    pub display_context_tokens: Option<u32>,
-    #[serde(default)]
-    pub display_context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
-    pub cost_snapshots: Vec<(usize, f64)>,
-    #[serde(default)]
-    pub turn_metas: Vec<(usize, TurnMeta)>,
-    // COMPAT(session-v1-messages): older session metadata used
-    // `context_snapshots`; current snapshots are accounting baselines.
-    #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
-    pub context_snapshots: Vec<(usize, ContextSnapshot)>,
-    #[serde(default)]
-    pub session_cost_usd: f64,
-    #[serde(default)]
-    pub session_usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,74 +242,12 @@ struct SessionWireV2 {
     pub display_context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     pub turn_metas: HistorySnapshots<TurnMeta>,
-    // COMPAT(session-v1-messages): older session metadata used
-    // `context_snapshots`; current snapshots are accounting baselines.
-    #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
+    #[serde(default, alias = "accounting_snapshots")]
     pub context_snapshots: HistorySnapshots<ContextSnapshot>,
     #[serde(default)]
     pub session_cost_usd: f64,
     #[serde(default)]
     pub session_usage: TokenUsage,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SessionWireProbe {
-    #[serde(default)]
-    schema_version: Option<u32>,
-    #[serde(default)]
-    history: Option<serde_json::Value>,
-}
-
-// COMPAT(session-v1-messages): old provider-message sessions sometimes stored
-// subagent transcript entries with role "agent". Treat them as assistant text
-// while importing the legacy shape.
-fn deserialize_legacy_messages<'de, D>(deserializer: D) -> Result<Vec<Message>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut values = Vec::<Value>::deserialize(deserializer)?;
-    for value in &mut values {
-        if value.get("role").and_then(Value::as_str) == Some("agent") {
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("role".to_string(), Value::String("assistant".to_string()));
-            }
-        }
-    }
-    values
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(serde::de::Error::custom)
-}
-
-// COMPAT(session-v1-messages): old snapshot keys were stored in provider-message
-// positions, not semantic history positions.
-/// `msg_to_hist[i]` = index into history that absorbed message i.
-/// `msg_len` = total messages count (history_to_messages length).
-fn remap_msg_to_hist<T: Clone>(
-    snapshots: &[(usize, T)],
-    msg_to_hist: &[usize],
-    hist_len: usize,
-) -> HistorySnapshots<T> {
-    HistorySnapshots::from_vec(
-        snapshots
-            .iter()
-            .map(|(msg_pos, v)| {
-                let hist_pos = if *msg_pos == 0 {
-                    0
-                } else if *msg_pos <= msg_to_hist.len() {
-                    // Snapshot was taken AT messages.len() == msg_pos, i.e.
-                    // after the (msg_pos-1)th message landed. The equivalent
-                    // history-space key is one past the history index of the
-                    // last absorbed message.
-                    msg_to_hist[*msg_pos - 1] + 1
-                } else {
-                    hist_len
-                };
-                (hist_pos, v.clone())
-            })
-            .collect(),
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,115 +344,12 @@ impl<T> From<Vec<(usize, T)>> for HistorySnapshots<T> {
     }
 }
 
-// COMPAT(session-v1-messages): rebuild context snapshots from old cost-only snapshots.
-fn legacy_context_snapshots(
-    cost_snapshots: Vec<(usize, f64)>,
-    context_tokens: Option<u32>,
-    context_tokens_history_len: Option<usize>,
-    display_context_tokens: Option<u32>,
-) -> HistorySnapshots<ContextSnapshot> {
-    HistorySnapshots::from_vec(
-        cost_snapshots
-            .into_iter()
-            .map(|(len, cost_usd)| {
-                let (context_tokens, context_tokens_history_len, display_context_tokens) =
-                    if context_tokens_history_len == Some(len) {
-                        (
-                            context_tokens,
-                            context_tokens_history_len,
-                            display_context_tokens,
-                        )
-                    } else {
-                        (None, None, None)
-                    };
-                (
-                    len,
-                    ContextSnapshot {
-                        legacy_cost_usd: cost_usd,
-                        context_tokens,
-                        context_tokens_history_len,
-                        context_token_identity: None,
-                        display_context_tokens,
-                        display_context_token_identity: None,
-                        checkpoint: None,
-                    },
-                )
-            })
-            .collect(),
-    )
-}
-
-impl From<SessionWire> for Session {
-    fn from(w: SessionWire) -> Self {
-        let table = message_to_history_positions(&w.messages);
-        let history = history_from_messages(w.messages);
-        let hist_len = history.len();
-        let context_tokens = w.context_tokens;
-        let context_tokens_history_len = w.context_tokens_history_len;
-        let display_context_tokens = w.display_context_tokens.or(context_tokens);
-        let cost_snapshots = remap_msg_to_hist(&w.cost_snapshots, &table, hist_len);
-        let context_snapshots = remap_msg_to_hist(&w.context_snapshots, &table, hist_len);
-        let context_snapshots = if context_snapshots.is_empty() {
-            legacy_context_snapshots(
-                cost_snapshots.into_vec(),
-                context_tokens,
-                context_tokens_history_len,
-                display_context_tokens,
-            )
-        } else {
-            context_snapshots
-        };
-        let session_cost_usd = if w.session_cost_usd == 0.0 {
-            context_snapshots
-                .last()
-                .map(|(_, snapshot)| snapshot.legacy_cost_usd)
-                .unwrap_or(w.session_cost_usd)
-        } else {
-            w.session_cost_usd
-        };
-        let metadata_snapshots = remap_msg_to_hist(&w.metadata_snapshots, &table, hist_len);
-        Self {
-            id: w.id,
-            title: w.title,
-            slug: w.slug,
-            first_user_message: w.first_user_message,
-            metadata_snapshots,
-            created_at_ms: w.created_at_ms,
-            updated_at_ms: w.updated_at_ms,
-            mode: w.mode,
-            reasoning_effort: w.reasoning_effort,
-            model: w.model,
-            cwd: w.cwd,
-            parent_id: w.parent_id,
-            turn_metas: remap_msg_to_hist(&w.turn_metas, &table, hist_len),
-            context_snapshots,
-            history,
-            checkpoint: w.checkpoint,
-            context_tokens,
-            context_tokens_history_len,
-            context_token_identity: None,
-            display_context_tokens,
-            display_context_token_identity: None,
-            session_cost_usd,
-            session_usage: w.session_usage,
-        }
-    }
-}
-
 impl From<SessionWireV2> for Session {
     fn from(w: SessionWireV2) -> Self {
         let context_tokens = w.context_tokens;
         let display_context_tokens = w.display_context_tokens.or(context_tokens);
         let metadata_snapshots = w.metadata_snapshots;
         let context_snapshots = w.context_snapshots;
-        let session_cost_usd = if w.session_cost_usd == 0.0 {
-            context_snapshots
-                .last()
-                .map(|(_, snapshot)| snapshot.legacy_cost_usd)
-                .unwrap_or(w.session_cost_usd)
-        } else {
-            w.session_cost_usd
-        };
         Self {
             id: w.id,
             title: w.title,
@@ -613,7 +372,7 @@ impl From<SessionWireV2> for Session {
             display_context_token_identity: w.display_context_token_identity,
             turn_metas: w.turn_metas,
             context_snapshots,
-            session_cost_usd,
+            session_cost_usd: w.session_cost_usd,
             session_usage: w.session_usage,
         }
     }
@@ -658,22 +417,14 @@ impl Serialize for Session {
 
 impl<'de> Deserialize<'de> for Session {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(de)?;
-        let probe: SessionWireProbe =
-            serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
-        match (probe.schema_version, probe.history.is_some()) {
-            (Some(CURRENT_SESSION_SCHEMA_VERSION), _) | (None, true) => {
-                serde_json::from_value::<SessionWireV2>(value)
-                    .map(Session::from)
-                    .map_err(serde::de::Error::custom)
-            }
-            (Some(version), _) => Err(serde::de::Error::custom(format!(
-                "unsupported session schema version {version}"
-            ))),
-            (None, false) => serde_json::from_value::<SessionWire>(value)
-                .map(Session::from)
-                .map_err(serde::de::Error::custom),
+        let wire = SessionWireV2::deserialize(de)?;
+        if wire.schema_version != CURRENT_SESSION_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported session schema version {}",
+                wire.schema_version
+            )));
         }
+        Ok(Session::from(wire))
     }
 }
 
@@ -714,135 +465,16 @@ pub struct SessionMeta {
     /// Populated in `meta.json` so the resume dialog avoids loading session history.
     #[serde(default)]
     pub text_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub migration: Option<SessionMigrationStatus>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct SessionAccountingState {
+struct SessionContextSnapshotState {
     #[serde(default)]
     session_usage: TokenUsage,
     #[serde(default)]
     context_token_identity: Option<ContextTokenIdentity>,
     #[serde(default)]
     display_context_token_identity: Option<ContextTokenIdentity>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionJsonlMeta {
-    pub schema_version: u32,
-    pub id: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub slug: Option<String>,
-    #[serde(default)]
-    pub first_user_message: Option<String>,
-    #[serde(default)]
-    pub metadata_snapshots: HistorySnapshots<SessionMetadataSnapshot>,
-    #[serde(default)]
-    pub created_at_ms: u64,
-    #[serde(default)]
-    pub updated_at_ms: u64,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    #[serde(default)]
-    pub checkpoint: Option<ContextCheckpoint>,
-    #[serde(default)]
-    pub context_tokens: Option<u32>,
-    #[serde(default)]
-    pub context_tokens_history_len: Option<usize>,
-    #[serde(default)]
-    pub context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
-    pub display_context_tokens: Option<u32>,
-    #[serde(default)]
-    pub display_context_token_identity: Option<ContextTokenIdentity>,
-    #[serde(default)]
-    pub turn_metas: HistorySnapshots<TurnMeta>,
-    // COMPAT(session-v1-messages): older session metadata used
-    // `context_snapshots`; current snapshots are accounting baselines.
-    #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
-    pub context_snapshots: HistorySnapshots<ContextSnapshot>,
-    #[serde(default)]
-    pub session_cost_usd: f64,
-    #[serde(default)]
-    pub session_usage: TokenUsage,
-    #[serde(default)]
-    pub text_bytes: Option<u64>,
-}
-
-impl From<&Session> for SessionJsonlMeta {
-    fn from(s: &Session) -> Self {
-        Self {
-            schema_version: CURRENT_SESSION_SCHEMA_VERSION,
-            id: s.id.clone(),
-            title: s.title.clone(),
-            slug: s.slug.clone(),
-            first_user_message: s.first_user_message.clone(),
-            metadata_snapshots: s.metadata_snapshots.clone(),
-            created_at_ms: s.created_at_ms,
-            updated_at_ms: s.updated_at_ms,
-            mode: s.mode.clone(),
-            reasoning_effort: s.reasoning_effort,
-            model: s.model.clone(),
-            cwd: s.cwd.clone(),
-            parent_id: s.parent_id.clone(),
-            checkpoint: s.checkpoint.clone(),
-            context_tokens: s.context_tokens,
-            context_tokens_history_len: s.context_tokens_history_len,
-            context_token_identity: s.context_token_identity.clone(),
-            display_context_tokens: s.display_context_tokens,
-            display_context_token_identity: s.display_context_token_identity.clone(),
-            turn_metas: s.turn_metas.clone(),
-            context_snapshots: s.context_snapshots.clone(),
-            session_cost_usd: s.session_cost_usd,
-            session_usage: s.session_usage.clone(),
-            text_bytes: Some(compute_text_bytes(&s.history)),
-        }
-    }
-}
-
-impl SessionJsonlMeta {
-    fn into_session(self, history: Vec<HistoryItem>) -> Session {
-        let display_context_token_identity = self
-            .display_context_token_identity
-            .clone()
-            .or_else(|| self.context_token_identity.clone());
-        Session {
-            id: self.id,
-            title: self.title,
-            slug: self.slug,
-            first_user_message: self.first_user_message,
-            metadata_snapshots: self.metadata_snapshots,
-            created_at_ms: self.created_at_ms,
-            updated_at_ms: self.updated_at_ms,
-            mode: self.mode,
-            reasoning_effort: self.reasoning_effort,
-            model: self.model,
-            cwd: self.cwd,
-            parent_id: self.parent_id,
-            history,
-            checkpoint: self.checkpoint,
-            context_tokens: self.context_tokens,
-            context_tokens_history_len: self.context_tokens_history_len,
-            context_token_identity: self.context_token_identity,
-            display_context_tokens: self.display_context_tokens.or(self.context_tokens),
-            display_context_token_identity,
-            turn_metas: self.turn_metas,
-            context_snapshots: self.context_snapshots,
-            session_cost_usd: self.session_cost_usd,
-            session_usage: self.session_usage,
-        }
-    }
 }
 
 impl Session {
@@ -876,29 +508,6 @@ impl Session {
             context_snapshots: HistorySnapshots::default(),
             session_cost_usd: 0.0,
             session_usage: TokenUsage::default(),
-        }
-    }
-
-    fn meta(&self) -> SessionMeta {
-        SessionMeta {
-            id: self.id.clone(),
-            title: self.title.clone(),
-            slug: self.slug.clone(),
-            first_user_message: self.first_user_message.clone(),
-            created_at_ms: self.created_at_ms,
-            updated_at_ms: self.updated_at_ms,
-            mode: self.mode.clone(),
-            reasoning_effort: self.reasoning_effort,
-            model: self.model.clone(),
-            cwd: self.cwd.clone(),
-            parent_id: self.parent_id.clone(),
-            context_tokens: self.display_context_tokens(),
-            context_token_identity: self.context_token_identity.clone(),
-            display_context_token_identity: self.display_context_token_identity.clone(),
-            history_len: Some(self.history.len()),
-            checkpoint: self.checkpoint.clone(),
-            text_bytes: Some(compute_text_bytes(&self.history)),
-            migration: None,
         }
     }
 
@@ -1027,6 +636,22 @@ impl Session {
         self.context_snapshots.push((hist_idx, snapshot));
     }
 
+    pub fn finish_turn_state(
+        &mut self,
+        history_len: usize,
+        meta: TurnMeta,
+        snapshot_context: bool,
+        update_context_token_history_len: bool,
+    ) {
+        self.turn_metas.push((history_len, meta));
+        if snapshot_context {
+            if update_context_token_history_len && self.context_tokens.is_some() {
+                self.context_tokens_history_len = Some(history_len);
+            }
+            self.snapshot_context();
+        }
+    }
+
     pub fn snapshot_metadata_at(&mut self, hist_idx: usize) {
         let snapshot = SessionMetadataSnapshot::from_session(self);
         self.metadata_snapshots
@@ -1151,8 +776,8 @@ impl Session {
                 .context_tokens_history_len
                 .is_some_and(|len| len <= hist_idx)
         {
-            // COMPAT(session-v1-messages): old sessions may not have context
-            // snapshots; keep a baseline that still fits the rewound history.
+            // Keep a live baseline that still fits the rewound history when no
+            // checkpoint-specific snapshot was recorded.
         } else {
             self.clear_context_tokens();
         }
@@ -1420,8 +1045,6 @@ pub fn dir_for_id(id: &str) -> PathBuf {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionDirKind {
     Store,
-    Jsonl,
-    LegacyJson,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1463,7 +1086,7 @@ pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMa
 pub fn save_with_blobs_result(
     session: &Session,
     url_to_blob: &std::collections::HashMap<String, String>,
-) -> Result<smelt_store::SessionSaveReport, smelt_store::StoreError> {
+) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     save_with_blobs_result_with_history_start(session, url_to_blob, 0)
 }
 
@@ -1471,11 +1094,10 @@ pub fn save_with_blobs_result_with_history_start(
     session: &Session,
     url_to_blob: &std::collections::HashMap<String, String>,
     history_start_idx: usize,
-) -> Result<smelt_store::SessionSaveReport, smelt_store::StoreError> {
+) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
     let session_dir = dir_for(session);
     fs::create_dir_all(&session_dir)?;
-    let ts = now_ms();
 
     let session_out = if url_to_blob.is_empty() {
         std::borrow::Cow::Borrowed(session)
@@ -1486,14 +1108,40 @@ pub fn save_with_blobs_result_with_history_start(
     };
 
     let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
-    let snapshot = store_snapshot_from_session(session_out.as_ref(), history_start_idx)?;
-    let report = db.save_session_snapshot_as_writer(&snapshot)?;
-    write_meta(&session_dir, &session_out.meta());
-    let blob = db
-        .search_blob()
-        .unwrap_or_else(|_| build_search_blob(&session_out.history));
-    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), ts);
-    Ok(report)
+    let current_state = db.session_state()?;
+    let base_revision = current_state.as_ref().map_or(0, |state| state.revision);
+    let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
+    let base_descriptor_len = db.transcript_descriptor_count()? as u64;
+    let history_len = session_out.history.len();
+    let history_start_idx = history_start_idx.min(history_len);
+    let command = smelt_store::SessionCommit {
+        session_id: session_out.id.clone(),
+        save_id: smelt_store::SaveId::ZERO,
+        base_revision: smelt_store::Revision::new(base_revision),
+        base_history_len: smelt_store::HistoryLen::new(base_history_len),
+        base_descriptor_len: smelt_store::DescriptorLen::new(base_descriptor_len),
+        state: store_state_from_session(session_out.as_ref(), history_len)?,
+        history: smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::new(history_start_idx as u64),
+            final_len: smelt_store::HistoryLen::new(history_len as u64),
+            items: session_out.history[history_start_idx..].to_vec(),
+        },
+        side_tables: store_side_table_suffixes_from_session_at(
+            session_out.as_ref(),
+            history_start_idx,
+        )?,
+        descriptors: None,
+    };
+    let receipt = db
+        .commit_session(&command)
+        .map_err(session_commit_failure_to_store_error)?;
+    if let Err(err) = refresh_derived_files(&session_dir) {
+        eprintln!(
+            "smelt: failed to refresh derived files for session {}: {err}",
+            session_out.id
+        );
+    }
+    Ok(receipt)
 }
 
 pub fn store_snapshot_from_session(
@@ -1503,20 +1151,23 @@ pub fn store_snapshot_from_session(
     let history_start_idx = history_start_idx.min(session.history.len());
     Ok(smelt_store::SessionSnapshot {
         state: store_state_from_session(session, session.history.len())?,
-        meta_json: None,
         history_start_idx,
         history_len: session.history.len(),
         history: session.history[history_start_idx..].to_vec(),
-        turn_metas: snapshot_values_from(&session.turn_metas, history_start_idx)?,
+        turn_metas: turn_meta_values_from(
+            &session.turn_metas,
+            history_start_idx,
+            session.history.len(),
+        )?,
         metadata_snapshots: snapshot_values_from(&session.metadata_snapshots, history_start_idx)?,
-        accounting_snapshots: snapshot_values_from(&session.context_snapshots, history_start_idx)?,
+        context_snapshots: snapshot_values_from(&session.context_snapshots, history_start_idx)?,
     })
 }
 
 pub fn store_side_table_suffixes_from_session(
     session: &Session,
     history_start_idx: usize,
-) -> Result<smelt_store::SessionSideTableSuffixes, smelt_store::StoreError> {
+) -> Result<smelt_store::SideTableSuffixes, smelt_store::StoreError> {
     let start_idx = history_start_idx.min(session.history.len());
     store_side_table_suffixes_from_session_at(session, start_idx)
 }
@@ -1524,26 +1175,48 @@ pub fn store_side_table_suffixes_from_session(
 pub fn store_side_table_suffixes_from_session_at(
     session: &Session,
     history_start_idx: usize,
-) -> Result<smelt_store::SessionSideTableSuffixes, smelt_store::StoreError> {
-    Ok(smelt_store::SessionSideTableSuffixes {
-        start_idx: history_start_idx,
-        turn_metas: snapshot_values_from(&session.turn_metas, history_start_idx)?,
-        metadata_snapshots: snapshot_values_from(&session.metadata_snapshots, history_start_idx)?,
-        accounting_snapshots: snapshot_values_from(&session.context_snapshots, history_start_idx)?,
+) -> Result<smelt_store::SideTableSuffixes, smelt_store::StoreError> {
+    Ok(smelt_store::SideTableSuffixes {
+        start: smelt_store::HistoryIndex::new(history_start_idx as u64),
+        turn_metas: typed_store_values(turn_meta_values_from(
+            &session.turn_metas,
+            history_start_idx,
+            session.history.len(),
+        )?),
+        metadata_snapshots: typed_store_values(snapshot_values_from(
+            &session.metadata_snapshots,
+            history_start_idx,
+        )?),
+        context_snapshots: typed_store_values(snapshot_values_from(
+            &session.context_snapshots,
+            history_start_idx,
+        )?),
     })
 }
 
-fn accounting_state_from_session(session: &Session) -> SessionAccountingState {
-    SessionAccountingState {
+fn typed_store_values(rows: Vec<(u64, Value)>) -> Vec<(smelt_store::HistoryIndex, Value)> {
+    rows.into_iter()
+        .map(|(idx, value)| (smelt_store::HistoryIndex::new(idx), value))
+        .collect()
+}
+
+fn session_commit_failure_to_store_error(
+    failure: smelt_store::SessionCommitFailure,
+) -> smelt_store::StoreError {
+    smelt_store::StoreError::Integrity(format!("session commit failed: {failure:?}"))
+}
+
+fn context_snapshot_state_from_session(session: &Session) -> SessionContextSnapshotState {
+    SessionContextSnapshotState {
         session_usage: session.session_usage.clone(),
         context_token_identity: session.context_token_identity.clone(),
         display_context_token_identity: session.display_context_token_identity.clone(),
     }
 }
 
-fn accounting_state_from_json(value: Option<Value>) -> SessionAccountingState {
+fn context_snapshot_state_from_json(value: Option<Value>) -> SessionContextSnapshotState {
     let Some(value) = value else {
-        return SessionAccountingState::default();
+        return SessionContextSnapshotState::default();
     };
     if value
         .as_object()
@@ -1551,9 +1224,9 @@ fn accounting_state_from_json(value: Option<Value>) -> SessionAccountingState {
     {
         serde_json::from_value(value).unwrap_or_default()
     } else {
-        SessionAccountingState {
+        SessionContextSnapshotState {
             session_usage: serde_json::from_value(value).unwrap_or_default(),
-            ..SessionAccountingState::default()
+            ..SessionContextSnapshotState::default()
         }
     }
 }
@@ -1603,7 +1276,7 @@ pub fn store_state_from_session(
             .map(|effort| effort.label().to_string()),
         model: session.model.clone(),
         parent_id: session.parent_id.clone(),
-        accounting_json: Some(serde_json::to_value(accounting_state_from_session(
+        accounting_json: Some(serde_json::to_value(context_snapshot_state_from_session(
             session,
         ))?),
         checkpoint_json: checkpoint_json_for_history_len(session.checkpoint.as_ref(), history_len)?,
@@ -1618,6 +1291,18 @@ pub fn store_state_from_session(
     })
 }
 
+fn turn_meta_values_from<T: Serialize>(
+    snapshots: &HistorySnapshots<T>,
+    history_start_idx: usize,
+    history_len: usize,
+) -> Result<Vec<(u64, Value)>, smelt_store::StoreError> {
+    snapshots
+        .iter()
+        .filter(|(idx, _)| *idx >= history_start_idx && *idx < history_len)
+        .map(|(idx, value)| Ok((*idx as u64, serde_json::to_value(value)?)))
+        .collect()
+}
+
 fn snapshot_values_from<T: Serialize>(
     snapshots: &HistorySnapshots<T>,
     history_start_idx: usize,
@@ -1627,23 +1312,6 @@ fn snapshot_values_from<T: Serialize>(
         .filter(|(idx, _)| *idx >= history_start_idx)
         .map(|(idx, value)| Ok((*idx as u64, serde_json::to_value(value)?)))
         .collect()
-}
-
-#[cfg(test)]
-fn encode_session_jsonl_meta(session: &Session) -> Option<String> {
-    let _perf = smelt_perf::perf::begin("session:write:encode_meta_json");
-    serde_json::to_string(&SessionJsonlMeta::from(session)).ok()
-}
-
-#[cfg(test)]
-fn encode_history_jsonl(history: &[HistoryItem]) -> Option<Vec<u8>> {
-    let _perf = smelt_perf::perf::begin("session:write:encode_history_jsonl");
-    let mut out = Vec::new();
-    for item in history {
-        serde_json::to_writer(&mut out, item).ok()?;
-        out.write_all(b"\n").ok()?;
-    }
-    Some(out)
 }
 
 /// Write `contents` to `path` atomically via a tmp file + rename.
@@ -1697,8 +1365,8 @@ pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
     if writer_lease_conflict_for_session_dir(&resolved.dir).is_some() {
         return Some(resolved.dir);
     }
-    if let Err(err) = crate::session_migration::ensure_session_db(&resolved.dir) {
-        log_session_migration_error(&resolved.dir, &err);
+    if let Err(err) = crate::session_store::ensure_session_db_read_only(&resolved.dir) {
+        log_session_open_error(&resolved.dir, &err);
         return None;
     }
     Some(resolved.dir)
@@ -1706,27 +1374,7 @@ pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
 
 pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionStoreRef)> {
     let resolved = resolve_session_dir_for_read(id_or_prefix)?;
-    if resolved.kind != SessionDirKind::Store {
-        return None;
-    }
     load_store_header_for_dir(resolved.dir)
-}
-
-pub fn load_store_header_or_import_bounded(
-    id_or_prefix: &str,
-) -> Option<(SessionHeader, SessionStoreRef)> {
-    let resolved = resolve_session_dir_for_read(id_or_prefix)?;
-    match resolved.kind {
-        SessionDirKind::Store => load_store_header_for_dir(resolved.dir),
-        SessionDirKind::Jsonl => {
-            if let Err(err) = crate::session_migration::ensure_session_db(&resolved.dir) {
-                log_session_migration_error(&resolved.dir, &err);
-                return None;
-            }
-            load_store_header_for_dir(resolved.dir)
-        }
-        SessionDirKind::LegacyJson => None,
-    }
 }
 
 pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader, SessionStoreRef)> {
@@ -1758,24 +1406,9 @@ pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader,
 }
 
 fn session_dir_kind(dir: &Path) -> Option<SessionDirKind> {
-    match crate::session_migration::classify_session_dir(dir) {
-        crate::session_migration::SessionDirKind::SqliteOnly
-        | crate::session_migration::SessionDirKind::SqliteWithMetadata
-        | crate::session_migration::SessionDirKind::SqliteWithLegacySidecars => {
-            Some(SessionDirKind::Store)
-        }
-        crate::session_migration::SessionDirKind::LegacySidecars => {
-            if dir.join("history.jsonl").is_file() {
-                Some(SessionDirKind::Jsonl)
-            } else if dir.join("session.json").is_file() {
-                Some(SessionDirKind::LegacyJson)
-            } else {
-                None
-            }
-        }
-        crate::session_migration::SessionDirKind::Empty
-        | crate::session_migration::SessionDirKind::MigrationStatus => None,
-    }
+    dir.join("session.db")
+        .is_file()
+        .then_some(SessionDirKind::Store)
 }
 
 pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
@@ -1788,8 +1421,8 @@ fn load_full_exact(id: &str) -> Option<Session> {
 }
 
 fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
-    if let Err(err) = crate::session_migration::ensure_session_db(dir_path) {
-        log_session_migration_error(dir_path, &err);
+    if let Err(err) = crate::session_store::ensure_session_db_read_only(dir_path) {
+        log_session_open_error(dir_path, &err);
         return None;
     }
     load_db_session(dir_path).and_then(|session| internalize_session_blobs(dir_path, session))
@@ -1835,8 +1468,8 @@ fn load_session_files_for_resume(dir_path: &std::path::Path) -> Option<LoadedSes
         return Some(LoadedSession { session, access });
     }
 
-    if let Err(err) = crate::session_migration::ensure_session_db(dir_path) {
-        log_session_migration_error(dir_path, &err);
+    if let Err(err) = crate::session_store::ensure_session_db_writable(dir_path) {
+        log_session_open_error(dir_path, &err);
         return None;
     }
     let access = claim_access_for_session_dir(dir_path);
@@ -1845,10 +1478,10 @@ fn load_session_files_for_resume(dir_path: &std::path::Path) -> Option<LoadedSes
     Some(LoadedSession { session, access })
 }
 
-fn log_session_migration_error(dir_path: &std::path::Path, err: &SessionMigrationError) {
+fn log_session_open_error(dir_path: &std::path::Path, err: &SessionStoreError) {
     engine::log::entry(
         engine::log::Level::Warn,
-        "session_migration_failed",
+        "session_open_failed",
         &serde_json::json!({
             "session_dir": dir_path.display().to_string(),
             "error": err.to_string(),
@@ -1890,12 +1523,11 @@ fn session_from_store_snapshot(
     let state = snapshot.state;
     let turn_metas = snapshots_from_values(snapshot.turn_metas).unwrap_or_default();
     let metadata_snapshots = snapshots_from_values(snapshot.metadata_snapshots).unwrap_or_default();
-    let context_snapshots =
-        snapshots_from_values(snapshot.accounting_snapshots).unwrap_or_default();
-    let accounting = accounting_state_from_json(state.accounting_json.clone());
-    let session_usage = accounting.session_usage.clone();
-    let context_token_identity = accounting.context_token_identity;
-    let display_context_token_identity = accounting
+    let context_snapshots = snapshots_from_values(snapshot.context_snapshots).unwrap_or_default();
+    let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
+    let session_usage = context_state.session_usage.clone();
+    let context_token_identity = context_state.context_token_identity;
+    let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
     let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), history.len());
@@ -1950,160 +1582,6 @@ fn snapshots_from_values<T: for<'de> Deserialize<'de>>(
         .map(HistorySnapshots::from_vec)
 }
 
-pub(crate) fn write_generated_sidecars(dir_path: &Path, session: &Session) {
-    write_meta(dir_path, &session.meta());
-    atomic_write(
-        &dir_path.join("content.txt"),
-        build_search_blob(&session.history).as_bytes(),
-        now_ms(),
-    );
-}
-
-// COMPAT(session-search-sidecar-missing): repair already-SQLite sessions that
-// predate generated sidecars or sparse transcript descriptors.
-pub(crate) fn repair_sqlite_session_dir(dir_path: &Path) -> Result<bool, smelt_store::StoreError> {
-    if let Ok(db) = smelt_store::SessionDb::open_read_only(dir_path.join("session.db")) {
-        let Some(state) = db.session_state()? else {
-            return Ok(false);
-        };
-        let descriptor_count = db.transcript_descriptor_count()?;
-        let search_blob = db.search_blob().ok();
-        if sqlite_session_artifacts_look_current(
-            dir_path,
-            &state,
-            descriptor_count,
-            search_blob.as_deref(),
-        ) {
-            let db = smelt_store::SessionDb::open(dir_path.join("session.db"))?;
-            let mut repaired = db.repair_mismatched_transcript_descriptor_history_links()? > 0;
-            repaired |= db.repair_checkpoint_first_live_index_past_history()? > 0;
-            if repaired {
-                if let Some(meta) = load_meta_from_db(dir_path) {
-                    write_meta(dir_path, &meta);
-                }
-            }
-            return Ok(repaired);
-        }
-    }
-
-    let db = smelt_store::SessionDb::open(dir_path.join("session.db"))?;
-    let mut repaired = db.repair_mismatched_transcript_descriptor_history_links()? > 0;
-    repaired |= db.repair_checkpoint_first_live_index_past_history()? > 0;
-    let Some(state) = db.session_state()? else {
-        return Ok(repaired);
-    };
-    let descriptor_count = db.transcript_descriptor_count()?;
-    let search_blob = db.search_blob().ok();
-    if sqlite_session_artifacts_look_current(
-        dir_path,
-        &state,
-        descriptor_count,
-        search_blob.as_deref(),
-    ) {
-        return Ok(repaired);
-    }
-
-    let Some(mut snapshot) = db.load_full_session_snapshot()? else {
-        return Ok(repaired);
-    };
-    let history = std::mem::take(&mut snapshot.history);
-    let session = session_from_store_snapshot(snapshot, history);
-
-    if meta_sidecar_needs_repair(dir_path, &session) {
-        write_meta(dir_path, &session.meta());
-        repaired = true;
-    }
-
-    let rows = transcript_descriptor_rows_from_session(&session)?;
-    if descriptor_count != rows.len() {
-        db.replace_transcript_descriptor_records(&rows)?;
-        repaired = true;
-    }
-
-    let search_blob = db
-        .search_blob()
-        .unwrap_or_else(|_| build_search_blob(&session.history));
-    if fs::read_to_string(dir_path.join("content.txt"))
-        .ok()
-        .as_deref()
-        != Some(search_blob.as_str())
-    {
-        atomic_write(
-            &dir_path.join("content.txt"),
-            search_blob.as_bytes(),
-            now_ms(),
-        );
-        repaired = true;
-    }
-
-    Ok(repaired)
-}
-
-fn sqlite_session_artifacts_look_current(
-    dir_path: &Path,
-    state: &smelt_store::SessionState,
-    descriptor_count: usize,
-    search_blob: Option<&str>,
-) -> bool {
-    let Some(search_blob) = search_blob else {
-        return false;
-    };
-    if fs::read_to_string(dir_path.join("content.txt"))
-        .ok()
-        .as_deref()
-        != Some(search_blob)
-    {
-        return false;
-    }
-    if descriptor_count < state.history_len as usize {
-        return false;
-    }
-    let Ok(contents) = fs::read_to_string(dir_path.join("meta.json")) else {
-        return false;
-    };
-    let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) else {
-        return false;
-    };
-    let accounting = accounting_state_from_json(state.accounting_json.clone());
-    let checkpoint =
-        checkpoint_from_json(state.checkpoint_json.clone(), state.history_len as usize);
-    let context_token_identity = accounting.context_token_identity;
-    let display_context_token_identity = accounting
-        .display_context_token_identity
-        .or_else(|| context_token_identity.clone());
-    meta.id == state.id
-        && meta.title == state.title
-        && meta.slug == state.slug
-        && meta.first_user_message == state.first_user_message
-        && meta.cwd == state.cwd
-        && meta.mode == state.mode
-        && meta
-            .reasoning_effort
-            .map(|effort| effort.label().to_string())
-            == state.reasoning_effort
-        && meta.model == state.model
-        && meta.parent_id == state.parent_id
-        && meta.context_tokens
-            == state
-                .display_context_tokens
-                .and_then(|tokens| u32::try_from(tokens).ok())
-        && meta.context_token_identity == context_token_identity
-        && meta.display_context_token_identity == display_context_token_identity
-        && meta.history_len == Some(state.history_len as usize)
-        && meta.checkpoint == checkpoint
-        && meta.text_bytes.is_some()
-}
-
-fn meta_sidecar_needs_repair(dir_path: &Path, session: &Session) -> bool {
-    let Ok(contents) = fs::read_to_string(dir_path.join("meta.json")) else {
-        return true;
-    };
-    let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) else {
-        return true;
-    };
-    meta != session.meta()
-}
-
 pub fn backfill_transcript_descriptor_records_from_history_range(
     session_dir: &Path,
     history_range: std::ops::Range<usize>,
@@ -2119,7 +1597,7 @@ pub fn backfill_transcript_descriptor_records_from_history_range(
         &std::collections::HashMap::new(),
     )?;
     let written = records.len();
-    db.replace_transcript_descriptor_suffix(descriptor_start_idx, &records)?;
+    db.replace_transcript_descriptor_suffix_for_repair(descriptor_start_idx, &records)?;
     Ok(written)
 }
 
@@ -2181,59 +1659,6 @@ fn transcript_descriptor_records_from_history_items(
     for (offset, record) in records.iter_mut().enumerate() {
         record.block_idx = block_start_idx.saturating_add(offset as u64);
     }
-    Ok(records)
-}
-
-fn transcript_descriptor_rows_from_session(
-    session: &Session,
-) -> Result<Vec<smelt_store::TranscriptDescriptorRecord>, smelt_store::StoreError> {
-    let mut records = Vec::new();
-    let mut tool_elapsed = std::collections::HashMap::new();
-    for (_, meta) in &session.turn_metas {
-        tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
-    }
-
-    for (history_idx, item) in session.history.iter().enumerate() {
-        if session
-            .checkpoint
-            .as_ref()
-            .is_some_and(|cp| cp.first_live_index == history_idx)
-        {
-            records.push(transcript_descriptor_record(
-                records.len(),
-                crate::transcript_model::TranscriptBlockDescriptor::Compacted {
-                    summary: session
-                        .checkpoint
-                        .as_ref()
-                        .map(|cp| cp.summary.clone())
-                        .unwrap_or_default(),
-                },
-                Some(crate::transcript_model::BlockOrigin::CheckpointMarker),
-                None,
-            )?);
-        }
-        push_history_item_descriptor_rows(&mut records, history_idx, item, &tool_elapsed)?;
-    }
-
-    if session
-        .checkpoint
-        .as_ref()
-        .is_some_and(|cp| cp.first_live_index >= session.history.len())
-    {
-        records.push(transcript_descriptor_record(
-            records.len(),
-            crate::transcript_model::TranscriptBlockDescriptor::Compacted {
-                summary: session
-                    .checkpoint
-                    .as_ref()
-                    .map(|cp| cp.summary.clone())
-                    .unwrap_or_default(),
-            },
-            Some(crate::transcript_model::BlockOrigin::CheckpointMarker),
-            None,
-        )?);
-    }
-
     Ok(records)
 }
 
@@ -2385,459 +1810,20 @@ fn transcript_descriptor_record(
     tool_state: Option<(String, crate::transcript_model::ToolState)>,
 ) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
     let content_hash = crate::utils::hash_serializable(&descriptor);
-    let search_text = crate::transcript_model::transcript_descriptor_search_text(
-        &descriptor,
-        tool_state.as_ref().map(|(_, state)| state),
-    );
     let record = crate::transcript_model::TranscriptBlockRecord {
         descriptor,
         content_hash,
         origin,
         tool_state,
     };
-    crate::transcript_model::transcript_descriptor_row(descriptor_idx, &record, search_text)
-}
-
-// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): remove old session
-// sidecars after a canonical SQLite database is readable.
-pub(crate) fn cleanup_migrated_legacy_artifacts(dir_path: &Path) -> usize {
-    let db_path = dir_path.join("session.db");
-    let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
-        return 0;
-    };
-    let Ok(Some(_)) = db.session_state() else {
-        return 0;
-    };
-    drop(db);
-
-    let mut removed = 0usize;
-    for name in [
-        "session.json",
-        "history.jsonl",
-        "requests.jsonl",
-        "session.ir.bin",
-    ] {
-        let path = dir_path.join(name);
-        if path.is_file() && fs::remove_file(path).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
-// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): build a canonical
-// SQLite database from pre-SQLite session sidecars during migration.
-pub(crate) fn import_legacy_session_to_db(
-    dir_path: &Path,
-    session: &Session,
-) -> Result<(), smelt_store::StoreError> {
-    import_legacy_session_to_db_with(
-        |db| {
-            let snapshot = store_snapshot_from_session(session, 0)?;
-            db.save_session_snapshot_for_import(&snapshot)?;
-            Ok(())
-        },
-        dir_path,
-    )
-}
-
-fn import_legacy_session_to_db_with(
-    write_import: impl FnOnce(&smelt_store::SessionDb) -> Result<(), smelt_store::StoreError>,
-    dir_path: &Path,
-) -> Result<(), smelt_store::StoreError> {
-    cleanup_stale_import_temp_files(dir_path);
-
-    let db_path = dir_path.join("session.db");
-    if db_path.is_file() {
-        return Ok(());
-    }
-
-    let temp_path = dir_path.join(format!(
-        "session.db.import-{}-{}-{}.tmp",
-        std::process::id(),
-        now_ms(),
-        MIGRATION_IMPORT_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    cleanup_sqlite_files(&temp_path);
-
-    let db = smelt_store::SessionDb::open(&temp_path)?;
-    let result = (|| {
-        write_import(&db)?;
-        db.import_legacy_requests_jsonl(dir_path)?;
-        db.connection()
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(())
-    })();
-    drop(db);
-
-    if let Err(err) = result {
-        cleanup_sqlite_files(&temp_path);
-        return Err(err);
-    }
-
-    if db_path.is_file() {
-        cleanup_sqlite_files(&temp_path);
-        return Ok(());
-    }
-
-    match fs::hard_link(&temp_path, &db_path) {
-        Ok(()) => {
-            cleanup_sqlite_files(&temp_path);
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && db_path.is_file() => {
-            cleanup_sqlite_files(&temp_path);
-            Ok(())
-        }
-        Err(err) => {
-            cleanup_sqlite_files(&temp_path);
-            Err(err.into())
-        }
-    }
-}
-
-const LEGACY_JSONL_IMPORT_CHUNK_ITEMS: usize = 256;
-
-pub(crate) fn import_jsonl_session_to_db_streaming(
-    dir_path: &Path,
-) -> crate::session_migration::SessionMigrationResult<()> {
-    let meta = read_jsonl_meta(dir_path)?;
-    let history_path = dir_path.join("history.jsonl");
-    let history_file = open_jsonl_history_file(&history_path)?;
-    let history_bytes = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    smelt_perf::perf::record_value("session:migration:jsonl_history_bytes", history_bytes);
-
-    let shell = meta.into_session(Vec::new());
-    import_legacy_session_to_db_with(
-        |db| import_jsonl_history_chunks(db, &shell, &history_path, history_file),
-        dir_path,
-    )
-    .map_err(
-        |err| crate::session_migration::SessionMigrationError::ImportSqlite {
-            message: err.to_string(),
-        },
-    )
-}
-
-fn import_jsonl_history_chunks(
-    db: &smelt_store::SessionDb,
-    shell: &Session,
-    history_path: &Path,
-    history_file: fs::File,
-) -> Result<(), smelt_store::StoreError> {
-    let initial_snapshot = smelt_store::SessionSnapshot {
-        state: store_state_from_session(shell, 0)?,
-        meta_json: None,
-        history_start_idx: 0,
-        history_len: 0,
-        history: Vec::new(),
-        turn_metas: Vec::new(),
-        metadata_snapshots: Vec::new(),
-        accounting_snapshots: Vec::new(),
-    };
-    db.save_session_snapshot_for_import(&initial_snapshot)?;
-
-    let _perf = smelt_perf::perf::begin("session:migration:parse_history_jsonl_streaming");
-    let reader = std::io::BufReader::new(history_file);
-    let mut chunk = Vec::with_capacity(LEGACY_JSONL_IMPORT_CHUNK_ITEMS);
-    let mut imported = 0usize;
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|err| {
-            smelt_store::StoreError::Io(std::io::Error::new(
-                err.kind(),
-                format!("read {} line {}: {err}", history_path.display(), idx + 1),
-            ))
-        })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let item = serde_json::from_str::<HistoryItem>(&line).map_err(|err| {
-            smelt_store::StoreError::Integrity(format!(
-                "parse {} line {}: {err}",
-                history_path.display(),
-                idx + 1
-            ))
-        })?;
-        chunk.push(item);
-        if chunk.len() >= LEGACY_JSONL_IMPORT_CHUNK_ITEMS {
-            write_jsonl_import_chunk(db, shell, imported, &mut chunk)?;
-            imported = db.history_item_count()?;
-        }
-    }
-    if !chunk.is_empty() {
-        write_jsonl_import_chunk(db, shell, imported, &mut chunk)?;
-        imported = db.history_item_count()?;
-    }
-
-    let side_tables = store_side_table_suffixes_from_session(shell, 0)?;
-    let suffix = smelt_store::SessionHistorySuffix {
-        state: store_state_from_session(shell, imported)?,
-        history_start_idx: imported,
-        history_len: imported,
-        history: Vec::new(),
-        side_tables: Some(side_tables),
-    };
-    db.save_session_history_suffix_for_import(&suffix)?;
-    smelt_perf::perf::record_value("session:migration:jsonl_history_items", imported as u64);
-    Ok(())
-}
-
-fn write_jsonl_import_chunk(
-    db: &smelt_store::SessionDb,
-    shell: &Session,
-    start_idx: usize,
-    chunk: &mut Vec<HistoryItem>,
-) -> Result<(), smelt_store::StoreError> {
-    let items = std::mem::take(chunk);
-    let history_len = start_idx + items.len();
-    let suffix = smelt_store::SessionHistorySuffix {
-        state: store_state_from_session(shell, history_len)?,
-        history_start_idx: start_idx,
-        history_len,
-        history: items,
-        side_tables: None,
-    };
-    db.save_session_history_suffix_for_import(&suffix)?;
-    Ok(())
-}
-
-// Import temps are only published after SQLite is closed and hard-linked into place.
-// A short grace period plus live-PID check keeps concurrent imports safe while
-// allowing crashed migrations to be collected on the next scan.
-const STALE_IMPORT_TEMP_MS: u64 = 10 * 60 * 1000;
-
-pub(crate) fn cleanup_stale_import_temp_files(dir_path: &Path) -> usize {
-    cleanup_stale_import_temp_files_before(dir_path, now_ms(), STALE_IMPORT_TEMP_MS)
-}
-
-fn cleanup_stale_import_temp_files_before(dir_path: &Path, now_ms: u64, stale_ms: u64) -> usize {
-    let Ok(entries) = fs::read_dir(dir_path) else {
-        return 0;
-    };
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(temp) = import_temp_name(name) else {
-            continue;
-        };
-        if now_ms.saturating_sub(temp.started_at_ms) < stale_ms {
-            continue;
-        }
-        if import_process_is_alive(temp.pid) {
-            continue;
-        }
-        if fs::remove_file(&path).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
-struct ImportTempName {
-    pid: u32,
-    started_at_ms: u64,
-}
-
-fn import_temp_name(name: &str) -> Option<ImportTempName> {
-    let rest = name.strip_prefix("session.db.import-")?;
-    let tmp_idx = rest.find(".tmp")?;
-    let suffix = &rest[tmp_idx..];
-    if !matches!(suffix, ".tmp" | ".tmp-wal" | ".tmp-shm" | ".tmp-journal") {
-        return None;
-    }
-    let stem = &rest[..tmp_idx];
-    let mut parts = stem.split('-');
-    let pid = parts.next()?.parse::<u32>().ok()?;
-    let started_at_ms = parts.next()?.parse::<u64>().ok()?;
-    parts.next()?.parse::<usize>().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(ImportTempName { pid, started_at_ms })
-}
-
-#[cfg(target_os = "linux")]
-fn import_process_is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn import_process_is_alive(_pid: u32) -> bool {
-    false
-}
-
-fn cleanup_sqlite_files(path: &Path) {
-    let _ = fs::remove_file(path);
-    let _ = fs::remove_file(sqlite_sidecar_path(path, "wal"));
-    let _ = fs::remove_file(sqlite_sidecar_path(path, "shm"));
-    let _ = fs::remove_file(sqlite_sidecar_path(path, "journal"));
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}-{suffix}", path.display()))
-}
-
-// COMPAT(session-split-jsonl): import pre-SQLite meta.json + history.jsonl
-// sessions into canonical SQLite storage during the alpha migration window.
-#[cfg(test)]
-pub(crate) fn read_jsonl_session(
-    dir_path: &Path,
-) -> crate::session_migration::SessionMigrationResult<Session> {
-    let meta = read_jsonl_meta(dir_path)?;
-
-    let history_path = dir_path.join("history.jsonl");
-    let history_file = open_jsonl_history_file(&history_path)?;
-    let history_len = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    smelt_perf::perf::record_value("session:load_full:history_jsonl_bytes", history_len);
-    let history = {
-        let _perf = smelt_perf::perf::begin("session:load_full:parse_history_jsonl");
-        let reader = std::io::BufReader::new(history_file);
-        let mut history = Vec::new();
-        for (idx, line) in reader.lines().enumerate() {
-            let line =
-                line.map_err(
-                    |err| crate::session_migration::SessionMigrationError::ReadFile {
-                        path: history_path.clone(),
-                        message: format!("line {}: {err}", idx + 1),
-                    },
-                )?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            history.push(serde_json::from_str::<HistoryItem>(&line).map_err(|err| {
-                crate::session_migration::SessionMigrationError::ParseJson {
-                    path: history_path.clone(),
-                    message: format!("line {}: {err}", idx + 1),
-                }
-            })?);
-        }
-        history
-    };
-    smelt_perf::perf::record_value("session:load_full:history_items", history.len() as u64);
-    Ok(meta.into_session(history))
-}
-
-fn read_jsonl_meta(
-    dir_path: &Path,
-) -> crate::session_migration::SessionMigrationResult<SessionJsonlMeta> {
-    let meta_path = dir_path.join("meta.json");
-    let meta_contents = {
-        let _perf = smelt_perf::perf::begin("session:load_full:read_meta_json");
-        fs::read_to_string(&meta_path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => {
-                crate::session_migration::SessionMigrationError::MissingFile {
-                    path: meta_path.clone(),
-                }
-            }
-            _ => crate::session_migration::SessionMigrationError::ReadFile {
-                path: meta_path.clone(),
-                message: err.to_string(),
-            },
-        })?
-    };
-    smelt_perf::perf::record_value(
-        "session:load_full:meta_json_bytes",
-        meta_contents.len() as u64,
-    );
-    let meta: SessionJsonlMeta = {
-        let _perf = smelt_perf::perf::begin("session:load_full:parse_meta_json");
-        serde_json::from_str(&meta_contents).map_err(|err| {
-            crate::session_migration::SessionMigrationError::ParseJson {
-                path: meta_path.clone(),
-                message: err.to_string(),
-            }
-        })?
-    };
-    if meta.schema_version != CURRENT_SESSION_SCHEMA_VERSION {
-        return Err(
-            crate::session_migration::SessionMigrationError::UnsupportedSchema {
-                path: meta_path,
-                version: meta.schema_version,
-            },
-        );
-    }
-    Ok(meta)
-}
-
-fn open_jsonl_history_file(
-    history_path: &Path,
-) -> crate::session_migration::SessionMigrationResult<fs::File> {
-    let _perf = smelt_perf::perf::begin("session:load_full:open_history_jsonl");
-    fs::File::open(history_path).map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound => {
-            crate::session_migration::SessionMigrationError::MissingFile {
-                path: history_path.to_path_buf(),
-            }
-        }
-        _ => crate::session_migration::SessionMigrationError::ReadFile {
-            path: history_path.to_path_buf(),
-            message: err.to_string(),
-        },
-    })
-}
-
-// COMPAT(session-json-monolith): read old monolithic session.json files only as
-// migration input for canonical SQLite storage.
-pub(crate) fn read_legacy_json_session(
-    dir_path: &Path,
-) -> crate::session_migration::SessionMigrationResult<Session> {
-    let session_path = dir_path.join("session.json");
-    let contents = {
-        let _perf = smelt_perf::perf::begin("session:load_full:read_json");
-        fs::read_to_string(&session_path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => {
-                crate::session_migration::SessionMigrationError::MissingFile {
-                    path: session_path.clone(),
-                }
-            }
-            _ => crate::session_migration::SessionMigrationError::ReadFile {
-                path: session_path.clone(),
-                message: err.to_string(),
-            },
-        })?
-    };
-    smelt_perf::perf::record_value("session:load_full:json_bytes", contents.len() as u64);
-    let session: Session = {
-        let _perf = smelt_perf::perf::begin("session:load_full:parse_json");
-        serde_json::from_str(&contents).map_err(|err| {
-            crate::session_migration::SessionMigrationError::ParseJson {
-                path: session_path,
-                message: err.to_string(),
-            }
-        })?
-    };
-    smelt_perf::perf::record_value(
-        "session:load_full:history_items",
-        session.history.len() as u64,
-    );
-    Ok(session)
-}
-
-// COMPAT(session-json-monolith): import old monolithic sessions to SQLite as
-// soon as they are opened, then write current sidecars. Legacy artifacts are
-// removed by the migration cleanup once canonical SQLite is readable.
-pub(crate) fn migrate_legacy_json_session(dir_path: &Path, session: &Session) {
-    let _perf = smelt_perf::perf::begin("session:load_full:migrate_sqlite");
-    write_generated_sidecars(dir_path, session);
-    cleanup_migrated_legacy_artifacts(dir_path);
+    crate::transcript_model::transcript_descriptor_row(descriptor_idx, &record)
 }
 
 /// Returns `None` when no match or prefix is ambiguous.
-// COMPAT(session-split-jsonl) / COMPAT(session-json-monolith): exact ID and prefix
-// resolution still sees pre-SQLite sidecars as sessions until import support ends.
 pub(crate) fn resolve_prefix(prefix: &str) -> Option<String> {
     let dir = sessions_dir();
 
-    if dir.join(prefix).join("session.db").is_file()
-        || dir.join(prefix).join("history.jsonl").is_file()
-        || dir.join(prefix).join("session.json").is_file()
-    {
+    if dir.join(prefix).join("session.db").is_file() {
         return Some(prefix.to_string());
     }
 
@@ -2846,7 +1832,8 @@ pub(crate) fn resolve_prefix(prefix: &str) -> Option<String> {
     };
     let mut matches = Vec::new();
     for entry in entries.flatten() {
-        if !entry.path().is_dir() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join("session.db").is_file() {
             continue;
         }
         let name = entry.file_name();
@@ -2894,40 +1881,27 @@ pub fn list_sessions() -> Vec<SessionMeta> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MetaLoadMode {
-    /// Build the resume/listing row from sidecars only. Listing must stay cheap
-    /// even when many legacy sidecars are missing exact-load-only fields.
+    /// Listing path. Prefer sidecars for speed, but regenerate from SQLite when missing.
     List,
     /// Exact load path. Fill fields required to resume display-only sessions.
     Full,
 }
 
-/// COMPAT(session-search-sidecar-missing): uses `meta.json` when present,
-/// reads canonical SQLite metadata when available, and surfaces pending/failed
-/// migration status without reading legacy session payloads.
 fn load_meta_for_dir(path: PathBuf, mode: MetaLoadMode) -> Option<SessionMeta> {
+    if !path.join("session.db").is_file() {
+        return None;
+    }
     let meta = if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
         load_meta_sidecar(&path, &contents, mode)
     } else {
         None
     };
-    let meta = if let Some(meta) = meta {
-        meta
-    } else if mode == MetaLoadMode::List {
-        load_list_meta_without_db(&path)?
-    } else if let Some(meta) = load_meta_from_db(&path) {
-        write_meta(&path, &meta);
-        meta
-    } else {
-        return migration_meta_for_dir(&path);
-    };
-    Some(with_migration_status(&path, meta))
-}
-
-fn load_list_meta_without_db(path: &Path) -> Option<SessionMeta> {
-    match crate::session_migration::classify_session_dir(path) {
-        crate::session_migration::SessionDirKind::SqliteOnly => None,
-        _ => migration_meta_for_dir(path),
+    if let Some(meta) = meta {
+        return Some(meta);
     }
+    let meta = load_meta_from_db(&path)?;
+    write_meta(&path, &meta);
+    Some(meta)
 }
 
 fn load_meta_sidecar(path: &Path, contents: &str, mode: MetaLoadMode) -> Option<SessionMeta> {
@@ -2985,9 +1959,9 @@ fn enrich_meta_from_db(
         meta.checkpoint = checkpoint_from_json(state.checkpoint_json, state.history_len as usize);
         changed = true;
     }
-    let accounting = accounting_state_from_json(state.accounting_json);
-    let context_token_identity = accounting.context_token_identity;
-    let display_context_token_identity = accounting
+    let context_state = context_snapshot_state_from_json(state.accounting_json);
+    let context_token_identity = context_state.context_token_identity;
+    let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
     if !token_identity_fields_present {
@@ -3004,46 +1978,15 @@ fn enrich_meta_from_db(
     changed
 }
 
-fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
-    let migration = migration_status_for_dir(path)?;
-    let id = path.file_name().and_then(|name| name.to_str())?.to_string();
-    Some(SessionMeta {
-        id,
-        title: None,
-        slug: None,
-        first_user_message: None,
-        created_at_ms: 0,
-        updated_at_ms: migration.updated_at_ms,
-        mode: None,
-        reasoning_effort: None,
-        model: None,
-        cwd: None,
-        parent_id: None,
-        context_tokens: None,
-        context_token_identity: None,
-        display_context_token_identity: None,
-        history_len: None,
-        checkpoint: None,
-        text_bytes: None,
-        migration: Some(migration),
-    })
-}
-
-fn with_migration_status(path: &Path, mut meta: SessionMeta) -> SessionMeta {
-    meta.migration = migration_status_for_dir(path);
-    meta
-}
-
-fn migration_status_for_dir(path: &Path) -> Option<SessionMigrationStatus> {
-    crate::session_migration::migration_status_for_dir(path).or_else(|| {
-        crate::session_migration::session_dir_needs_migration(path).then_some(
-            SessionMigrationStatus {
-                state: SessionMigrationState::Pending,
-                message: None,
-                updated_at_ms: 0,
-            },
-        )
-    })
+pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
+    let meta_written = write_db_meta_sidecar(dir_path)?;
+    let db_path = dir_path.join("session.db");
+    if db_path.is_file() {
+        let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+        let blob = db.search_blob().map_err(|err| err.to_string())?;
+        atomic_write(&dir_path.join("content.txt"), blob.as_bytes(), now_ms());
+    }
+    Ok(meta_written)
 }
 
 pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
@@ -3068,40 +2011,9 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
         .ok()?
         .min(state.history_len as usize);
     let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), retained_history_len);
-    let accounting = accounting_state_from_json(state.accounting_json.clone());
-    if let Some(meta_json) = db.meta("session_meta_json").ok().flatten() {
-        if let Ok(meta) = serde_json::from_str::<SessionJsonlMeta>(&meta_json) {
-            let context_token_identity = meta
-                .context_token_identity
-                .or_else(|| accounting.context_token_identity.clone());
-            let display_context_token_identity = meta
-                .display_context_token_identity
-                .or_else(|| accounting.display_context_token_identity.clone())
-                .or_else(|| context_token_identity.clone());
-            return Some(SessionMeta {
-                id: meta.id,
-                title: meta.title,
-                slug: meta.slug,
-                first_user_message: meta.first_user_message,
-                created_at_ms: meta.created_at_ms,
-                updated_at_ms: meta.updated_at_ms,
-                mode: meta.mode,
-                reasoning_effort: meta.reasoning_effort,
-                model: meta.model,
-                cwd: meta.cwd,
-                parent_id: meta.parent_id,
-                context_tokens: meta.display_context_tokens.or(meta.context_tokens),
-                context_token_identity,
-                display_context_token_identity,
-                history_len: Some(state.history_len as usize),
-                checkpoint,
-                text_bytes,
-                migration: None,
-            });
-        }
-    }
-    let context_token_identity = accounting.context_token_identity;
-    let display_context_token_identity = accounting
+    let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
+    let context_token_identity = context_state.context_token_identity;
+    let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
     Some(SessionMeta {
@@ -3128,40 +2040,11 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
         history_len: Some(state.history_len as usize),
         checkpoint,
         text_bytes,
-        migration: None,
     })
 }
 
-fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
-    let mut total: u64 = 0;
-    for item in history {
-        match item {
-            HistoryItem::System { content } | HistoryItem::User { content, .. } => {
-                total += content.text_content().len() as u64;
-            }
-            HistoryItem::Note(note) => {
-                total += note.text().len() as u64;
-            }
-            HistoryItem::Assistant(turn) => {
-                if let Some(ref c) = turn.content {
-                    total += c.text_content().len() as u64;
-                }
-                if let Some(ref r) = turn.reasoning {
-                    total += r.len() as u64;
-                }
-                for inv in &turn.invocations {
-                    total += inv.name.len() as u64;
-                    total += inv.arguments.len() as u64;
-                    total += inv.result.content.len() as u64;
-                }
-            }
-        }
-    }
-    total
-}
-
 fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
-    let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) else {
+    let Ok(db) = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")) else {
         return;
     };
     let Ok(bytes) = db.history_text_bytes() else {
@@ -3171,33 +2054,14 @@ fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
     write_meta(session_dir, meta);
 }
 
-/// User + assistant text only; reasoning, tool output, and system messages excluded.
-fn build_search_blob(history: &[HistoryItem]) -> String {
-    let mut out = String::new();
-    for item in history {
-        let text_opt = match item {
-            HistoryItem::User { content, .. } => Some(content.text_content()),
-            HistoryItem::Assistant(turn) => turn.content.as_ref().map(|c| c.text_content()),
-            HistoryItem::System { .. } | HistoryItem::Note(_) => None,
-        };
-        if let Some(text) = text_opt {
-            if !text.is_empty() {
-                out.push_str(&text);
-                out.push('\n');
-            }
-        }
-    }
-    out
-}
-
 /// Read the searchable text blob for `id`.
 ///
 /// COMPAT(session-search-sidecar-missing): reads canonical SQLite search text,
-/// migrating legacy inputs first when necessary, then writes `content.txt`.
+/// then falls back to `content.txt` for sessions that predate generated caches.
 pub fn load_search_blob(id: &str) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
     let session_dir = sessions_dir().join(id);
-    if let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) {
+    if let Ok(db) = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")) {
         if let Ok(blob) = db.search_blob() {
             atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
             return Some(blob);
@@ -3206,11 +2070,11 @@ pub fn load_search_blob(id: &str) -> Option<String> {
     if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
         return Some(contents);
     }
-    if let Err(err) = crate::session_migration::ensure_session_db(&session_dir) {
-        log_session_migration_error(&session_dir, &err);
+    if let Err(err) = crate::session_store::ensure_session_db_read_only(&session_dir) {
+        log_session_open_error(&session_dir, &err);
         return None;
     }
-    if let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) {
+    if let Ok(db) = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")) {
         if let Ok(blob) = db.search_blob() {
             atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
             return Some(blob);
@@ -3355,10 +2219,6 @@ mod tests {
             Vec::new(),
         ))
     }
-    fn system_item(text: &str) -> HistoryItem {
-        HistoryItem::system(text)
-    }
-
     fn checkpoint(summary: &str, first_live_index: usize) -> ContextCheckpoint {
         ContextCheckpoint {
             kind: "compaction".to_string(),
@@ -3382,52 +2242,24 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_session_round_trips_native_history() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.title = Some("JSONL".into());
-        s.history.push(user_item("hello jsonl"));
-        s.history.push(assistant_text_item("assistant jsonl"));
-        s.record_context_tokens(42, test_context_identity());
+    fn finish_turn_state_records_turn_meta_and_rewindable_context() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user_item("hello")];
+        session.record_context_tokens(123, test_context_identity());
+        let meta = TurnMeta {
+            elapsed_ms: 10,
+            avg_tps: Some(2.0),
+            display_tps: Some(2.0),
+            interrupted: true,
+            tool_elapsed: std::collections::HashMap::new(),
+        };
 
-        let meta = encode_session_jsonl_meta(&s).expect("encode meta");
-        let history = encode_history_jsonl(&s.history).expect("encode history");
-        fs::write(dir.path().join("meta.json"), meta).expect("write meta");
-        fs::write(dir.path().join("history.jsonl"), history).expect("write history");
+        session.finish_turn_state(7, meta, true, true);
 
-        let loaded = read_jsonl_session(dir.path()).expect("load jsonl session");
-        assert_eq!(loaded.title.as_deref(), Some("JSONL"));
-        assert_eq!(loaded.context_tokens, Some(42));
-        assert_eq!(loaded.current_context_tokens(), Some(42));
-        assert_eq!(loaded.history.len(), 2);
-        assert!(
-            matches!(&loaded.history[0], HistoryItem::User { content, .. } if content.text_content() == "hello jsonl")
-        );
-    }
-
-    #[test]
-    fn legacy_json_session_migrates_to_sqlite_storage() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.history.push(user_item("legacy prompt"));
-        fs::write(
-            dir.path().join("session.json"),
-            serde_json::to_string(&s).expect("encode legacy session"),
-        )
-        .expect("write legacy session");
-
-        let loaded = read_legacy_json_session(dir.path()).expect("load legacy session");
-        import_legacy_session_to_db(dir.path(), &loaded).expect("import sqlite");
-        migrate_legacy_json_session(dir.path(), &loaded);
-
-        assert!(dir.path().join("session.db").is_file());
-        assert!(dir.path().join("meta.json").is_file());
-        assert!(!dir.path().join("history.jsonl").exists());
-        assert!(!dir.path().join("session.json").exists());
-        let migrated = load_db_session(dir.path()).expect("load migrated session");
-        assert_eq!(migrated.history.len(), 1);
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        assert_eq!(db.writer_lease().unwrap(), None);
+        assert_eq!(session.turn_metas.len(), 1);
+        assert_eq!(session.turn_metas[0].0, 7);
+        assert_eq!(session.context_tokens_history_len, Some(7));
+        assert!(session.context_snapshots.iter().any(|(idx, _)| *idx == 1));
     }
 
     #[test]
@@ -3442,25 +2274,27 @@ mod tests {
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
-        db.replace_transcript_descriptor_records(&[smelt_store::TranscriptDescriptorRecord {
-            block_idx: 0,
-            history_idx: Some(0),
-            kind: "user".to_string(),
-            tool_call_id: None,
-            tool_name: None,
-            content_hash: "bad-user-link".to_string(),
-            estimated_text_bytes: "continue".len() as u64,
-            preview_text: "continue".to_string(),
-            search_text: "continue".to_string(),
-            descriptor_json: serde_json::json!({
-                "kind": "user",
-                "text": "continue",
-                "image_labels": [],
-            })
-            .to_string(),
-            origin_json: Some(serde_json::json!({ "History": 0 }).to_string()),
-            tool_state_json: None,
-        }])
+        db.replace_transcript_descriptor_records_for_repair(&[
+            smelt_store::TranscriptDescriptorRecord {
+                block_idx: 0,
+                history_idx: Some(0),
+                kind: "user".to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                content_hash: "bad-user-link".to_string(),
+                estimated_text_bytes: "continue".len() as u64,
+                preview_text: "continue".to_string(),
+                indexed_text: "continue".to_string(),
+                descriptor_json: serde_json::json!({
+                    "kind": "user",
+                    "text": "continue",
+                    "image_labels": [],
+                })
+                .to_string(),
+                origin_json: Some(serde_json::json!({ "History": 0 }).to_string()),
+                tool_state_json: None,
+            },
+        ])
         .unwrap();
         drop(db);
 
@@ -3549,7 +2383,7 @@ mod tests {
     }
 
     #[test]
-    fn list_sessions_uses_sidecar_metadata_without_db_backfill() {
+    fn list_sessions_uses_sidecar_metadata_and_regenerates_missing_cache() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
         let mut ids = Vec::new();
@@ -3596,22 +2430,35 @@ mod tests {
             assert!(meta.checkpoint.is_none());
             assert_eq!(meta.text_bytes, None);
         }
+        let missing_sidecar_meta = listed
+            .iter()
+            .find(|meta| meta.id == ids[2])
+            .expect("db-only session is listed from sqlite");
+        assert_eq!(missing_sidecar_meta.history_len, Some(1));
+        assert!(missing_sidecar_meta
+            .text_bytes
+            .is_some_and(|bytes| bytes > 0));
+        assert!(dir_for_id(&ids[2]).join("meta.json").is_file());
+        let read_only_count = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "store:db:open_read_only")
+            .map(|row| row.count)
+            .unwrap_or(0);
         assert!(
-            listed.iter().all(|meta| meta.id != ids[2]),
-            "db-only sessions without sidecar metadata are not resumable list entries"
+            read_only_count > 0,
+            "list_sessions should open sqlite when regenerating missing metadata"
         );
-        for label in ["store:db:open_read_only", "store:db:open_read_write"] {
-            let count = snapshot
-                .durations
-                .iter()
-                .find(|row| row.label == label)
-                .map(|row| row.count)
-                .unwrap_or(0);
-            assert_eq!(
-                count, 0,
-                "list_sessions should not open databases for {label}"
-            );
-        }
+        let read_write_count = snapshot
+            .durations
+            .iter()
+            .find(|row| row.label == "store:db:open_read_write")
+            .map(|row| row.count)
+            .unwrap_or(0);
+        assert_eq!(
+            read_write_count, 0,
+            "list_sessions should not open databases read-write"
+        );
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -3630,25 +2477,21 @@ mod tests {
     }
 
     #[test]
-    fn resolve_session_dir_for_read_classifies_without_migrating() {
+    fn resolve_session_dir_for_read_ignores_directories_without_database() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let legacy_id = "legacy-resolve";
-        let legacy_dir = sessions_dir().join(legacy_id);
-        fs::create_dir_all(&legacy_dir).expect("create legacy session dir");
-        fs::write(legacy_dir.join("session.json"), "{}").expect("write legacy marker");
+        let stale_dir = sessions_dir().join("legacy-resolve");
+        fs::create_dir_all(&stale_dir).expect("create stale session dir");
+        fs::write(stale_dir.join("session.json"), "{}").expect("write stale marker");
 
         let mut session = fixture_session();
         session.id = "store-header-resolve".into();
         session.history.push(user_item("hello"));
         save(&session, &crate::attachment::AttachmentStore::new());
 
-        let legacy = resolve_session_dir_for_read("legacy-res").expect("resolve legacy prefix");
-        assert_eq!(legacy.id, legacy_id);
-        assert_eq!(legacy.kind, SessionDirKind::LegacyJson);
-        assert_eq!(legacy.dir, legacy_dir);
-        assert!(!legacy.dir.join("session.db").exists());
+        assert!(resolve_session_dir_for_read("legacy-res").is_none());
+        assert!(!stale_dir.join("session.db").exists());
 
         let store = resolve_session_dir_for_read("store-header").expect("resolve store prefix");
         assert_eq!(store.id, session.id);
@@ -3661,520 +2504,74 @@ mod tests {
         assert!(header.revision > 0);
         assert_eq!(store_ref.session_dir, dir_for(&session));
         assert!(store_ref.db_path.is_file());
-        assert!(!legacy.dir.join("session.db").exists());
+    }
+
+    fn stale_session_dir_without_db(id: &str) -> std::path::PathBuf {
+        let dir = sessions_dir().join(id);
+        fs::create_dir_all(&dir).expect("create stale session dir");
+        fs::write(dir.join("session.json"), "{}").expect("write stale marker");
+        dir
     }
 
     #[test]
-    fn legacy_json_session_imports_agent_role_messages() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        fs::write(
-            dir.path().join("session.json"),
-            serde_json::json!({
-                "id": "legacy-agent-role",
-                "created_at_ms": 1,
-                "updated_at_ms": 2,
-                "messages": [
-                    {"role": "user", "content": "ask"},
-                    {"role": "agent", "content": "subagent answer", "agent_from_id": "a", "agent_from_slug": "scout"},
-                    {"role": "assistant", "content": "final answer"}
-                ]
-            })
-            .to_string(),
-        )
-        .expect("write legacy session");
+    fn prepare_session_dir_for_read_does_not_create_missing_session_db() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let loaded = read_legacy_json_session(dir.path()).expect("load legacy agent session");
+        let id = "legacy-prepare-no-db";
+        let dir = stale_session_dir_without_db(id);
 
-        assert_eq!(loaded.history.len(), 3);
-        assert!(matches!(
-            &loaded.history[1],
-            HistoryItem::Assistant(step)
-                if step.content.as_ref().is_some_and(|content| content.text_content() == "subagent answer")
-        ));
+        assert!(prepare_session_dir_for_read(id).is_none());
+        assert!(!dir.join("session.db").exists());
     }
 
     #[test]
-    fn stale_split_session_falls_back_to_legacy_json_and_migrates_to_sqlite() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "stale-split".into();
-        s.title = Some("legacy title".into());
-        s.history.push(user_item("legacy prompt"));
-        fs::write(
-            dir.path().join("session.json"),
-            serde_json::to_string(&s).expect("encode legacy session"),
-        )
-        .expect("write legacy session");
-        fs::write(
-            dir.path().join("meta.json"),
-            serde_json::json!({
-                "id": s.id,
-                "title": "stale split missing schema_version",
-            })
-            .to_string(),
-        )
-        .expect("write stale meta");
-        fs::write(dir.path().join("history.jsonl"), b"\n").expect("write stale history");
+    fn load_meta_does_not_create_missing_session_db() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let loaded = load_session_files(dir.path()).expect("load via legacy fallback");
+        let id = "legacy-meta-no-db";
+        let dir = stale_session_dir_without_db(id);
 
-        assert_eq!(loaded.title.as_deref(), Some("legacy title"));
-        assert_eq!(loaded.history.len(), 1);
-        assert!(dir.path().join("session.db").is_file());
-        assert!(dir.path().join("meta.json").is_file());
-        assert!(!dir.path().join("history.jsonl").exists());
-        assert!(!dir.path().join("session.json").exists());
-        let migrated = load_db_session(dir.path()).expect("load migrated db session");
-        assert_eq!(migrated.title.as_deref(), Some("legacy title"));
-        assert_eq!(migrated.history.len(), 1);
+        assert!(load_meta(id).is_none());
+        assert!(!dir.join("session.db").exists());
     }
 
     #[test]
-    fn migration_helper_imports_split_session_to_sqlite() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "split-migrate".into();
-        s.title = Some("split title".into());
-        s.history.push(user_item("split prompt"));
-        fs::write(
-            dir.path().join("meta.json"),
-            encode_session_jsonl_meta(&s).expect("encode meta"),
-        )
-        .expect("write meta");
-        fs::write(
-            dir.path().join("history.jsonl"),
-            encode_history_jsonl(&s.history).expect("encode history"),
-        )
-        .expect("write history");
-        fs::write(
-            dir.path().join("requests.jsonl"),
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "request_id": 1,
-                    "kind": "turn",
-                    "timestamp_ms": 30,
-                    "provider_kind": "openai",
-                    "model": "model-a",
-                    "body": {"messages": [{"role": "user", "content": "split prompt"}]},
-                })
-            ),
-        )
-        .expect("write requests");
-        fs::write(
-            dir.path().join("session.json"),
-            serde_json::to_string(&s).expect("encode redundant legacy session"),
-        )
-        .expect("write redundant legacy session");
-        fs::write(dir.path().join("session.ir.bin"), b"obsolete cache").expect("write ir cache");
+    fn list_sessions_ignores_directory_without_database() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let outcome = migrate_session_dir_to_db(dir.path()).expect("migrate split");
+        let id = "legacy-list-no-db";
+        let dir = stale_session_dir_without_db(id);
 
-        assert_eq!(outcome, SessionMigrationOutcome::Migrated);
-        assert!(dir.path().join("session.db").is_file());
-        assert!(!dir.path().join("history.jsonl").exists());
-        assert!(!dir.path().join("requests.jsonl").exists());
-        assert!(!dir.path().join("session.json").exists());
-        assert!(!dir.path().join("session.ir.bin").exists());
-        assert!(!dir
-            .path()
-            .join(crate::session_migration::MIGRATION_STATUS_FILE)
-            .exists());
-        let migrated = load_db_session(dir.path()).expect("load migrated db session");
-        assert_eq!(migrated.title.as_deref(), Some("split title"));
-        assert_eq!(migrated.history.len(), 1);
+        assert!(list_sessions().is_empty());
+        assert!(!dir.join("session.db").exists());
     }
 
     #[test]
-    fn migration_streams_split_session_chunks_and_backfills_descriptors_incrementally() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "split-streaming-migrate".into();
-        s.title = Some("streaming split".into());
-        for i in 0..(LEGACY_JSONL_IMPORT_CHUNK_ITEMS + 5) {
-            s.history.push(user_item(&format!("stream prompt {i}")));
-        }
-        fs::write(
-            dir.path().join("meta.json"),
-            encode_session_jsonl_meta(&s).expect("encode meta"),
-        )
-        .expect("write meta");
-        fs::write(
-            dir.path().join("history.jsonl"),
-            encode_history_jsonl(&s.history).expect("encode history"),
-        )
-        .expect("write history");
+    fn load_search_blob_does_not_create_missing_session_db() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        smelt_perf::perf::clear();
-        smelt_perf::perf::set_enabled(true);
-        let outcome = migrate_session_dir_to_db(dir.path()).expect("migrate split");
-        let snapshot = smelt_perf::perf::snapshot();
-        smelt_perf::perf::set_enabled(false);
+        let id = "legacy-search-no-db";
+        let dir = stale_session_dir_without_db(id);
 
-        assert_eq!(outcome, SessionMigrationOutcome::Migrated);
-        assert!(dir.path().join("session.db").is_file());
-        assert!(!dir.path().join("history.jsonl").exists());
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        assert_eq!(db.history_item_count().unwrap(), s.history.len());
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
-        assert_eq!(db.transcript_block_count().unwrap(), s.history.len());
-        assert!(snapshot
-            .durations
-            .iter()
-            .all(|row| row.label != "session:load_full:parse_history_jsonl"));
-        drop(db);
-
-        let written = backfill_transcript_descriptors_in_history_chunks(dir.path(), 32, Some(1))
-            .expect("backfill one chunk");
-        assert!(written > 0);
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        assert_eq!(db.transcript_descriptor_count().unwrap(), written);
-        assert!(db.history_item_count().unwrap() > db.transcript_descriptor_count().unwrap());
+        assert!(load_search_blob(id).is_none());
+        assert!(!dir.join("session.db").exists());
     }
 
     #[test]
-    fn migration_repairs_existing_sqlite_session_artifacts() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "repair-sqlite".into();
-        s.history.push(user_item("repair prompt"));
-        s.history
-            .push(HistoryItem::Assistant(protocol::AssistantStep::terminal(
-                Some(protocol::Content::text("repair answer")),
-                Some("repair reasoning".into()),
-                Vec::new(),
-            )));
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
-        drop(db);
+    fn load_search_blob_uses_content_sidecar_without_database() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let outcome = migrate_session_dir_to_db(dir.path()).expect("repair sqlite");
+        let id = "legacy-search-sidecar";
+        let dir = stale_session_dir_without_db(id);
+        fs::write(dir.join("content.txt"), "cached search text").expect("write search sidecar");
 
-        assert_eq!(outcome, SessionMigrationOutcome::Repaired);
-        assert!(dir.path().join("meta.json").is_file());
-        assert_eq!(
-            fs::read_to_string(dir.path().join("content.txt")).unwrap(),
-            "repair prompt\nrepair reasoning\nrepair answer\n"
-        );
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        assert_eq!(db.transcript_descriptor_count().unwrap(), 3);
-    }
-
-    #[test]
-    fn migration_repairs_stale_meta_and_partial_descriptors() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "repair-partial".into();
-        s.title = Some("current title".into());
-        s.history.push(user_item("first"));
-        s.history.push(user_item("second"));
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-        let rows = transcript_descriptor_rows_from_session(&s).unwrap();
-        db.replace_transcript_descriptor_records(&rows[..1])
-            .unwrap();
-        drop(db);
-        let mut stale_meta = s.meta();
-        stale_meta.title = Some("stale title".into());
-        write_meta(dir.path(), &stale_meta);
-        fs::write(dir.path().join("content.txt"), b"stale search").unwrap();
-
-        let outcome = migrate_session_dir_to_db(dir.path()).expect("repair sqlite");
-
-        assert_eq!(outcome, SessionMigrationOutcome::Repaired);
-        let repaired_meta: SessionMeta =
-            serde_json::from_str(&fs::read_to_string(dir.path().join("meta.json")).unwrap())
-                .unwrap();
-        assert_eq!(repaired_meta.title.as_deref(), Some("current title"));
-        assert_eq!(
-            fs::read_to_string(dir.path().join("content.txt")).unwrap(),
-            "first\nsecond\n"
-        );
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        assert_eq!(db.transcript_descriptor_count().unwrap(), rows.len());
-    }
-
-    #[test]
-    fn canonical_sqlite_session_skips_after_repair() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "canonical-sqlite".into();
-        s.history.push(user_item("canonical prompt"));
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-        drop(db);
-
-        assert_eq!(
-            migrate_session_dir_to_db(dir.path()).expect("initial repair"),
-            SessionMigrationOutcome::Repaired
-        );
-        assert_eq!(
-            migrate_session_dir_to_db(dir.path()).expect("second scan"),
-            SessionMigrationOutcome::Skipped
-        );
-    }
-
-    #[test]
-    fn canonical_sqlite_session_clears_stale_migration_failure() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "stale-migration-status".into();
-        s.history.push(user_item("canonical prompt"));
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-        drop(db);
-
-        assert_eq!(
-            migrate_session_dir_to_db(dir.path()).expect("initial repair"),
-            SessionMigrationOutcome::Repaired
-        );
-        fs::write(
-            dir.path()
-                .join(crate::session_migration::MIGRATION_STATUS_FILE),
-            serde_json::to_vec(&crate::session_migration::SessionMigrationStatus {
-                state: crate::session_migration::SessionMigrationState::Failed,
-                message: Some(
-                    "failed to open sqlite database: sqlite error: database is locked".into(),
-                ),
-                updated_at_ms: 1,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            migrate_session_dir_to_db(dir.path()).expect("second scan"),
-            SessionMigrationOutcome::Skipped
-        );
-        assert!(!dir
-            .path()
-            .join(crate::session_migration::MIGRATION_STATUS_FILE)
-            .exists());
-    }
-
-    #[test]
-    fn sqlite_session_locked_during_repair_is_skipped_without_failure_status() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut s = fixture_session();
-        s.id = "locked-sqlite".into();
-        s.history.push(user_item("locked prompt"));
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-        db.connection().execute_batch("BEGIN EXCLUSIVE").unwrap();
-
-        assert_eq!(
-            migrate_session_dir_to_db(dir.path()).expect("skip locked sqlite"),
-            SessionMigrationOutcome::Skipped
-        );
-        assert!(!dir
-            .path()
-            .join(crate::session_migration::MIGRATION_STATUS_FILE)
-            .exists());
-
-        db.connection().execute_batch("ROLLBACK").unwrap();
-    }
-
-    #[test]
-    fn cleans_stale_import_temp_files_only() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let stale = dir.path().join("session.db.import-4294967295-1000-0.tmp");
-        let stale_wal = dir
-            .path()
-            .join("session.db.import-4294967295-1000-0.tmp-wal");
-        let stale_shm = dir
-            .path()
-            .join("session.db.import-4294967295-1000-0.tmp-shm");
-        let stale_journal = dir
-            .path()
-            .join("session.db.import-4294967295-1000-0.tmp-journal");
-        let fresh = dir.path().join("session.db.import-4294967295-9500-0.tmp");
-        let normal_db = dir.path().join("session.db");
-        let unrelated = dir.path().join("session.db.import-not-a-temp.tmp");
-        for path in [
-            &stale,
-            &stale_wal,
-            &stale_shm,
-            &stale_journal,
-            &fresh,
-            &normal_db,
-            &unrelated,
-        ] {
-            fs::write(path, b"x").expect("write temp");
-        }
-
-        let removed = cleanup_stale_import_temp_files_before(dir.path(), 10_000, 1_000);
-
-        assert_eq!(removed, 4);
-        assert!(!stale.exists());
-        assert!(!stale_wal.exists());
-        assert!(!stale_shm.exists());
-        assert!(!stale_journal.exists());
-        assert!(fresh.exists());
-        assert!(normal_db.exists());
-        assert!(unrelated.exists());
-    }
-
-    #[test]
-    fn migration_scan_cleans_stale_import_temps_in_skipped_sessions() {
-        let root = tempfile::tempdir().expect("temp dir");
-        let session_dir = root.path().join("existing");
-        fs::create_dir(&session_dir).expect("session dir");
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-        drop(db);
-        let stale = session_dir.join("session.db.import-4294967295-1000-0.tmp");
-        fs::write(&stale, b"x").expect("write stale temp");
-
-        let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
-
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.skipped, 1);
-        assert!(!stale.exists());
-    }
-
-    #[test]
-    fn migration_scan_cleans_legacy_artifacts_in_skipped_sessions() {
-        let root = tempfile::tempdir().expect("temp dir");
-        let session_dir = root.path().join("existing");
-        fs::create_dir(&session_dir).expect("session dir");
-        let mut s = fixture_session();
-        s.id = "existing".into();
-        s.history.push(user_item("already migrated"));
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-        drop(db);
-        for name in [
-            "session.json",
-            "history.jsonl",
-            "requests.jsonl",
-            "session.ir.bin",
-        ] {
-            fs::write(session_dir.join(name), b"legacy").expect("write legacy artifact");
-        }
-
-        let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
-
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.repaired, 1);
-        for name in [
-            "session.json",
-            "history.jsonl",
-            "requests.jsonl",
-            "session.ir.bin",
-        ] {
-            assert!(!session_dir.join(name).exists(), "{name} should be removed");
-        }
-    }
-
-    #[test]
-    fn legacy_session_without_db_lists_as_pending_without_parsing_payload() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        fs::write(dir.path().join("session.json"), b"not json").expect("write invalid legacy");
-
-        let listed =
-            load_meta_for_dir(dir.path().to_path_buf(), MetaLoadMode::List).expect("pending meta");
-
-        assert_eq!(listed.id, dir.path().file_name().unwrap().to_str().unwrap());
-        assert_eq!(
-            listed.migration.as_ref().unwrap().state,
-            SessionMigrationState::Pending
-        );
-        assert!(!dir.path().join("session.db").exists());
-        assert!(!dir
-            .path()
-            .join(crate::session_migration::MIGRATION_STATUS_FILE)
-            .exists());
-    }
-
-    #[test]
-    fn failed_migration_keeps_legacy_files_and_is_retryable() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        fs::write(dir.path().join("session.json"), b"not json").expect("write invalid legacy");
-
-        let first = migrate_session_dir_to_db(dir.path()).expect_err("invalid legacy fails");
-        assert!(first.to_string().contains("failed to parse"));
-        assert!(dir.path().join("session.json").is_file());
-        assert!(!dir.path().join("session.db").exists());
-        let failed =
-            crate::session_migration::read_migration_status(dir.path()).expect("failure status");
-        assert_eq!(failed.state, SessionMigrationState::Failed);
-        let listed =
-            load_meta_for_dir(dir.path().to_path_buf(), MetaLoadMode::List).expect("failure meta");
-        assert_eq!(
-            listed.migration.as_ref().unwrap().state,
-            SessionMigrationState::Failed
-        );
-
-        let mut s = fixture_session();
-        s.id = "retry-migrate".into();
-        s.history.push(user_item("fixed prompt"));
-        fs::write(
-            dir.path().join("session.json"),
-            serde_json::to_string(&s).expect("encode legacy session"),
-        )
-        .expect("write fixed legacy");
-
-        let retry = migrate_session_dir_to_db(dir.path()).expect("retry succeeds");
-        assert_eq!(retry, SessionMigrationOutcome::Migrated);
-        assert!(dir.path().join("session.db").is_file());
-        assert!(!dir
-            .path()
-            .join(crate::session_migration::MIGRATION_STATUS_FILE)
-            .exists());
-    }
-
-    #[test]
-    fn migration_batch_counts_progress_and_bounds_failures() {
-        let root = tempfile::tempdir().expect("temp dir");
-        let existing = root.path().join("existing");
-        fs::create_dir(&existing).expect("existing dir");
-        let mut s = fixture_session();
-        s.id = "existing".into();
-        let db = smelt_store::SessionDb::open(existing.join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
-            .unwrap();
-
-        let good = root.path().join("good");
-        fs::create_dir(&good).expect("good dir");
-        s.id = "good".into();
-        s.history.push(user_item("good prompt"));
-        fs::write(
-            good.join("session.json"),
-            serde_json::to_string(&s).expect("encode legacy session"),
-        )
-        .expect("write good legacy");
-
-        for idx in 0..7 {
-            let bad = root.path().join(format!("bad-{idx}"));
-            fs::create_dir(&bad).expect("bad dir");
-            fs::write(bad.join("session.json"), b"not json").expect("write bad legacy");
-        }
-
-        assert_eq!(
-            crate::session_migration::pending_session_migration_count_in_dir(root.path()),
-            8
-        );
-
-        let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
-
-        assert_eq!(report.scanned, 9);
-        assert_eq!(report.migrated, 1);
-        assert_eq!(report.repaired, 1);
-        assert_eq!(report.skipped, 0);
-        assert_eq!(report.failed, 7);
-        assert_eq!(
-            report.failures.len(),
-            crate::session_migration::max_migration_failure_logs()
-        );
-        assert!(good.join("session.db").is_file());
-        assert!(!good.join("session.json").exists());
-        assert!(root.path().join("bad-0/session.json").is_file());
+        assert_eq!(load_search_blob(id).as_deref(), Some("cached search text"));
+        assert!(!dir.join("session.db").exists());
     }
 
     #[test]
@@ -4190,7 +2587,7 @@ mod tests {
         s.history.push(user_item("hello sqlite"));
         s.record_context_tokens(42, test_context_identity());
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
+        db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
 
         let loaded = load_session_files(dir.path()).expect("load db session");
@@ -4224,26 +2621,6 @@ mod tests {
             &loaded.history[0],
             HistoryItem::User { content, display: Some(display) }
                 if content.text_content() == "expanded command body" && display == "/reflect"
-        ));
-    }
-
-    #[test]
-    fn legacy_messages_session_loads_with_no_user_display() {
-        let json = serde_json::json!({
-            "id": "legacy",
-            "created_at_ms": 1,
-            "updated_at_ms": 1,
-            "messages": [{
-                "role": "user",
-                "content": "expanded command body"
-            }]
-        });
-
-        let loaded: Session = serde_json::from_value(json).expect("deserialize legacy session");
-        assert!(matches!(
-            &loaded.history[0],
-            HistoryItem::User { content, display: None }
-                if content.text_content() == "expanded command body"
         ));
     }
 
@@ -4616,34 +2993,6 @@ mod tests {
     }
 
     #[test]
-    fn meta_projects_visible_session_fields() {
-        let mut s = fixture_session();
-        s.title = Some("My Title".into());
-        s.slug = Some("my-slug".into());
-        s.first_user_message = Some("hello".into());
-        s.mode = Some("ask".into());
-        s.model = Some("claude-opus".into());
-        s.cwd = Some("/work".into());
-        s.parent_id = Some("p1".into());
-        s.context_tokens = Some(1234);
-        s.history.push(user_item("hi"));
-        s.context_tokens_history_len = Some(s.history.len());
-
-        let m = s.meta();
-        assert_eq!(m.id, s.id);
-        assert_eq!(m.title.as_deref(), Some("My Title"));
-        assert_eq!(m.slug.as_deref(), Some("my-slug"));
-        assert_eq!(m.first_user_message.as_deref(), Some("hello"));
-        assert_eq!(m.mode.as_deref(), Some("ask"));
-        assert_eq!(m.model.as_deref(), Some("claude-opus"));
-        assert_eq!(m.cwd.as_deref(), Some("/work"));
-        assert_eq!(m.parent_id.as_deref(), Some("p1"));
-        assert_eq!(m.context_tokens, Some(1234));
-        assert_eq!(m.text_bytes, Some(2)); // "hi"
-        assert!(m.migration.is_none());
-    }
-
-    #[test]
     fn current_context_tokens_requires_exact_history_length() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
@@ -4702,63 +3051,6 @@ mod tests {
         assert!(forked.created_at_ms >= s.created_at_ms);
     }
 
-    // ── compute_text_bytes / build_search_blob ───────────────────────
-
-    #[test]
-    fn compute_text_bytes_sums_user_assistant_content_lengths() {
-        let items = vec![user_item("hello"), assistant_text_item("hi there")];
-        assert_eq!(compute_text_bytes(&items), 13);
-    }
-
-    #[test]
-    fn compute_text_bytes_includes_reasoning_and_tool_calls() {
-        let inv = ToolInvocation {
-            call_id: "id-1".into(),
-            name: "edit".into(),
-            arguments: "{\"path\":\"f.rs\"}".into(),
-            result: ToolOutcome {
-                content: "ok".into(),
-                is_error: false,
-                metadata: None,
-            },
-            elapsed_ms: None,
-        };
-        let turn = AssistantStep::with_invocations(
-            Some(Content::Text("text".into())),
-            Some("thinking".into()),
-            Vec::new(),
-            vec![inv],
-        );
-        let items = vec![HistoryItem::Assistant(turn)];
-        // 4 (text) + 8 (reasoning) + 4 (name) + 15 (args) + 2 (result)
-        assert_eq!(compute_text_bytes(&items), 33);
-    }
-
-    #[test]
-    fn compute_text_bytes_handles_empty_input() {
-        assert_eq!(compute_text_bytes(&[]), 0);
-    }
-
-    #[test]
-    fn build_search_blob_includes_only_user_and_assistant_text() {
-        let items = vec![
-            user_item("question"),
-            assistant_text_item("answer"),
-            system_item("system prompt"),
-        ];
-        let blob = build_search_blob(&items);
-        assert!(blob.contains("question"));
-        assert!(blob.contains("answer"));
-        assert!(!blob.contains("system prompt"));
-    }
-
-    #[test]
-    fn build_search_blob_skips_empty_history_items() {
-        let items = vec![user_item(""), assistant_text_item("real")];
-        let blob = build_search_blob(&items);
-        assert_eq!(blob, "real\n");
-    }
-
     // ── session_updated_at ────────────────────────────────────────────
 
     #[test]
@@ -4781,7 +3073,6 @@ mod tests {
             history_len: None,
             checkpoint: None,
             text_bytes: None,
-            migration: None,
         };
         assert_eq!(session_updated_at(&m), 200);
         let m2 = SessionMeta {
@@ -4858,65 +3149,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_session_with_orphan_tool_use_is_repaired_on_deserialize() {
-        // Real reproducer for issue #8: a session file persisted mid-tool
-        // with an unpaired tool_use should load with a synthesized
-        // "interrupted" tool result.
-        let json = serde_json::json!({
-            "id": "abc",
-            "messages": [
-                { "role": "user", "content": "go" },
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        { "id": "web_fetch:36", "type": "function",
-                          "function": { "name": "web_fetch", "arguments": "{}" } }
-                    ]
-                }
-            ]
-        });
-        let s: Session = serde_json::from_value(json).unwrap();
-        let assistant = s
-            .history
-            .iter()
-            .find_map(|i| i.as_assistant())
-            .expect("assistant item");
-        assert_eq!(assistant.invocations.len(), 1);
-        assert!(assistant.invocations[0].result.is_error);
-        assert!(assistant.invocations[0]
-            .result
-            .content
-            .contains("interrupted"));
-    }
-
-    #[test]
-    fn legacy_session_with_token_snapshots_loads_without_error() {
-        // Old session files may contain `token_snapshots`. The field is no
-        // longer used, but deserialization should not fail.
-        let json = serde_json::json!({
-            "id": "abc",
-            "messages": [
-                { "role": "user", "content": "go" },
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        { "id": "c1", "type": "function",
-                          "function": { "name": "f", "arguments": "{}" } }
-                    ]
-                },
-                { "role": "tool", "tool_call_id": "c1", "content": "ok" }
-            ],
-            "token_snapshots": [[3, 100]],
-            "cost_snapshots": [[3, 0.5]]
-        });
-        let s: Session = serde_json::from_value(json).unwrap();
-        assert_eq!(s.history.len(), 2);
-        assert_eq!(s.context_snapshots.len(), 1);
-        assert_eq!(s.context_snapshots[0].0, 2);
-        assert_eq!(s.session_cost_usd, 0.5);
-    }
-
-    #[test]
     fn session_round_trips_through_wire_form_preserving_history_and_snapshots() {
         // Verify lossless save → load → save: native history rows,
         // snapshot keys, session cost, and context tokens all survive a
@@ -4964,7 +3196,7 @@ mod tests {
 
         let json = serde_json::to_string(&original).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let snapshot = &value["accounting_snapshots"][0][1];
+        let snapshot = &value["context_snapshots"][0][1];
         assert!(snapshot.get("cost_usd").is_none());
         assert!(snapshot.get("session_usage").is_none());
         let round: Session = serde_json::from_str(&json).unwrap();

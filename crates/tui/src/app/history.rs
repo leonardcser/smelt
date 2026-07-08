@@ -46,6 +46,9 @@ pub(crate) fn live_session_for_test(
     history_len: usize,
     checkpoint: Option<smelt_core::ContextCheckpoint>,
 ) -> smelt_core::session_runtime::LiveSession {
+    let revision = smelt_core::session::load_store_header(&id)
+        .map(|(header, _)| header.revision)
+        .unwrap_or(0);
     let header = smelt_core::session::SessionHeader {
         meta: smelt_core::session::SessionMeta {
             id,
@@ -65,10 +68,9 @@ pub(crate) fn live_session_for_test(
             history_len: Some(history_len),
             checkpoint,
             text_bytes: None,
-            migration: None,
         },
         history_len,
-        revision: 0,
+        revision,
     };
     smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
 }
@@ -78,8 +80,6 @@ pub(crate) fn live_session_for_test(
 /// store-backed and must not add variants here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FullSessionMaterializationReason {
-    LegacyOpenFallback,
-    LegacyPreviewFallback,
     InspectSessionDetail,
     #[cfg(test)]
     TestSavedSessionAssertion,
@@ -88,12 +88,6 @@ pub(crate) enum FullSessionMaterializationReason {
 impl FullSessionMaterializationReason {
     fn counter(self) -> &'static str {
         match self {
-            FullSessionMaterializationReason::LegacyOpenFallback => {
-                "compat:session:load_full_fallback"
-            }
-            FullSessionMaterializationReason::LegacyPreviewFallback => {
-                "compat:session:preview_full_fallback"
-            }
             FullSessionMaterializationReason::InspectSessionDetail => {
                 "inspect:session:detail_load_full"
             }
@@ -109,7 +103,7 @@ pub(crate) fn materialize_full_session(
     id: &str,
     reason: FullSessionMaterializationReason,
 ) -> Option<session::Session> {
-    smelt_perf::perf::record_value("compat:session:full_materialized", 1);
+    smelt_perf::perf::record_value("session:full_materialized", 1);
     smelt_perf::perf::record_value(reason.counter(), 1);
     session::load_full(id)
 }
@@ -586,7 +580,8 @@ mod tests {
         let records = (0..200)
             .map(|idx| test_descriptor_record(idx, &format!("block {idx}")))
             .collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.replace_transcript_descriptor_records_for_repair(&records)
+            .unwrap();
         drop(db);
 
         let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 10, 1)
@@ -621,7 +616,8 @@ mod tests {
             test_descriptor_record(70, "visible old tail"),
             test_descriptor_record(235, "visible newest tail"),
         ];
-        db.replace_transcript_descriptor_records(&records).unwrap();
+        db.replace_transcript_descriptor_records_for_repair(&records)
+            .unwrap();
         drop(db);
 
         let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 80, 12)
@@ -647,7 +643,7 @@ mod tests {
             content_hash: "0".to_string(),
             estimated_text_bytes: content.len() as u64,
             preview_text: content.to_string(),
-            search_text: content.to_string(),
+            indexed_text: content.to_string(),
             descriptor_json: serde_json::to_string(&TranscriptBlockDescriptor::Text {
                 content: content.to_string(),
             })
@@ -1076,8 +1072,8 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to fork session blobs: {err}"));
             return;
         }
-        if let Err(err) = session::write_db_meta_sidecar(&fork_dir) {
-            self.notify_error_sticky(format!("failed to write fork metadata: {err}"));
+        if let Err(err) = session::refresh_derived_files(&fork_dir) {
+            self.notify_error_sticky(format!("failed to refresh fork metadata: {err}"));
             return;
         }
         let Some((header, store_ref)) = session::load_store_header_for_dir(fork_dir.clone()) else {
@@ -1383,9 +1379,8 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
-    // COMPAT(legacy-session-full-load-fallbacks): retained for explicit promotion
-    // of old in-memory-only UI flows. Normal store-backed resume, render, save,
-    // rewind, and fork paths must not call this.
+    // Explicit promotion for old in-memory-only UI flows. Normal store-backed
+    // resume, render, save, rewind, and fork paths must not call this.
     pub(crate) fn ensure_live_session_materialized(&mut self) {
         let Some(live_session) = self.session_document.live_session.take() else {
             return;
@@ -1562,11 +1557,8 @@ impl TuiApp {
             match load_transcript_tail_from_sqlite(&self.core.session, width, viewport_rows) {
                 Some(loaded_transcript) => (loaded_transcript, true),
                 None => {
-                    // COMPAT(legacy-session-full-load-fallbacks): legacy or partially migrated sessions without descriptor rows rebuild the display transcript from the loaded session.
-                    smelt_perf::perf::record_value(
-                        "compat:session:rebuild_transcript_full_fallback",
-                        1,
-                    );
+                    // Sessions without descriptor rows rebuild the display transcript from the loaded session.
+                    smelt_perf::perf::record_value("session:rebuild_transcript_full_fallback", 1);
                     (
                         crate::app::transcript::LoadedTranscript::full(
                             build_transcript_from_session(&self.lua, &self.core.session),
@@ -1592,17 +1584,28 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn ack_persist_save(&mut self, ack: crate::persist::PersistAck) {
+    pub(crate) fn ack_persist_save(&mut self, receipt: smelt_store::SaveReceipt) {
         let save_queued = self
             .session_document
-            .mark_persisted(&ack, self.core.session.checkpoint.as_ref());
+            .mark_persisted(&receipt, self.core.session.checkpoint.as_ref());
         if save_queued {
             self.save_session();
         }
     }
 
     pub(crate) fn fail_persist_save(&mut self, err: crate::persist::PersistFailure) {
+        let recoverable = err
+            .commit_failure
+            .as_ref()
+            .is_some_and(smelt_store::SessionCommitFailure::is_recoverable_stale_base);
         self.session_document.mark_persist_failed(&err);
+        if recoverable {
+            smelt_perf::perf::record_value("session:save:recoverable_failure", 1);
+            if self.session_document.is_save_queued() && !self.prompt_input_is_busy() {
+                self.save_session();
+            }
+            return;
+        }
         self.notify_error_sticky(format!(
             "failed to save session {}: {}",
             err.session_id, err.message
@@ -1666,43 +1669,37 @@ impl TuiApp {
                 side_tables,
             } => {
                 smelt_perf::perf::record_value("session:save:metadata_only", 1);
-                let Some(save_id) = self.session_document.mark_submitted(
-                    session_id.clone(),
-                    crate::persist::PersistSaveKind::Metadata,
+                let Some(submitted) = self.session_document.submit_metadata_save(
+                    session_id,
                     generation,
-                    crate::app::session_document::SubmittedHistoryRange::metadata_only(
-                        state.history_len,
-                    ),
-                    None,
-                ) else {
-                    return;
-                };
-                self.persister
-                    .save_metadata(crate::persist::PersistMetadataRequest {
-                        save_id,
-                        session_id,
-                        session_dir,
-                        state: *state,
-                        side_tables: *side_tables,
-                    });
-            }
-            crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
-                let pending_history =
-                    crate::app::session_document::SubmittedHistoryRange::from_delta(&delta);
-                let Some(save_id) = self.session_document.mark_submitted(
-                    session_id.clone(),
-                    crate::persist::PersistSaveKind::History,
-                    generation,
-                    pending_history,
-                    None,
+                    *state,
+                    *side_tables,
                 ) else {
                     return;
                 };
                 self.persister.save(crate::persist::PersistRequest {
-                    save_id,
-                    session_id,
                     session_dir,
-                    delta: *delta,
+                    command: submitted.command,
+                    blobs: Vec::new(),
+                });
+            }
+            crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
+                let submitted = match self
+                    .session_document
+                    .submit_history_save(session_id, generation, *delta, None)
+                {
+                    Ok(Some(submitted)) => submitted,
+                    Ok(None) => return,
+                    Err(err) => {
+                        self.notify_error_sticky(format!(
+                            "failed to prepare session commit: {err}"
+                        ));
+                        return;
+                    }
+                };
+                self.persister.save(crate::persist::PersistRequest {
+                    session_dir,
+                    command: submitted.command,
                     blobs,
                 });
             }
@@ -1761,22 +1758,20 @@ impl TuiApp {
             .dir()
             .to_path_buf();
         self.publish_shared_session_state();
-        let pending_history =
-            crate::app::session_document::SubmittedHistoryRange::from_delta(&delta);
-        let Some(save_id) = self.session_document.mark_submitted(
-            session_id.clone(),
-            crate::persist::PersistSaveKind::History,
-            generation,
-            pending_history,
-            None,
-        ) else {
-            return;
+        let submitted = match self
+            .session_document
+            .submit_history_save(session_id, generation, delta, None)
+        {
+            Ok(Some(submitted)) => submitted,
+            Ok(None) => return,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session commit: {err}"));
+                return;
+            }
         };
         self.persister.save(crate::persist::PersistRequest {
-            save_id,
-            session_id,
             session_dir,
-            delta,
+            command: submitted.command,
             blobs,
         });
     }
@@ -2176,7 +2171,7 @@ impl TuiApp {
     fn persist_history_suffix(
         &mut self,
         generation: crate::app::session_document::DocumentGeneration,
-        delta: Box<crate::persist::PersistDelta>,
+        delta: Box<smelt_core::session_save::PersistDelta>,
         descriptor_append: Option<crate::app::session_document::DescriptorAppendSubmission>,
     ) -> bool {
         self.publish_shared_session_state();
@@ -2188,22 +2183,22 @@ impl TuiApp {
         let session = &self.core.session;
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
-        let pending_history =
-            crate::app::session_document::SubmittedHistoryRange::from_delta(&delta);
-        let Some(save_id) = self.session_document.mark_submitted(
-            session_id.clone(),
-            crate::persist::PersistSaveKind::History,
+        let submitted = match self.session_document.submit_history_save(
+            session_id,
             generation,
-            pending_history,
+            *delta,
             descriptor_append,
-        ) else {
-            return false;
+        ) {
+            Ok(Some(submitted)) => submitted,
+            Ok(None) => return false,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session commit: {err}"));
+                return false;
+            }
         };
         self.persister.save(crate::persist::PersistRequest {
-            save_id,
-            session_id,
             session_dir,
-            delta: *delta,
+            command: submitted.command,
             blobs: self.pending_image_blobs(),
         });
         true
@@ -2406,10 +2401,8 @@ mod checkpoint_tests {
             "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
-            "compat:session:full_materialized",
-            "compat:session:load_full_fallback",
-            "compat:session:preview_full_fallback",
-            "compat:session:rebuild_transcript_full_fallback",
+            "session:full_materialized",
+            "session:rebuild_transcript_full_fallback",
             "session:display_only_load_full",
             "session:save:descriptor_sparse_full_rebuild",
             "transcript:build_from_session:history_items",
