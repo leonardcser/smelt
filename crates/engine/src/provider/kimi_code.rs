@@ -1,88 +1,22 @@
 use crate::paths::{cache_dir, state_dir};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rand::RngExt;
+use smelt_provider::kimi_code::{self as kimi_protocol, KimiHeaders};
+use smelt_provider::kimi_code::{KimiCodeModelInfo, KimiCodeTokens, ManagedUsageReport};
 
-use super::{auth_storage::CredStore, unix_now, LoginCallbacks};
+use smelt_provider::unix_now;
 
-pub const API_BASE: &str = "https://api.kimi.com/coding/v1";
-const OAUTH_HOST: &str = "https://auth.kimi.com";
-const CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+use super::{auth_storage::CredStore, LoginCallbacks};
+
+const API_BASE: &str = smelt_provider::kimi_code::API_BASE;
+const OAUTH_HOST: &str = smelt_provider::kimi_code::OAUTH_HOST;
 const TOKENS_ENV: &str = "SMELT_KIMI_CODE_TOKENS";
 const MODELS_CACHE_VERSION: u32 = 1;
 
 pub fn is_api_base(api_base: &str) -> bool {
-    api_base
-        .trim_end_matches('/')
-        .contains("api.kimi.com/coding")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KimiCodeModelInfo {
-    pub id: String,
-    pub context_length: Option<u32>,
-    pub supports_reasoning: Option<bool>,
-    pub supports_image_in: Option<bool>,
-    pub supports_video_in: Option<bool>,
-    pub supports_tool_use: Option<bool>,
-    pub display_name: Option<String>,
-}
-
-impl KimiCodeModelInfo {
-    fn from_json(item: &serde_json::Value) -> Option<Self> {
-        let id = item["id"].as_str()?.to_string();
-        let display_name = item["display_name"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        Some(Self {
-            id,
-            context_length: json_u32(&item["context_length"]),
-            supports_reasoning: item.get("supports_reasoning").and_then(|v| v.as_bool()),
-            supports_image_in: item.get("supports_image_in").and_then(|v| v.as_bool()),
-            supports_video_in: item.get("supports_video_in").and_then(|v| v.as_bool()),
-            supports_tool_use: item.get("supports_tool_use").and_then(|v| v.as_bool()),
-            display_name,
-        })
-    }
-
-    pub fn matches_name(&self, model: &str) -> bool {
-        self.id.eq_ignore_ascii_case(model)
-            || self
-                .display_name
-                .as_deref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(model))
-    }
-}
-
-impl From<KimiCodeModelInfo> for protocol::ModelMetadata {
-    fn from(model: KimiCodeModelInfo) -> Self {
-        let mut input_modalities = vec!["text".to_string()];
-        if model.supports_image_in == Some(true) {
-            input_modalities.push("image".to_string());
-        }
-        if model.supports_video_in == Some(true) {
-            input_modalities.push("video".to_string());
-        }
-        Self {
-            id: model.id,
-            display_name: model.display_name,
-            context_window: model.context_length,
-            supports_reasoning: model.supports_reasoning,
-            input_modalities: Some(input_modalities),
-        }
-    }
-}
-
-fn json_u32(value: &serde_json::Value) -> Option<u32> {
-    value
-        .as_u64()
-        .or_else(|| value.as_str()?.parse::<u64>().ok())
-        .and_then(|v| u32::try_from(v).ok())
-        .filter(|v| *v > 0)
+    smelt_provider::is_kimi_code_api_base(api_base)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,42 +34,23 @@ impl KimiCodeModelsCache {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct KimiCodeTokens {
-    access_token: String,
-    refresh_token: String,
-    pub(crate) expires_at: u64,
-    #[serde(default)]
-    scope: String,
-    #[serde(default = "default_bearer")]
-    token_type: String,
-}
-
-fn default_bearer() -> String {
-    "Bearer".to_string()
-}
-
 fn cred_store() -> CredStore {
     CredStore::production("smelt-kimi-code-auth", "default", token_path(), TOKENS_ENV)
 }
 
 #[derive(Clone)]
-struct KimiAuthEnv {
-    oauth_host: String,
-    api_base: String,
+struct EngineKimiEnv {
+    protocol: kimi_protocol::KimiAuthEnv,
     token_store: CredStore,
     models_cache_path: PathBuf,
-    now: fn() -> u64,
 }
 
-impl KimiAuthEnv {
+impl EngineKimiEnv {
     fn production() -> Self {
         Self {
-            oauth_host: oauth_host(),
-            api_base: api_base(),
+            protocol: protocol_env(),
             token_store: cred_store(),
             models_cache_path: models_cache_path(),
-            now: unix_now,
         }
     }
 }
@@ -144,277 +59,30 @@ fn token_path() -> PathBuf {
     state_dir().join("kimi_code_auth.json")
 }
 
-impl KimiCodeTokens {
-    fn save_to(&self, store: &CredStore) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        store.save(&json)
-    }
-
-    fn load() -> Option<Self> {
-        Self::load_from(&cred_store())
-    }
-
-    fn load_from(store: &CredStore) -> Option<Self> {
-        let json = store.load()?;
-        serde_json::from_str(&json).ok()
-    }
-
-    fn delete() {
-        cred_store().delete();
-    }
+fn save_tokens_to(tokens: &KimiCodeTokens, store: &CredStore) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(tokens).map_err(|e| e.to_string())?;
+    store.save(&json)
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ManagedUsageRow {
-    pub label: String,
-    pub used: i64,
-    pub limit: i64,
-    #[serde(rename = "resetHint", skip_serializing_if = "Option::is_none")]
-    pub reset_hint: Option<String>,
+fn load_tokens() -> Option<KimiCodeTokens> {
+    load_tokens_from(&cred_store())
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ManagedUsageReport {
-    pub summary: Option<ManagedUsageRow>,
-    pub limits: Vec<ManagedUsageRow>,
+fn load_tokens_from(store: &CredStore) -> Option<KimiCodeTokens> {
+    let json = store.load()?;
+    serde_json::from_str(&json).ok()
 }
 
-pub fn parse_managed_usage_payload(payload: &Value) -> ManagedUsageReport {
-    let Some(rec) = payload.as_object() else {
-        return ManagedUsageReport {
-            summary: None,
-            limits: Vec::new(),
-        };
-    };
-
-    let summary = to_usage_row(rec.get("usage"), "Weekly limit");
-    let mut limits = Vec::new();
-    if let Some(items) = rec.get("limits").and_then(Value::as_array) {
-        for (idx, item) in items.iter().enumerate() {
-            let Some(item_obj) = item.as_object() else {
-                continue;
-            };
-            let detail = item_obj
-                .get("detail")
-                .and_then(Value::as_object)
-                .unwrap_or(item_obj);
-            let empty = serde_json::Map::new();
-            let window = item_obj
-                .get("window")
-                .and_then(Value::as_object)
-                .unwrap_or(&empty);
-            let label = limit_label(item_obj, detail, window, idx);
-            if let Some(row) = to_usage_row(Some(&Value::Object(detail.clone())), &label) {
-                limits.push(row);
-            }
-        }
-    }
-
-    ManagedUsageReport { summary, limits }
-}
-
-fn to_usage_row(raw: Option<&Value>, default_label: &str) -> Option<ManagedUsageRow> {
-    let raw = raw?.as_object()?;
-    let limit = to_int(raw.get("limit"));
-    let mut used = to_int(raw.get("used"));
-    if used.is_none() {
-        if let (Some(remaining), Some(limit)) = (to_int(raw.get("remaining")), limit) {
-            used = Some(limit - remaining);
-        }
-    }
-    if used.is_none() && limit.is_none() {
-        return None;
-    }
-    let label = string_field(raw, "name")
-        .or_else(|| string_field(raw, "title"))
-        .unwrap_or_else(|| default_label.to_string());
-    Some(ManagedUsageRow {
-        label,
-        used: used.unwrap_or(0),
-        limit: limit.unwrap_or(0),
-        reset_hint: reset_hint_from(raw),
-    })
-}
-
-fn limit_label(
-    item: &serde_json::Map<String, Value>,
-    detail: &serde_json::Map<String, Value>,
-    window: &serde_json::Map<String, Value>,
-    idx: usize,
-) -> String {
-    for key in ["name", "title", "scope"] {
-        if let Some(value) = string_field(item, key).or_else(|| string_field(detail, key)) {
-            return value;
-        }
-    }
-    let duration = to_int(
-        window
-            .get("duration")
-            .or_else(|| item.get("duration"))
-            .or_else(|| detail.get("duration")),
-    );
-    let time_unit = window
-        .get("timeUnit")
-        .or_else(|| item.get("timeUnit"))
-        .or_else(|| detail.get("timeUnit"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if let Some(duration) = duration {
-        if time_unit.contains("MINUTE") {
-            if duration >= 60 && duration % 60 == 0 {
-                return format!("{}h limit", duration / 60);
-            }
-            return format!("{duration}m limit");
-        }
-        if time_unit.contains("HOUR") {
-            return format!("{duration}h limit");
-        }
-        if time_unit.contains("DAY") {
-            return format!("{duration}d limit");
-        }
-        return format!("{duration}s limit");
-    }
-    format!("Limit #{}", idx + 1)
-}
-
-fn reset_hint_from(raw: &serde_json::Map<String, Value>) -> Option<String> {
-    for key in ["reset_at", "resetAt", "reset_time", "resetTime"] {
-        if let Some(value) = raw
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(format_reset_time(value));
-        }
-    }
-    for key in ["reset_in", "resetIn", "ttl", "window"] {
-        if let Some(seconds) = to_int(raw.get(key)).filter(|s| *s > 0) {
-            return Some(format!("resets in {}", format_duration(seconds)));
-        }
-    }
-    None
-}
-
-fn format_reset_time(value: &str) -> String {
-    let Some(stamp) = parse_iso_time(value) else {
-        return format!("resets at {value}");
-    };
-    let diff = stamp - unix_now() as i64;
-    if diff <= 0 {
-        return "reset".to_string();
-    }
-    format!("resets in {}", format_duration(diff))
-}
-
-fn parse_iso_time(value: &str) -> Option<i64> {
-    let re = regex::Regex::new(
-        r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?",
-    )
-    .ok()?;
-    let captures = re.captures(value)?;
-    let y = captures.get(1)?.as_str().parse::<i32>().ok()?;
-    let mo = captures.get(2)?.as_str().parse::<u32>().ok()?;
-    let d = captures.get(3)?.as_str().parse::<u32>().ok()?;
-    let h = captures.get(4)?.as_str().parse::<i64>().ok()?;
-    let mi = captures.get(5)?.as_str().parse::<i64>().ok()?;
-    let s = captures.get(6)?.as_str().parse::<i64>().ok()?;
-    let offset = captures
-        .get(7)
-        .map(|m| parse_timezone_offset(m.as_str()))
-        .unwrap_or(Some(0))?;
-    Some(days_from_civil(y, mo, d)? * 86_400 + h * 3600 + mi * 60 + s - offset)
-}
-
-fn parse_timezone_offset(value: &str) -> Option<i64> {
-    if value == "Z" || value == "z" {
-        return Some(0);
-    }
-    let sign = match value.as_bytes().first().copied()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let digits: String = value[1..].chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 {
-        return None;
-    }
-    let hours = digits[0..2].parse::<i64>().ok()?;
-    let minutes = digits[2..4].parse::<i64>().ok()?;
-    Some(sign * (hours * 3600 + minutes * 60))
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let y = year - i32::from(month <= 2);
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = month as i32 + if month > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + day as i32 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146097 + doe - 719468) as i64)
-}
-
-fn format_duration(total_seconds: i64) -> String {
-    if total_seconds <= 0 {
-        return "0s".to_string();
-    }
-    let days = total_seconds / 86_400;
-    let hours = (total_seconds % 86_400) / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-    let mut parts = Vec::new();
-    if days > 0 {
-        parts.push(format!("{days}d"));
-    }
-    if hours > 0 {
-        parts.push(format!("{hours}h"));
-    }
-    if minutes > 0 {
-        parts.push(format!("{minutes}m"));
-    }
-    if seconds > 0 && parts.is_empty() {
-        parts.push(format!("{seconds}s"));
-    }
-    if parts.is_empty() {
-        "0s".to_string()
-    } else {
-        parts.join(" ")
-    }
-}
-
-fn to_int(value: Option<&Value>) -> Option<i64> {
-    match value? {
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|n| n.trunc() as i64)),
-        Value::String(s) => s.parse::<f64>().ok().map(|n| n.trunc() as i64),
-        _ => None,
-    }
-}
-
-fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    map.get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-fn api_error_message(body: &str) -> Option<String> {
-    let payload: Value = serde_json::from_str(body).ok()?;
-    payload
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| payload.pointer("/error/message").and_then(Value::as_str))
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+fn delete_tokens() {
+    cred_store().delete();
 }
 
 pub fn is_logged_in() -> bool {
-    KimiCodeTokens::load().is_some()
+    load_tokens().is_some()
 }
 
 pub fn logout() {
-    KimiCodeTokens::delete();
+    delete_tokens();
 }
 
 pub fn api_base() -> String {
@@ -489,41 +157,6 @@ fn ascii_header(value: impl AsRef<str>, fallback: &str) -> String {
     }
 }
 
-fn default_headers() -> Vec<(&'static str, String)> {
-    let version = env!("CARGO_PKG_VERSION");
-    // Kimi's coding API expects these device/platform headers for OAuth-backed
-    // requests. The User-Agent remains Smelt-owned; this is not Kimi CLI
-    // credential storage or User-Agent impersonation.
-    vec![
-        ("User-Agent", format!("smelt/{version}")),
-        ("X-Msh-Platform", "kimi_code_cli".to_string()),
-        ("X-Msh-Version", version.to_string()),
-        (
-            "X-Msh-Device-Name",
-            ascii_header(std::env::var("HOSTNAME").unwrap_or_default(), "unknown"),
-        ),
-        (
-            "X-Msh-Device-Model",
-            ascii_header(
-                format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
-                "unknown",
-            ),
-        ),
-        (
-            "X-Msh-Os-Version",
-            ascii_header(std::env::consts::OS, "unknown"),
-        ),
-        ("X-Msh-Device-Id", device_id()),
-    ]
-}
-
-pub(crate) fn apply_default_headers(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    for (key, value) in default_headers() {
-        req = req.header(key, value);
-    }
-    req
-}
-
 fn oauth_host() -> String {
     std::env::var("KIMI_CODE_OAUTH_HOST")
         .or_else(|_| std::env::var("KIMI_OAUTH_HOST"))
@@ -532,104 +165,27 @@ fn oauth_host() -> String {
         .to_string()
 }
 
-fn token_from_response_at(value: &serde_json::Value, now: u64) -> Result<KimiCodeTokens, String> {
-    let access_token = value["access_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or("OAuth response missing access_token")?
-        .to_string();
-    let refresh_token = value["refresh_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or("OAuth response missing refresh_token")?
-        .to_string();
-    let expires_in = value["expires_in"]
-        .as_u64()
-        .ok_or("OAuth response missing expires_in")?;
-    Ok(KimiCodeTokens {
-        access_token,
-        refresh_token,
-        expires_at: now.saturating_add(expires_in),
-        scope: value["scope"].as_str().unwrap_or_default().to_string(),
-        token_type: value["token_type"].as_str().unwrap_or("Bearer").to_string(),
-    })
-}
-
-struct OAuthResponse {
-    status: u16,
-    body: String,
-    json: serde_json::Value,
-}
-
-struct OAuthFormRequest {
-    url: String,
-    body: String,
-}
-
-fn build_oauth_form_request(
-    env: &KimiAuthEnv,
-    path: &str,
-    params: &[(&str, &str)],
-) -> OAuthFormRequest {
-    OAuthFormRequest {
-        url: format!("{}{}", env.oauth_host, path),
-        body: url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(params.iter().copied())
-            .finish(),
+pub(crate) fn protocol_headers() -> KimiHeaders {
+    let version = env!("CARGO_PKG_VERSION");
+    KimiHeaders {
+        user_agent: format!("smelt/{version}"),
+        version: version.to_string(),
+        device_name: ascii_header(std::env::var("HOSTNAME").unwrap_or_default(), "unknown"),
+        device_model: ascii_header(
+            format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "unknown",
+        ),
+        os_version: ascii_header(std::env::consts::OS, "unknown"),
+        device_id: device_id(),
     }
 }
 
-async fn post_form(
-    client: &reqwest::Client,
-    env: &KimiAuthEnv,
-    path: &str,
-    params: &[(&str, &str)],
-) -> Result<OAuthResponse, String> {
-    let spec = build_oauth_form_request(env, path, params);
-    let resp = apply_default_headers(client.post(&spec.url))
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(spec.body)
-        .send()
-        .await
-        .map_err(|e| format!("OAuth request failed: {e}"))?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-    Ok(OAuthResponse { status, body, json })
-}
-
-fn oauth_error(resp: &OAuthResponse, context: &str) -> String {
-    let detail = resp.json["error_description"]
-        .as_str()
-        .or_else(|| resp.json["detail"].as_str())
-        .or_else(|| resp.json["message"].as_str())
-        .or_else(|| resp.json["error"].as_str())
-        .unwrap_or(resp.body.as_str());
-    format!("{context} (HTTP {}): {detail}", resp.status)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum DevicePollDecision {
-    Authorized,
-    Continue { interval: u64 },
-    Expired,
-    Denied,
-}
-
-fn device_poll_decision(resp: &OAuthResponse, interval: u64) -> Result<DevicePollDecision, String> {
-    if resp.status == 200 {
-        return Ok(DevicePollDecision::Authorized);
-    }
-
-    match resp.json["error"].as_str().unwrap_or_default() {
-        "authorization_pending" => Ok(DevicePollDecision::Continue { interval }),
-        "slow_down" => Ok(DevicePollDecision::Continue {
-            interval: interval.saturating_add(5),
-        }),
-        "expired_token" => Ok(DevicePollDecision::Expired),
-        "access_denied" => Ok(DevicePollDecision::Denied),
-        _ => Err(oauth_error(resp, "Device token polling failed")),
+fn protocol_env() -> kimi_protocol::KimiAuthEnv {
+    kimi_protocol::KimiAuthEnv {
+        oauth_host: oauth_host(),
+        api_base: api_base(),
+        headers: protocol_headers(),
+        now: unix_now,
     }
 }
 
@@ -637,115 +193,44 @@ pub(crate) async fn login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
 ) -> Result<KimiCodeTokens, String> {
-    login_with_env(client, callbacks, &KimiAuthEnv::production()).await
+    login_with_env(client, callbacks, &EngineKimiEnv::production()).await
 }
 
 async fn login_with_env(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
-    env: &KimiAuthEnv,
+    env: &EngineKimiEnv,
 ) -> Result<KimiCodeTokens, String> {
-    let auth = post_form(
-        client,
-        env,
-        "/api/oauth/device_authorization",
-        &[("client_id", CLIENT_ID)],
-    )
-    .await?;
-    if auth.status != 200 {
-        return Err(oauth_error(&auth, "Device authorization failed"));
+    let progress = kimi_protocol::KimiLoginProgress {
+        on_prompt: callbacks.on_prompt,
+    };
+    let outcome = kimi_protocol::login(client, &progress, &env.protocol).await?;
+    save_tokens_to(&outcome.tokens, &env.token_store)?;
+    if !outcome.models.is_empty() {
+        save_models_cache_to(&env.models_cache_path, &outcome.models);
     }
-
-    let user_code = auth.json["user_code"].as_str().unwrap_or_default();
-    let device_code = auth.json["device_code"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or("device authorization response missing device_code")?;
-    let callback_url = auth.json["verification_uri_complete"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or("device authorization response missing verification_uri_complete")?;
-    let mut interval = auth.json["interval"].as_u64().unwrap_or(5);
-    let expires_at =
-        (env.now)().saturating_add(auth.json["expires_in"].as_u64().unwrap_or(15 * 60));
-    (callbacks.on_prompt)(callback_url, user_code);
-
-    while (env.now)() < expires_at {
-        tokio::time::sleep(Duration::from_secs(interval)).await;
-        let resp = post_form(
-            client,
-            env,
-            "/api/oauth/token",
-            &[
-                ("client_id", CLIENT_ID),
-                ("device_code", device_code),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ],
-        )
-        .await?;
-
-        match device_poll_decision(&resp, interval)? {
-            DevicePollDecision::Authorized => {
-                let tokens = token_from_response_at(&resp.json, (env.now)())?;
-                tokens.save_to(&env.token_store)?;
-                let models =
-                    fetch_models_with_token(client, &env.api_base, &tokens.access_token).await;
-                if let Ok(models) = models {
-                    if !models.is_empty() {
-                        save_models_cache_to(&env.models_cache_path, &models);
-                    }
-                }
-                return Ok(tokens);
-            }
-            DevicePollDecision::Continue {
-                interval: next_interval,
-            } => {
-                interval = next_interval;
-            }
-            DevicePollDecision::Expired => {
-                return Err("Kimi Code authorization expired; run login again".to_string());
-            }
-            DevicePollDecision::Denied => {
-                return Err("Kimi Code authorization was denied".to_string())
-            }
-        }
-    }
-
-    Err("Kimi Code authorization expired; run login again".to_string())
+    Ok(outcome.tokens)
 }
 
 pub async fn access_token(client: &reqwest::Client) -> Result<String, String> {
-    access_token_with_env(client, &KimiAuthEnv::production()).await
+    access_token_with_env(client, &EngineKimiEnv::production()).await
 }
 
 async fn access_token_with_env(
     client: &reqwest::Client,
-    env: &KimiAuthEnv,
+    env: &EngineKimiEnv,
 ) -> Result<String, String> {
-    let Some(tokens) = KimiCodeTokens::load_from(&env.token_store) else {
+    let Some(tokens) = load_tokens_from(&env.token_store) else {
         return Err("not logged in to Kimi Code".to_string());
     };
-    if tokens.expires_at > (env.now)().saturating_add(60) {
+    if tokens.expires_at > (env.protocol.now)().saturating_add(60) {
         return Ok(tokens.access_token);
     }
 
-    let resp = post_form(
-        client,
-        env,
-        "/api/oauth/token",
-        &[
-            ("client_id", CLIENT_ID),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &tokens.refresh_token),
-        ],
-    )
-    .await?;
-    if resp.status != 200 {
-        return Err(oauth_error(&resp, "Token refresh failed"));
-    }
-    let fresh = token_from_response_at(&resp.json, (env.now)())?;
+    let fresh =
+        kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token).await?;
     let token = fresh.access_token.clone();
-    fresh.save_to(&env.token_store)?;
+    save_tokens_to(&fresh, &env.token_store)?;
     Ok(token)
 }
 
@@ -755,23 +240,13 @@ pub async fn authenticated_request(
     body: Option<Vec<u8>>,
     client: &reqwest::Client,
 ) -> Result<crate::auth::AuthenticatedResponse, String> {
-    authenticated_request_with_env(method, path, body, client, &KimiAuthEnv::production()).await
+    authenticated_request_with_env(method, path, body, client, &EngineKimiEnv::production()).await
 }
 
 pub async fn managed_usage(client: &reqwest::Client) -> Result<ManagedUsageReport, String> {
-    let resp = authenticated_request("GET", "/usages", None, client).await?;
-    if resp.status != 200 {
-        let message = api_error_message(&resp.body).unwrap_or_else(|| match resp.status {
-            401 => "Authorization failed. Please run `smelt auth`.".to_string(),
-            403 => "Usage unavailable for this account.".to_string(),
-            404 => "Usage endpoint not available. Try Kimi For Coding.".to_string(),
-            _ => "Usage unavailable right now. Try again later.".to_string(),
-        });
-        return Err(message);
-    }
-    let payload: Value = serde_json::from_str(&resp.body)
-        .map_err(|_| "Usage response was invalid. Try again later.".to_string())?;
-    Ok(parse_managed_usage_payload(&payload))
+    let env = EngineKimiEnv::production();
+    let token = access_token_with_env(client, &env).await?;
+    kimi_protocol::managed_usage(client, &env.protocol, &token).await
 }
 
 async fn authenticated_request_with_env(
@@ -779,14 +254,16 @@ async fn authenticated_request_with_env(
     path: &str,
     body: Option<Vec<u8>>,
     client: &reqwest::Client,
-    env: &KimiAuthEnv,
+    env: &EngineKimiEnv,
 ) -> Result<crate::auth::AuthenticatedResponse, String> {
     let token = access_token_with_env(client, env).await?;
-    let url = format!("{}{}", env.api_base, crate::auth::authenticated_path(path)?);
-    crate::auth::send_authenticated_request(client, method, url, body, |req| {
-        apply_default_headers(req).bearer_auth(token)
+    let resp =
+        kimi_protocol::authenticated_request(client, &env.protocol, method, path, body, &token)
+            .await?;
+    Ok(crate::auth::AuthenticatedResponse {
+        status: resp.status,
+        body: resp.body,
     })
-    .await
 }
 
 fn models_cache_path() -> PathBuf {
@@ -842,50 +319,16 @@ fn save_models_cache_to(cache_path: &Path, models: &[KimiCodeModelInfo]) {
     );
 }
 
-fn parse_models_response(json: &serde_json::Value) -> Vec<KimiCodeModelInfo> {
-    json["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(KimiCodeModelInfo::from_json)
-        .collect()
-}
-
-async fn fetch_models_with_token(
-    client: &reqwest::Client,
-    api_base: &str,
-    token: &str,
-) -> Result<Vec<KimiCodeModelInfo>, String> {
-    let resp = apply_default_headers(client.get(format!("{api_base}/models")))
-        .bearer_auth(token)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("Kimi Code models request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "Kimi Code models endpoint rejected credentials (HTTP {status}): {body}"
-        ));
-    }
-    let json = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("Kimi Code models response was invalid JSON: {e}"))?;
-    Ok(parse_models_response(&json))
-}
-
 pub async fn fetch_model_info(client: &reqwest::Client) -> Result<Vec<KimiCodeModelInfo>, String> {
-    fetch_model_info_with_env(client, &KimiAuthEnv::production()).await
+    fetch_model_info_with_env(client, &EngineKimiEnv::production()).await
 }
 
 async fn fetch_model_info_with_env(
     client: &reqwest::Client,
-    env: &KimiAuthEnv,
+    env: &EngineKimiEnv,
 ) -> Result<Vec<KimiCodeModelInfo>, String> {
     let token = access_token_with_env(client, env).await?;
-    let models = fetch_models_with_token(client, &env.api_base, &token).await?;
+    let models = kimi_protocol::fetch_models_with_token(client, &env.protocol, &token).await?;
     if !models.is_empty() {
         save_models_cache_to(&env.models_cache_path, &models);
     }
@@ -906,201 +349,10 @@ pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
         .and_then(|info| info.context_length)
 }
 
-pub(crate) fn cached_supports_reasoning(model: &str) -> Option<bool> {
-    load_cached_model_info()
-        .into_iter()
-        .find(|info| info.matches_name(model))
-        .and_then(|info| info.supports_reasoning)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::test_http::spawn_json_response;
-
-    #[test]
-    fn parse_models_response_keeps_kimi_metadata() {
-        let json = serde_json::json!({"data": [{
-            "id": "moonshot-v1",
-            "context_length": 131072,
-            "supports_reasoning": false,
-            "supports_image_in": true,
-            "supports_video_in": false,
-            "supports_tool_use": true,
-            "display_name": "Moonshot V1"
-        }]});
-
-        let models = parse_models_response(&json);
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "moonshot-v1");
-        assert_eq!(models[0].context_length, Some(131_072));
-        assert_eq!(models[0].supports_reasoning, Some(false));
-        assert_eq!(models[0].supports_image_in, Some(true));
-        assert_eq!(models[0].supports_video_in, Some(false));
-        assert_eq!(models[0].supports_tool_use, Some(true));
-        assert!(models[0].matches_name("Moonshot V1"));
-    }
-
-    #[test]
-    fn parse_managed_usage_payload_matches_kimi_usage_shape() {
-        let parsed = parse_managed_usage_payload(&serde_json::json!({
-            "usage": { "used": 40.9, "limit": "1000", "name": "Weekly limit" },
-            "limits": [
-                { "detail": { "used": 1.9, "limit": 100 }, "window": { "duration": 300.0, "timeUnit": "MINUTE" } },
-                { "detail": { "remaining": 10, "limit": 50 }, "window": { "duration": 24, "timeUnit": "HOUR" } },
-                { "name": "Daily cap", "detail": { "used": 5, "limit": 100 }, "window": { "duration": 1440, "timeUnit": "MINUTE" } }
-            ]
-        }));
-
-        assert_eq!(
-            parsed.summary,
-            Some(ManagedUsageRow {
-                label: "Weekly limit".into(),
-                used: 40,
-                limit: 1000,
-                reset_hint: None,
-            })
-        );
-        assert_eq!(parsed.limits[0].label, "5h limit");
-        assert_eq!(parsed.limits[0].used, 1);
-        assert_eq!(parsed.limits[1].label, "24h limit");
-        assert_eq!(parsed.limits[1].used, 40);
-        assert_eq!(parsed.limits[2].label, "Daily cap");
-    }
-
-    #[test]
-    fn parse_iso_time_honors_timezone_offsets_and_fractional_seconds() {
-        assert_eq!(parse_iso_time("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso_time("1970-01-01T02:00:00.123+02:00"), Some(0));
-        assert_eq!(parse_iso_time("1969-12-31T19:00:00-0500"), Some(0));
-    }
-
-    #[test]
-    fn format_duration_matches_kimi_style() {
-        assert_eq!(format_duration(45), "45s");
-        assert_eq!(format_duration(90), "1m");
-        assert_eq!(format_duration(3661), "1h 1m");
-        assert_eq!(format_duration(86_400 + 7200 + 600), "1d 2h 10m");
-    }
-
-    #[test]
-    fn json_u32_accepts_positive_numbers_and_numeric_strings_only() {
-        assert_eq!(json_u32(&serde_json::json!(42)), Some(42));
-        assert_eq!(json_u32(&serde_json::json!("42")), Some(42));
-        assert_eq!(json_u32(&serde_json::json!(0)), None);
-        assert_eq!(json_u32(&serde_json::json!("0")), None);
-        assert_eq!(json_u32(&serde_json::json!("nope")), None);
-        assert_eq!(json_u32(&serde_json::json!(u64::MAX)), None);
-    }
-
-    #[test]
-    fn token_from_response_requires_core_fields() {
-        let missing_access = token_from_response_at(
-            &serde_json::json!({
-                "refresh_token": "refresh",
-                "expires_in": 60
-            }),
-            100,
-        )
-        .unwrap_err();
-        assert!(missing_access.contains("access_token"));
-
-        let missing_refresh = token_from_response_at(
-            &serde_json::json!({
-                "access_token": "access",
-                "expires_in": 60
-            }),
-            100,
-        )
-        .unwrap_err();
-        assert!(missing_refresh.contains("refresh_token"));
-
-        let missing_expiry = token_from_response_at(
-            &serde_json::json!({
-                "access_token": "access",
-                "refresh_token": "refresh"
-            }),
-            100,
-        )
-        .unwrap_err();
-        assert!(missing_expiry.contains("expires_in"));
-    }
-
-    #[test]
-    fn token_from_response_uses_supplied_now_and_defaults_optional_fields() {
-        let tokens = token_from_response_at(
-            &serde_json::json!({
-                "access_token": "access",
-                "refresh_token": "refresh",
-                "expires_in": 60
-            }),
-            1_000,
-        )
-        .unwrap();
-
-        assert_eq!(tokens.access_token, "access");
-        assert_eq!(tokens.refresh_token, "refresh");
-        assert_eq!(tokens.scope, "");
-        assert_eq!(tokens.token_type, "Bearer");
-        assert_eq!(tokens.expires_at, 1_060);
-    }
-
-    #[test]
-    fn device_poll_decision_classifies_pending_slowdown_and_terminal_errors() {
-        let pending = OAuthResponse {
-            status: 400,
-            body: String::new(),
-            json: serde_json::json!({"error": "authorization_pending"}),
-        };
-        assert_eq!(
-            device_poll_decision(&pending, 5).unwrap(),
-            DevicePollDecision::Continue { interval: 5 }
-        );
-
-        let slow_down = OAuthResponse {
-            status: 400,
-            body: String::new(),
-            json: serde_json::json!({"error": "slow_down"}),
-        };
-        assert_eq!(
-            device_poll_decision(&slow_down, 5).unwrap(),
-            DevicePollDecision::Continue { interval: 10 }
-        );
-
-        let expired = OAuthResponse {
-            status: 400,
-            body: String::new(),
-            json: serde_json::json!({"error": "expired_token"}),
-        };
-        assert_eq!(
-            device_poll_decision(&expired, 5).unwrap(),
-            DevicePollDecision::Expired
-        );
-    }
-
-    #[test]
-    fn oauth_error_prefers_structured_fields_before_raw_body() {
-        let resp = OAuthResponse {
-            status: 400,
-            body: "raw body".into(),
-            json: serde_json::json!({"message": "structured message"}),
-        };
-        assert_eq!(
-            oauth_error(&resp, "Refresh failed"),
-            "Refresh failed (HTTP 400): structured message"
-        );
-
-        let raw = OAuthResponse {
-            status: 500,
-            body: "server exploded".into(),
-            json: serde_json::Value::Null,
-        };
-        assert_eq!(
-            oauth_error(&raw, "Refresh failed"),
-            "Refresh failed (HTTP 500): server exploded"
-        );
-    }
 
     fn fixed_now() -> u64 {
         1_000
@@ -1110,37 +362,24 @@ mod tests {
         CredStore::file_only(path)
     }
 
-    fn test_env(oauth_host: String, token_path: PathBuf, cache_path: PathBuf) -> KimiAuthEnv {
-        KimiAuthEnv {
-            oauth_host,
-            api_base: "http://127.0.0.1:9".to_string(),
+    fn test_env(oauth_host: String, token_path: PathBuf, cache_path: PathBuf) -> EngineKimiEnv {
+        EngineKimiEnv {
+            protocol: kimi_protocol::KimiAuthEnv {
+                oauth_host,
+                api_base: "http://127.0.0.1:9".to_string(),
+                headers: KimiHeaders {
+                    user_agent: "smelt/test".to_string(),
+                    version: "test".to_string(),
+                    device_name: "device".to_string(),
+                    device_model: "model".to_string(),
+                    os_version: "os".to_string(),
+                    device_id: "id".to_string(),
+                },
+                now: fixed_now,
+            },
             token_store: test_token_store(token_path),
             models_cache_path: cache_path,
-            now: fixed_now,
         }
-    }
-
-    #[test]
-    fn build_oauth_form_request_uses_env_host_and_urlencoded_body() {
-        let tmp = tempfile::tempdir().unwrap();
-        let env = test_env(
-            "https://auth.example".to_string(),
-            tmp.path().join("tokens.json"),
-            tmp.path().join("models.json"),
-        );
-
-        let req = build_oauth_form_request(
-            &env,
-            "/api/oauth/token",
-            &[
-                ("client_id", "client-1"),
-                ("scope", "a b"),
-                ("redirect", "x/y"),
-            ],
-        );
-
-        assert_eq!(req.url, "https://auth.example/api/oauth/token");
-        assert_eq!(req.body, "client_id=client-1&scope=a+b&redirect=x%2Fy");
     }
 
     #[tokio::test]
@@ -1151,15 +390,14 @@ mod tests {
             tmp.path().join("tokens.json"),
             tmp.path().join("models.json"),
         );
-        KimiCodeTokens {
+        let tokens = KimiCodeTokens {
             access_token: "cached-access".to_string(),
             refresh_token: "cached-refresh".to_string(),
             expires_at: fixed_now() + 3_600,
             scope: String::new(),
-            token_type: default_bearer(),
-        }
-        .save_to(&env.token_store)
-        .unwrap();
+            token_type: kimi_protocol::default_bearer(),
+        };
+        save_tokens_to(&tokens, &env.token_store).unwrap();
 
         let token = access_token_with_env(&reqwest::Client::new(), &env)
             .await
@@ -1180,15 +418,14 @@ mod tests {
             tmp.path().join("tokens.json"),
             tmp.path().join("models.json"),
         );
-        KimiCodeTokens {
+        let tokens = KimiCodeTokens {
             access_token: "expired-access".to_string(),
             refresh_token: "expired-refresh".to_string(),
             expires_at: fixed_now().saturating_sub(1),
             scope: String::new(),
-            token_type: default_bearer(),
-        }
-        .save_to(&env.token_store)
-        .unwrap();
+            token_type: kimi_protocol::default_bearer(),
+        };
+        save_tokens_to(&tokens, &env.token_store).unwrap();
 
         let token = access_token_with_env(&reqwest::Client::new(), &env)
             .await

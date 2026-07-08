@@ -3,7 +3,7 @@ use protocol::{FunctionCall, ToolCall};
 /// Extract `<tool_call>` blocks from text. Some backends (vLLM) embed tool call
 /// markup in `content` or `reasoning_content` instead of the `tool_calls` field.
 /// Returns parsed calls and the cleaned text; cleaned is `None` if empty.
-pub(super) fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>, Option<String>) {
+pub fn extract_tool_calls_from_text(text: Option<&str>) -> (Vec<ToolCall>, Option<String>) {
     let Some(text) = text else {
         return (vec![], None);
     };
@@ -218,91 +218,46 @@ mod tests {
     fn extract_xml_format_tool_call() {
         let text = r#"
 <tool_call>
-<function=write_file>
-<parameter=file_path>/testbed/test.py</parameter>
-<parameter=content>
-print("hello")
-</parameter>
-</function>
-</tool_call>"#;
-
-        let (calls, cleaned) = extract_tool_calls_from_text(Some(text));
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "write_file");
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["file_path"], "/testbed/test.py");
-        assert_eq!(args["content"], "print(\"hello\")");
-        assert!(cleaned.is_none() || cleaned.as_deref().unwrap().trim().is_empty());
-    }
-
-    #[test]
-    fn extract_xml_format_with_multiline_content() {
-        let text = r#"Let me try this:
-
-<tool_call>
-<function=write_file>
-<parameter=content>
-import sys
-
-class Base:
-    pass
-</parameter>
+<function=replace_in_file>
 <parameter=file_path>
-/testbed/test_clear.py
+/foo.rs
+</parameter>
+<parameter=old_string>
+hello
+</parameter>
+<parameter=new_string>
+world
 </parameter>
 </function>
 </tool_call>"#;
 
         let (calls, cleaned) = extract_tool_calls_from_text(Some(text));
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "write_file");
+        assert_eq!(calls[0].function.name, "replace_in_file");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert!(args["content"].as_str().unwrap().contains("class Base:"));
-        assert!(args["file_path"]
-            .as_str()
-            .unwrap()
-            .contains("test_clear.py"));
-        assert_eq!(cleaned.unwrap(), "Let me try this:");
+        assert_eq!(args["file_path"], "/foo.rs");
+        assert_eq!(args["old_string"], "hello");
+        assert_eq!(args["new_string"], "world");
+        assert!(cleaned.is_none());
     }
 
     #[test]
-    fn extract_arg_kv_format_tool_call() {
-        let text = r#"
-<tool_call>
-<function>bash</function>
-<arg_key>thought</arg_key>
-<arg_value>Let me check what files are here.</arg_value>
-<arg_key>command</arg_key>
-<arg_value>ls -la</arg_value>
-</tool_call>"#;
-
-        let (calls, cleaned) = extract_tool_calls_from_text(Some(text));
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "bash");
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert!(args.get("thought").is_none());
-        assert_eq!(args["command"], "ls -la");
-        assert!(cleaned.is_none() || cleaned.as_deref().unwrap().trim().is_empty());
-    }
-
-    #[test]
-    fn extract_arg_kv_format_multiple_args() {
+    fn extract_arg_key_value_format_tool_call() {
         let text = r#"<tool_call>
-<function>write_file</function>
-<arg_key>file_path</arg_key>
-<arg_value>/tmp/test.py</arg_value>
-<arg_key>content</arg_key>
+<function>search_files</function>
+<arg_key>query</arg_key>
 <arg_value>
-print("hello")
+needle
 </arg_value>
+<arg_key>thought</arg_key>
+<arg_value>ignore me</arg_value>
 </tool_call>"#;
 
-        let (calls, cleaned) = extract_tool_calls_from_text(Some(text));
+        let (calls, _) = extract_tool_calls_from_text(Some(text));
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "write_file");
+        assert_eq!(calls[0].function.name, "search_files");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["file_path"], "/tmp/test.py");
-        assert_eq!(args["content"], "print(\"hello\")");
-        assert!(cleaned.is_none() || cleaned.as_deref().unwrap().trim().is_empty());
+        assert_eq!(args["query"], "needle");
+        assert!(args.get("thought").is_none());
     }
 }

@@ -532,9 +532,9 @@ mod tests {
             api_key_env: "SMELT_TEST_KEY".into(),
             provider_type: "openai".into(),
             available_models: Vec::new(),
-            model_config: engine::ModelConfig {
+            model_config: smelt_provider::ModelConfig {
                 tool_calling: Some(tool_calling),
-                ..engine::ModelConfig::default()
+                ..smelt_provider::ModelConfig::default()
             },
             cli_model_override: false,
             cli_api_base_override: false,

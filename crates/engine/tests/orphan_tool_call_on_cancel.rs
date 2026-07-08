@@ -14,10 +14,11 @@
 //! that property end-to-end against the real event loop with a fake
 //! LLM emitting a tool_use mid-turn.
 
-use engine::{ApiConfig, EngineConfig, ModelConfig};
+use engine::{ApiConfig, EngineConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, HistoryItem, ReasoningEffort, StartTurnPayload, UiCommand,
 };
+use smelt_provider::ModelConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

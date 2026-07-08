@@ -1,9 +1,6 @@
 mod agent;
 pub mod auth;
-pub mod cancel;
-pub mod catalog;
 pub mod clock;
-pub(crate) mod config;
 pub mod env;
 pub mod host;
 pub mod image;
@@ -12,14 +9,11 @@ pub mod opener;
 
 pub mod paths;
 
-pub mod pricing;
 pub mod provider;
 pub mod redact;
 mod request_log;
 pub(crate) mod result_dedup;
 pub(crate) mod skills;
-#[cfg(test)]
-pub(crate) mod test_util;
 pub mod tools;
 pub(crate) mod trim;
 
@@ -36,14 +30,13 @@ use tokio::sync::mpsc;
 /// and the renderer; they MUST stay byte-equal.
 pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
 
-pub use config::ModelConfig;
 pub use paths::{config_dir, data_dir, home_dir, state_dir};
 
 /// Re-export so non-engine crates (the TUI) can store an HTTP client
 /// without depending on `reqwest` directly.
 pub use reqwest::Client as HttpClient;
 
-pub use provider::{Provider, ProviderKind};
+pub use provider::EngineProvider;
 pub use skills::SkillLoader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +208,7 @@ pub struct ApiConfig {
     pub key: String,
     pub key_env: String,
     pub provider_type: String,
-    pub model_config: ModelConfig,
+    pub model_config: smelt_provider::ModelConfig,
 }
 
 #[derive(Clone)]

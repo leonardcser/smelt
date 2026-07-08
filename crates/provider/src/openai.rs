@@ -1,12 +1,9 @@
-use super::sse;
-use super::{non_empty, non_empty_blocks};
-use super::{
-    ParsedResponse, ProviderError, ProviderStreamEvent, ToolCallStreamEvent, ToolDefinition,
+use crate::sse;
+use crate::{
+    json_as_u64, non_empty, non_empty_blocks, parse_retry_from_body, rate_limit_error, unix_now,
+    CancellationToken, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
+    ToolCallStreamEvent, ToolDefinition,
 };
-use crate::cancel::CancellationToken;
-use crate::config::ModelConfig;
-use crate::log;
-use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
 };
@@ -107,7 +104,7 @@ fn shorthand_user_content(content: Option<&protocol::Content>) -> serde_json::Va
     }
 }
 
-pub(super) fn build_body(
+pub fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
     model: &str,
@@ -124,7 +121,7 @@ pub(super) fn build_body(
     )
 }
 
-pub(super) fn build_codex_body(
+pub fn build_codex_body(
     messages: &[Message],
     tools: &[ToolDefinition],
     model: &str,
@@ -221,25 +218,14 @@ fn build_body_with_user_shape(
             }
             Role::Tool => {
                 let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-                let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);
                 let call_id = match &m.tool_call_id {
                     Some(id) if !id.is_empty() => id.as_str(),
-                    _ => {
-                        log::entry(
-                            log::Level::Error,
-                            "tool_message_missing_call_id",
-                            &serde_json::json!({
-                                "content": output,
-                                "tool_call_id": m.tool_call_id.clone(),
-                            }),
-                        );
-                        "missing_call_id"
-                    }
+                    _ => "missing_call_id",
                 };
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": trimmed,
+                    "output": output,
                 }));
             }
         }
@@ -286,7 +272,7 @@ fn build_body_with_user_shape(
     body
 }
 
-pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
+pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
     let output = data["output"]
         .as_array()
         .ok_or_else(|| ProviderError::InvalidResponse("no output in response".into()))?;
@@ -353,24 +339,24 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 
 /// Accumulator for one streaming response. Mutated by `apply_sse_event`.
 #[derive(Default)]
-pub(super) struct StreamState {
-    pub(super) content: String,
-    pub(super) reasoning: String,
+struct StreamState {
+    content: String,
+    reasoning: String,
     /// Verbatim reasoning items captured via `response.output_item.done`.
     /// Echoed back on the next turn after normalization; item ids are
     /// omitted because stateless requests do not persist server items.
-    pub(super) reasoning_items: Vec<serde_json::Value>,
+    reasoning_items: Vec<serde_json::Value>,
     /// item ids in provider output order.
-    pub(super) tool_order: Vec<String>,
+    tool_order: Vec<String>,
     /// item_id -> (call_id, name, args)
-    pub(super) tool_calls: HashMap<String, (String, String, String)>,
-    pub(super) usage: TokenUsage,
-    pub(super) error: Option<ProviderError>,
-    pub(super) saw_completed: bool,
+    tool_calls: HashMap<String, (String, String, String)>,
+    usage: TokenUsage,
+    error: Option<ProviderError>,
+    saw_completed: bool,
 }
 
 impl StreamState {
-    pub(super) fn finalize(self) -> Result<ParsedResponse, ProviderError> {
+    fn finalize(self) -> Result<ParsedResponse, ProviderError> {
         if let Some(err) = self.error {
             return Err(err);
         }
@@ -416,20 +402,20 @@ impl StreamState {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
-pub(super) fn parse_stream_events<'a>(
+#[cfg_attr(not(any(test, feature = "fuzz")), allow(dead_code))]
+pub fn parse_stream_events<'a>(
     events: impl IntoIterator<Item = &'a serde_json::Value>,
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
     for ev in events {
-        apply_sse_event(&mut state, ev, on_delta, super::unix_now());
+        apply_sse_event(&mut state, ev, on_delta, unix_now());
     }
     state.finalize()
 }
 
 /// Apply one SSE event to the accumulator. Pure (modulo the on_delta callback).
-pub(super) fn apply_sse_event(
+fn apply_sse_event(
     state: &mut StreamState,
     ev: &serde_json::Value,
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
@@ -577,10 +563,10 @@ pub(super) fn apply_sse_event(
                 let code = error["code"].as_str().unwrap_or("");
                 let err_type = error["type"].as_str().unwrap_or("");
                 let message = error["message"].as_str().unwrap_or("");
-                let resets_at = super::json_as_u64(&error["resets_at"]);
+                let resets_at = json_as_u64(&error["resets_at"]);
                 if code == "rate_limit_exceeded" {
-                    let retry_after = super::parse_retry_from_body(message);
-                    state.error = Some(super::rate_limit_error(resets_at, retry_after, now_secs));
+                    let retry_after = parse_retry_from_body(message);
+                    state.error = Some(rate_limit_error(resets_at, retry_after, now_secs));
                 } else if code == "insufficient_quota"
                     || code == "billing_not_active"
                     || err_type == "usage_limit_reached"
@@ -614,7 +600,7 @@ pub(super) fn apply_sse_event(
     }
 }
 
-pub(super) async fn read_stream(
+pub async fn read_stream(
     resp: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: &(dyn Fn(ProviderStreamEvent) + Send + Sync),
@@ -633,13 +619,59 @@ pub(super) async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::FunctionSchema;
-    use crate::test_util::{assistant_text, system, tool_msg, user};
+    use crate::FunctionSchema;
     use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
 
+    fn message(role: Role, content: Option<Content>) -> Message {
+        Message {
+            role,
+            content,
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+            tool_metadata: None,
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        message(Role::User, Some(Content::Text(text.into())))
+    }
+
+    fn system(text: &str) -> Message {
+        message(Role::System, Some(Content::Text(text.into())))
+    }
+
+    fn assistant_text(text: &str) -> Message {
+        message(Role::Assistant, Some(Content::Text(text.into())))
+    }
+
     fn assistant_calls(calls: Vec<ToolCall>) -> Message {
-        crate::test_util::assistant_calls(None, calls)
+        Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: Some(calls),
+            tool_call_id: None,
+            is_error: false,
+            tool_metadata: None,
+        }
+    }
+
+    fn tool_msg(call_id: Option<&str>, output: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: Some(Content::Text(output.into())),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: call_id.map(String::from),
+            is_error: false,
+            tool_metadata: None,
+        }
     }
 
     fn cfg() -> ModelConfig {
@@ -1569,7 +1601,7 @@ mod tests {
     #[test]
     fn sse_failed_rate_limit_sets_rate_limited_error() {
         let mut state = StreamState::default();
-        let resets_at = crate::provider::unix_now() + 30;
+        let resets_at = unix_now() + 30;
         step(
             &mut state,
             json!({

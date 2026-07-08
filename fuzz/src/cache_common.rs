@@ -10,7 +10,7 @@
 //! - happens in exactly one place and lands in both targets.
 
 use arbitrary::Arbitrary;
-use engine::provider::{sort_tools_for_cache_stability, FunctionSchema, ToolDefinition};
+use smelt_provider::{sort_tools_for_cache_stability, FunctionSchema, ToolDefinition};
 use protocol::AgentMode;
 
 /// Bounded tool name palette. Index-modulated so two histories can

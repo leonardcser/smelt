@@ -1,10 +1,11 @@
 [workspace]
-members = ["crates/protocol", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store"]
+members = ["crates/protocol", "crates/provider", "crates/engine", "crates/style", "crates/ansi", "crates/perf", "crates/buffer", "crates/term", "crates/edit", "crates/core", "crates/tui", "crates/lua-doc-derive", "crates/xtask", "crates/store"]
 exclude = ["fuzz"]
 
 [workspace.dependencies]
 # Internal crates
 smelt-protocol = { path = "crates/protocol" }
+smelt-provider = { path = "crates/provider" }
 smelt-engine = { path = "crates/engine" }
 smelt-style = { path = "crates/style", version = "0.2.0" }
 smelt-ansi = { path = "crates/ansi", version = "0.1.0" }
@@ -72,6 +73,7 @@ path = "src/main.rs"
 
 [dependencies]
 smelt-protocol = { workspace = true }
+smelt-provider = { workspace = true }
 smelt-engine = { workspace = true }
 smelt-core = { workspace = true }
 smelt-perf = { workspace = true }

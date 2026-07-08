@@ -214,7 +214,7 @@ impl TestAppBuilder {
             api_key_env: String::new(),
             provider_type: String::new(),
             available_models: Vec::new(),
-            model_config: engine::ModelConfig::default(),
+            model_config: smelt_provider::ModelConfig::default(),
             cli_model_override: false,
             cli_api_base_override: false,
             cli_api_key_env_override: false,

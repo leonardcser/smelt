@@ -753,7 +753,7 @@ impl TuiApp {
     }
 
     pub(crate) fn active_provider_supports_mid_turn_reasoning_changes(&self) -> bool {
-        engine::ProviderKind::from_config_and_url(
+        smelt_provider::ProviderKind::from_config_and_url(
             &self.core.config.provider_type,
             &self.core.config.api_base,
         )
@@ -2254,7 +2254,7 @@ impl TuiApp {
     }
 
     pub(crate) fn warn_if_api_base_normalized(&mut self) {
-        let Some(hint) = engine::provider::api_base_normalization_hint(&self.core.config.api_base)
+        let Some(hint) = smelt_provider::api_base_normalization_hint(&self.core.config.api_base)
         else {
             return;
         };

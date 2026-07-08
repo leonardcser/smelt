@@ -1,63 +1,13 @@
 use std::path::PathBuf;
 
+pub use smelt_provider::ModelConfig;
+
 pub fn config_dir() -> PathBuf {
     engine::config_dir()
 }
 
 pub fn state_dir() -> PathBuf {
     engine::state_dir()
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct ModelConfig {
-    pub name: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub top_k: Option<u32>,
-    pub min_p: Option<f64>,
-    pub repeat_penalty: Option<f64>,
-    pub tool_calling: Option<bool>,
-    /// Cost per 1M input tokens in USD.
-    pub input_cost: Option<f64>,
-    /// Cost per 1M output tokens in USD.
-    pub output_cost: Option<f64>,
-    /// Cost per 1M cache-read tokens in USD.
-    pub cache_read_cost: Option<f64>,
-    /// Cost per 1M cache-write tokens in USD.
-    pub cache_write_cost: Option<f64>,
-    /// Maximum output tokens for this model.
-    pub max_tokens: Option<u32>,
-    /// Per-level token budgets for budget-based thinking.
-    pub thinking_budgets: Option<protocol::ThinkingBudgets>,
-    /// Total context window, in tokens, from provider/catalog metadata.
-    pub context_window: Option<u32>,
-    /// Whether metadata says this model supports reasoning/thinking parameters.
-    pub supports_reasoning: Option<bool>,
-    /// Input modalities supported by this model, such as `text`, `image`, and `pdf`.
-    pub input_modalities: Option<Vec<String>>,
-}
-
-impl From<&ModelConfig> for engine::ModelConfig {
-    fn from(c: &ModelConfig) -> Self {
-        Self {
-            name: c.name.clone(),
-            temperature: c.temperature,
-            top_p: c.top_p,
-            top_k: c.top_k,
-            min_p: c.min_p,
-            repeat_penalty: c.repeat_penalty,
-            tool_calling: c.tool_calling,
-            input_cost: c.input_cost,
-            output_cost: c.output_cost,
-            cache_read_cost: c.cache_read_cost,
-            cache_write_cost: c.cache_write_cost,
-            max_tokens: c.max_tokens,
-            thinking_budgets: c.thinking_budgets,
-            context_window: c.context_window,
-            supports_reasoning: c.supports_reasoning,
-            input_modalities: c.input_modalities.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -476,7 +426,7 @@ fn is_kimi_code_provider(provider: &ProviderConfig) -> bool {
         || provider
             .api_base
             .as_deref()
-            .is_some_and(engine::provider::kimi_code::is_api_base)
+            .is_some_and(smelt_provider::is_kimi_code_api_base)
 }
 
 impl Config {
@@ -485,12 +435,12 @@ impl Config {
         let mut out = Vec::new();
         for provider in &self.providers {
             let provider_name = provider.name.clone().unwrap_or_default();
-            let api_base = provider.api_base.clone().unwrap_or_default();
-            let api_key_env = provider.api_key_env.clone().unwrap_or_default();
             let provider_type = provider
                 .provider_type
                 .clone()
                 .unwrap_or_else(|| "openai-compatible".to_string());
+            let api_base = provider.api_base.clone().unwrap_or_default();
+            let api_key_env = provider.api_key_env.clone().unwrap_or_default();
 
             for model in &provider.models {
                 let model_name = model.name.clone().unwrap_or_default();
@@ -637,7 +587,7 @@ impl Config {
             self.providers.push(ProviderConfig {
                 name: Some("codex".to_string()),
                 provider_type: Some("codex".to_string()),
-                api_base: Some(engine::provider::codex::CODEX_API_ENDPOINT.to_string()),
+                api_base: Some(smelt_provider::codex::CODEX_API_ENDPOINT.to_string()),
                 api_key_env: None,
                 models: vec![],
             });
@@ -648,7 +598,7 @@ impl Config {
             self.providers.push(ProviderConfig {
                 name: Some("copilot".to_string()),
                 provider_type: Some("copilot".to_string()),
-                api_base: Some(engine::provider::copilot::DEFAULT_COPILOT_API_BASE.to_string()),
+                api_base: Some(smelt_provider::copilot::DEFAULT_COPILOT_API_BASE.to_string()),
                 api_key_env: None,
                 models: vec![],
             });
@@ -659,7 +609,7 @@ impl Config {
             self.providers.push(ProviderConfig {
                 name: Some("kimi-code".to_string()),
                 provider_type: Some("kimi-code".to_string()),
-                api_base: Some(engine::provider::kimi_code::API_BASE.to_string()),
+                api_base: Some(smelt_provider::kimi_code::API_BASE.to_string()),
                 api_key_env: None,
                 models: vec![ModelConfig {
                     name: Some("kimi-for-coding".to_string()),

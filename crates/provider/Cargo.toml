@@ -1,0 +1,29 @@
+[package]
+name = "smelt-provider"
+version = "0.5.0-alpha.8"
+edition = "2021"
+
+[lib]
+name = "smelt_provider"
+
+[dependencies]
+smelt-protocol = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+futures-util = { workspace = true }
+base64 = { workspace = true }
+libc = { workspace = true }
+url.workspace = true
+rand = "0.10"
+sha2.workspace = true
+
+[features]
+fuzz = []
+test-support = []
+
+[dev-dependencies]
+tempfile.workspace = true

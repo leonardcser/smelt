@@ -2540,6 +2540,7 @@ dependencies = [
  "smelt-engine",
  "smelt-perf",
  "smelt-protocol",
+ "smelt-provider",
  "smelt-tui",
  "tempfile",
  "tokio",
@@ -2596,6 +2597,7 @@ dependencies = [
  "smelt-lua-doc-derive",
  "smelt-perf",
  "smelt-protocol",
+ "smelt-provider",
  "smelt-store",
  "syntect",
  "tempfile",
@@ -2631,6 +2633,7 @@ dependencies = [
  "sha2",
  "smelt-perf",
  "smelt-protocol",
+ "smelt-provider",
  "smelt-store",
  "tempfile",
  "thiserror",
@@ -2657,6 +2660,26 @@ version = "0.5.0-alpha.8"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "smelt-provider"
+version = "0.5.0-alpha.8"
+dependencies = [
+ "base64",
+ "futures-util",
+ "libc",
+ "rand 0.10.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smelt-protocol",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]
@@ -2714,6 +2737,7 @@ dependencies = [
  "smelt-lua-doc-derive",
  "smelt-perf",
  "smelt-protocol",
+ "smelt-provider",
  "smelt-store",
  "smelt-term",
  "tempfile",

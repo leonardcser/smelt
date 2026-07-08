@@ -16,11 +16,12 @@
 //! `other => { self.handle_background_cmd(other); }`. The fix is to
 //! mirror that in `execute_concurrent`'s catch-all.
 
-use engine::{ApiConfig, EngineConfig, ModelConfig};
+use engine::{ApiConfig, EngineConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, StartTurnPayload, ToolDef,
     ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };
+use smelt_provider::ModelConfig;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

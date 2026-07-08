@@ -1,27 +1,15 @@
-//! GitHub Copilot authentication and API access.
-//! GitHub OAuth device-code → long-lived GitHub token → short-lived Copilot token (~30min TTL).
-//! The Copilot token carries a `proxy-ep=` claim from which the API base URL is derived.
+//! GitHub Copilot authentication storage and cached model access.
 
 use crate::log;
 use crate::paths::state_dir;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use super::{auth_storage::CredStore, unix_now, LoginCallbacks};
+use smelt_provider::copilot::{self, CopilotAuthConfig, CopilotLoginProgress};
+use smelt_provider::copilot::{CopilotModel, CopilotTokens};
 
-// VS Code Copilot Chat OAuth client ID, stored base64-encoded to avoid casual grep matches.
-const CLIENT_ID_B64: &str = "SXYxLmI1MDdhMDhjODdlY2ZlOTg=";
+use smelt_provider::unix_now;
 
-const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
-const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
-pub const DEFAULT_COPILOT_API_BASE: &str = "https://api.individual.githubcopilot.com";
-
-const EDITOR_VERSION: &str = "vscode/1.107.0";
-const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
-const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
-const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+use super::{auth_storage::CredStore, LoginCallbacks};
 
 const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
@@ -37,339 +25,70 @@ fn cred_store() -> CredStore {
 #[derive(Clone)]
 struct CopilotAuthEnv {
     token_store: CredStore,
-    copilot_token_url: String,
+    config: CopilotAuthConfig,
     models_cache_path: PathBuf,
-    now: fn() -> u64,
 }
 
 impl CopilotAuthEnv {
     fn production() -> Self {
         Self {
             token_store: cred_store(),
-            copilot_token_url: COPILOT_TOKEN_URL.to_string(),
+            config: CopilotAuthConfig::production(unix_now),
             models_cache_path: cache_path(),
-            now: unix_now,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CopilotTokens {
-    pub(crate) refresh_token: String,
-    pub(crate) access_token: String,
-    pub(crate) expires_at: u64,
-    pub(crate) api_base: String,
-    #[serde(default)]
-    pub(crate) last_refresh: u64,
+fn save_tokens_to(tokens: &CopilotTokens, store: &CredStore) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(tokens).map_err(|e| e.to_string())?;
+    store.save(&json)
 }
 
-impl CopilotTokens {
-    fn needs_refresh_at(&self, now: u64) -> bool {
-        now + 60 >= self.expires_at
-    }
-
-    pub(crate) fn save(&self) -> Result<(), String> {
-        self.save_to(&cred_store())
-    }
-
-    fn save_to(&self, store: &CredStore) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        store.save(&json)
-    }
-
-    pub(crate) fn load() -> Option<Self> {
-        Self::load_from(&cred_store())
-    }
-
-    fn load_from(store: &CredStore) -> Option<Self> {
-        let json = store.load()?;
-        serde_json::from_str(&json).ok()
-    }
-
-    pub(crate) fn delete() {
-        cred_store().delete();
-    }
+fn load_tokens_from(store: &CredStore) -> Option<CopilotTokens> {
+    let json = store.load()?;
+    serde_json::from_str(&json).ok()
 }
 
-fn client_id() -> String {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(CLIENT_ID_B64)
-        .expect("hard-coded client ID must decode");
-    String::from_utf8(bytes).expect("client ID must be UTF-8")
+pub(crate) fn load_tokens() -> Option<CopilotTokens> {
+    load_tokens_from(&cred_store())
 }
 
-/// Extract the Copilot API base URL from the `proxy-ep=` claim in a Copilot token.
-fn base_url_from_token(token: &str) -> Option<String> {
-    let proxy_host = token
-        .split(';')
-        .find_map(|kv| kv.strip_prefix("proxy-ep="))?;
-    let api_host = proxy_host.strip_prefix("proxy.").unwrap_or(proxy_host);
-    Some(format!("https://api.{}", api_host))
-}
-
-pub(crate) fn base_headers() -> [(&'static str, &'static str); 4] {
-    [
-        ("User-Agent", COPILOT_USER_AGENT),
-        ("Editor-Version", EDITOR_VERSION),
-        ("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION),
-        ("Copilot-Integration-Id", COPILOT_INTEGRATION_ID),
-    ]
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum GitHubPollDecision {
-    Authorized(String),
-    Pending,
-    SlowDown { interval_ms: u64 },
-    Failed(String),
-}
-
-fn github_poll_decision(data: &serde_json::Value, current_interval_ms: u64) -> GitHubPollDecision {
-    if let Some(token) = data.get("access_token").and_then(|v| v.as_str()) {
-        return GitHubPollDecision::Authorized(token.to_string());
-    }
-
-    let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("");
-    match error {
-        "authorization_pending" => GitHubPollDecision::Pending,
-        "slow_down" => {
-            let interval_ms = data
-                .get("interval")
-                .and_then(|v| v.as_u64())
-                .map(|n| n * 1000)
-                .unwrap_or_else(|| current_interval_ms.saturating_add(5000).max(1000));
-            GitHubPollDecision::SlowDown { interval_ms }
-        }
-        other => {
-            let desc = data
-                .get("error_description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let suffix = if desc.is_empty() {
-                String::new()
-            } else {
-                format!(": {desc}")
-            };
-            GitHubPollDecision::Failed(format!("Device flow failed: {other}{suffix}"))
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    interval: u64,
-    expires_in: u64,
+pub(crate) fn delete_tokens() {
+    cred_store().delete();
 }
 
 pub(crate) async fn device_code_login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
 ) -> Result<CopilotTokens, String> {
-    let cid = client_id();
-
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", &cid)
-        .append_pair("scope", "read:user")
-        .finish();
-    let device_resp = client
-        .post(GITHUB_DEVICE_CODE_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("User-Agent", COPILOT_USER_AGENT)
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("device code request failed: {e}"))?;
-
-    if !device_resp.status().is_success() {
-        let status = device_resp.status();
-        let body = device_resp.text().await.unwrap_or_default();
-        return Err(format!("device code error (HTTP {status}): {body}"));
-    }
-
-    let device: DeviceCodeResponse = device_resp
-        .json()
-        .await
-        .map_err(|e| format!("bad device code response: {e}"))?;
-
-    (callbacks.on_prompt)(&device.verification_uri, &device.user_code);
-
-    let github_token = poll_for_github_token(
-        client,
-        &cid,
-        &device.device_code,
-        device.interval,
-        device.expires_in,
-    )
-    .await?;
-
-    (callbacks.on_progress)("Fetching Copilot token…");
-    let (access, expires_at, api_base) = fetch_copilot_token(client, &github_token).await?;
-
-    let tokens = CopilotTokens {
-        refresh_token: github_token,
-        access_token: access,
-        expires_at,
-        api_base,
-        last_refresh: unix_now(),
+    let progress = CopilotLoginProgress {
+        on_prompt: callbacks.on_prompt,
+        on_progress: callbacks.on_progress,
     };
-    tokens
-        .save()
-        .map_err(|e| format!("failed to save tokens: {e}"))?;
+    let tokens =
+        copilot::device_code_login(client, &progress, &CopilotAuthEnv::production().config).await?;
+    save_tokens_to(&tokens, &cred_store()).map_err(|e| format!("failed to save tokens: {e}"))?;
 
     (callbacks.on_progress)("Fetching Copilot models…");
-    let models = match fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            log::entry(
-                log::Level::Warn,
-                "copilot_fetch_models_failed",
-                &serde_json::json!({ "error": e }),
-            );
-            Vec::new()
-        }
-    };
+    let models =
+        match copilot::fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                log::entry(
+                    log::Level::Warn,
+                    "copilot_fetch_models_failed",
+                    &serde_json::json!({ "error": e }),
+                );
+                Vec::new()
+            }
+        };
     if !models.is_empty() {
         (callbacks.on_progress)(&format!("Fetched {} Copilot models", models.len()));
         save_models_cache_to(&cache_path(), &models);
     }
 
     Ok(tokens)
-}
-
-async fn poll_for_github_token(
-    client: &reqwest::Client,
-    client_id: &str,
-    device_code: &str,
-    initial_interval: u64,
-    expires_in: u64,
-) -> Result<String, String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(expires_in.max(1));
-    let initial_multiplier = 1.2_f64;
-    let slow_down_multiplier = 1.4_f64;
-    let mut interval_ms: u64 = initial_interval.max(1) * 1000;
-    let mut multiplier = initial_multiplier;
-    let mut slow_down_count: u32 = 0;
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            if slow_down_count > 0 {
-                return Err("Device flow timed out after repeated slow_down responses. \
-                     This is often caused by clock drift in WSL or VM environments."
-                    .into());
-            }
-            return Err("Device flow timed out".into());
-        }
-
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let wait_ms = ((interval_ms as f64) * multiplier).ceil() as u64;
-        let wait = Duration::from_millis(wait_ms).min(remaining);
-        tokio::time::sleep(wait).await;
-
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", client_id)
-            .append_pair("device_code", device_code)
-            .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-            .finish();
-        let resp = client
-            .post(GITHUB_ACCESS_TOKEN_URL)
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("User-Agent", COPILOT_USER_AGENT)
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| format!("token poll failed: {e}"))?;
-
-        let data: serde_json::Value = match resp.json().await {
-            Ok(v) => v,
-            Err(e) => return Err(format!("bad token poll response: {e}")),
-        };
-
-        match github_poll_decision(&data, interval_ms) {
-            GitHubPollDecision::Authorized(token) => return Ok(token),
-            GitHubPollDecision::Pending => continue,
-            GitHubPollDecision::SlowDown {
-                interval_ms: next_interval_ms,
-            } => {
-                slow_down_count += 1;
-                interval_ms = next_interval_ms;
-                multiplier = slow_down_multiplier;
-                continue;
-            }
-            GitHubPollDecision::Failed(message) => return Err(message),
-        }
-    }
-}
-
-struct CopilotTokenRequest {
-    url: String,
-    authorization: String,
-}
-
-fn build_copilot_token_request(env: &CopilotAuthEnv, github_token: &str) -> CopilotTokenRequest {
-    CopilotTokenRequest {
-        url: env.copilot_token_url.clone(),
-        authorization: format!("Bearer {github_token}"),
-    }
-}
-
-async fn fetch_copilot_token(
-    client: &reqwest::Client,
-    github_token: &str,
-) -> Result<(String, u64, String), String> {
-    fetch_copilot_token_with_env(client, github_token, &CopilotAuthEnv::production()).await
-}
-
-async fn fetch_copilot_token_with_env(
-    client: &reqwest::Client,
-    github_token: &str,
-    env: &CopilotAuthEnv,
-) -> Result<(String, u64, String), String> {
-    let spec = build_copilot_token_request(env, github_token);
-    let mut req = client
-        .get(spec.url)
-        .header("Accept", "application/json")
-        .header("Authorization", spec.authorization);
-    for (k, v) in base_headers() {
-        req = req.header(k, v);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("copilot token request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("copilot token error (HTTP {status}): {body}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("bad copilot token response: {e}"))?;
-
-    let token = data
-        .get("token")
-        .and_then(|v| v.as_str())
-        .ok_or("missing 'token' in copilot response")?
-        .to_string();
-    let expires_at = data
-        .get("expires_at")
-        .and_then(|v| v.as_u64())
-        .ok_or("missing 'expires_at' in copilot response")?;
-
-    let api_base =
-        base_url_from_token(&token).unwrap_or_else(|| DEFAULT_COPILOT_API_BASE.to_string());
-
-    Ok((token, expires_at, api_base))
 }
 
 pub(crate) async fn refresh_tokens(
@@ -384,18 +103,8 @@ async fn refresh_tokens_with_env(
     refresh_token: &str,
     env: &CopilotAuthEnv,
 ) -> Result<CopilotTokens, String> {
-    let (access, expires_at, api_base) =
-        fetch_copilot_token_with_env(client, refresh_token, env).await?;
-    let tokens = CopilotTokens {
-        refresh_token: refresh_token.to_string(),
-        access_token: access,
-        expires_at,
-        api_base,
-        last_refresh: (env.now)(),
-    };
-    tokens
-        .save_to(&env.token_store)
-        .map_err(|e| format!("failed to save tokens: {e}"))?;
+    let tokens = copilot::refresh_tokens(client, refresh_token, &env.config).await?;
+    save_tokens_to(&tokens, &env.token_store).map_err(|e| format!("failed to save tokens: {e}"))?;
     log::entry(
         log::Level::Debug,
         "copilot_token_refreshed",
@@ -414,178 +123,12 @@ async fn ensure_access_token_full_with_env(
     client: &reqwest::Client,
     env: &CopilotAuthEnv,
 ) -> Result<CopilotTokens, String> {
-    let tokens = CopilotTokens::load_from(&env.token_store)
+    let tokens = load_tokens_from(&env.token_store)
         .ok_or("not logged in to GitHub Copilot; run `smelt auth` first")?;
-    if !tokens.needs_refresh_at((env.now)()) {
+    if !tokens.needs_refresh_at((env.config.now)()) {
         return Ok(tokens);
     }
     refresh_tokens_with_env(client, &tokens.refresh_token, env).await
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CopilotModel {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) vendor: Option<String>,
-    pub(crate) family: Option<String>,
-    pub(crate) capability_type: Option<String>,
-    pub(crate) context_window: Option<u32>,
-    pub(crate) max_output_tokens: Option<u32>,
-    pub(crate) policy_state: Option<String>,
-    #[serde(default)]
-    pub(crate) supported_reasoning_efforts: Vec<String>,
-}
-
-impl From<CopilotModel> for protocol::ModelMetadata {
-    fn from(model: CopilotModel) -> Self {
-        Self {
-            id: model.id,
-            display_name: Some(model.name),
-            context_window: model.context_window,
-            supports_reasoning: (!model.supported_reasoning_efforts.is_empty()).then_some(true),
-            input_modalities: None,
-        }
-    }
-}
-
-async fn fetch_available_models(
-    client: &reqwest::Client,
-    access_token: &str,
-    api_base: &str,
-) -> Result<Vec<CopilotModel>, String> {
-    let url = format!("{}/models", api_base.trim_end_matches('/'));
-    let mut req = client
-        .get(&url)
-        .header("Accept", "application/json")
-        .bearer_auth(access_token);
-    for (k, v) in base_headers() {
-        req = req.header(k, v);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("models request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("models error (HTTP {status}): {body}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("bad models response: {e}"))?;
-
-    parse_models_response(&data).ok_or_else(|| "missing 'data' array in models response".into())
-}
-
-/// Filter, sort, and dedup chat-capable models from the `/models` endpoint payload. Pure.
-fn infer_family(id: &str, name: &str, vendor: Option<&str>) -> Option<String> {
-    let id_lower = id.to_ascii_lowercase();
-    let name_lower = name.to_ascii_lowercase();
-    if id_lower.starts_with("claude-") || name_lower.contains("claude") {
-        return Some("claude".to_string());
-    }
-    if id_lower.starts_with("gpt-") || name_lower.starts_with("gpt-") {
-        return Some("gpt".to_string());
-    }
-    if id_lower.starts_with("gemini-") || name_lower.contains("gemini") {
-        return Some("gemini".to_string());
-    }
-    if id_lower.starts_with("oswe-") || name_lower.contains("raptor") {
-        return Some("oswe".to_string());
-    }
-    vendor.map(|v| v.to_ascii_lowercase())
-}
-
-fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> {
-    let entries = data.get("data").and_then(|v| v.as_array())?;
-    let mut out: Vec<CopilotModel> = Vec::with_capacity(entries.len());
-    for m in entries {
-        let capability_type = m
-            .pointer("/capabilities/type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !capability_type.is_empty() && capability_type != "chat" {
-            continue;
-        }
-        let model_picker_enabled = m
-            .get("model_picker_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if !model_picker_enabled {
-            continue;
-        }
-        let policy_state = m
-            .pointer("/policy/state")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if policy_state.as_deref() == Some("disabled") {
-            continue;
-        }
-        let id = match m.get("id").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let name = m
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&id)
-            .to_string();
-        let vendor = m
-            .get("vendor")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let family = m
-            .get("family")
-            .and_then(|v| v.as_str())
-            .or_else(|| m.get("model_family").and_then(|v| v.as_str()))
-            .or_else(|| m.pointer("/capabilities/family").and_then(|v| v.as_str()))
-            .map(|s| s.to_string())
-            .or_else(|| infer_family(&id, &name, vendor.as_deref()));
-        let capability_type = if capability_type.is_empty() {
-            None
-        } else {
-            Some(capability_type.to_string())
-        };
-        let supported_reasoning_efforts = m
-            .get("supportedReasoningEfforts")
-            .or_else(|| m.get("supported_reasoning_efforts"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let context_window = m
-            .pointer("/capabilities/limits/max_context_window_tokens")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                m.pointer("/capabilities/limits/max_prompt_tokens")
-                    .and_then(|v| v.as_u64())
-            })
-            .map(|v| v as u32);
-        let max_output_tokens = m
-            .pointer("/capabilities/limits/max_output_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        out.push(CopilotModel {
-            id,
-            name,
-            vendor,
-            family,
-            capability_type,
-            context_window,
-            max_output_tokens,
-            policy_state,
-            supported_reasoning_efforts,
-        });
-    }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out.dedup_by(|a, b| a.id == b.id);
-    Some(out)
 }
 
 fn cache_path() -> PathBuf {
@@ -628,11 +171,12 @@ async fn refresh_models_cache_with_env(
     let Ok(tokens) = ensure_access_token_full_with_env(client, env).await else {
         return Vec::new();
     };
-    let models = match fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
-    {
-        Ok(m) => m,
-        Err(_) => return Vec::new(),
-    };
+    let models =
+        match copilot::fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
+        {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
     save_models_cache_to(&env.models_cache_path, &models);
     models
 }
@@ -653,6 +197,11 @@ pub(crate) fn cached_output_tokens(model: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::provider::test_http::spawn_json_response;
+    use smelt_provider::copilot::{
+        base_headers, base_url_from_token, build_copilot_token_request, client_id,
+        github_poll_decision, parse_models_response, GitHubPollDecision, COPILOT_INTEGRATION_ID,
+        COPILOT_USER_AGENT, EDITOR_PLUGIN_VERSION, EDITOR_VERSION,
+    };
 
     #[test]
     fn client_id_decodes() {
@@ -706,7 +255,7 @@ mod tests {
             refresh_token: "r".into(),
             access_token: "a".into(),
             expires_at,
-            api_base: DEFAULT_COPILOT_API_BASE.into(),
+            api_base: smelt_provider::copilot::DEFAULT_COPILOT_API_BASE.into(),
             last_refresh: 0,
         }
     }
@@ -791,9 +340,11 @@ mod tests {
     fn test_env(token_url: String, token_path: std::path::PathBuf) -> CopilotAuthEnv {
         CopilotAuthEnv {
             token_store: CredStore::file_only(token_path),
-            copilot_token_url: token_url,
+            config: CopilotAuthConfig {
+                copilot_token_url: token_url,
+                now: fixed_now,
+            },
             models_cache_path: std::path::PathBuf::from("unused-model-cache.json"),
-            now: fixed_now,
         }
     }
 
@@ -805,7 +356,7 @@ mod tests {
             tmp.path().join("tokens.json"),
         );
 
-        let req = build_copilot_token_request(&env, "github-token");
+        let req = build_copilot_token_request(&env.config, "github-token");
 
         assert_eq!(req.url, "https://copilot-token.example");
         assert_eq!(req.authorization, "Bearer github-token");

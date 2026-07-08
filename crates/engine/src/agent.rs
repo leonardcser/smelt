@@ -1,8 +1,6 @@
 use crate::log;
-use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
+use crate::provider::EngineProvider;
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
-#[cfg(test)]
-use crate::ModelConfig;
 use crate::{ApiConfig, EngineConfig};
 use protocol::Decision;
 use protocol::{
@@ -10,6 +8,11 @@ use protocol::{
     HistoryItem, Message, ReasoningEffort, ToolInvocation, ToolOutcome, TurnMeta, UiCommand,
 };
 use serde_json::Value;
+use smelt_provider::{
+    quota_exceeded_message, sort_tools_for_cache_stability, CancellationToken, ChatOptions,
+    ChatRequestOptions, ChatResponse, FunctionSchema, ModelConfig, ProviderError,
+    ProviderStreamEvent, RequestAttemptInfo, ResponseFormat, ToolCallStreamEvent, ToolDefinition,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,8 +30,8 @@ fn dispatch_request_audit(
     host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
     session_dir: &Path,
     ctx: crate::request_log::RequestContext,
-    info: &crate::provider::RequestAttemptInfo<'_>,
-    pricing: &crate::pricing::ResolvedPricing,
+    info: &RequestAttemptInfo<'_>,
+    pricing: &smelt_provider::ResolvedPricing,
     mode: crate::RequestAuditMode,
 ) {
     let Some((entry, payload_mode)) = crate::request_log::entry(ctx, info, pricing, mode) else {
@@ -70,15 +73,18 @@ pub(crate) async fn engine_task(
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    crate::catalog::spawn_fetch(client.clone());
+    smelt_provider::catalog::spawn_fetch(
+        client.clone(),
+        Some(crate::paths::cache_dir().join("web")),
+    );
 
     let _ = event_tx.send(EngineEvent::Ready);
 
-    let mut bg_cancel = crate::cancel::CancellationToken::new();
+    let mut bg_cancel = CancellationToken::new();
 
     loop {
         if bg_cancel.is_cancelled() {
-            bg_cancel = crate::cancel::CancellationToken::new();
+            bg_cancel = CancellationToken::new();
         }
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
@@ -139,7 +145,7 @@ pub(crate) async fn engine_task(
                             host_tx: &host_tx,
                             config: &config,
                             http_client: &client,
-                            cancel: crate::cancel::CancellationToken::new(),
+                            cancel: CancellationToken::new(),
                             bg_cancel: bg_cancel.clone(),
                             history: Vec::new(),
                             mode,
@@ -303,7 +309,7 @@ pub(crate) struct BackgroundCtx<'a> {
     pub dispatcher: &'a dyn ToolDispatcher,
     pub event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
     pub host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
-    pub bg_cancel: crate::cancel::CancellationToken,
+    pub bg_cancel: CancellationToken,
 }
 
 /// Dispatch a command that doesn't depend on turn state. Returns `None`
@@ -363,7 +369,7 @@ fn spawn_engine_ask(
     task: AskTask,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
     host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
-    cancel: crate::cancel::CancellationToken,
+    cancel: CancellationToken,
 ) {
     let AskTask {
         id,
@@ -413,9 +419,12 @@ fn spawn_engine_ask(
         let ask_id = id;
 
         let mut opts = ChatOptions::new(&cancel);
-        opts.cache = provider.default_cache_config(cache_ttl_long, Some(&session_id));
+        let mut request_opts = ChatRequestOptions {
+            cache: provider.default_cache_config(cache_ttl_long, Some(&session_id)),
+            ..ChatRequestOptions::default()
+        };
         if let Some(fmt) = response_format {
-            opts.response_format = Some(crate::provider::ResponseFormat {
+            request_opts.response_format = Some(ResponseFormat {
                 name: fmt.name,
                 schema: fmt.schema,
             });
@@ -435,7 +444,7 @@ fn spawn_engine_ask(
             })
             .chain(mcp_defs)
             .collect();
-        crate::provider::sort_tools_for_cache_stability(&mut tool_defs);
+        sort_tools_for_cache_stability(&mut tool_defs);
 
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
@@ -447,8 +456,8 @@ fn spawn_engine_ask(
             if visible_retries {
                 opts.on_retry = Some(&on_retry);
             }
-            let on_delta = |delta: provider::ProviderStreamEvent| {
-                if let provider::ProviderStreamEvent::TextDelta(text) = delta {
+            let on_delta = |delta: ProviderStreamEvent| {
+                if let ProviderStreamEvent::TextDelta(text) = delta {
                     let _ = tx.send(EngineEvent::EngineAskDelta {
                         id,
                         delta: text.to_string(),
@@ -459,8 +468,8 @@ fn spawn_engine_ask(
                 opts.on_delta = Some(&on_delta);
             }
             let log_pricing = pricing.clone();
-            let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
-                let resolved = crate::pricing::resolve(
+            let on_attempt = move |info: RequestAttemptInfo<'_>| {
+                let resolved = smelt_provider::resolve_pricing(
                     info.model,
                     &log_pricing.provider_type,
                     &log_pricing.api_base,
@@ -485,7 +494,14 @@ fn spawn_engine_ask(
             };
             opts.on_attempt = Some(&on_attempt);
             provider
-                .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
+                .chat(
+                    &messages,
+                    &tool_defs,
+                    &model_name,
+                    reasoning_effort,
+                    &request_opts,
+                    &opts,
+                )
                 .await
         };
 
@@ -582,12 +598,12 @@ fn build_provider(
     api_key: Option<&str>,
     model_overrides: Option<&protocol::ModelConfigOverrides>,
     clock: std::sync::Arc<dyn crate::clock::Clock>,
-) -> Provider {
+) -> EngineProvider {
     let model_config = match model_overrides {
         Some(o) => api.model_config.clone().with_overrides(o),
         None => api.model_config.clone(),
     };
-    Provider::new(
+    EngineProvider::new(
         api_base.unwrap_or(&api.base).to_string(),
         api_key.unwrap_or(&api.key).to_string(),
         &api.provider_type,
@@ -754,7 +770,7 @@ struct PendingToolCall<'a> {
 }
 
 struct Turn<'a> {
-    provider: Provider,
+    provider: EngineProvider,
     dispatcher: &'a dyn ToolDispatcher,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
@@ -762,8 +778,8 @@ struct Turn<'a> {
     host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
-    cancel: crate::cancel::CancellationToken,
-    bg_cancel: crate::cancel::CancellationToken,
+    cancel: CancellationToken,
+    bg_cancel: CancellationToken,
     /// Committed conversation history. Invariant: every `Assistant` step
     /// either has no `invocations` (terminal) or has a `ToolOutcome` paired
     /// with every `ToolCall` the LLM emitted. There is no in-flight tool
@@ -1184,7 +1200,7 @@ impl<'a> Turn<'a> {
         provider_type: String,
     ) {
         self.model = model;
-        self.provider = Provider::new(
+        self.provider = EngineProvider::new(
             api_base,
             api_key,
             &provider_type,
@@ -1401,7 +1417,7 @@ impl<'a> Turn<'a> {
                         parameters: pt.parameters.clone(),
                     }));
                 }
-                crate::provider::sort_tools_for_cache_stability(&mut defs);
+                sort_tools_for_cache_stability(&mut defs);
                 defs
             } else {
                 Vec::new()
@@ -1456,7 +1472,7 @@ impl<'a> Turn<'a> {
                         &serde_json::json!({"reason": "quota_exceeded", "error": body}),
                     );
                     self.emit(EngineEvent::TurnError {
-                        message: provider::quota_exceeded_message().to_string(),
+                        message: quota_exceeded_message().to_string(),
                         kind: Some(EngineAskErrorKind::Quota),
                         retry_at_ms: resets_at.map(|epoch| epoch.saturating_mul(1000)),
                     });
@@ -2417,11 +2433,7 @@ impl<'a> Turn<'a> {
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
-    ) -> (
-        Result<(crate::provider::LLMResponse, bool), ProviderError>,
-        String,
-        String,
-    ) {
+    ) -> (Result<(ChatResponse, bool), ProviderError>, String, String) {
         // The chat future borrows self.provider and self.model, so model
         // changes received mid-request are deferred until the future resolves.
         let mut pending_model: Option<(String, String, String, String)> = None;
@@ -2446,21 +2458,21 @@ impl<'a> Turn<'a> {
                     attempt,
                 });
             };
-            let on_delta = |delta: provider::ProviderStreamEvent| match delta {
-                provider::ProviderStreamEvent::TextDelta(text) => {
+            let on_delta = |delta: ProviderStreamEvent| match delta {
+                ProviderStreamEvent::TextDelta(text) => {
                     partial_text.lock().unwrap().push_str(text);
                     let _ = self.event_tx.send(EngineEvent::TextDelta {
                         delta: text.to_string(),
                     });
                 }
-                provider::ProviderStreamEvent::ThinkingDelta(text) => {
+                ProviderStreamEvent::ThinkingDelta(text) => {
                     partial_reasoning.lock().unwrap().push_str(text);
                     let _ = self.event_tx.send(EngineEvent::ThinkingDelta {
                         delta: text.to_string(),
                     });
                 }
-                provider::ProviderStreamEvent::ToolCall(tool_event) => match tool_event {
-                    provider::ToolCallStreamEvent::Started {
+                ProviderStreamEvent::ToolCall(tool_event) => match tool_event {
+                    ToolCallStreamEvent::Started {
                         stream_id,
                         call_id,
                         tool_name,
@@ -2471,7 +2483,7 @@ impl<'a> Turn<'a> {
                             tool_name: tool_name.map(str::to_string),
                         });
                     }
-                    provider::ToolCallStreamEvent::ArgsDelta {
+                    ToolCallStreamEvent::ArgsDelta {
                         stream_id,
                         call_id,
                         tool_name,
@@ -2484,7 +2496,7 @@ impl<'a> Turn<'a> {
                             delta: delta.to_string(),
                         });
                     }
-                    provider::ToolCallStreamEvent::Finished {
+                    ToolCallStreamEvent::Finished {
                         stream_id,
                         call_id,
                         tool_name,
@@ -2501,9 +2513,9 @@ impl<'a> Turn<'a> {
             };
             // Resolve pricing once so the request-log sidecar can record an
             // estimated cost alongside usage on success.
-            let pricing = crate::pricing::resolve(
+            let pricing = smelt_provider::resolve_pricing(
                 &self.model,
-                self.provider.provider_kind().as_str(),
+                self.provider.provider_kind().as_config_str(),
                 self.provider.api_base(),
                 self.provider.model_config(),
             );
@@ -2518,7 +2530,7 @@ impl<'a> Turn<'a> {
             // `ToolInvocation`s inline), so the resulting Message slice
             // satisfies "assistant tool_calls followed by tool_results".
             let wire_messages = protocol::history_to_messages(&self.history);
-            let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
+            let on_attempt = move |info: RequestAttemptInfo<'_>| {
                 let ctx = crate::request_log::RequestContext {
                     request_id: turn_id,
                     kind: "turn".to_string(),
@@ -2536,21 +2548,24 @@ impl<'a> Turn<'a> {
                     audit_mode,
                 );
             };
+            let request_opts = ChatRequestOptions {
+                cache: self
+                    .provider
+                    .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
+                ..ChatRequestOptions::default()
+            };
             let opts = ChatOptions {
                 cancel: &self.cancel,
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
                 on_attempt: Some(&on_attempt),
-                response_format: None,
-                cache: self
-                    .provider
-                    .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
             };
             let chat_future = self.provider.chat(
                 &wire_messages,
                 tool_defs,
                 &self.model,
                 self.reasoning_effort,
+                &request_opts,
                 &opts,
             );
             tokio::pin!(chat_future);
@@ -2659,13 +2674,13 @@ fn send_usage(
     tx: &mpsc::UnboundedSender<EngineEvent>,
     provider_type: &str,
     api_base: &str,
-    model_config: &crate::ModelConfig,
+    model_config: &ModelConfig,
     model: &str,
     usage: protocol::TokenUsage,
     tokens_per_sec: Option<f64>,
     background: bool,
 ) {
-    let resolved = crate::pricing::resolve(model, provider_type, api_base, model_config);
+    let resolved = smelt_provider::resolve_pricing(model, provider_type, api_base, model_config);
     let cost = resolved.pricing.cost(&usage);
     let _ = tx.send(EngineEvent::TokenUsage {
         usage,
@@ -2679,7 +2694,7 @@ fn send_usage(
 struct PricingContext {
     provider_type: String,
     api_base: String,
-    model_config: crate::ModelConfig,
+    model_config: ModelConfig,
 }
 
 impl PricingContext {
@@ -2862,7 +2877,7 @@ mod tests {
         let clock: std::sync::Arc<dyn crate::clock::Clock> =
             std::sync::Arc::new(crate::clock::RealClock);
         let config = test_engine_config(clock.clone());
-        let provider = Provider::new(
+        let provider = EngineProvider::new(
             "https://x".into(),
             "k".into(),
             "openai",
@@ -2877,8 +2892,8 @@ mod tests {
             host_tx: &host_tx,
             config: &config,
             http_client: &client,
-            cancel: crate::cancel::CancellationToken::new(),
-            bg_cancel: crate::cancel::CancellationToken::new(),
+            cancel: CancellationToken::new(),
+            bg_cancel: CancellationToken::new(),
             history: vec![HistoryItem::system("sys")],
             mode: AgentMode::normal(),
             reasoning_effort: ReasoningEffort::Off,

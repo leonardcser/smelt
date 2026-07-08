@@ -1,6 +1,6 @@
 use crate::config;
-use engine::ModelConfig;
 use protocol::{AgentMode, ReasoningEffort};
+use smelt_provider::ModelConfig;
 
 pub struct AppConfig {
     pub model: String,

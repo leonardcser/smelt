@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 smelt-protocol = { workspace = true }
 smelt-engine = { workspace = true }
+smelt-provider = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }
 smelt-ansi = { workspace = true }

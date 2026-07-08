@@ -1,12 +1,12 @@
-use super::extract::extract_tool_calls_from_text;
-use super::{collect_indexed_tool_calls, non_empty, sse};
-use super::{
-    ParsedResponse, ProviderError, ProviderStreamEvent, ToolCallStreamEvent, ToolDefinition,
+use crate::extract::extract_tool_calls_from_text;
+use crate::sse;
+use crate::{
+    collect_indexed_tool_calls, non_empty, sanitize_tool_call_arguments, CancellationToken,
+    ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent, ToolCallStreamEvent,
+    ToolDefinition,
 };
-use crate::cancel::CancellationToken;
-use crate::config::ModelConfig;
-use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
-use protocol::{Message, ReasoningEffort, Role, TokenUsage, ToolCall};
+use protocol::{Message, ReasoningEffort, TokenUsage, ToolCall};
+
 use std::collections::HashMap;
 
 fn add_tokens(a: Option<u32>, b: Option<u32>) -> Option<u32> {
@@ -53,7 +53,7 @@ fn sanitize_message_for_chat_completions(obj: &mut serde_json::Map<String, serde
     obj.retain(|key, _| allowed.contains(&key.as_str()));
 }
 
-pub(super) fn build_body(
+pub fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
     model: &str,
@@ -65,13 +65,7 @@ pub(super) fn build_body(
         .map(|m| {
             let mut v = serde_json::to_value(m).unwrap();
             if let Some(obj) = v.as_object_mut() {
-                if m.role == Role::Tool {
-                    if let Some(s) = obj.get("content").and_then(|c| c.as_str()) {
-                        let trimmed = trim_tool_output(s, MAX_TOOL_OUTPUT_LINES);
-                        obj.insert("content".into(), serde_json::json!(trimmed));
-                    }
-                }
-                super::sanitize_tool_call_arguments(obj);
+                sanitize_tool_call_arguments(obj);
                 sanitize_message_for_chat_completions(obj);
             }
             v
@@ -110,7 +104,7 @@ pub(super) fn build_body(
     body
 }
 
-pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
+pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
     let choice = data["choices"]
         .get(0)
         .ok_or_else(|| ProviderError::InvalidResponse("no choices in response".into()))?;
@@ -154,18 +148,18 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 
 /// Accumulator for one streaming response. Mutated by `apply_sse_event`.
 #[derive(Default)]
-pub(super) struct StreamState {
-    pub(super) content: String,
-    pub(super) reasoning: String,
+struct StreamState {
+    content: String,
+    reasoning: String,
     /// content block index -> (id, name, args-json)
-    pub(super) tool_calls: HashMap<usize, (String, String, String)>,
-    pub(super) usage: TokenUsage,
-    pub(super) saw_finish_reason: bool,
-    pub(super) emitted_tool_finishes: bool,
+    tool_calls: HashMap<usize, (String, String, String)>,
+    usage: TokenUsage,
+    saw_finish_reason: bool,
+    emitted_tool_finishes: bool,
 }
 
 impl StreamState {
-    pub(super) fn finalize(self) -> ParsedResponse {
+    fn finalize(self) -> ParsedResponse {
         let content = non_empty(self.content);
         let reasoning = non_empty(self.reasoning);
         let tool_calls = collect_indexed_tool_calls(self.tool_calls);
@@ -198,7 +192,7 @@ impl StreamState {
     }
 }
 
-pub(super) fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderError> {
+fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderError> {
     if !state.saw_finish_reason {
         return Err(ProviderError::InvalidResponse(
             "stream ended without finish_reason".into(),
@@ -207,8 +201,8 @@ pub(super) fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, 
     Ok(state.finalize())
 }
 
-#[cfg(any(test, feature = "fuzz"))]
-pub(super) fn parse_stream_events<'a>(
+#[cfg_attr(not(any(test, feature = "fuzz")), allow(dead_code))]
+pub fn parse_stream_events<'a>(
     events: impl IntoIterator<Item = &'a serde_json::Value>,
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
 ) -> Result<ParsedResponse, ProviderError> {
@@ -220,7 +214,7 @@ pub(super) fn parse_stream_events<'a>(
 }
 
 /// Apply one SSE event to the accumulator. Pure (modulo `on_delta`).
-pub(super) fn apply_sse_event(
+fn apply_sse_event(
     state: &mut StreamState,
     ev: &serde_json::Value,
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
@@ -343,7 +337,7 @@ fn emit_tool_finishes(
     }
 }
 
-pub(super) async fn read_stream(
+pub async fn read_stream(
     resp: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: &(dyn Fn(ProviderStreamEvent) + Send + Sync),
@@ -361,17 +355,29 @@ pub(super) async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::FunctionSchema;
-    use crate::test_util::{tool_msg as tool_msg_opt, user};
-    use protocol::{FunctionCall, Message, ToolCall};
+    use crate::FunctionSchema;
+    use protocol::{Content, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()
     }
 
+    fn user(content: &str) -> Message {
+        Message::user(Content::text(content))
+    }
+
     fn tool_msg(call_id: &str, output: &str) -> Message {
-        tool_msg_opt(Some(call_id), output)
+        Message {
+            role: Role::Tool,
+            content: Some(Content::text(output)),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: Some(call_id.to_string()),
+            is_error: false,
+            tool_metadata: None,
+        }
     }
 
     fn message_keys(message: &serde_json::Value) -> Vec<String> {
@@ -418,8 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn build_body_tool_message_content_is_trimmed() {
-        // trim_tool_output applies to the content string; many short lines pass through unchanged.
+    fn build_body_preserves_prepared_tool_message_content() {
         let body = build_body(
             &[tool_msg("call-1", "ok")],
             &[],

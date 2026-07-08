@@ -1,11 +1,9 @@
-use super::{collect_indexed_tool_calls, non_empty, non_empty_blocks, sse};
-use super::{
-    CacheConfig, ParsedResponse, ProviderError, ProviderStreamEvent, ToolCallStreamEvent,
-    ToolDefinition,
+use crate::sse;
+use crate::{
+    collect_indexed_tool_calls, non_empty, non_empty_blocks, parse_claude_model_version,
+    CacheConfig, CancellationToken, ClaudeModelFamily, ModelConfig, ParsedResponse, ProviderError,
+    ProviderStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
-use crate::cancel::CancellationToken;
-use crate::config::ModelConfig;
-use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use base64::Engine;
 use protocol::{
     FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
@@ -52,12 +50,12 @@ fn count_cache_breakpoints(body: &serde_json::Value) -> usize {
 }
 
 fn supports_adaptive_thinking(model: &str) -> bool {
-    let Some(version) = super::parse_claude_model_version(model) else {
+    let Some(version) = parse_claude_model_version(model) else {
         return false;
     };
     matches!(
         version.family,
-        Some(super::ClaudeModelFamily::Opus | super::ClaudeModelFamily::Sonnet)
+        Some(ClaudeModelFamily::Opus | ClaudeModelFamily::Sonnet)
     ) && version.at_least(4, 6)
 }
 
@@ -198,14 +196,13 @@ fn anthropic_file_attachment_block(metadata: &serde_json::Value) -> Option<serde
 
 fn anthropic_tool_result_content(m: &Message) -> serde_json::Value {
     let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
-    let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);
     let Some(metadata) = &m.tool_metadata else {
-        return serde_json::Value::String(trimmed);
+        return serde_json::Value::String(output.to_string());
     };
     if metadata.get("kind").and_then(|v| v.as_str()) != Some("file_attachment") {
-        return serde_json::Value::String(trimmed);
+        return serde_json::Value::String(output.to_string());
     }
-    let mut parts = vec![serde_json::json!({"type": "text", "text": trimmed})];
+    let mut parts = vec![serde_json::json!({"type": "text", "text": output})];
     if let Some(block) = anthropic_file_attachment_block(metadata) {
         parts.push(block);
     } else {
@@ -217,7 +214,7 @@ fn anthropic_tool_result_content(m: &Message) -> serde_json::Value {
     serde_json::Value::Array(parts)
 }
 
-pub(super) fn build_body(
+pub fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
     model: &str,
@@ -389,7 +386,7 @@ pub(super) fn build_body(
     body
 }
 
-pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
+pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
     let mut content: Option<String> = None;
     let mut reasoning: Option<String> = None;
     let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
@@ -463,30 +460,30 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 /// shape we will replay on the next request - text + signature for normal
 /// thinking, opaque `data` for redacted_thinking.
 #[derive(Default)]
-pub(super) struct ThinkingAccum {
-    pub(super) text: String,
-    pub(super) signature: Option<String>,
+struct ThinkingAccum {
+    text: String,
+    signature: Option<String>,
     /// Verbatim payload of a `redacted_thinking` block. When set, this block
     /// is replayed as `{"type":"redacted_thinking", "data": <payload>}`; text
     /// and signature are unused.
-    pub(super) redacted_data: Option<String>,
+    redacted_data: Option<String>,
 }
 
 /// Accumulator for one streaming response. Mutated by `apply_sse_event`.
 #[derive(Default)]
-pub(super) struct StreamState {
-    pub(super) content: String,
-    pub(super) reasoning: String,
+struct StreamState {
+    content: String,
+    reasoning: String,
     /// content block index -> verbatim thinking block, replayed on next turn.
-    pub(super) thinking_blocks: BTreeMap<usize, ThinkingAccum>,
+    thinking_blocks: BTreeMap<usize, ThinkingAccum>,
     /// content block index -> (id, name, args-json)
-    pub(super) tool_calls: HashMap<usize, (String, String, String)>,
-    pub(super) usage: TokenUsage,
-    pub(super) saw_message_stop: bool,
+    tool_calls: HashMap<usize, (String, String, String)>,
+    usage: TokenUsage,
+    saw_message_stop: bool,
 }
 
 impl StreamState {
-    pub(super) fn finalize(self) -> ParsedResponse {
+    fn finalize(self) -> ParsedResponse {
         let reasoning_blocks: Vec<ReasoningBlock> = self
             .thinking_blocks
             .into_values()
@@ -517,7 +514,7 @@ impl StreamState {
     }
 }
 
-pub(super) fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderError> {
+fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderError> {
     if !state.saw_message_stop {
         return Err(ProviderError::InvalidResponse(
             "stream ended without message_stop".into(),
@@ -526,8 +523,8 @@ pub(super) fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, 
     Ok(state.finalize())
 }
 
-#[cfg(any(test, feature = "fuzz"))]
-pub(super) fn parse_stream_events<'a>(
+#[cfg_attr(not(any(test, feature = "fuzz")), allow(dead_code))]
+pub fn parse_stream_events<'a>(
     events: impl IntoIterator<Item = &'a serde_json::Value>,
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
 ) -> Result<ParsedResponse, ProviderError> {
@@ -539,7 +536,7 @@ pub(super) fn parse_stream_events<'a>(
 }
 
 /// Apply one SSE event to the accumulator. Pure (modulo `on_delta`).
-pub(super) fn apply_sse_event(
+fn apply_sse_event(
     state: &mut StreamState,
     ev: &serde_json::Value,
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
@@ -694,7 +691,7 @@ pub(super) fn apply_sse_event(
     }
 }
 
-pub(super) async fn read_stream(
+pub async fn read_stream(
     resp: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: &(dyn Fn(ProviderStreamEvent) + Send + Sync),
@@ -712,13 +709,63 @@ pub(super) async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::FunctionSchema;
-    use crate::test_util::{assistant_calls, assistant_text, system, tool_msg, user};
+    use crate::FunctionSchema;
     use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()
+    }
+
+    fn message(role: Role, content: Option<Content>) -> Message {
+        Message {
+            role,
+            content,
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+            tool_metadata: None,
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        message(Role::User, Some(Content::Text(text.into())))
+    }
+
+    fn system(text: &str) -> Message {
+        message(Role::System, Some(Content::Text(text.into())))
+    }
+
+    fn assistant_text(text: &str) -> Message {
+        message(Role::Assistant, Some(Content::Text(text.into())))
+    }
+
+    fn assistant_calls(content: Option<&str>, calls: Vec<ToolCall>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: content.map(|text| Content::Text(text.into())),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: Some(calls),
+            tool_call_id: None,
+            is_error: false,
+            tool_metadata: None,
+        }
+    }
+
+    fn tool_msg(call_id: Option<&str>, output: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: Some(Content::Text(output.into())),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: call_id.map(String::from),
+            is_error: false,
+            tool_metadata: None,
+        }
     }
 
     #[test]
@@ -2207,8 +2254,8 @@ mod tests {
         }
         let mut shuffled_a = vec![tool("zed"), tool("alpha"), tool("midway")];
         let mut shuffled_b = vec![tool("midway"), tool("zed"), tool("alpha")];
-        crate::provider::sort_tools_for_cache_stability(&mut shuffled_a);
-        crate::provider::sort_tools_for_cache_stability(&mut shuffled_b);
+        crate::sort_tools_for_cache_stability(&mut shuffled_a);
+        crate::sort_tools_for_cache_stability(&mut shuffled_b);
 
         // Both orderings collapse to the same body.
         let body_a = build_body(

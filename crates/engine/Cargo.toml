@@ -8,6 +8,7 @@ name = "engine"
 
 [dependencies]
 smelt-protocol = { workspace = true }
+smelt-provider = { workspace = true }
 smelt-store = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "net", "process"] }
 reqwest = { workspace = true, features = ["stream"] }
@@ -31,5 +32,6 @@ smelt-perf = { version = "0.1.3", path = "../perf" }
 fuzz = []
 
 [dev-dependencies]
+smelt-provider = { workspace = true, features = ["test-support"] }
 serial_test = "3.4.0"
 tempfile.workspace = true

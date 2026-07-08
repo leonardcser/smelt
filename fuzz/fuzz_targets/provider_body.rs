@@ -5,8 +5,7 @@
 //! accidentally reach them.
 
 use arbitrary::Arbitrary;
-use engine::provider::{fuzz_build_anthropic_body, fuzz_build_openai_body, CacheConfig};
-use engine::ModelConfig;
+use smelt_provider::{fuzz_build_anthropic_body, fuzz_build_openai_body, CacheConfig, ModelConfig};
 use libfuzzer_sys::fuzz_target;
 use protocol::{Content, Message, ReasoningEffort};
 use smelt_fuzz::cache_common::{build_tools, ArbTool};

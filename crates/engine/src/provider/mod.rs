@@ -1,290 +1,49 @@
-mod anthropic;
 mod auth;
 mod auth_storage;
-mod chat_completions;
 pub mod codex;
 pub mod copilot;
-mod extract;
 pub mod kimi_code;
-mod openai;
-mod sse;
 
-use crate::cancel::CancellationToken;
 use crate::log;
 pub(crate) use auth::LoginCallbacks;
 pub use protocol::TokenUsage;
-use protocol::{Message, ReasoningBlock, ReasoningEffort, ToolCall};
+use protocol::{Message, ReasoningEffort};
 use reqwest::Client;
-use serde::Serialize;
+#[cfg(test)]
+use smelt_provider::ParsedResponse;
+#[cfg(test)]
+use smelt_provider::{apply_response_format, sanitize_tool_call_arguments};
+use smelt_provider::{ChatProvider, ChatResponse, CopilotInitiator, ModelConfig};
+#[cfg(test)]
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolDefinition {
-    #[serde(rename = "type")]
-    def_type: AlwaysFunctionDef,
-    pub(crate) function: FunctionSchema,
-}
+#[cfg(test)]
+use smelt_provider::WireApi;
+#[cfg(test)]
+use smelt_provider::{api_key_auth, emit_retry, endpoint_url, ApiKeyAuth};
+use smelt_provider::{
+    normalize_api_base, AuthKind, CacheConfig, ChatOptions, ChatRequestOptions, ProviderClient,
+    ProviderKind, ToolDefinition,
+};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FunctionSchema {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
+#[cfg(test)]
+use smelt_provider::{context_window_from_models_entry, models_entry_matches};
 
-#[derive(Debug, Clone, Copy)]
-struct AlwaysFunctionDef;
+#[cfg(test)]
+use smelt_provider::{
+    anthropic_supports_structured_output, api_base_normalization_hint, format_epoch_local,
+    format_rate_limit, json_as_u64, parse_claude_model_version, parse_resets_at,
+    parse_retry_from_body, quota_exceeded_message, unix_now, ApiBaseNormalizationHint,
+    CancellationToken, ClaudeModelFamily, FunctionSchema, ResponseFormat,
+};
+#[cfg(test)]
+use smelt_provider::{collect_indexed_tool_calls, non_empty};
 
-impl Serialize for AlwaysFunctionDef {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str("function")
-    }
-}
+type EngineChatResponse = ChatResponse;
 
-impl ToolDefinition {
-    pub fn new(function: FunctionSchema) -> Self {
-        Self {
-            def_type: AlwaysFunctionDef,
-            function,
-        }
-    }
-}
-
-/// Internal parsed fields from an API response.
-pub(crate) struct ParsedResponse {
-    pub(crate) content: Option<String>,
-    pub(crate) reasoning: Option<String>,
-    /// Provider-shaped reasoning blocks to round-trip on the next request.
-    pub(crate) reasoning_blocks: Option<Vec<ReasoningBlock>>,
-    pub(crate) tool_calls: Vec<ToolCall>,
-    pub(crate) usage: TokenUsage,
-}
-
-impl ParsedResponse {
-    pub(crate) fn into_response(self, tokens_per_sec: Option<f64>) -> LLMResponse {
-        LLMResponse {
-            content: self.content,
-            reasoning_content: self.reasoning,
-            reasoning_details: self.reasoning_blocks,
-            tool_calls: self.tool_calls,
-            usage: self.usage,
-            tokens_per_sec,
-        }
-    }
-}
-
-pub(crate) fn non_empty(s: String) -> Option<String> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-pub(crate) fn non_empty_blocks(v: Vec<ReasoningBlock>) -> Option<Vec<ReasoningBlock>> {
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
-}
-
-pub(crate) fn collect_indexed_tool_calls(
-    map: std::collections::HashMap<usize, (String, String, String)>,
-) -> Vec<ToolCall> {
-    let mut vec: Vec<(usize, ToolCall)> = map
-        .into_iter()
-        .map(|(idx, (id, name, args))| {
-            (
-                idx,
-                ToolCall::new(
-                    id,
-                    protocol::FunctionCall {
-                        name,
-                        arguments: args,
-                    },
-                ),
-            )
-        })
-        .collect();
-    vec.sort_by_key(|(idx, _)| *idx);
-    vec.into_iter().map(|(_, tc)| tc).collect()
-}
-
-/// A streaming event from the LLM provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderStreamEvent<'a> {
-    TextDelta(&'a str),
-    ThinkingDelta(&'a str),
-    ToolCall(ToolCallStreamEvent<'a>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolCallStreamEvent<'a> {
-    Started {
-        stream_id: &'a str,
-        call_id: Option<&'a str>,
-        tool_name: Option<&'a str>,
-    },
-    ArgsDelta {
-        stream_id: &'a str,
-        call_id: Option<&'a str>,
-        tool_name: Option<&'a str>,
-        delta: &'a str,
-    },
-    Finished {
-        stream_id: &'a str,
-        call_id: &'a str,
-        tool_name: &'a str,
-        arguments: &'a str,
-    },
-}
-
-#[derive(Clone)]
-pub struct LLMResponse {
-    pub(crate) content: Option<String>,
-    pub(crate) reasoning_content: Option<String>,
-    pub(crate) reasoning_details: Option<Vec<ReasoningBlock>>,
-    pub(crate) tool_calls: Vec<ToolCall>,
-    pub(crate) usage: TokenUsage,
-    pub(crate) tokens_per_sec: Option<f64>,
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum ProviderError {
-    #[error("cancelled")]
-    Cancelled,
-    #[error("{}", format_rate_limit(resets_at))]
-    RateLimited { resets_at: Option<u64> },
-    #[error("{}", quota_exceeded_message())]
-    QuotaExceeded {
-        body: String,
-        resets_at: Option<u64>,
-    },
-    #[error("authentication failed: {0}")]
-    Auth(String),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("server error {status}: {body}")]
-    Server { status: u16, body: String },
-    #[error("network error: {0}")]
-    Network(String),
-    #[error("stream error: {0}")]
-    Stream(String),
-    #[error("invalid response: {0}")]
-    InvalidResponse(String),
-    #[error("max retries exceeded")]
-    MaxRetries,
-}
-
-pub fn quota_exceeded_message() -> &'static str {
-    "API quota exceeded; check your plan and billing details"
-}
-
-fn is_quota_error_body(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    lower.contains("insufficient_quota")
-        || lower.contains("billing_not_active")
-        || lower.contains("credit balance is too low")
-        || lower.contains("usage_limit_reached")
-        || lower.contains("usage limit")
-        || lower.contains("quota exceeded")
-        || lower.contains("quota exhausted")
-}
-
-const MAX_AUTO_RATE_LIMIT_DELAY: Duration = Duration::from_secs(10 * 60);
-
-fn rate_limit_error(
-    resets_at: Option<u64>,
-    retry_after: Option<Duration>,
-    now_secs: u64,
-) -> ProviderError {
-    ProviderError::RateLimited {
-        resets_at: resets_at.or_else(|| retry_after.map(|d| now_secs + d.as_secs())),
-    }
-}
-
-fn retry_delay_for(
-    err: &ProviderError,
-    attempt: usize,
-    retry_after: Option<Duration>,
-    now_secs: u64,
-) -> Option<Duration> {
-    let backoff = backoff_delay(attempt);
-    match err {
-        ProviderError::Network(_) | ProviderError::Server { .. } | ProviderError::Stream(_) => {
-            Some(retry_after.map_or(backoff, |delay| delay.max(backoff)))
-        }
-        ProviderError::RateLimited {
-            resets_at: Some(epoch),
-        } => {
-            let delay = Duration::from_secs(epoch.saturating_sub(now_secs));
-            (delay <= MAX_AUTO_RATE_LIMIT_DELAY).then_some(delay.max(backoff))
-        }
-        _ => None,
-    }
-}
-
-fn emit_retry(opts: &ChatOptions<'_>, delay: Duration, attempt: usize) {
-    if let Some(f) = opts.on_retry {
-        f(delay, (attempt + 1) as u32);
-    }
-}
-
-fn format_rate_limit(resets_at: &Option<u64>) -> String {
-    let Some(epoch) = resets_at else {
-        return "rate limited".to_string();
-    };
-    let time_str = format_epoch_local(*epoch);
-    format!("rate limited; try again at {time_str}")
-}
-
-fn format_epoch_local(epoch_secs: u64) -> String {
-    #[cfg(unix)]
-    {
-        let t = epoch_secs as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&t, &mut tm) };
-
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let month = MONTHS[tm.tm_mon as usize % 12];
-        let day = tm.tm_mday;
-        let year = tm.tm_year + 1900;
-        let suffix = match day % 10 {
-            1 if day != 11 => "st",
-            2 if day != 12 => "nd",
-            3 if day != 13 => "rd",
-            _ => "th",
-        };
-        let (hour12, ampm) = match tm.tm_hour {
-            0 => (12, "AM"),
-            1..=11 => (tm.tm_hour, "AM"),
-            12 => (12, "PM"),
-            _ => (tm.tm_hour - 12, "PM"),
-        };
-        format!(
-            "{month} {day}{suffix}, {year} {hour12}:{:02} {ampm}",
-            tm.tm_min
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = epoch_secs;
-        "later".to_string()
-    }
-}
-
-pub(crate) fn unix_now() -> u64 {
-    unix_secs(std::time::SystemTime::now())
-}
-
-fn unix_secs(time: std::time::SystemTime) -> u64 {
-    time.duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use smelt_provider::ProviderError;
+#[cfg(test)]
+use smelt_provider::{backoff_delay, retry_delay_for};
 
 #[cfg(test)]
 pub(crate) mod test_http {
@@ -336,626 +95,42 @@ pub(crate) mod test_http {
     }
 }
 
-impl ProviderError {
-    fn from_http_at(code: u16, body: String, retry_after: Option<Duration>, now_secs: u64) -> Self {
-        let is_quota = is_quota_error_body(&body);
-
-        match code {
-            _ if is_quota => ProviderError::QuotaExceeded {
-                resets_at: parse_resets_at(&body)
-                    .or_else(|| retry_after.map(|d| now_secs + d.as_secs())),
-                body,
-            },
-            400 => ProviderError::InvalidResponse(body),
-            401 | 403 => ProviderError::Auth(body),
-            404 => ProviderError::NotFound(body),
-            429 => rate_limit_error(parse_resets_at(&body), retry_after, now_secs),
-            _ => ProviderError::Server { status: code, body },
-        }
-    }
-
-    #[cfg(test)]
-    fn from_http(code: u16, body: String, retry_after: Option<Duration>) -> Self {
-        Self::from_http_at(code, body, retry_after, unix_now())
-    }
-}
-
-fn parse_resets_at(body: &str) -> Option<u64> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    json.get("error")
-        .and_then(|e| e.get("resets_at"))
-        .and_then(json_as_u64)
-}
-
-pub(crate) fn json_as_u64(v: &serde_json::Value) -> Option<u64> {
-    v.as_u64()
-        .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
-}
-
-pub(crate) fn parse_retry_from_body(body: &str) -> Option<Duration> {
-    let lower = body.to_ascii_lowercase();
-    let idx = lower.find("try again in")?;
-    let after = &lower[idx + "try again in".len()..];
-    let trimmed = after.trim_start();
-
-    let end = trimmed
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(trimmed.len());
-    let value: f64 = trimmed[..end].parse().ok()?;
-
-    let unit = trimmed[end..].trim_start();
-    if unit.starts_with("ms") {
-        Some(Duration::from_millis(value as u64))
-    } else {
-        Some(Duration::from_secs_f64(value))
-    }
-}
-
-fn backoff_delay(attempt: usize) -> Duration {
-    Duration::from_millis(500 * 2u64.pow(attempt as u32))
-}
-
-fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
-    let val = resp.headers().get("retry-after")?.to_str().ok()?;
-    val.parse::<f64>()
-        .ok()
-        .filter(|&s| s > 0.0)
-        .map(Duration::from_secs_f64)
-}
-
-fn reasoning_support_from_metadata(
-    config: &crate::config::ModelConfig,
-    provider_type: &str,
-    api_base: &str,
-    model: &str,
-) -> Option<bool> {
-    config.supports_reasoning.or_else(|| {
-        if kimi_code::is_api_base(api_base) {
-            kimi_code::cached_supports_reasoning(model)
-                .or_else(|| crate::catalog::supports_reasoning(provider_type, api_base, model))
-        } else {
-            crate::catalog::supports_reasoning(provider_type, api_base, model)
-        }
-    })
-}
-
-fn effective_reasoning_effort(
-    requested: ReasoningEffort,
-    config: &crate::config::ModelConfig,
-    provider_type: &str,
-    api_base: &str,
-    model: &str,
-) -> ReasoningEffort {
-    if requested == ReasoningEffort::Off {
-        return ReasoningEffort::Off;
-    }
-
-    let support = reasoning_support_from_metadata(config, provider_type, api_base, model);
-    if support == Some(false) || (provider_type == "openai-compatible" && support != Some(true)) {
-        ReasoningEffort::Off
-    } else {
-        requested
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderKind {
-    OpenAiCompatible,
-    OpenAi,
-    Codex,
-    AnthropicCompatible,
-    Anthropic,
-    Copilot,
-    KimiCode,
-}
-
-impl ProviderKind {
-    pub fn default_reasoning_cycle(self) -> &'static [ReasoningEffort] {
-        match self {
-            Self::OpenAiCompatible => &[
-                ReasoningEffort::Off,
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-            ],
-            Self::OpenAi
-            | Self::Codex
-            | Self::AnthropicCompatible
-            | Self::Anthropic
-            | Self::Copilot
-            | Self::KimiCode => &[
-                ReasoningEffort::Off,
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-                ReasoningEffort::Max,
-            ],
-        }
-    }
-
-    pub fn from_config(provider_type: &str) -> Self {
-        match provider_type {
-            "openai" => Self::OpenAi,
-            "codex" => Self::Codex,
-            "anthropic-compatible" => Self::AnthropicCompatible,
-            "anthropic" => Self::Anthropic,
-            "kimi-code" => Self::KimiCode,
-            "copilot" | "github-copilot" => Self::Copilot,
-            _ => Self::OpenAiCompatible,
-        }
-    }
-
-    pub fn from_config_and_url(provider_type: &str, api_base: &str) -> Self {
-        if kimi_code::is_api_base(api_base) {
-            Self::KimiCode
-        } else {
-            Self::from_config(provider_type)
-        }
-    }
-
-    /// Canonical config string for this provider - the inverse of
-    /// [`ProviderKind::from_config`]. Used for catalog lookups and logging.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAi => "openai",
-            Self::Codex => "codex",
-            Self::AnthropicCompatible => "anthropic-compatible",
-            Self::Anthropic => "anthropic",
-            Self::Copilot => "copilot",
-            Self::KimiCode => "kimi-code",
-            Self::OpenAiCompatible => "openai-compatible",
-        }
-    }
-
-    pub fn detect_from_url(api_base: &str) -> Self {
-        if kimi_code::is_api_base(api_base) {
-            Self::KimiCode
-        } else if api_base.contains("api.anthropic.com") {
-            Self::Anthropic
-        } else if api_base.contains("api.openai.com") {
-            Self::OpenAi
-        } else if api_base.contains("chatgpt.com") {
-            Self::Codex
-        } else if api_base.contains("githubcopilot.com") {
-            Self::Copilot
-        } else {
-            Self::OpenAiCompatible
-        }
-    }
-
-    pub fn as_config_str(self) -> &'static str {
-        match self {
-            Self::OpenAiCompatible => "openai-compatible",
-            Self::OpenAi => "openai",
-            Self::Codex => "codex",
-            Self::AnthropicCompatible => "anthropic-compatible",
-            Self::Anthropic => "anthropic",
-            Self::Copilot => "copilot",
-            Self::KimiCode => "kimi-code",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApiKeyAuth {
-    Bearer,
-    XApiKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderAuth {
-    ApiKey,
-    KimiCodeOAuth,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ProviderDescriptor {
-    wire_api: WireApi,
-    auth: Option<ProviderAuth>,
-    api_key_auth: Option<ApiKeyAuth>,
-    anthropic_cache: bool,
-    mid_turn_reasoning_changes: bool,
-}
-
-impl ProviderKind {
-    fn descriptor(self) -> ProviderDescriptor {
-        match self {
-            Self::OpenAiCompatible => ProviderDescriptor {
-                wire_api: WireApi::ChatCompletions,
-                auth: Some(ProviderAuth::ApiKey),
-                api_key_auth: Some(ApiKeyAuth::Bearer),
-                anthropic_cache: false,
-                mid_turn_reasoning_changes: true,
-            },
-            Self::OpenAi => ProviderDescriptor {
-                wire_api: WireApi::OpenAiResponses,
-                auth: Some(ProviderAuth::ApiKey),
-                api_key_auth: Some(ApiKeyAuth::Bearer),
-                anthropic_cache: false,
-                mid_turn_reasoning_changes: true,
-            },
-            Self::Codex => ProviderDescriptor {
-                wire_api: WireApi::OpenAiResponses,
-                auth: None,
-                api_key_auth: None,
-                anthropic_cache: false,
-                mid_turn_reasoning_changes: true,
-            },
-            Self::AnthropicCompatible => ProviderDescriptor {
-                wire_api: WireApi::AnthropicMessages,
-                auth: Some(ProviderAuth::ApiKey),
-                api_key_auth: Some(ApiKeyAuth::XApiKey),
-                anthropic_cache: true,
-                mid_turn_reasoning_changes: true,
-            },
-            Self::Anthropic => ProviderDescriptor {
-                wire_api: WireApi::AnthropicMessages,
-                auth: Some(ProviderAuth::ApiKey),
-                api_key_auth: Some(ApiKeyAuth::XApiKey),
-                anthropic_cache: true,
-                mid_turn_reasoning_changes: true,
-            },
-            Self::Copilot => ProviderDescriptor {
-                wire_api: WireApi::ChatCompletions,
-                auth: None,
-                api_key_auth: None,
-                anthropic_cache: false,
-                mid_turn_reasoning_changes: true,
-            },
-            Self::KimiCode => ProviderDescriptor {
-                wire_api: WireApi::AnthropicMessages,
-                auth: Some(ProviderAuth::KimiCodeOAuth),
-                api_key_auth: Some(ApiKeyAuth::Bearer),
-                anthropic_cache: false,
-                mid_turn_reasoning_changes: false,
-            },
-        }
-    }
-
-    pub fn supports_mid_turn_reasoning_changes(self) -> bool {
-        self.descriptor().mid_turn_reasoning_changes
-    }
-
-    fn wire_api(self) -> WireApi {
-        self.descriptor().wire_api
-    }
-}
-
-fn api_key_auth(kind: ProviderKind, api_key: &str) -> Option<ApiKeyAuth> {
-    if api_key.is_empty() {
-        return None;
-    }
-    kind.descriptor().api_key_auth
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WireApi {
-    ChatCompletions,
-    OpenAiResponses,
-    AnthropicMessages,
-}
-
-impl WireApi {
-    fn is_anthropic(self) -> bool {
-        self == Self::AnthropicMessages
-    }
-
-    fn copilot_url(self, base: &str) -> String {
-        let base = base.trim_end_matches('/');
-        match self {
-            Self::ChatCompletions => format!("{base}/chat/completions"),
-            Self::OpenAiResponses => format!("{base}/responses"),
-            Self::AnthropicMessages => format!("{base}/v1/messages"),
-        }
-    }
-
-    fn parse_response(self, data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
-        match self {
-            Self::ChatCompletions => chat_completions::parse_response(data),
-            Self::OpenAiResponses => openai::parse_response(data),
-            Self::AnthropicMessages => anthropic::parse_response(data),
-        }
-    }
-
-    async fn read_stream(
-        self,
-        resp: reqwest::Response,
-        cancel: &CancellationToken,
-        on_event: &(dyn Fn(ProviderStreamEvent<'_>) + Send + Sync),
-        now_secs: u64,
-    ) -> Result<ParsedResponse, ProviderError> {
-        match self {
-            Self::ChatCompletions => chat_completions::read_stream(resp, cancel, on_event).await,
-            Self::OpenAiResponses => openai::read_stream(resp, cancel, on_event, now_secs).await,
-            Self::AnthropicMessages => anthropic::read_stream(resp, cancel, on_event).await,
-        }
-    }
-}
-
-fn select_copilot_wire_api(model: &str, metadata: Option<&copilot::CopilotModel>) -> WireApi {
-    let model_lower = model.to_ascii_lowercase();
-    if metadata.is_some_and(copilot_model_is_anthropic) || model_lower.starts_with("claude-") {
-        return WireApi::AnthropicMessages;
-    }
-    if copilot_model_needs_responses(&model_lower, metadata) {
-        return WireApi::OpenAiResponses;
-    }
-    WireApi::ChatCompletions
-}
-
-#[cfg(test)]
-fn copilot_wire_api(model: &str) -> WireApi {
-    select_copilot_wire_api(model, None)
-}
-
-fn copilot_model_is_anthropic(model: &copilot::CopilotModel) -> bool {
-    model
-        .vendor
-        .as_deref()
-        .is_some_and(|vendor| vendor.eq_ignore_ascii_case("anthropic"))
-        || model
-            .family
-            .as_deref()
-            .is_some_and(|family| family.eq_ignore_ascii_case("claude"))
-        || model.id.starts_with("claude-")
-}
-
-fn copilot_model_needs_responses(model: &str, metadata: Option<&copilot::CopilotModel>) -> bool {
-    let id = metadata.map_or(model, |m| m.id.as_str());
-    id.starts_with("gpt-5") || id.starts_with("oswe") || id.contains("codex")
-}
-
-fn copilot_chat_completions_body(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    model: &str,
-    effort: ReasoningEffort,
-    config: &crate::config::ModelConfig,
-) -> serde_json::Value {
-    let mut body = chat_completions::build_body(messages, tools, model, effort, config);
-    if let Some(obj) = body.as_object_mut() {
-        obj.remove("chat_template_kwargs");
-        obj.remove("reasoning_effort");
-    }
-    body
-}
-
-fn copilot_body(
-    wire: WireApi,
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    model: &str,
-    effort: ReasoningEffort,
-    config: &crate::config::ModelConfig,
-    cache: &CacheConfig,
-) -> serde_json::Value {
-    match wire {
-        WireApi::ChatCompletions => {
-            copilot_chat_completions_body(messages, tools, model, effort, config)
-        }
-        WireApi::OpenAiResponses => {
-            let mut body = openai::build_body(messages, tools, model, effort, config);
-            body["store"] = serde_json::json!(false);
-            body
-        }
-        WireApi::AnthropicMessages => {
-            anthropic::build_body(messages, tools, model, effort, config, cache)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaudeModelFamily {
-    Haiku,
-    Opus,
-    Sonnet,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClaudeModelVersion {
-    pub(crate) family: Option<ClaudeModelFamily>,
-    pub(crate) major: u16,
-    pub(crate) minor: u16,
-}
-
-impl ClaudeModelVersion {
-    pub(crate) fn at_least(self, major: u16, minor: u16) -> bool {
-        (self.major, self.minor) >= (major, minor)
-    }
-}
-
-pub(crate) fn parse_claude_model_version(model: &str) -> Option<ClaudeModelVersion> {
-    let lower = model.to_ascii_lowercase();
-    if !lower.contains("claude") {
-        return None;
-    }
-    let tokens: Vec<&str> = lower
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
-    let family = tokens.iter().find_map(|token| match *token {
-        "haiku" => Some(ClaudeModelFamily::Haiku),
-        "opus" => Some(ClaudeModelFamily::Opus),
-        "sonnet" => Some(ClaudeModelFamily::Sonnet),
-        _ => None,
-    });
-    let mut numbers = tokens.iter().filter_map(|token| token.parse::<u16>().ok());
-    let major = numbers.next()?;
-    let minor = numbers.next().unwrap_or(0);
-    Some(ClaudeModelVersion {
-        family,
-        major,
-        minor,
-    })
-}
-
-/// Structured JSON output schema. Each provider adapter maps this to its native field.
 #[derive(Clone)]
-pub struct ResponseFormat {
-    pub name: String,
-    pub schema: serde_json::Value,
-}
-
-/// Snapshot of one provider request attempt, delivered to the
-/// `ChatOptions::on_attempt` hook after the attempt finishes.
-pub struct RequestAttemptInfo<'a> {
-    pub url: &'a str,
-    pub provider_kind: ProviderKind,
-    pub model: &'a str,
-    pub body: &'a serde_json::Value,
-    pub attempt: u32,
-    pub elapsed_ms: u64,
-    pub result: Result<&'a LLMResponse, &'a ProviderError>,
-    /// HTTP status returned by the provider, when a response was received.
-    pub http_status: Option<u16>,
-    /// Raw HTTP error body, capped by the request log writer.
-    pub error_body: Option<&'a str>,
-    /// Verbatim non-streaming response body, available only for non-streaming
-    /// requests.
-    pub raw_response: Option<&'a serde_json::Value>,
-}
-
-pub struct ChatOptions<'a> {
-    pub(crate) cancel: &'a CancellationToken,
-    pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
-    pub(crate) on_delta: Option<&'a (dyn Fn(ProviderStreamEvent<'_>) + Send + Sync)>,
-    pub(crate) on_attempt: Option<&'a (dyn Fn(RequestAttemptInfo<'_>) + Send + Sync)>,
-    pub response_format: Option<ResponseFormat>,
-    pub cache: CacheConfig,
-}
-
-impl<'a> ChatOptions<'a> {
-    pub fn new(cancel: &'a CancellationToken) -> Self {
-        Self {
-            cancel,
-            on_retry: None,
-            on_delta: None,
-            on_attempt: None,
-            response_format: None,
-            cache: CacheConfig::default(),
-        }
-    }
-}
-
-/// Per-request prompt-cache strategy. Anthropic uses `cache_control`
-/// markers; OpenAI-family providers use a `prompt_cache_key` routing hint
-/// (session-scoped) that improves hit rate under load. The key is a
-/// performance optimization, not telemetry - without it OpenAI's prefix
-/// cache works opportunistically; with it the request routes to a shard
-/// that already saw the prefix.
-#[derive(Clone, Debug, Default)]
-pub struct CacheConfig {
-    pub anthropic_markers: bool,
-    /// Use the 1-hour TTL instead of 5 minutes (Anthropic only).
-    pub ttl_long: bool,
-    /// Session-stable identifier sent to OpenAI / Codex as
-    /// `prompt_cache_key`. Should be the same for every request in a
-    /// session and differ across sessions. Clamped to 64 chars.
-    pub prompt_cache_key: Option<String>,
-}
-
-/// OpenAI accepts up to 256 chars but recommends shorter; pi-mono uses
-/// 64. Session ids in smelt are SHA256 hex (64 chars) so most keys pass
-/// through unchanged. Clamping is by char count (not bytes) so non-ASCII
-/// keys never split mid-codepoint.
-pub(crate) fn clamp_prompt_cache_key(key: &str) -> String {
-    key.chars().take(64).collect()
-}
-
-/// Sort tool definitions by name in place. The cached prompt prefix
-/// includes the tools section; any registration-order drift would
-/// silently invalidate the cache. Every caller that hands tools to
-/// `Provider::chat` MUST sort first; this is the canonical helper.
-pub fn sort_tools_for_cache_stability(tools: &mut [ToolDefinition]) {
-    tools.sort_by(|a, b| a.function.name.cmp(&b.function.name));
-}
-
-#[derive(Clone)]
-pub struct Provider {
+pub struct EngineProvider {
     api_base: String,
     api_key: String,
-    client: Client,
+    client: ProviderClient,
     kind: ProviderKind,
-    auth: Option<ProviderAuth>,
-    model_config: crate::config::ModelConfig,
+    auth: Option<AuthKind>,
+    model_config: ModelConfig,
     /// Sticky routing token for Codex: set from the first response, echoed on subsequent requests within the same turn.
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    clock: std::sync::Arc<dyn crate::clock::Clock>,
 }
 
-/// Ensure `tool_calls[].function.arguments` is valid JSON; some models emit malformed strings.
-pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Some(tcs) = obj.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
-        for tc in tcs {
-            if let Some(args) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
-                if let Some(s) = args.as_str() {
-                    if serde_json::from_str::<serde_json::Value>(s).is_err() {
-                        *args = serde_json::json!("{}");
-                    }
-                }
-            }
-        }
-    }
+struct EngineChatAuth {
+    is_codex: bool,
+    is_copilot: bool,
+    request_api_key: String,
+    codex_auth: Option<smelt_provider::codex::CodexTokens>,
+    codex_401_retried: bool,
+    copilot_auth: Option<smelt_provider::copilot::CopilotTokens>,
+    copilot_401_retried: bool,
+    copilot_initiator: CopilotInitiator,
+    copilot_has_images: bool,
 }
 
-fn apply_codex_request_headers(
-    mut req: reqwest::RequestBuilder,
-    tokens: Option<&codex::CodexTokens>,
-    turn_state: Option<&str>,
-) -> reqwest::RequestBuilder {
-    req = req.header(reqwest::header::ACCEPT, "text/event-stream");
-    if let Some(tokens) = tokens {
-        req = tokens.apply_headers(req).header("originator", "smelt");
-        if let Some(ts) = turn_state {
-            req = req.header("x-codex-turn-state", ts);
-        }
-    }
-    req
+struct EngineChatAttempt<'a, 'opts> {
+    messages: &'a [Message],
+    tools: &'a [ToolDefinition],
+    model: &'a str,
+    effort: ReasoningEffort,
+    request_opts: &'a ChatRequestOptions,
+    opts: &'opts ChatOptions<'opts>,
+    config: &'a ModelConfig,
+    copilot_model: Option<&'a smelt_provider::copilot::CopilotModel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApiBaseNormalizationHint {
-    pub original: String,
-    pub normalized: String,
-    pub endpoint: &'static str,
-}
-
-fn strip_known_endpoint(base: &str) -> Option<(&str, &'static str)> {
-    for (suffix, endpoint) in [
-        ("/chat/completions", "chat/completions"),
-        ("/responses", "responses"),
-        ("/messages", "messages"),
-    ] {
-        if let Some(stripped) = base.strip_suffix(suffix) {
-            return Some((stripped.trim_end_matches('/'), endpoint));
-        }
-    }
-    None
-}
-
-pub fn api_base_normalization_hint(api_base: &str) -> Option<ApiBaseNormalizationHint> {
-    let original = api_base.trim().trim_end_matches('/');
-    let (normalized, endpoint) = strip_known_endpoint(original)?;
-    Some(ApiBaseNormalizationHint {
-        original: original.to_string(),
-        normalized: normalized.to_string(),
-        endpoint,
-    })
-}
-
-pub fn normalize_api_base(api_base: &str) -> String {
-    api_base_normalization_hint(api_base)
-        .map(|hint| hint.normalized)
-        .unwrap_or_else(|| api_base.trim().trim_end_matches('/').to_string())
-}
-
-fn endpoint_url(api_base: &str, endpoint: &str) -> String {
-    let base = normalize_api_base(api_base);
-    let endpoint = endpoint.trim_start_matches('/');
-    format!("{base}/{endpoint}")
-}
-
-impl Provider {
+impl EngineProvider {
     pub(crate) fn supports_mid_turn_reasoning_changes(&self) -> bool {
         self.kind.descriptor().mid_turn_reasoning_changes
     }
@@ -965,7 +140,7 @@ impl Provider {
         api_key: String,
         provider_type: &str,
         client: Client,
-        clock: std::sync::Arc<dyn crate::clock::Clock>,
+        _clock: std::sync::Arc<dyn crate::clock::Clock>,
     ) -> Self {
         let api_base = normalize_api_base(&api_base);
         let kind = ProviderKind::from_config_and_url(provider_type, &api_base);
@@ -973,12 +148,11 @@ impl Provider {
         Self {
             api_base,
             api_key,
-            client,
+            client: ProviderClient::new(client),
             kind,
             auth,
             model_config: Default::default(),
             turn_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            clock,
         }
     }
 
@@ -994,7 +168,7 @@ impl Provider {
         self.kind
     }
 
-    pub(crate) fn model_config(&self) -> &crate::config::ModelConfig {
+    pub(crate) fn model_config(&self) -> &ModelConfig {
         &self.model_config
     }
 
@@ -1003,7 +177,7 @@ impl Provider {
         &self.api_key
     }
 
-    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+    pub fn with_model_config(mut self, config: ModelConfig) -> Self {
         self.model_config = config;
         self
     }
@@ -1032,507 +206,268 @@ impl Provider {
         tools: &[ToolDefinition],
         model: &str,
         effort: ReasoningEffort,
+        request_opts: &ChatRequestOptions,
         opts: &ChatOptions<'_>,
-    ) -> Result<LLMResponse, ProviderError> {
-        let is_provider_anthropic =
-            self.kind == ProviderKind::Anthropic || self.kind == ProviderKind::AnthropicCompatible;
-        let is_codex = self.kind == ProviderKind::Codex;
+    ) -> Result<EngineChatResponse, ProviderError> {
         let is_copilot = self.kind == ProviderKind::Copilot;
-        let copilot_model = if is_copilot {
-            copilot::cached_model(model)
-        } else {
-            None
-        };
-        let copilot_wire =
-            is_copilot.then(|| select_copilot_wire_api(model, copilot_model.as_ref()));
-        let request_wire = copilot_wire.unwrap_or_else(|| self.kind.wire_api());
-        let is_anthropic_wire = is_provider_anthropic || request_wire.is_anthropic();
+        let copilot_model = is_copilot.then(|| copilot::cached_model(model)).flatten();
+        let config = self
+            .resolve_model_config(model, copilot_model.as_ref())
+            .await;
+        let effort = self.resolve_reasoning_effort(effort, &config, model).await;
+        let mut auth = self.prepare_chat_auth(messages).await?;
 
-        let mut codex_auth = if is_codex {
-            Some(
-                codex::ensure_access_token_full(&self.client)
-                    .await
-                    .map_err(ProviderError::Auth)?,
-            )
-        } else {
-            None
-        };
-        let mut codex_401_retried = false;
-
-        let mut copilot_auth = if is_copilot {
-            Some(
-                copilot::ensure_access_token_full(&self.client)
-                    .await
-                    .map_err(ProviderError::Auth)?,
-            )
-        } else {
-            None
-        };
-        let mut copilot_401_retried = false;
-
-        let mut config = self.model_config.clone();
-        if config.max_tokens.is_none() {
-            let copilot_output_tokens = if is_copilot {
-                copilot_model
-                    .as_ref()
-                    .and_then(|m| m.max_output_tokens)
-                    .or_else(|| copilot::cached_output_tokens(model))
-            } else {
-                None
+        loop {
+            let attempt = EngineChatAttempt {
+                messages,
+                tools,
+                model,
+                effort,
+                request_opts,
+                opts,
+                config: &config,
+                copilot_model: copilot_model.as_ref(),
             };
-            if let Some(tokens) = copilot_output_tokens {
-                config.max_tokens = Some(tokens);
-            } else {
-                crate::catalog::ensure_loaded(&self.client).await;
-                if let Some(tokens) =
-                    crate::catalog::output_tokens(self.kind.as_str(), &self.api_base, model)
-                {
-                    config.max_tokens = Some(tokens);
-                }
-            }
-        }
+            let result = self.send_chat_attempt(attempt, &auth).await;
 
-        let effort =
-            effective_reasoning_effort(effort, &config, self.kind.as_str(), &self.api_base, model);
-
-        let (mut url, mut body) = match self.kind {
-            ProviderKind::OpenAiCompatible => {
-                let url = endpoint_url(&self.api_base, "chat/completions");
-                let body = chat_completions::build_body(messages, tools, model, effort, &config);
-                (url, body)
-            }
-            ProviderKind::OpenAi => {
-                let url = endpoint_url(&self.api_base, "responses");
-                let body = openai::build_body(messages, tools, model, effort, &config);
-                (url, body)
-            }
-            ProviderKind::Codex => {
-                let url = codex::CODEX_API_ENDPOINT.to_string();
-                let body = openai::build_codex_body(messages, tools, model, effort, &config);
-                (url, body)
-            }
-            ProviderKind::AnthropicCompatible
-            | ProviderKind::Anthropic
-            | ProviderKind::KimiCode => {
-                let url = endpoint_url(&self.api_base, "messages");
-                let body =
-                    anthropic::build_body(messages, tools, model, effort, &config, &opts.cache);
-                (url, body)
-            }
-            ProviderKind::Copilot => {
-                // Base URL comes from the Copilot token's proxy-ep claim.
-                let base = copilot_auth
-                    .as_ref()
-                    .map(|t| t.api_base.as_str())
-                    .unwrap_or(copilot::DEFAULT_COPILOT_API_BASE);
-                let wire = copilot_wire.expect("copilot wire api is set for Copilot provider");
-                let url = wire.copilot_url(base);
-                let body = copilot_body(wire, messages, tools, model, effort, &config, &opts.cache);
-                (url, body)
-            }
-        };
-
-        let request_api_key = match self.auth {
-            Some(ProviderAuth::KimiCodeOAuth) => kimi_code::access_token(&self.client)
-                .await
-                .map_err(ProviderError::Auth)?,
-            Some(ProviderAuth::ApiKey) | None => self.api_key.clone(),
-        };
-
-        let copilot_initiator: &'static str = if is_copilot {
-            match messages.last().map(|m| m.role) {
-                Some(protocol::Role::User) | None => "user",
-                _ => "agent",
-            }
-        } else {
-            "user"
-        };
-        let copilot_has_images = is_copilot && messages_have_images(messages);
-
-        if let Some(fmt) = opts.response_format.as_ref() {
-            apply_response_format(&mut body, request_wire, fmt);
-        }
-
-        // OpenAI / Codex routing hint: keeps follow-up requests landing on
-        // the shard that already cached the prefix. Anthropic uses
-        // cache_control markers instead; Copilot and local OpenAI-compat
-        // servers don't recognize the field.
-        if matches!(self.kind, ProviderKind::OpenAi | ProviderKind::Codex) {
-            if let Some(ref key) = opts.cache.prompt_cache_key {
-                body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
-            }
-        }
-
-        let use_stream = opts.on_delta.is_some() || is_codex;
-        if use_stream {
-            body["stream"] = serde_json::json!(true);
-            if self.kind == ProviderKind::OpenAiCompatible {
-                body["stream_options"] = serde_json::json!({"include_usage": true});
-            }
-        }
-
-        if log::Level::Debug.enabled() {
-            log::entry(
-                log::Level::Debug,
-                "request",
-                &serde_json::json!({
-                    "url": url,
-                    "provider_kind": format!("{:?}", self.kind),
-                    "body": body,
-                }),
-            );
-        }
-
-        let max_retries = 9;
-        let max_stream_retries = 5;
-
-        struct AttemptEvent<'a> {
-            attempt: u32,
-            elapsed_ms: u64,
-            result: Result<&'a LLMResponse, &'a ProviderError>,
-            raw_response: Option<&'a serde_json::Value>,
-            http_status: Option<u16>,
-            error_body: Option<&'a str>,
-            url: &'a str,
-        }
-
-        let emit_attempt = |event: AttemptEvent<'_>| {
-            if let Some(cb) = opts.on_attempt {
-                cb(RequestAttemptInfo {
-                    url: event.url,
-                    provider_kind: self.kind,
-                    model,
-                    body: &body,
-                    attempt: event.attempt,
-                    elapsed_ms: event.elapsed_ms,
-                    result: event.result,
-                    http_status: event.http_status,
-                    error_body: event.error_body,
-                    raw_response: event.raw_response,
-                });
-            }
-        };
-
-        for attempt in 0..=max_retries {
-            let request_start = self.clock.instant_now();
-
-            let mut req = self.client.post(&url).json(&body);
-            if self.auth == Some(ProviderAuth::KimiCodeOAuth) {
-                req = kimi_code::apply_default_headers(req);
-            }
-            if is_codex {
-                let turn_state = self.turn_state.lock().unwrap().clone();
-                req = apply_codex_request_headers(req, codex_auth.as_ref(), turn_state.as_deref());
-            } else if is_copilot {
-                if let Some(ref tokens) = copilot_auth {
-                    req = req.bearer_auth(&tokens.access_token);
-                }
-                for (k, v) in copilot::base_headers() {
-                    req = req.header(k, v);
-                }
-                req = req
-                    .header("X-Initiator", copilot_initiator)
-                    .header("Openai-Intent", "conversation-edits");
-                if copilot_has_images {
-                    req = req.header("Copilot-Vision-Request", "true");
-                }
-            } else if let Some(auth) = api_key_auth(self.kind, &request_api_key) {
-                match auth {
-                    ApiKeyAuth::Bearer => req = req.bearer_auth(&request_api_key),
-                    ApiKeyAuth::XApiKey => req = req.header("x-api-key", &request_api_key),
-                }
-            }
-            if is_anthropic_wire {
-                req = req.header("anthropic-version", "2023-06-01");
-            }
-
-            let resp = tokio::select! {
-                biased;
-                _ = opts.cancel.cancelled() => {
-                    let err = ProviderError::Cancelled;
-                    let elapsed = self.clock.instant_now().duration_since(request_start);
-                    emit_attempt(AttemptEvent {
-                        attempt: attempt as u32,
-                        elapsed_ms: elapsed.as_millis() as u64,
-                        result: Err(&err),
-                        raw_response: None,
-                        http_status: None,
-                        error_body: None,
-                        url: &url,
-                    });
-                    return Err(err);
-                }
-                result = req.send() => match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let err = ProviderError::Network(e.to_string());
-                        let elapsed = self.clock.instant_now().duration_since(request_start);
-                        emit_attempt(AttemptEvent {
-                            attempt: attempt as u32,
-                            elapsed_ms: elapsed.as_millis() as u64,
-                            result: Err(&err),
-                            raw_response: None,
-                            http_status: None,
-                            error_body: None,
-                            url: &url,
-                        });
-                        log::entry(log::Level::Warn, "request_error", &serde_json::json!({
-                            "attempt": attempt,
-                            "error": format!("{e:?}"),
-                        }));
-                        if attempt < max_retries {
-                            let delay = backoff_delay(attempt);
-                            emit_retry(opts, delay, attempt);
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                        return Err(err);
-                    }
-                }
-            };
-
-            if !resp.status().is_success() {
-                let code = resp.status().as_u16();
-                let retry_after = parse_retry_after(&resp);
-                let text = resp.text().await.unwrap_or_default();
-
-                let err = ProviderError::from_http_at(
-                    code,
-                    text.clone(),
-                    retry_after,
-                    unix_secs(self.clock.system_now()),
-                );
-                let elapsed = self.clock.instant_now().duration_since(request_start);
-                emit_attempt(AttemptEvent {
-                    attempt: attempt as u32,
-                    elapsed_ms: elapsed.as_millis() as u64,
-                    result: Err(&err),
-                    raw_response: None,
-                    http_status: Some(code),
-                    error_body: Some(&text),
-                    url: &url,
-                });
-
-                log::entry(
-                    log::Level::Warn,
-                    "request_error",
-                    &serde_json::json!({
-                        "attempt": attempt,
-                        "status": code,
-                        "retry_after_secs": retry_after.map(|d| d.as_secs_f64()),
-                        "error": err.to_string(),
-                    }),
-                );
-
-                if is_codex && matches!(err, ProviderError::Auth(_)) && !codex_401_retried {
-                    codex_401_retried = true;
-                    if let Some(ref stale) = codex_auth {
-                        if let Ok(refreshed) =
-                            codex::refresh_tokens(&self.client, &stale.refresh_token).await
-                        {
-                            log::entry(
-                                log::Level::Info,
-                                "codex_401_recovery",
-                                &serde_json::json!({ "account_id": refreshed.account_id }),
-                            );
-                            codex_auth = Some(refreshed);
-                            continue;
-                        }
-                    }
-                }
-
-                // Copilot: the short-lived access token may expire mid-flight; refresh once.
-                if is_copilot && matches!(err, ProviderError::Auth(_)) && !copilot_401_retried {
-                    copilot_401_retried = true;
-                    if let Some(ref stale) = copilot_auth {
-                        if let Ok(refreshed) =
-                            copilot::refresh_tokens(&self.client, &stale.refresh_token).await
-                        {
-                            log::entry(
-                                log::Level::Info,
-                                "copilot_401_recovery",
-                                &serde_json::json!({ "expires_at": refreshed.expires_at }),
-                            );
-                            let base = refreshed.api_base.trim_end_matches('/');
-                            url = copilot_wire
-                                .expect("copilot wire api is set for Copilot provider")
-                                .copilot_url(base);
-                            copilot_auth = Some(refreshed);
-                            continue;
-                        }
-                    }
-                }
-
-                if attempt < max_retries {
-                    if let Some(delay) = retry_delay_for(
-                        &err,
-                        attempt,
-                        retry_after,
-                        unix_secs(self.clock.system_now()),
-                    ) {
-                        emit_retry(opts, delay, attempt);
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                }
-                return Err(err);
-            }
-
-            let http_status = Some(resp.status().as_u16());
-
-            if is_codex && self.turn_state.lock().unwrap().is_none() {
-                if let Some(val) = resp.headers().get("x-codex-turn-state") {
-                    if let Ok(s) = val.to_str() {
-                        *self.turn_state.lock().unwrap() = Some(s.to_string());
-                    }
-                }
-            }
-
-            let noop_delta: &(dyn Fn(ProviderStreamEvent<'_>) + Send + Sync) = &|_| {};
-            let on_delta = opts.on_delta.unwrap_or(noop_delta);
-
-            let parsed_result = if use_stream {
-                (
-                    request_wire
-                        .read_stream(
-                            resp,
-                            opts.cancel,
-                            on_delta,
-                            unix_secs(self.clock.system_now()),
-                        )
-                        .await,
-                    None,
-                    http_status,
-                    None,
-                )
-            } else {
-                match resp.text().await {
-                    Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(data) => {
-                            if log::Level::Debug.enabled() {
-                                log::entry(
-                                    log::Level::Debug,
-                                    "raw_response",
-                                    &serde_json::json!({
-                                        "url": url,
-                                        "provider_kind": format!("{:?}", self.kind),
-                                        "wire_api": format!("{:?}", request_wire),
-                                        "data": data,
-                                    }),
-                                );
-                            }
-
-                            (
-                                request_wire.parse_response(&data),
-                                Some(data),
-                                http_status,
-                                None,
-                            )
-                        }
-                        Err(e) => (
-                            Err(ProviderError::InvalidResponse(e.to_string())),
-                            None,
-                            http_status,
-                            Some(text),
-                        ),
-                    },
-                    Err(e) => (
-                        Err(ProviderError::InvalidResponse(e.to_string())),
-                        None,
-                        http_status,
-                        None,
-                    ),
-                }
-            };
-
-            let (parsed, raw, status) = match parsed_result {
-                (Ok(parsed), raw, status, _) => (parsed, raw, status),
-                (Err(err), _, status, error_body) if attempt < max_stream_retries => {
-                    let elapsed = self.clock.instant_now().duration_since(request_start);
-                    emit_attempt(AttemptEvent {
-                        attempt: attempt as u32,
-                        elapsed_ms: elapsed.as_millis() as u64,
-                        result: Err(&err),
-                        raw_response: None,
-                        http_status: status,
-                        error_body: error_body.as_deref(),
-                        url: &url,
-                    });
-                    let Some(delay) =
-                        retry_delay_for(&err, attempt, None, unix_secs(self.clock.system_now()))
-                    else {
-                        return Err(err);
-                    };
-                    log::entry(
-                        log::Level::Warn,
-                        "request_error",
-                        &serde_json::json!({
-                            "attempt": attempt,
-                            "error": err.to_string(),
-                        }),
-                    );
-                    emit_retry(opts, delay, attempt);
-                    tokio::time::sleep(delay).await;
+            match result {
+                Err(ProviderError::Auth(_)) if self.refresh_after_auth_error(&mut auth).await? => {
                     continue;
                 }
-                (Err(err), _, status, error_body) => {
-                    let elapsed = self.clock.instant_now().duration_since(request_start);
-                    emit_attempt(AttemptEvent {
-                        attempt: attempt as u32,
-                        elapsed_ms: elapsed.as_millis() as u64,
-                        result: Err(&err),
-                        raw_response: None,
-                        http_status: status,
-                        error_body: error_body.as_deref(),
-                        url: &url,
-                    });
-                    return Err(err);
+                Ok(response) => {
+                    self.store_response_metadata(&response, &auth);
+                    return Ok(response);
                 }
-            };
-
-            let elapsed = self.clock.instant_now().duration_since(request_start);
-            // End-to-end provider request throughput: includes request/response latency
-            // and streaming time, but not any later tool execution or permission waits.
-            let tokens_per_sec = parsed.usage.completion_tokens.and_then(|c| {
-                if c > 0 && elapsed.as_secs_f64() >= 0.001 {
-                    Some(c as f64 / elapsed.as_secs_f64())
-                } else {
-                    None
-                }
-            });
-            let response = parsed.into_response(tokens_per_sec);
-            emit_attempt(AttemptEvent {
-                attempt: attempt as u32,
-                elapsed_ms: elapsed.as_millis() as u64,
-                result: Ok(&response),
-                raw_response: raw.as_ref(),
-                http_status: status,
-                error_body: None,
-                url: &url,
-            });
-
-            if log::Level::Debug.enabled() {
-                log::entry(
-                    log::Level::Debug,
-                    "response",
-                    &serde_json::json!({
-                        "content": response.content,
-                        "reasoning_content": response.reasoning_content,
-                        "tool_calls": response.tool_calls,
-                        "context_tokens": response.usage.context_tokens,
-                        "prompt_tokens": response.usage.prompt_tokens,
-                    }),
-                );
+                result => return result,
             }
+        }
+    }
 
-            return Ok(response);
+    async fn prepare_chat_auth(
+        &self,
+        messages: &[Message],
+    ) -> Result<EngineChatAuth, ProviderError> {
+        let is_codex = self.kind == ProviderKind::Codex;
+        let is_copilot = self.kind == ProviderKind::Copilot;
+        let codex_auth = if is_codex {
+            Some(
+                codex::ensure_access_token_full(self.client.http())
+                    .await
+                    .map_err(ProviderError::Auth)?,
+            )
+        } else {
+            None
+        };
+        let copilot_auth = if is_copilot {
+            Some(
+                copilot::ensure_access_token_full(self.client.http())
+                    .await
+                    .map_err(ProviderError::Auth)?,
+            )
+        } else {
+            None
+        };
+        let request_api_key = match self.auth {
+            Some(AuthKind::KimiCodeOAuth) => kimi_code::access_token(self.client.http())
+                .await
+                .map_err(ProviderError::Auth)?,
+            Some(AuthKind::ApiKey) | None => self.api_key.clone(),
+        };
+        let copilot_initiator = if is_copilot {
+            match messages.last().map(|m| m.role) {
+                Some(protocol::Role::User) | None => CopilotInitiator::User,
+                _ => CopilotInitiator::Agent,
+            }
+        } else {
+            CopilotInitiator::User
+        };
+
+        Ok(EngineChatAuth {
+            is_codex,
+            is_copilot,
+            request_api_key,
+            codex_auth,
+            codex_401_retried: false,
+            copilot_auth,
+            copilot_401_retried: false,
+            copilot_initiator,
+            copilot_has_images: is_copilot && messages_have_images(messages),
+        })
+    }
+
+    async fn send_chat_attempt(
+        &self,
+        attempt: EngineChatAttempt<'_, '_>,
+        auth: &EngineChatAuth,
+    ) -> Result<EngineChatResponse, ProviderError> {
+        let turn_state = self.turn_state.lock().unwrap().clone();
+        let kimi_headers =
+            (self.auth == Some(AuthKind::KimiCodeOAuth)).then(kimi_code::protocol_headers);
+        let provider = match self.auth {
+            Some(AuthKind::KimiCodeOAuth) => {
+                let Some(headers) = kimi_headers.as_ref() else {
+                    return Err(ProviderError::InvalidResponse(
+                        "kimi-code headers are missing".to_string(),
+                    ));
+                };
+                ChatProvider::kimi_code(&auth.request_api_key, headers)
+            }
+            Some(AuthKind::ApiKey) => ChatProvider::api_key(self.kind, &auth.request_api_key),
+            None if auth.is_codex => {
+                let Some(tokens) = auth.codex_auth.as_ref() else {
+                    return Err(ProviderError::Auth(
+                        "codex authentication is missing".to_string(),
+                    ));
+                };
+                ChatProvider::codex(tokens, turn_state.as_deref())
+            }
+            None if auth.is_copilot => {
+                let Some(tokens) = auth.copilot_auth.as_ref() else {
+                    return Err(ProviderError::Auth(
+                        "copilot authentication is missing".to_string(),
+                    ));
+                };
+                ChatProvider::copilot(
+                    tokens,
+                    attempt.model,
+                    attempt.copilot_model,
+                    auth.copilot_initiator,
+                    auth.copilot_has_images,
+                )
+            }
+            None => ChatProvider::none(self.kind),
+        };
+        let request = smelt_provider::ChatRequest {
+            provider,
+            api_base: &self.api_base,
+            model: attempt.model,
+            messages: attempt.messages,
+            tools: attempt.tools,
+            effort: attempt.effort,
+            config: attempt.config,
+            cache: attempt.request_opts.cache.clone(),
+            response_format: attempt.request_opts.response_format.clone(),
+        };
+
+        self.client.chat(request, attempt.opts).await
+    }
+
+    async fn refresh_after_auth_error(
+        &self,
+        auth: &mut EngineChatAuth,
+    ) -> Result<bool, ProviderError> {
+        if auth.is_codex && !auth.codex_401_retried {
+            auth.codex_401_retried = true;
+            let Some(stale) = auth.codex_auth.as_ref() else {
+                return Ok(false);
+            };
+            if let Ok(refreshed) =
+                codex::refresh_tokens(self.client.http(), &stale.refresh_token).await
+            {
+                log::entry(
+                    log::Level::Info,
+                    "codex_401_recovery",
+                    &serde_json::json!({ "account_id": refreshed.account_id }),
+                );
+                auth.codex_auth = Some(refreshed);
+                return Ok(true);
+            }
         }
 
-        Err(ProviderError::MaxRetries)
+        if auth.is_copilot && !auth.copilot_401_retried {
+            auth.copilot_401_retried = true;
+            let Some(stale) = auth.copilot_auth.as_ref() else {
+                return Ok(false);
+            };
+            if let Ok(refreshed) =
+                copilot::refresh_tokens(self.client.http(), &stale.refresh_token).await
+            {
+                log::entry(
+                    log::Level::Info,
+                    "copilot_401_recovery",
+                    &serde_json::json!({ "expires_at": refreshed.expires_at }),
+                );
+                auth.copilot_auth = Some(refreshed);
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn store_response_metadata(&self, response: &EngineChatResponse, auth: &EngineChatAuth) {
+        if !auth.is_codex {
+            return;
+        }
+        if let Some(state) = response.metadata.codex_turn_state.as_deref() {
+            let mut turn_state = self.turn_state.lock().unwrap();
+            if turn_state.is_none() {
+                *turn_state = Some(state.to_string());
+            }
+        }
+    }
+
+    async fn resolve_model_config(
+        &self,
+        model: &str,
+        copilot_model: Option<&smelt_provider::copilot::CopilotModel>,
+    ) -> ModelConfig {
+        let mut config = self.model_config.clone();
+        if config.max_tokens.is_some() {
+            return config;
+        }
+
+        let copilot_output_tokens = if self.kind == ProviderKind::Copilot {
+            copilot_model
+                .and_then(|m| m.max_output_tokens)
+                .or_else(|| copilot::cached_output_tokens(model))
+        } else {
+            None
+        };
+        if let Some(tokens) = copilot_output_tokens {
+            config.max_tokens = Some(tokens);
+            return config;
+        }
+
+        self.ensure_catalog_loaded().await;
+        if let Some(tokens) =
+            smelt_provider::catalog::output_tokens(self.kind.as_config_str(), &self.api_base, model)
+        {
+            config.max_tokens = Some(tokens);
+        }
+        config
+    }
+
+    async fn resolve_reasoning_effort(
+        &self,
+        requested: ReasoningEffort,
+        config: &ModelConfig,
+        model: &str,
+    ) -> ReasoningEffort {
+        if config.supports_reasoning.is_none() {
+            self.ensure_catalog_loaded().await;
+        }
+        let supports_reasoning = config.supports_reasoning.or_else(|| {
+            smelt_provider::catalog::supports_reasoning(
+                self.kind.as_config_str(),
+                &self.api_base,
+                model,
+            )
+        });
+        smelt_provider::effective_reasoning_effort(
+            requested,
+            self.kind.as_config_str(),
+            supports_reasoning,
+        )
+    }
+
+    async fn ensure_catalog_loaded(&self) {
+        let catalog_cache_dir = crate::paths::cache_dir().join("web");
+        smelt_provider::catalog::ensure_loaded(self.client.http(), Some(&catalog_cache_dir)).await;
     }
 
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
-        let provider_label = self.kind.as_str();
+        let provider_label = self.kind.as_config_str();
         if let Some(v) = self.model_config.context_window {
             crate::log::entry(
                 crate::log::Level::Info,
@@ -1551,13 +486,15 @@ impl Provider {
         // if it doesn't expose a window field.
         let from_provider = match self.kind {
             ProviderKind::OpenAiCompatible => {
-                self.fetch_context_window_openai_compatible(model).await
+                self.client
+                    .fetch_context_window_openai_compatible(&self.api_base, &self.api_key, model)
+                    .await
             }
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
             ProviderKind::KimiCode => match kimi_code::cached_context_window(model) {
                 Some(v) => Some(v),
-                None => kimi_code::fetch_model_info(&self.client)
+                None => kimi_code::fetch_model_info(self.client.http())
                     .await
                     .ok()
                     .into_iter()
@@ -1565,17 +502,34 @@ impl Provider {
                     .find(|info| info.matches_name(model))
                     .and_then(|info| info.context_length),
             },
-            ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
+            ProviderKind::Anthropic => {
+                self.client
+                    .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
+                    .await
+            }
             ProviderKind::AnthropicCompatible => {
-                match self.fetch_context_window_anthropic(model).await {
+                match self
+                    .client
+                    .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
+                    .await
+                {
                     Some(v) => Some(v),
-                    None => self.fetch_context_window_openai_compatible(model).await,
+                    None => {
+                        self.client
+                            .fetch_context_window_openai_compatible(
+                                &self.api_base,
+                                &self.api_key,
+                                model,
+                            )
+                            .await
+                    }
                 }
             }
             ProviderKind::Copilot => copilot::cached_context_window(model),
         };
-        let result = from_provider
-            .or_else(|| crate::catalog::context_window(provider_label, &self.api_base, model));
+        let result = from_provider.or_else(|| {
+            smelt_provider::catalog::context_window(provider_label, &self.api_base, model)
+        });
         crate::log::entry(
             crate::log::Level::Info,
             "fetch_context_window",
@@ -1588,125 +542,6 @@ impl Provider {
         );
         result
     }
-
-    async fn fetch_context_window_anthropic(&self, model: &str) -> Option<u32> {
-        let url = format!("{}/models/{}", self.api_base, model);
-        let resp = self
-            .client
-            .get(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let data: serde_json::Value = resp.json().await.ok()?;
-        data["max_input_tokens"].as_u64().map(|v| v as u32)
-    }
-
-    async fn fetch_context_window_openai_compatible(&self, model: &str) -> Option<u32> {
-        let url = format!("{}/models", self.api_base);
-        let mut req = self.client.get(&url);
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
-        }
-        let resp = req.send().await.ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let data: serde_json::Value = resp.json().await.ok()?;
-        let models = data["data"].as_array()?;
-        let entry = models.iter().find(|m| models_entry_matches(m, model))?;
-        context_window_from_models_entry(entry)
-    }
-}
-
-/// Kimi puts the human-facing name in `display_name` and a stable
-/// backend slug in `id`, so accept either.
-fn models_entry_matches(entry: &serde_json::Value, model: &str) -> bool {
-    let eq = |field: &str| {
-        entry[field]
-            .as_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case(model))
-    };
-    eq("id") || eq("display_name")
-}
-
-/// Pick the context window out of one `/v1/models` entry. Each backend
-/// uses a different field; we walk the common ones in priority order.
-fn context_window_from_models_entry(entry: &serde_json::Value) -> Option<u32> {
-    // vLLM / SGLang advertise the raw `max_model_len`.
-    if let Some(v) = entry["max_model_len"].as_u64() {
-        return Some(v as u32);
-    }
-    // Moonshot / Kimi / OpenRouter / DeepSeek / Together AI.
-    if let Some(v) = entry["context_length"].as_u64() {
-        return Some(v as u32);
-    }
-    // Groq + a handful of others.
-    if let Some(v) = entry["context_window"].as_u64() {
-        return Some(v as u32);
-    }
-    // llama.cpp server: published as a launcher arg pair on `status.args`.
-    if let Some(args) = entry["status"]["args"].as_array() {
-        for i in 0..args.len().saturating_sub(1) {
-            if args[i].as_str() == Some("--ctx-size") {
-                return args[i + 1].as_str()?.parse::<u32>().ok();
-            }
-        }
-    }
-    None
-}
-
-fn apply_response_format(body: &mut serde_json::Value, wire: WireApi, fmt: &ResponseFormat) {
-    match wire {
-        WireApi::ChatCompletions => {
-            body["response_format"] = serde_json::json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": fmt.name,
-                    "schema": fmt.schema,
-                    "strict": true,
-                }
-            });
-        }
-        WireApi::OpenAiResponses => {
-            body["text"] = serde_json::json!({
-                "format": {
-                    "type": "json_schema",
-                    "name": fmt.name,
-                    "schema": fmt.schema,
-                    "strict": true,
-                }
-            });
-        }
-        WireApi::AnthropicMessages => {
-            // Older models (Haiku 3.5, Sonnet 3.7, etc.) 400 if this field is sent.
-            let model = body["model"].as_str().unwrap_or("");
-            if !anthropic_supports_structured_output(model) {
-                return;
-            }
-            let format_val = serde_json::json!({
-                "type": "json_schema",
-                "schema": fmt.schema,
-            });
-            match body.get_mut("output_config") {
-                Some(v) if v.is_object() => {
-                    v["format"] = format_val;
-                }
-                _ => {
-                    body["output_config"] = serde_json::json!({ "format": format_val });
-                }
-            }
-        }
-    }
-}
-
-fn anthropic_supports_structured_output(model: &str) -> bool {
-    model.contains("mythos")
-        || parse_claude_model_version(model).is_some_and(|version| version.at_least(4, 5))
 }
 
 fn messages_have_images(messages: &[Message]) -> bool {
@@ -1728,123 +563,6 @@ pub fn slugify(title: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FuzzProviderSummary {
-    pub ok: bool,
-    pub content_len: usize,
-    pub reasoning_len: usize,
-    pub reasoning_blocks: usize,
-    pub tool_calls: usize,
-    pub text_deltas: usize,
-    pub thinking_deltas: usize,
-    pub tool_arg_deltas: usize,
-    pub usage_fields: usize,
-    pub error: Option<String>,
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-fn fuzz_summary(
-    result: Result<ParsedResponse, ProviderError>,
-    deltas: FuzzProviderSummary,
-) -> FuzzProviderSummary {
-    match result {
-        Ok(parsed) => FuzzProviderSummary {
-            ok: true,
-            content_len: parsed.content.as_deref().map(str::len).unwrap_or(0),
-            reasoning_len: parsed.reasoning.as_deref().map(str::len).unwrap_or(0),
-            reasoning_blocks: parsed.reasoning_blocks.as_ref().map(Vec::len).unwrap_or(0),
-            tool_calls: parsed.tool_calls.len(),
-            usage_fields: usize::from(parsed.usage.context_tokens.is_some())
-                + usize::from(parsed.usage.prompt_tokens.is_some())
-                + usize::from(parsed.usage.completion_tokens.is_some())
-                + usize::from(parsed.usage.cache_read_tokens.is_some())
-                + usize::from(parsed.usage.cache_write_tokens.is_some())
-                + usize::from(parsed.usage.reasoning_tokens.is_some()),
-            ..deltas
-        },
-        Err(err) => FuzzProviderSummary {
-            ok: false,
-            error: Some(err.to_string()),
-            ..deltas
-        },
-    }
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-fn count_delta(summary: &mut FuzzProviderSummary, event: ProviderStreamEvent<'_>) {
-    match event {
-        ProviderStreamEvent::TextDelta(_) => summary.text_deltas += 1,
-        ProviderStreamEvent::ThinkingDelta(_) => summary.thinking_deltas += 1,
-        ProviderStreamEvent::ToolCall(ToolCallStreamEvent::ArgsDelta { .. }) => {
-            summary.tool_arg_deltas += 1
-        }
-        ProviderStreamEvent::ToolCall(
-            ToolCallStreamEvent::Started { .. } | ToolCallStreamEvent::Finished { .. },
-        ) => {}
-    }
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
-    sse::drain_sse_events(buf)
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_parse_provider_response(wire: u8, data: &serde_json::Value) -> FuzzProviderSummary {
-    let result = match wire % 3 {
-        0 => chat_completions::parse_response(data),
-        1 => openai::parse_response(data),
-        _ => anthropic::parse_response(data),
-    };
-    fuzz_summary(result, FuzzProviderSummary::default())
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_parse_provider_stream(wire: u8, events: &[serde_json::Value]) -> FuzzProviderSummary {
-    let mut deltas = FuzzProviderSummary::default();
-    let result = match wire % 3 {
-        0 => chat_completions::parse_stream_events(events, &mut |d| count_delta(&mut deltas, d)),
-        1 => openai::parse_stream_events(events, &mut |d| count_delta(&mut deltas, d)),
-        _ => anthropic::parse_stream_events(events, &mut |d| count_delta(&mut deltas, d)),
-    };
-    fuzz_summary(result, deltas)
-}
-
-/// Fuzz-only entry points: build the provider-shaped request bodies the
-/// same way the production code does, so `cache_invariance` can
-/// byte-compare cached prefixes across randomly-generated histories
-/// without going through the network layer. Gated behind the `fuzz`
-/// feature; not part of the supported API surface - use `Provider::chat`
-/// instead.
-#[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_build_anthropic_body(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    model: &str,
-    effort: ReasoningEffort,
-    config: &crate::config::ModelConfig,
-    cache: &CacheConfig,
-) -> serde_json::Value {
-    anthropic::build_body(messages, tools, model, effort, config, cache)
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_build_openai_body(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    model: &str,
-    effort: ReasoningEffort,
-    config: &crate::config::ModelConfig,
-    cache: &CacheConfig,
-) -> serde_json::Value {
-    let mut body = openai::build_body(messages, tools, model, effort, config);
-    if let Some(ref key) = cache.prompt_cache_key {
-        body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
-    }
-    body
 }
 
 #[cfg(test)]
@@ -1869,8 +587,8 @@ mod tests {
 
     #[test]
     fn kimi_code_api_base_uses_anthropic_messages_wire_even_for_old_configs() {
-        let provider = Provider::new(
-            kimi_code::API_BASE.to_string(),
+        let provider = EngineProvider::new(
+            smelt_provider::kimi_code::API_BASE.to_string(),
             "token".to_string(),
             "openai-compatible",
             Client::new(),
@@ -1883,14 +601,14 @@ mod tests {
 
     #[test]
     fn kimi_code_defers_mid_turn_reasoning_changes() {
-        let kimi = Provider::new(
-            kimi_code::API_BASE.to_string(),
+        let kimi = EngineProvider::new(
+            smelt_provider::kimi_code::API_BASE.to_string(),
             "token".to_string(),
             "kimi-code",
             Client::new(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
-        let openai = Provider::new(
+        let openai = EngineProvider::new(
             "https://api.openai.com/v1".to_string(),
             "token".to_string(),
             "openai",
@@ -1988,7 +706,7 @@ mod tests {
 
     #[test]
     fn provider_normalizes_endpoint_shaped_api_base() {
-        let provider = Provider::new(
+        let provider = EngineProvider::new(
             "https://api.cerebras.ai/v1/chat/completions".to_string(),
             "token".to_string(),
             "openai-compatible",
@@ -2001,72 +719,23 @@ mod tests {
 
     #[test]
     fn openai_compatible_reasoning_requires_explicit_support() {
-        let cfg = crate::config::ModelConfig::default();
         assert_eq!(
-            effective_reasoning_effort(
+            smelt_provider::effective_reasoning_effort(
                 ReasoningEffort::High,
-                &cfg,
                 "openai-compatible",
-                "https://api.cerebras.ai/v1",
-                "m"
+                None
             ),
             ReasoningEffort::Off
         );
 
-        let cfg = crate::config::ModelConfig {
-            supports_reasoning: Some(true),
-            ..Default::default()
-        };
         assert_eq!(
-            effective_reasoning_effort(
+            smelt_provider::effective_reasoning_effort(
                 ReasoningEffort::High,
-                &cfg,
                 "openai-compatible",
-                "https://api.cerebras.ai/v1",
-                "m"
+                Some(true)
             ),
             ReasoningEffort::High
         );
-    }
-
-    #[test]
-    fn codex_request_headers_include_event_stream_accept() {
-        let req =
-            apply_codex_request_headers(Client::new().post("https://example.test"), None, None)
-                .build()
-                .unwrap();
-
-        assert_eq!(
-            req.headers().get(reqwest::header::ACCEPT).unwrap(),
-            "text/event-stream"
-        );
-    }
-
-    #[test]
-    fn codex_request_headers_include_auth_originator_and_turn_state() {
-        let tokens = codex::CodexTokens {
-            access_token: "access".into(),
-            refresh_token: "refresh".into(),
-            expires_at: 123,
-            account_id: Some("acct".into()),
-            last_refresh: 0,
-        };
-        let req = apply_codex_request_headers(
-            Client::new().post("https://example.test"),
-            Some(&tokens),
-            Some("turn"),
-        )
-        .build()
-        .unwrap();
-
-        assert_eq!(
-            req.headers().get(reqwest::header::ACCEPT).unwrap(),
-            "text/event-stream"
-        );
-        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer access");
-        assert_eq!(req.headers().get("ChatGPT-Account-ID").unwrap(), "acct");
-        assert_eq!(req.headers().get("originator").unwrap(), "smelt");
-        assert_eq!(req.headers().get("x-codex-turn-state").unwrap(), "turn");
     }
 
     // ---- non_empty ----
@@ -2306,7 +975,7 @@ mod tests {
 
     #[test]
     fn emit_retry_reports_one_based_retry_count() {
-        let cancel = crate::cancel::CancellationToken::new();
+        let cancel = CancellationToken::new();
         let seen = std::sync::Mutex::new(Vec::new());
         let on_retry = |delay, attempt| seen.lock().unwrap().push((delay, attempt));
         let mut opts = ChatOptions::new(&cancel);
@@ -2665,88 +1334,6 @@ mod tests {
         assert!(!messages_have_images(&[m]));
     }
 
-    // ---- Copilot wire routing ----
-
-    fn copilot_model(
-        id: &str,
-        vendor: Option<&str>,
-        family: Option<&str>,
-    ) -> copilot::CopilotModel {
-        copilot::CopilotModel {
-            id: id.into(),
-            name: id.into(),
-            vendor: vendor.map(|s| s.to_string()),
-            family: family.map(|s| s.to_string()),
-            capability_type: Some("chat".into()),
-            context_window: Some(123_000),
-            max_output_tokens: Some(32_000),
-            policy_state: Some("enabled".into()),
-            supported_reasoning_efforts: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn copilot_wire_uses_cached_anthropic_metadata() {
-        let model = copilot_model("enterprise-claude-alias", Some("Anthropic"), None);
-        assert_eq!(
-            select_copilot_wire_api("enterprise-claude-alias", Some(&model)),
-            WireApi::AnthropicMessages
-        );
-    }
-
-    #[test]
-    fn copilot_wire_uses_cached_family_metadata() {
-        let model = copilot_model("corp-sonnet", None, Some("claude"));
-        assert_eq!(
-            select_copilot_wire_api("corp-sonnet", Some(&model)),
-            WireApi::AnthropicMessages
-        );
-    }
-
-    #[test]
-    fn copilot_wire_routes_claude_models_to_anthropic_messages() {
-        assert_eq!(
-            copilot_wire_api("claude-sonnet-4.6"),
-            WireApi::AnthropicMessages
-        );
-        assert_eq!(
-            copilot_wire_api("claude-opus-4.8"),
-            WireApi::AnthropicMessages
-        );
-    }
-
-    #[test]
-    fn copilot_wire_routes_gpt5_codex_and_oswe_models_to_responses() {
-        assert_eq!(copilot_wire_api("gpt-5-mini"), WireApi::OpenAiResponses);
-        assert_eq!(copilot_wire_api("gpt-5.4"), WireApi::OpenAiResponses);
-        assert_eq!(copilot_wire_api("gpt-5.2-codex"), WireApi::OpenAiResponses);
-        assert_eq!(
-            copilot_wire_api("oswe-vscode-prime"),
-            WireApi::OpenAiResponses
-        );
-    }
-
-    #[test]
-    fn copilot_wire_keeps_gemini_on_chat_completions() {
-        assert_eq!(
-            copilot_wire_api("gemini-3.5-flash"),
-            WireApi::ChatCompletions
-        );
-    }
-
-    #[test]
-    fn copilot_chat_completions_body_drops_local_reasoning_fields() {
-        let body = copilot_chat_completions_body(
-            &[user_msg("hi")],
-            &[],
-            "gemini-3.5-flash",
-            ReasoningEffort::High,
-            &crate::config::ModelConfig::default(),
-        );
-        assert!(body.get("chat_template_kwargs").is_none());
-        assert!(body.get("reasoning_effort").is_none());
-    }
-
     // ---- Provider basics ----
 
     fn http_client() -> Client {
@@ -2755,7 +1342,7 @@ mod tests {
 
     #[test]
     fn provider_new_strips_trailing_slashes_from_api_base() {
-        let p = Provider::new(
+        let p = EngineProvider::new(
             "https://x/".into(),
             "k".into(),
             "openai",
@@ -2767,7 +1354,7 @@ mod tests {
 
     #[test]
     fn provider_new_resolves_kind_from_provider_type() {
-        let p = Provider::new(
+        let p = EngineProvider::new(
             "https://x".into(),
             "k".into(),
             "anthropic",
@@ -2779,7 +1366,7 @@ mod tests {
 
     #[test]
     fn provider_tool_calling_default_is_true() {
-        let p = Provider::new(
+        let p = EngineProvider::new(
             "".into(),
             "".into(),
             "openai",
@@ -2791,11 +1378,11 @@ mod tests {
 
     #[test]
     fn provider_with_model_config_overrides_default() {
-        let cfg = crate::config::ModelConfig {
+        let cfg = ModelConfig {
             tool_calling: Some(false),
             ..Default::default()
         };
-        let p = Provider::new(
+        let p = EngineProvider::new(
             "".into(),
             "".into(),
             "openai",
@@ -2808,21 +1395,20 @@ mod tests {
 
     #[test]
     fn model_config_with_overrides_threads_each_field() {
-        let cfg =
-            crate::config::ModelConfig::default().with_overrides(&protocol::ModelConfigOverrides {
-                temperature: Some(0.1),
-                top_p: Some(0.2),
-                top_k: Some(3),
-                min_p: Some(0.4),
-                repeat_penalty: Some(1.5),
-                max_tokens: Some(8192),
-                thinking_budgets: Some(protocol::ThinkingBudgets {
-                    low: 1024,
-                    medium: 2048,
-                    high: 4096,
-                    max: 8192,
-                }),
-            });
+        let cfg = ModelConfig::default().with_overrides(&protocol::ModelConfigOverrides {
+            temperature: Some(0.1),
+            top_p: Some(0.2),
+            top_k: Some(3),
+            min_p: Some(0.4),
+            repeat_penalty: Some(1.5),
+            max_tokens: Some(8192),
+            thinking_budgets: Some(protocol::ThinkingBudgets {
+                low: 1024,
+                medium: 2048,
+                high: 4096,
+                max: 8192,
+            }),
+        });
         assert_eq!(cfg.temperature, Some(0.1));
         assert_eq!(cfg.top_p, Some(0.2));
         assert_eq!(cfg.top_k, Some(3));
@@ -2838,7 +1424,7 @@ mod tests {
 
     #[test]
     fn model_config_with_overrides_preserves_unset_override_fields() {
-        let base = crate::config::ModelConfig {
+        let base = ModelConfig {
             temperature: Some(0.5),
             top_p: Some(0.8),
             ..Default::default()
@@ -2915,7 +1501,7 @@ mod tests {
 
     #[test]
     fn provider_reset_turn_state_clears_to_none() {
-        let p = Provider::new(
+        let p = EngineProvider::new(
             "".into(),
             "".into(),
             "codex",
@@ -2958,7 +1544,7 @@ mod tests {
             )],
             usage: TokenUsage::default(),
         };
-        let r = p.into_response(Some(12.5));
+        let r = ChatResponse::from_parsed(p, Some(12.5));
         assert_eq!(r.content.as_deref(), Some("c"));
         assert_eq!(r.reasoning_content.as_deref(), Some("r"));
         assert_eq!(r.tool_calls.len(), 1);

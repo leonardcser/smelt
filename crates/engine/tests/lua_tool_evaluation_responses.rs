@@ -6,11 +6,12 @@
 //! commands, but they can only be matched once `classify_tools` has built the
 //! full pending request-id plan for `execute_concurrent`.
 
-use engine::{ApiConfig, EngineConfig, ModelConfig};
+use engine::{ApiConfig, EngineConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, ReasoningEffort, StartTurnPayload, ToolDef, ToolExecutionMode,
     ToolHookFlags, ToolMetadata, UiCommand,
 };
+use smelt_provider::ModelConfig;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;

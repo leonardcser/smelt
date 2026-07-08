@@ -1,25 +1,25 @@
 //! Tool-output trimming for model context windows.
 //!
-//! This is the single engine-level budget for tool output. Tools may still
+//! This is the single provider-facing budget for tool output. Tools may still
 //! self-limit before producing output, but every model-visible tool result is
 //! normalized here before it enters committed history.
 
 use protocol::ToolInvocation;
 
 /// Maximum lines of a single tool output sent to the LLM.
-pub(crate) const MAX_TOOL_OUTPUT_LINES: usize = 2000;
+pub const MAX_TOOL_OUTPUT_LINES: usize = 2000;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 /// Maximum approximate tokens of a single tool output sent to the LLM.
-pub(crate) const MAX_TOOL_OUTPUT_TOKENS: usize = 10_000;
+pub const MAX_TOOL_OUTPUT_TOKENS: usize = 10_000;
 /// Maximum approximate tokens of all tool outputs in one assistant tool step.
-pub(crate) const MAX_TURN_TOOL_OUTPUT_TOKENS: usize = 40_000;
+pub const MAX_TURN_TOOL_OUTPUT_TOKENS: usize = 40_000;
 const TRUNCATION_NOTICE: &str = "[tool output truncated for model context]";
 
 /// Apply the canonical model-visible budget to a batch of tool invocations.
 ///
 /// The per-tool cap keeps any one result bounded; the aggregate cap prevents a
 /// parallel batch of individually-legal outputs from filling the context window.
-pub(crate) fn budget_tool_invocations(invocations: &mut [ToolInvocation]) {
+pub fn budget_tool_invocations(invocations: &mut [ToolInvocation]) {
     for inv in invocations.iter_mut() {
         inv.result.content = trim_tool_output(&inv.result.content, MAX_TOOL_OUTPUT_LINES);
     }
@@ -41,7 +41,7 @@ pub(crate) fn budget_tool_invocations(invocations: &mut [ToolInvocation]) {
 /// Trim a single tool output for model context. Prepends the total line count
 /// and appends an explicit truncation notice when content is clipped by line
 /// count, or keeps the head and tail when content exceeds the token budget.
-pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
+pub fn trim_tool_output(content: &str, max_lines: usize) -> String {
     trim_tool_output_with_budget(content, max_lines, MAX_TOOL_OUTPUT_TOKENS)
 }
 

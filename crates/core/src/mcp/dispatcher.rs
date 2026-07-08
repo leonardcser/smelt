@@ -1,9 +1,9 @@
 use crate::mcp::{args_summary, McpManager, McpToolDef};
 use crate::permissions::ToolOrigin;
-use engine::provider::{FunctionSchema, ToolDefinition};
 use engine::tools::{ToolContext, ToolDispatcher, ToolFuture, ToolResult};
 use protocol::{AgentMode, ToolEvaluation, ToolMetadata};
 use serde_json::Value;
+use smelt_provider::{FunctionSchema, ToolDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -1,6 +1,6 @@
-use crate::provider::ToolDefinition;
 use protocol::ToolEvaluation;
 use serde_json::Value;
+use smelt_provider::ToolDefinition;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

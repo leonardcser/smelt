@@ -324,8 +324,9 @@ pub async fn resolve(
                 .api_key_env
                 .clone()
                 .unwrap_or_else(|| r.api_key_env.clone());
-            let provider_kind = engine::ProviderKind::from_config_and_url(&r.provider_type, &base);
-            let key = if provider_kind == engine::ProviderKind::KimiCode {
+            let provider_kind =
+                smelt_provider::ProviderKind::from_config_and_url(&r.provider_type, &base);
+            let key = if provider_kind == smelt_provider::ProviderKind::KimiCode {
                 String::new()
             } else {
                 match resolve_api_key(&key_env) {
@@ -346,8 +347,8 @@ pub async fn resolve(
             )
         } else if let Some(base) = args.api_base.clone() {
             let key_env = args.api_key_env.clone().unwrap_or_default();
-            let provider_kind = engine::ProviderKind::detect_from_url(&base);
-            let key = if provider_kind == engine::ProviderKind::KimiCode {
+            let provider_kind = smelt_provider::ProviderKind::detect_from_url(&base);
+            let key = if provider_kind == smelt_provider::ProviderKind::KimiCode {
                 String::new()
             } else {
                 match resolve_api_key(&key_env) {
@@ -382,7 +383,7 @@ pub async fn resolve(
     if let Some(ref t) = args.r#type {
         provider_type = t.clone();
     } else if args.api_base.is_some() {
-        provider_type = engine::ProviderKind::detect_from_url(&api_base)
+        provider_type = smelt_provider::ProviderKind::detect_from_url(&api_base)
             .as_config_str()
             .to_string();
     }
@@ -453,7 +454,8 @@ pub async fn resolve(
         default_effort.unwrap_or(ReasoningEffort::Off)
     };
 
-    let provider_kind = engine::ProviderKind::from_config_and_url(&provider_type, &api_base);
+    let provider_kind =
+        smelt_provider::ProviderKind::from_config_and_url(&provider_type, &api_base);
     let mut reasoning_cycle = args
         .reasoning_cycle
         .as_deref()

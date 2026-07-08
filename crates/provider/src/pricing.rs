@@ -1,6 +1,7 @@
 //! Cost resolution: layers a user override on top of the models.dev
 //! catalog. Catalog fetch + storage lives in [`crate::catalog`].
 
+use crate::ModelConfig;
 use protocol::TokenUsage;
 
 /// Per-model pricing in USD per 1M tokens.
@@ -13,7 +14,7 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
-    pub(crate) fn cost(&self, usage: &TokenUsage) -> f64 {
+    pub fn cost(&self, usage: &TokenUsage) -> f64 {
         let input = usage.prompt_tokens.unwrap_or(0) as f64;
         let output = usage.completion_tokens.unwrap_or(0) as f64;
         let cache_read = usage.cache_read_tokens.unwrap_or(0) as f64;
@@ -64,9 +65,12 @@ pub fn resolve(
     model: &str,
     provider_type: &str,
     api_base: &str,
-    config: &crate::config::ModelConfig,
+    config: &ModelConfig,
 ) -> ResolvedPricing {
-    let has_config_override = config.input_cost.is_some() || config.output_cost.is_some();
+    let has_config_override = config.input_cost.is_some()
+        || config.output_cost.is_some()
+        || config.cache_read_cost.is_some()
+        || config.cache_write_cost.is_some();
     let catalog_hit =
         crate::catalog::lookup(provider_type, api_base, model).and_then(|e| e.pricing);
 
@@ -232,7 +236,7 @@ mod tests {
 
     #[test]
     fn resolve_returns_none_source_when_no_config_override_and_catalog_empty() {
-        let cfg = crate::config::ModelConfig::default();
+        let cfg = ModelConfig::default();
         let r = resolve("any-model", "openai-compatible", "", &cfg);
         assert_eq!(r.source, PricingSource::None);
         assert_eq!(r.pricing.input, 0.0);
@@ -240,7 +244,7 @@ mod tests {
 
     #[test]
     fn resolve_uses_config_override_when_provided() {
-        let cfg = crate::config::ModelConfig {
+        let cfg = ModelConfig {
             input_cost: Some(5.0),
             output_cost: Some(10.0),
             cache_read_cost: Some(0.5),
@@ -257,7 +261,7 @@ mod tests {
 
     #[test]
     fn resolve_config_override_partial_falls_back_to_zero_for_missing_fields_when_no_catalog() {
-        let cfg = crate::config::ModelConfig {
+        let cfg = ModelConfig {
             input_cost: Some(5.0),
             ..Default::default()
         };

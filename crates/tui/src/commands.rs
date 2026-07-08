@@ -490,7 +490,7 @@ impl TuiApp {
         self.core.config.api_base = resolved.api_base.clone();
         self.core.config.api_key_env = resolved.api_key_env.clone();
         self.core.config.provider_type = resolved.provider_type.clone();
-        self.core.config.model_config = (&resolved.config).into();
+        self.core.config.model_config = resolved.config.clone();
         if record {
             self.update_session_persist_metadata();
         }
@@ -550,8 +550,9 @@ impl TuiApp {
         let update_api_base = api_base.clone();
         let clock = std::sync::Arc::clone(&self.core.clock);
         tokio::spawn(async move {
-            let provider = engine::Provider::new(api_base, api_key, &provider_type, client, clock)
-                .with_model_config(model_config);
+            let provider =
+                engine::EngineProvider::new(api_base, api_key, &provider_type, client, clock)
+                    .with_model_config(model_config);
             let value = provider.fetch_context_window(&model).await;
             let _ = tx.send(ContextWindowUpdate {
                 request_id,

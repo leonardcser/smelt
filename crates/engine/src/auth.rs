@@ -79,8 +79,8 @@ pub async fn login(
 
 pub fn logout(provider: AuthProvider) {
     match provider {
-        AuthProvider::Codex => provider::codex::CodexTokens::delete(),
-        AuthProvider::Copilot => provider::copilot::CopilotTokens::delete(),
+        AuthProvider::Codex => provider::codex::delete_tokens(),
+        AuthProvider::Copilot => provider::copilot::delete_tokens(),
         AuthProvider::KimiCode => provider::kimi_code::logout(),
     }
 }
@@ -112,8 +112,8 @@ pub fn cached_model_info(kind: AuthProvider) -> Vec<AuthModelInfo> {
 
 pub fn is_logged_in(provider: AuthProvider) -> bool {
     match provider {
-        AuthProvider::Codex => provider::codex::CodexTokens::load().is_some(),
-        AuthProvider::Copilot => provider::copilot::CopilotTokens::load().is_some(),
+        AuthProvider::Codex => provider::codex::load_tokens().is_some(),
+        AuthProvider::Copilot => provider::copilot::load_tokens().is_some(),
         AuthProvider::KimiCode => provider::kimi_code::is_logged_in(),
     }
 }
@@ -145,7 +145,7 @@ pub async fn authenticated_request(
 pub async fn managed_usage(
     provider: AuthProvider,
     client: &reqwest::Client,
-) -> Result<provider::kimi_code::ManagedUsageReport, String> {
+) -> Result<smelt_provider::kimi_code::ManagedUsageReport, String> {
     match provider {
         AuthProvider::KimiCode => provider::kimi_code::managed_usage(client).await,
         AuthProvider::Codex | AuthProvider::Copilot => {
@@ -163,7 +163,7 @@ async fn codex_authenticated_request(
     let tokens = provider::codex::ensure_access_token_full(client).await?;
     let url = format!(
         "{}{}",
-        provider::codex::CHATGPT_BACKEND_API_BASE,
+        smelt_provider::codex::CHATGPT_BACKEND_API_BASE,
         authenticated_path(path)?
     );
     send_authenticated_request(client, method, url, body, |req| tokens.apply_headers(req)).await

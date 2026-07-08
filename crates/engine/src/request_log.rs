@@ -1,12 +1,13 @@
 //! Persistent provider request audit for session introspection.
 
 use protocol::request_log::{RequestError, RequestLogEntry, RequestResponse};
+use smelt_provider::{ProviderError, RequestAttemptInfo};
 
 /// Build one request audit entry and choose its storage payload mode.
 pub fn entry(
     ctx: RequestContext,
-    info: &crate::provider::RequestAttemptInfo<'_>,
-    pricing: &crate::pricing::ResolvedPricing,
+    info: &RequestAttemptInfo<'_>,
+    pricing: &smelt_provider::ResolvedPricing,
     mode: crate::RequestAuditMode,
 ) -> Option<(RequestLogEntry, smelt_store::RequestAuditPayloadMode)> {
     mode.payload_mode()
@@ -18,8 +19,8 @@ pub fn entry(
 pub fn append(
     db: &smelt_store::SessionDb,
     ctx: RequestContext,
-    info: &crate::provider::RequestAttemptInfo<'_>,
-    pricing: &crate::pricing::ResolvedPricing,
+    info: &RequestAttemptInfo<'_>,
+    pricing: &smelt_provider::ResolvedPricing,
     mode: crate::RequestAuditMode,
 ) -> Result<Option<i64>, smelt_store::StoreError> {
     let Some((entry, payload_mode)) = entry(ctx, info, pricing, mode) else {
@@ -40,8 +41,8 @@ pub struct RequestContext {
 
 fn build_entry(
     ctx: RequestContext,
-    info: &crate::provider::RequestAttemptInfo<'_>,
-    pricing: &crate::pricing::ResolvedPricing,
+    info: &RequestAttemptInfo<'_>,
+    pricing: &smelt_provider::ResolvedPricing,
 ) -> RequestLogEntry {
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -86,7 +87,7 @@ fn build_entry(
         ask_id: ctx.ask_id,
         history_len: ctx.history_len,
         timestamp_ms,
-        provider_kind: info.provider_kind.as_str().to_string(),
+        provider_kind: info.provider_kind.as_config_str().to_string(),
         api_base: info
             .url
             .split("?")
@@ -123,11 +124,10 @@ fn build_entry(
 }
 
 fn provider_error_to_log_error(
-    err: &crate::provider::ProviderError,
+    err: &ProviderError,
     http_status: Option<u16>,
     body: Option<String>,
 ) -> RequestError {
-    use crate::provider::ProviderError;
     let (kind, status) = match err {
         ProviderError::Cancelled => ("cancelled", http_status),
         ProviderError::RateLimited { .. } => ("rate_limited", http_status),
@@ -167,9 +167,9 @@ fn truncate_error_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::{ModelPricing, PricingSource, ResolvedPricing};
-    use crate::provider::{LLMResponse, ProviderError, ProviderKind, RequestAttemptInfo};
     use protocol::TokenUsage;
+    use smelt_provider::{ChatResponse, ProviderError, ProviderKind, RequestAttemptInfo};
+    use smelt_provider::{ModelPricing, PricingSource, ResolvedPricing};
 
     fn zero_pricing() -> ResolvedPricing {
         ResolvedPricing {
@@ -211,13 +211,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session_dir = tmp.path();
         let body = serde_json::json!({"model": "gpt-test", "messages": []});
-        let resp = LLMResponse {
+        let resp = ChatResponse {
             content: Some("hello".into()),
             reasoning_content: None,
             reasoning_details: None,
             tool_calls: Vec::new(),
             usage: sample_usage(),
             tokens_per_sec: None,
+            metadata: Default::default(),
         };
         let info = RequestAttemptInfo {
             url: "https://api.example.com/v1/chat/completions",
@@ -265,13 +266,14 @@ mod tests {
 
         let body = serde_json::json!({"model": "gpt-test", "messages": []});
         let url = "https://api.example.com/v1/chat/completions";
-        let resp = LLMResponse {
+        let resp = ChatResponse {
             content: Some("hello".into()),
             reasoning_content: None,
             reasoning_details: None,
             tool_calls: Vec::new(),
             usage: sample_usage(),
             tokens_per_sec: Some(123.0),
+            metadata: Default::default(),
         };
         let info = RequestAttemptInfo {
             url,

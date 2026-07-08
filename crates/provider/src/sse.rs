@@ -1,11 +1,10 @@
-use super::ProviderError;
-use crate::cancel::CancellationToken;
+use crate::{CancellationToken, ProviderError};
 use futures_util::StreamExt;
 
 /// Drain complete SSE events from `buf`. Strips processed lines; partial lines
 /// remain. `data:` lines are JSON-parsed; `[DONE]` markers and non-data lines
 /// are skipped. Pure - called repeatedly as new chunks arrive.
-pub(super) fn drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
+pub fn drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
     let mut events = Vec::new();
     while let Some(pos) = buf.find('\n') {
         let raw: String = buf.drain(..pos + 1).collect();
@@ -27,7 +26,7 @@ pub(super) fn drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
     events
 }
 
-pub(super) async fn read_events(
+pub async fn read_events(
     resp: reqwest::Response,
     cancel: &CancellationToken,
     mut handler: impl FnMut(&serde_json::Value),

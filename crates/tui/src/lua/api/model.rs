@@ -14,7 +14,7 @@ fn resolved_input_modalities(app: &crate::app::TuiApp) -> Vec<String> {
         .input_modalities
         .clone()
         .unwrap_or_default();
-    if let Some(catalog) = engine::catalog::input_modalities(
+    if let Some(catalog) = smelt_provider::catalog::input_modalities(
         &app.core.config.provider_type,
         &app.core.config.api_base,
         &app.core.config.model,
@@ -88,21 +88,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let resolved = crate::lua::try_with_app(|app| {
-                engine::pricing::resolve(
+                smelt_provider::resolve_pricing(
                     &app.core.config.model,
                     &app.core.config.provider_type,
                     &app.core.config.api_base,
                     &app.core.config.model_config,
                 )
             })
-            .unwrap_or(engine::pricing::ResolvedPricing {
-                pricing: engine::pricing::ModelPricing {
+            .unwrap_or(smelt_provider::ResolvedPricing {
+                pricing: smelt_provider::ModelPricing {
                     input: 0.0,
                     output: 0.0,
                     cache_read: 0.0,
                     cache_write: 0.0,
                 },
-                source: engine::pricing::PricingSource::None,
+                source: smelt_provider::PricingSource::None,
             });
             let t = lua.create_table()?;
             t.set("input", resolved.pricing.input)?;
@@ -125,7 +125,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     return Some(override_);
                 }
                 // Fall back to models.dev catalog.
-                engine::catalog::output_tokens(
+                smelt_provider::catalog::output_tokens(
                     &app.core.config.provider_type,
                     &app.core.config.api_base,
                     &app.core.config.model,
@@ -190,7 +190,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let provider_type = app.core.config.provider_type.clone();
                 let api_base = app.core.config.api_base.clone();
                 let model = app.core.config.model.clone();
-                let catalog = engine::catalog::lookup(&provider_type, &api_base, &model);
+                let catalog = smelt_provider::catalog::lookup(&provider_type, &api_base, &model);
                 let max_tokens = app
                     .core
                     .config

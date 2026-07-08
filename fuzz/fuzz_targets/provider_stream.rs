@@ -2,8 +2,9 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use engine::provider::{
+use smelt_provider::{
     fuzz_drain_sse_events, fuzz_parse_provider_response, fuzz_parse_provider_stream,
+    FuzzProviderSummary,
 };
 
 #[derive(Debug)]
@@ -231,7 +232,7 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
     summary
 }
 
-fn assert_controlled_summary(actual: &engine::provider::FuzzProviderSummary, expected: ExpectedSummary) {
+fn assert_controlled_summary(actual: &FuzzProviderSummary, expected: ExpectedSummary) {
     assert_eq!(actual.ok, expected.ok, "provider stream completion status changed");
     assert_eq!(actual.content_len, expected.content_len, "provider stream content length changed");
     assert_eq!(actual.reasoning_len, expected.reasoning_len, "provider stream reasoning length changed");

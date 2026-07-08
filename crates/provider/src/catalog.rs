@@ -6,21 +6,17 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::pricing::ModelPricing;
 
-fn cache_dir() -> PathBuf {
-    crate::paths::cache_dir().join("web")
-}
-
-fn key_path(key: &str) -> PathBuf {
+fn key_path(cache_dir: &Path, key: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
     let hash = hasher.finish();
-    cache_dir().join(format!("{hash:x}"))
+    cache_dir.join(format!("{hash:x}"))
 }
 
 fn now_secs() -> u64 {
@@ -30,8 +26,8 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn cache_get(key: &str) -> Option<String> {
-    let path = key_path(key);
+fn cache_get(cache_dir: Option<&Path>, key: &str) -> Option<String> {
+    let path = key_path(cache_dir?, key);
     let contents = std::fs::read_to_string(&path).ok()?;
     let (first_line, rest) = contents.split_once('\n')?;
     let expires: u64 = first_line.parse().ok()?;
@@ -42,10 +38,12 @@ fn cache_get(key: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
-fn cache_put_with_ttl(key: &str, value: &str, ttl: Duration) {
-    let dir = cache_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = key_path(key);
+fn cache_put_with_ttl(cache_dir: Option<&Path>, key: &str, value: &str, ttl: Duration) {
+    let Some(dir) = cache_dir else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let path = key_path(dir, key);
     let tmp = dir.join(format!("{}.tmp", std::process::id()));
     let expires = now_secs() + ttl.as_secs();
     let data = format!("{expires}\n{value}");
@@ -73,12 +71,12 @@ static CATALOG: OnceLock<HashMap<(String, String), ModelEntry>> = OnceLock::new(
 
 /// Fetch the catalog in the background. Only the first call populates;
 /// subsequent calls are a no-op.
-pub fn spawn_fetch(client: reqwest::Client) {
+pub fn spawn_fetch(client: reqwest::Client, cache_dir: Option<PathBuf>) {
     if CATALOG.get().is_some() {
         return;
     }
     tokio::spawn(async move {
-        let map = load_or_fetch(&client).await;
+        let map = load_or_fetch(&client, cache_dir.as_deref()).await;
         if !map.is_empty() {
             let _ = CATALOG.set(map);
         }
@@ -88,11 +86,11 @@ pub fn spawn_fetch(client: reqwest::Client) {
 /// Ensure the catalog is available before a caller needs a synchronous lookup.
 /// This keeps startup non-blocking while letting request construction wait for
 /// model limits when the cache is cold.
-pub async fn ensure_loaded(client: &reqwest::Client) {
+pub async fn ensure_loaded(client: &reqwest::Client, cache_dir: Option<&Path>) {
     if CATALOG.get().is_some() {
         return;
     }
-    let map = load_or_fetch(client).await;
+    let map = load_or_fetch(client, cache_dir).await;
     if !map.is_empty() {
         let _ = CATALOG.set(map);
     }
@@ -139,8 +137,11 @@ pub fn input_modalities(provider_type: &str, api_base: &str, model: &str) -> Opt
     lookup(provider_type, api_base, model).and_then(|e| e.input_modalities)
 }
 
-async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelEntry> {
-    if let Some(json) = cache_get(CACHE_KEY) {
+async fn load_or_fetch(
+    client: &reqwest::Client,
+    cache_dir: Option<&Path>,
+) -> HashMap<(String, String), ModelEntry> {
+    if let Some(json) = cache_get(cache_dir, CACHE_KEY) {
         if let Some(map) = parse(&json) {
             return map;
         }
@@ -154,7 +155,7 @@ async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), Mo
     };
     let map = parse(&json).unwrap_or_default();
     if !map.is_empty() {
-        cache_put_with_ttl(CACHE_KEY, &json, CACHE_TTL);
+        cache_put_with_ttl(cache_dir, CACHE_KEY, &json, CACHE_TTL);
     }
     map
 }
@@ -180,7 +181,7 @@ fn push_unique(keys: &mut Vec<String>, key: String) {
 }
 
 fn detected_catalog_key(api_base: &str) -> Option<&'static str> {
-    if crate::provider::kimi_code::is_api_base(api_base) {
+    if crate::is_kimi_code_api_base(api_base) {
         return Some("kimi-for-coding");
     }
     None
