@@ -33,7 +33,7 @@ pub(super) struct TranscriptSearchIndex {
 
 pub(super) struct TranscriptSearchStore {
     session_id: String,
-    db: smelt_store::SessionDb,
+    db: smelt_store::SessionReader,
 }
 
 #[derive(Clone, Debug)]
@@ -267,7 +267,7 @@ impl TuiApp {
         out
     }
 
-    fn transcript_search_store(&mut self) -> Option<&smelt_store::SessionDb> {
+    fn transcript_search_store(&mut self) -> Option<&smelt_store::SessionReader> {
         let session_id = self.core.session.id.clone();
         if self
             .search
@@ -276,7 +276,7 @@ impl TuiApp {
             .is_none_or(|store| store.session_id != session_id)
         {
             let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
-            let db = smelt_store::SessionDb::open_read_only(db_path).ok()?;
+            let db = smelt_store::SessionReader::open_database(db_path).ok()?;
             self.search.transcript_store = Some(TranscriptSearchStore { session_id, db });
         }
         self.search.transcript_store.as_ref().map(|store| &store.db)

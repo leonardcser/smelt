@@ -20,13 +20,12 @@ with `COMPAT(<id>)`.
   point at a missing or wrong-kind history row, such as a user descriptor linked
   to a context note after sparse resume
 - Code:
-  - `crates/core/src/session.rs`: store-header load and SQLite session repair run
-    the bounded repair before sparse transcript resume
+  - `crates/store/src/access.rs`: `SessionMaintenance` exposes the repair only
+    while holding exclusive session ownership
   - `crates/store/src/history.rs`: repair scans linked descriptor rows and
     clears only mismatched history links, leaving descriptor content intact
 - Tests:
   - `repair_mismatched_transcript_descriptor_history_links_detaches_bad_links`
-  - `load_store_header_for_dir_repairs_mismatched_transcript_descriptor_history_links`
 
 ## session-checkpoint-live-index-past-history
 
@@ -36,9 +35,10 @@ with `COMPAT(<id>)`.
   `session_state.history_len`, which made resumed model history contain only the
   checkpoint summary and omit all retained SQLite history rows
 - Code:
-  - `crates/core/src/session.rs`: store-header load and SQLite session repair run
-    the bounded repair before sparse model-history resume; read-only metadata
-    load also clamps impossible checkpoint coordinates in memory
+  - `crates/core/src/session.rs`: read-only metadata loads clamp impossible
+    checkpoint coordinates in memory without changing SQLite
+  - `crates/store/src/access.rs`: `SessionMaintenance` exposes the repair only
+    while holding exclusive session ownership
   - `crates/store/src/meta.rs`: repair rewrites impossible checkpoint live starts
     to `0`, preserving the summary while replaying all retained rows, and state
     validation rejects new checkpoint writes past `history_len`
@@ -46,8 +46,16 @@ with `COMPAT(<id>)`.
   - `repair_checkpoint_first_live_index_past_history_replays_retained_rows`
   - `repair_checkpoint_first_live_index_past_actual_history_rows`
   - `session_state_rejects_checkpoint_first_live_index_past_history`
-  - `load_store_header_for_dir_repairs_checkpoint_first_live_index_past_history`
-  - `store_backed_resume_repairs_checkpoint_that_points_past_retained_history`
+  - `store_backed_resume_tolerates_bad_checkpoint_without_repairing_database`
+
+## session-writer-lease-metadata
+
+- Remove after: sessions last written by pre-lock alpha builds no longer need to
+  open in supported versions
+- Why: remove the obsolete timed `writer_lease` metadata row when claiming the
+  lifetime operating-system lock and fenced writer ownership
+- Code:
+  - `crates/store/src/meta.rs`: writer ownership claim removes the legacy row
 
 ## allowed-session-full-materialization
 

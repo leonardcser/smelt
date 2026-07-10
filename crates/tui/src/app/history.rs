@@ -136,7 +136,7 @@ pub(crate) fn materialize_full_transcript_read_only_result(
 ) -> session::SessionStoreResult<Option<(crate::app::transcript::LoadedTranscript, usize)>> {
     let resolved = session::resolve_session_dir_for_read_result(id)?;
     let db_path = resolved.dir.join("session.db");
-    let db = smelt_store::SessionDb::open_read_only(&db_path)
+    let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| smelt_core::session_store::store_error("open", &db_path, err))?;
     let descriptor_count = db.transcript_descriptor_count().map_err(|err| {
         smelt_core::session_store::store_error("read transcript descriptor count", &db_path, err)
@@ -1063,11 +1063,9 @@ impl TuiApp {
         };
         let original_id = self.core.session.id.clone();
         let history_len = live.history_len();
-        let source_db_path = live.dir().join("session.db");
         let mut forked = self.core.session.fork(self.core.env.pid());
         forked.history.clear();
         let fork_dir = session::dir_for(&forked);
-        let fork_db_path = fork_dir.join("session.db");
         let state = match session::store_state_from_session(&forked, history_len) {
             Ok(state) => state,
             Err(err) => {
@@ -1075,14 +1073,25 @@ impl TuiApp {
                 return;
             }
         };
-        let source_db = match smelt_store::SessionDb::open_read_only(&source_db_path) {
-            Ok(db) => db,
+        let source = match smelt_store::SessionReader::open_existing(live.dir()) {
+            Ok(source) => source,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to open source session store: {err}"));
                 return;
             }
         };
-        if let Err(err) = source_db.copy_prefix_to(&fork_db_path, &state, history_len) {
+        if let Err(err) = session::create_private_dir_all(&fork_dir) {
+            self.notify_error_sticky(format!("failed to create fork directory: {err}"));
+            return;
+        }
+        let maintenance = match smelt_store::SessionMaintenance::open(&fork_dir, &forked.id) {
+            Ok(maintenance) => maintenance,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to own fork destination: {err}"));
+                return;
+            }
+        };
+        if let Err(err) = maintenance.copy_prefix_from(&source, &state, history_len) {
             self.notify_error_sticky(format!("failed to fork session store: {err}"));
             return;
         }
@@ -1092,6 +1101,10 @@ impl TuiApp {
         }
         if let Err(err) = session::refresh_derived_files(&fork_dir) {
             self.notify_error_sticky(format!("failed to refresh fork metadata: {err}"));
+            return;
+        }
+        if let Err(err) = maintenance.release() {
+            self.notify_error_sticky(format!("failed to release fork destination: {err}"));
             return;
         }
         let Some((header, store_ref)) = session::load_store_header_for_dir(fork_dir.clone()) else {
@@ -1130,6 +1143,10 @@ impl TuiApp {
             self.core.engine.send(UiCommand::Cancel);
         }
         self.lua.cancel_tasks();
+        self.flush_persist();
+        if let Err(err) = self.persister.release() {
+            self.notify_error_sticky(format!("failed to release session writer: {err}"));
+        }
         let old_id = self.core.session.id.clone();
         self.reset_session_permissions();
         self.queued_inputs.clear();
@@ -1182,19 +1199,14 @@ impl TuiApp {
         }
     }
 
-    fn apply_session_access(&mut self, access: session::SessionAccessDecision) {
-        self.session_access = match access {
-            session::SessionAccessDecision::Owned => SessionAccess::Owned,
-            session::SessionAccessDecision::ReadOnly { reason } => {
+    fn claim_writer_access_for_current_session(&mut self) {
+        self.session_access = match self.persister.open_owned(&self.core.session.id) {
+            Ok(()) => SessionAccess::Owned,
+            Err(reason) => {
                 self.notify_error_sticky(format!("opened session read-only: {reason}"));
                 SessionAccess::ReadOnly { reason }
             }
         };
-    }
-
-    fn claim_writer_access_for_current_session(&mut self) {
-        let session_dir = session::dir_for(&self.core.session);
-        self.apply_session_access(session::claim_access_for_session_dir(&session_dir));
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
@@ -1204,26 +1216,12 @@ impl TuiApp {
         let document =
             crate::app::session_document::SessionDocument::from_full_session(loaded, transcript)
                 .into_full();
-        self.load_full_session_document(document, None);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn load_session_for_resume(&mut self, loaded: session::LoadedSession) {
-        let transcript = crate::app::transcript::LoadedTranscript::full(
-            build_transcript_from_session(&self.lua, &loaded.session),
-        );
-        let document = crate::app::session_document::SessionDocument::from_full_session(
-            loaded.session,
-            transcript,
-        )
-        .into_full();
-        self.load_full_session_document(document, Some(loaded.access));
+        self.load_full_session_document(document);
     }
 
     fn load_full_session_document(
         &mut self,
         document: crate::app::session_document::FullSessionDocument,
-        access: Option<session::SessionAccessDecision>,
     ) {
         let crate::app::session_document::FullSessionDocument {
             session: loaded,
@@ -1240,11 +1238,6 @@ impl TuiApp {
         self.lua.cancel_tasks();
         let old_id = self.core.session.id.clone();
         self.flush_persist();
-        if let Some(access) = access.clone() {
-            self.apply_session_access(access);
-        } else {
-            self.session_access = SessionAccess::Owned;
-        }
 
         if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
             self.set_mode(mode, false);
@@ -1272,9 +1265,7 @@ impl TuiApp {
         }
 
         self.install_loaded_session(loaded);
-        if access.is_none() {
-            self.claim_writer_access_for_current_session();
-        }
+        self.claim_writer_access_for_current_session();
         let history_len = self.session_history_len();
         let revision = session::load_store_header_for_dir(session::dir_for(&self.core.session))
             .map_or(0, |(header, _)| header.revision);
@@ -1623,11 +1614,31 @@ impl TuiApp {
     }
 
     pub(crate) fn fail_persist_save(&mut self, err: crate::persist::PersistFailure) {
+        let ownership_lost = matches!(
+            err.commit_failure.as_ref(),
+            Some(smelt_store::SessionCommitFailure::OwnershipLost)
+        );
         let recoverable = err
             .commit_failure
             .as_ref()
             .is_some_and(smelt_store::SessionCommitFailure::is_recoverable_stale_base);
         self.session_document.mark_persist_failed(&err);
+        if ownership_lost {
+            let reason = "session writer ownership was lost".to_string();
+            if let Err(release_err) = self.persister.release() {
+                self.notify_error_sticky(format!(
+                    "failed to release session writer after ownership loss: {release_err}"
+                ));
+            }
+            self.session_access = SessionAccess::ReadOnly {
+                reason: reason.clone(),
+            };
+            self.notify_error_sticky(format!(
+                "failed to save session {}: {reason}",
+                err.session_id
+            ));
+            return;
+        }
         if recoverable {
             smelt_perf::perf::record_value("session:save:recoverable_failure", 1);
             if self.session_document.is_save_queued() && !self.prompt_input_is_busy() {
@@ -1678,7 +1689,6 @@ impl TuiApp {
         };
         let session = &self.core.session;
         let session_id = session.id.clone();
-        let session_dir = session::dir_for(session);
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(crate::app::SharedSessionState {
                 id: session_id.clone(),
@@ -1707,7 +1717,6 @@ impl TuiApp {
                     return;
                 };
                 self.persister.save(crate::persist::PersistRequest {
-                    session_dir,
                     command: submitted.command,
                     blobs: Vec::new(),
                 });
@@ -1727,7 +1736,6 @@ impl TuiApp {
                     }
                 };
                 self.persister.save(crate::persist::PersistRequest {
-                    session_dir,
                     command: submitted.command,
                     blobs,
                 });
@@ -1779,13 +1787,6 @@ impl TuiApp {
             }
         };
         let session_id = self.core.session.id.clone();
-        let session_dir = self
-            .session_document
-            .live_session
-            .as_ref()
-            .expect("live session present")
-            .dir()
-            .to_path_buf();
         self.publish_shared_session_state();
         let submitted = match self
             .session_document
@@ -1799,7 +1800,6 @@ impl TuiApp {
             }
         };
         self.persister.save(crate::persist::PersistRequest {
-            session_dir,
             command: submitted.command,
             blobs,
         });
@@ -2061,7 +2061,7 @@ impl TuiApp {
         let mut history = prefix;
         if end_index > first_live_index {
             let db_path = session::dir_for(&self.core.session).join("session.db");
-            let db = smelt_store::SessionDb::open_read_only(&db_path)
+            let db = smelt_store::SessionReader::open_database(&db_path)
                 .map_err(|err| format!("open model history database {db_path:?}: {err}"))?;
             let mut rows = db
                 .read_history_items_range(first_live_index..end_index)
@@ -2209,7 +2209,6 @@ impl TuiApp {
         }
         let session = &self.core.session;
         let session_id = session.id.clone();
-        let session_dir = session::dir_for(session);
         let submitted = match self.session_document.submit_history_save(
             session_id,
             generation,
@@ -2224,7 +2223,6 @@ impl TuiApp {
             }
         };
         self.persister.save(crate::persist::PersistRequest {
-            session_dir,
             command: submitted.command,
             blobs: self.pending_image_blobs(),
         });
@@ -2585,7 +2583,7 @@ mod checkpoint_tests {
             perf_value_max("session:transcript:read_only_full_fallback"),
             1
         );
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).unwrap();
         assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
         drop(db);
 
@@ -2594,7 +2592,7 @@ mod checkpoint_tests {
         app.app.save_session();
         app.app.flush_persist();
 
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).unwrap();
         assert_eq!(db.transcript_descriptor_count().unwrap(), 256);
     }
 
@@ -2653,7 +2651,7 @@ mod checkpoint_tests {
         );
 
         let db =
-            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+            smelt_store::SessionReader::open_database(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         let rows = db
             .read_history_items_range(0..3)
@@ -2707,7 +2705,7 @@ mod checkpoint_tests {
         assert_eq!(app.app.core.session.history.len(), 3);
 
         let db =
-            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+            smelt_store::SessionReader::open_database(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         let rows = db
             .read_history_items_range(0..3)
@@ -2771,7 +2769,7 @@ mod checkpoint_tests {
         assert_cached_persist_db();
         assert_no_full_store_reads();
 
-        let db = smelt_store::SessionDb::open_read_only(
+        let db = smelt_store::SessionReader::open_database(
             session::dir_for_id(&app.app.core.session.id).join("session.db"),
         )
         .expect("open session db");
@@ -2851,7 +2849,7 @@ mod checkpoint_tests {
         assert_no_full_store_reads();
 
         let db =
-            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+            smelt_store::SessionReader::open_database(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         let tail = db
             .read_history_items_range(OLD_HISTORY_LEN..OLD_HISTORY_LEN + 1)
@@ -2944,6 +2942,10 @@ mod checkpoint_tests {
             "opened transcript did not render saved history: {rows:?}"
         );
 
+        app.app
+            .persister
+            .release()
+            .expect("release history-only fixture");
         session::delete(id).expect("delete history-only fixture");
     }
 
@@ -3006,7 +3008,7 @@ mod checkpoint_tests {
         );
 
         let db =
-            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+            smelt_store::SessionReader::open_database(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         let snapshot = db
             .load_full_session_snapshot()
@@ -3040,7 +3042,7 @@ mod checkpoint_tests {
         app.app.flush_persist();
 
         let db =
-            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+            smelt_store::SessionReader::open_database(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         assert_eq!(
             db.read_history_items_range(0..10)

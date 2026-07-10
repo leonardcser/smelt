@@ -146,12 +146,13 @@ fn descriptor_records_from_rows(
 }
 
 struct SqliteTranscriptStore {
-    db: smelt_store::SessionDb,
+    db: smelt_store::SessionReader,
 }
 
 impl SqliteTranscriptStore {
     fn open_read_only(session_dir: impl AsRef<std::path::Path>) -> smelt_store::Result<Self> {
-        let db = smelt_store::SessionDb::open_read_only(session_dir.as_ref().join("session.db"))?;
+        let db =
+            smelt_store::SessionReader::open_database(session_dir.as_ref().join("session.db"))?;
         Ok(Self { db })
     }
 
@@ -2244,7 +2245,7 @@ impl TranscriptDocument {
 
     fn stored_descriptor_index_for_block_idx(&self, block_idx: u64) -> Option<usize> {
         let session_dir = self.descriptors.session_dir()?.clone();
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
+        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
         db.transcript_descriptor_index_for_block_idx(block_idx)
             .ok()
             .flatten()
@@ -2443,7 +2444,7 @@ impl TranscriptDocument {
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, TranscriptBlockRecordWithId)> {
         let session_dir = self.descriptors.session_dir()?.clone();
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
+        let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
         let record = match direction {
             TranscriptNavigationDirection::Previous => {
                 let before = anchor_index.checked_sub(1)?;
@@ -5563,7 +5564,7 @@ mod document_tests {
         let records = skewed_transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
         crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
-        let expected = smelt_store::SessionDb::open_read_only(dir.path().join("session.db"))
+        let expected = smelt_store::SessionReader::open_database(dir.path().join("session.db"))
             .unwrap()
             .transcript_descriptor_estimated_rows((0..220).into(), width)
             .unwrap() as RowIndex;
@@ -5603,7 +5604,7 @@ mod document_tests {
             records: descriptor_records_with_ids(&records[5..8], 5),
         };
         assert!(document.merge_descriptor_window(window));
-        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+        let db = smelt_store::SessionReader::open_database(dir.path().join("session.db")).unwrap();
         let persisted_prefix = db
             .transcript_descriptor_estimated_rows((0..5).into(), width)
             .unwrap() as RowIndex;

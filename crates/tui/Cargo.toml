@@ -40,5 +40,5 @@ insta = { workspace = true }
 # workspace builds keep this off; tests, storybook, and examples that need it
 # opt in explicitly.
 default = []
-harness = []
+harness = ["smelt-store/test-util"]
 

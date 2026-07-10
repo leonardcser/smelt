@@ -1,3 +1,4 @@
+mod access;
 mod compression;
 mod db;
 mod error;
@@ -10,18 +11,20 @@ mod schema;
 mod session_commit;
 mod session_snapshot;
 
+pub use access::{OwnedSessionWriter, SessionMaintenance, SessionReader};
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
     DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
 };
-pub use db::{OpenMode, OpenOptions, SessionDb};
+#[cfg(any(test, feature = "test-util"))]
+pub use db::SessionDb;
 pub use error::{Result, StoreError};
 pub use history::{
     TranscriptBlockMetadataRecord, TranscriptDescriptorHydration, TranscriptDescriptorIndex,
     TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
     TranscriptSearchCandidate, TranscriptSearchDirection,
 };
-pub use meta::{SessionMeta, SessionState, WriterLease};
+pub use meta::{SessionMeta, SessionState, WriterOwner};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,

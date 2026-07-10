@@ -1,4 +1,6 @@
+#[cfg(any(test, feature = "test-util"))]
 use std::fs;
+#[cfg(any(test, feature = "test-util"))]
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -54,14 +56,30 @@ pub struct SessionMeta {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WriterLease {
-    pub owner_id: String,
+pub struct WriterOwner {
     pub hostname: String,
     pub pid: u32,
+    pub process_start_id: String,
     pub app_version: String,
-    pub started_at: i64,
-    pub heartbeat_at: i64,
+    pub claimed_at: i64,
 }
+
+impl WriterOwner {
+    pub fn summary(&self) -> String {
+        format!(
+            "pid {} on {} (process {}, claimed at {})",
+            self.pid, self.hostname, self.process_start_id, self.claimed_at
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PersistedWriterOwner {
+    token: String,
+    owner: WriterOwner,
+}
+
+const WRITER_OWNER_KEY: &str = "writer_owner";
 
 pub(crate) fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
@@ -83,77 +101,43 @@ pub(crate) fn meta(conn: &Connection, key: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-pub(crate) fn set_writer_lease(conn: &Connection, lease: &WriterLease) -> Result<()> {
-    set_meta(conn, "writer_lease", &serde_json::to_string(lease)?)
-}
-
-pub(crate) fn writer_lease(conn: &Connection) -> Result<Option<WriterLease>> {
-    meta(conn, "writer_lease")?
-        .map(|value| serde_json::from_str(&value).map_err(Into::into))
-        .transpose()
-}
-
-pub(crate) fn acquire_writer_lease(
+pub(crate) fn claim_writer_owner(
     conn: &Connection,
-    lease: &WriterLease,
-    stale_after_secs: i64,
+    token: &str,
+    owner: &WriterOwner,
 ) -> Result<()> {
-    if let Some(existing) = writer_lease(conn)? {
-        if writer_lease_conflicts(&existing, lease, stale_after_secs) {
-            return Err(StoreError::Integrity(format!(
-                "session has active writer lease from pid {} on {}",
-                existing.pid, existing.hostname
-            )));
-        }
-    }
-    set_writer_lease(conn, lease)
-}
-
-pub(crate) fn writer_lease_conflicts(
-    existing: &WriterLease,
-    lease: &WriterLease,
-    stale_after_secs: i64,
-) -> bool {
-    let stale = lease.heartbeat_at.saturating_sub(existing.heartbeat_at) > stale_after_secs
-        || same_host_dead_writer(existing, lease);
-    let same_owner = existing.owner_id == lease.owner_id;
-    !same_owner && !stale
-}
-
-fn same_host_dead_writer(existing: &WriterLease, lease: &WriterLease) -> bool {
-    let same_host = existing.hostname == lease.hostname
-        || existing.hostname == "unknown-host"
-        || lease.hostname == "unknown-host";
-    same_host && !process_is_alive(existing.pid)
-}
-
-#[cfg(target_os = "linux")]
-fn process_is_alive(pid: u32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn process_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-#[cfg(not(unix))]
-fn process_is_alive(_pid: u32) -> bool {
-    true
-}
-
-pub(crate) fn clear_writer_lease(conn: &Connection) -> Result<()> {
+    let persisted = PersistedWriterOwner {
+        token: token.to_string(),
+        owner: owner.clone(),
+    };
+    set_meta(conn, WRITER_OWNER_KEY, &serde_json::to_string(&persisted)?)?;
+    // COMPAT(session-writer-lease-metadata): remove with pre-lock session metadata support.
     conn.execute("DELETE FROM store_meta WHERE key = 'writer_lease'", [])?;
     Ok(())
+}
+
+pub(crate) fn writer_owner(conn: &Connection) -> Result<Option<WriterOwner>> {
+    Ok(persisted_writer_owner(conn)?.map(|persisted| persisted.owner))
+}
+
+pub(crate) fn verify_writer_owner(conn: &Connection, token: &str) -> Result<()> {
+    match persisted_writer_owner(conn)? {
+        Some(owner) if owner.token == token => Ok(()),
+        _ => Err(StoreError::OwnershipLost),
+    }
+}
+
+pub(crate) fn clear_writer_owner(conn: &Connection, token: &str) -> Result<()> {
+    if persisted_writer_owner(conn)?.is_some_and(|owner| owner.token == token) {
+        conn.execute("DELETE FROM store_meta WHERE key = ?1", [WRITER_OWNER_KEY])?;
+    }
+    Ok(())
+}
+
+fn persisted_writer_owner(conn: &Connection) -> Result<Option<PersistedWriterOwner>> {
+    meta(conn, WRITER_OWNER_KEY)?
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
 }
 
 pub(crate) fn upsert_session_state(conn: &Connection, state: &SessionState) -> Result<()> {
@@ -339,6 +323,7 @@ fn checkpoint_first_live_index(value: &serde_json::Value) -> Option<u64> {
         .and_then(serde_json::Value::as_u64)
 }
 
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) fn write_meta_sidecar(
     conn: &Connection,
     path: impl AsRef<Path>,

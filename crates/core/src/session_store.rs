@@ -125,6 +125,14 @@ pub fn store_error(
         smelt_store::StoreError::Json(err) => SessionStoreError::Corrupt {
             context: format!("{operation} {}: {err}", path.display()),
         },
+        smelt_store::StoreError::OwnershipConflict { owner } => {
+            SessionStoreError::ReadOnlyOwnerConflict {
+                owner: owner.unwrap_or_else(|| "unknown owner".into()),
+            }
+        }
+        smelt_store::StoreError::OwnershipLost => SessionStoreError::ReadOnlyOwnerConflict {
+            owner: "writer ownership was lost".into(),
+        },
         smelt_store::StoreError::Integrity(message) => SessionStoreError::Corrupt {
             context: format!("{operation} {}: {message}", path.display()),
         },
@@ -138,17 +146,10 @@ pub fn store_error(
 }
 
 pub fn ensure_session_db_read_only(dir_path: &Path) -> SessionStoreResult<()> {
-    open_session_db(dir_path, smelt_store::SessionDb::open_read_only)
+    open_session_db(dir_path)
 }
 
-pub fn ensure_session_db_writable(dir_path: &Path) -> SessionStoreResult<()> {
-    open_session_db(dir_path, smelt_store::SessionDb::open)
-}
-
-fn open_session_db(
-    dir_path: &Path,
-    open: impl FnOnce(std::path::PathBuf) -> smelt_store::Result<smelt_store::SessionDb>,
-) -> SessionStoreResult<()> {
+fn open_session_db(dir_path: &Path) -> SessionStoreResult<()> {
     reject_symlink(dir_path, "open")?;
     let db_path = dir_path.join("session.db");
     reject_symlink(&db_path, "open")?;
@@ -157,7 +158,7 @@ fn open_session_db(
             id: session_dir_id(dir_path),
         });
     }
-    open(db_path.clone())
+    smelt_store::SessionReader::open_existing(dir_path)
         .map(|_| ())
         .map_err(|err| store_error("open", &db_path, err))
 }
@@ -208,11 +209,11 @@ pub fn export_requests_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), 
     db.export_requests_jsonl(out).map_err(|err| err.to_string())
 }
 
-fn db_for_export(id_or_prefix: &str) -> SessionStoreResult<smelt_store::SessionDb> {
+fn db_for_export(id_or_prefix: &str) -> SessionStoreResult<smelt_store::SessionReader> {
     let id = crate::session::resolve_prefix(id_or_prefix)?;
     let dir = crate::session::session_dir(&id);
     ensure_session_db_read_only(&dir)?;
     let db_path = dir.join("session.db");
-    smelt_store::SessionDb::open_read_only(&db_path)
+    smelt_store::SessionReader::open_existing(&dir)
         .map_err(|err| store_error("open export database", &db_path, err))
 }

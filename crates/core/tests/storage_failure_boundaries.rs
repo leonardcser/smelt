@@ -14,9 +14,13 @@ fn storage_owner_probe() {
     };
     let ready = required_path(PROBE_READY);
     let release = required_path(PROBE_RELEASE);
-    let db = smelt_store::SessionDb::open(db_path).expect("open owner database");
-    db.acquire_current_process_writer_lease()
-        .expect("claim writer lease");
+    let session_dir = db_path.parent().expect("database parent");
+    let session_id = session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("session id");
+    let _writer = smelt_store::OwnedSessionWriter::open(session_dir, session_id)
+        .expect("claim session writer");
     touch(&ready);
     wait_for(&release);
 }
@@ -68,6 +72,13 @@ fn repair_needed_read_does_not_mutate_while_another_process_owns_session() {
         &smelt_core::session::store_snapshot_from_session(&session, 0).expect("build snapshot"),
     )
     .expect("save fixture");
+    drop(db);
+
+    let ready = root.path().join("owner.ready");
+    let release = root.path().join("owner.release");
+    let mut owner = spawn_owner(&db_path, &ready, &release);
+    wait_for(&ready);
+    let db = smelt_store::SessionDb::open(&db_path).expect("open database for failure injection");
     db.connection()
         .execute(
             "UPDATE session_state SET checkpoint_json = ?1 WHERE singleton = 1",
@@ -81,11 +92,6 @@ fn repair_needed_read_does_not_mutate_while_another_process_owns_session() {
         )
         .expect("corrupt checkpoint boundary");
     drop(db);
-
-    let ready = root.path().join("owner.ready");
-    let release = root.path().join("owner.release");
-    let mut owner = spawn_owner(&db_path, &ready, &release);
-    wait_for(&ready);
 
     let (header, _) =
         smelt_core::session::load_store_header_for_dir(session_dir).expect("resume header loads");

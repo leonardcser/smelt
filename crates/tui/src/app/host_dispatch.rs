@@ -134,7 +134,7 @@ impl TuiApp {
                 self.dispatch_recover_from_context_limit(messages, reply);
             }
             HostCall::RequestAudit {
-                session_dir,
+                session_dir: _,
                 entry,
                 payload_mode,
             } => {
@@ -142,7 +142,6 @@ impl TuiApp {
                     self.persister
                         .append_request_audit(crate::persist::PersistRequestAudit {
                             session_id: self.core.session.id.clone(),
-                            session_dir,
                             entry: *entry,
                             payload_mode,
                         });

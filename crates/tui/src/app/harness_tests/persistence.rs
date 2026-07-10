@@ -5,7 +5,6 @@ use protocol::{
     TokenUsage, ToolInvocation, ToolOutcome,
 };
 use smelt_core::transcript_model::Block;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn loaded_session(id: &str) -> smelt_core::session::Session {
     crate::app::history::materialize_full_session(
@@ -281,7 +280,7 @@ fn shutdown_flushes_descriptor_only_transcript_blocks() {
     });
     app.app.save_session_and_flush();
 
-    let db = smelt_store::SessionDb::open_read_only(
+    let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
     )
     .unwrap();
@@ -371,7 +370,7 @@ fn sparse_descriptor_resume_interrupt_save_compacts_and_appends_again() {
     resumed.app.save_session_and_flush();
     assert!(resumed.app.notification.is_none());
 
-    let db = smelt_store::SessionDb::open_read_only(&db_path).unwrap();
+    let db = smelt_store::SessionReader::open_database(&db_path).unwrap();
     let rows = db.read_all_transcript_descriptor_records().unwrap();
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().any(|row| row
@@ -611,7 +610,7 @@ fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
             if step.content.as_ref().is_some_and(|content| content.text_content() == "recent reply")
     ));
 
-    let persisted = smelt_store::SessionDb::open_read_only(&db_path)
+    let persisted = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
         .session_state()
         .unwrap()
@@ -684,7 +683,7 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
 }
 
 #[test]
-fn resuming_session_with_active_writer_lease_is_read_only() {
+fn resuming_session_with_active_writer_is_read_only() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
     writer
@@ -695,29 +694,11 @@ fn resuming_session_with_active_writer_lease_is_read_only() {
     let session_id = writer.app.core.session.id.clone();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     let db_path = session_dir.join("session.db");
-    let before = smelt_store::SessionDb::open_read_only(&db_path)
+    let before = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
         .session_state()
         .unwrap()
         .expect("session state before read-only resume");
-    drop(writer);
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    smelt_store::SessionDb::open(&db_path)
-        .unwrap()
-        .set_writer_lease(&smelt_store::WriterLease {
-            owner_id: "other-host:424242".into(),
-            hostname: "other-host".into(),
-            pid: 424_242,
-            app_version: "test".into(),
-            started_at: now,
-            heartbeat_at: now,
-        })
-        .unwrap();
-
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     reader.app.load_session_by_id(&session_id);
 
@@ -733,7 +714,7 @@ fn resuming_session_with_active_writer_lease_is_read_only() {
     assert_eq!(result, HistoryAppendResult::Unchanged);
     reader.app.save_session_and_flush();
 
-    let after = smelt_store::SessionDb::open_read_only(&db_path)
+    let after = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
         .session_state()
         .unwrap()
@@ -741,7 +722,7 @@ fn resuming_session_with_active_writer_lease_is_read_only() {
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.history_len, before.history_len);
     assert_eq!(
-        smelt_store::SessionDb::open_read_only(&db_path)
+        smelt_store::SessionReader::open_database(&db_path)
             .unwrap()
             .history_item_count()
             .unwrap(),
@@ -836,7 +817,7 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
     );
     resumed.app.save_session_and_flush();
 
-    let db = smelt_store::SessionDb::open_read_only(
+    let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
     )
     .unwrap();
@@ -888,7 +869,7 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
     resumed.cancel();
     resumed.app.save_session_and_flush();
 
-    let db = smelt_store::SessionDb::open_read_only(
+    let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
     )
     .unwrap();
@@ -948,7 +929,7 @@ fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
     resumed.cancel();
     resumed.app.save_session_and_flush();
 
-    let db = smelt_store::SessionDb::open_read_only(
+    let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
     )
     .unwrap();
@@ -1038,6 +1019,28 @@ fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
         loaded.history.last(),
         Some(HistoryItem::User { content, .. }) if content.text_content() == "recover after stale descriptor"
     ));
+}
+
+#[test]
+fn ownership_loss_moves_session_to_read_only_and_releases_lock() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert!(!resumed.app.session_is_read_only());
+
+    resumed.app.fail_persist_save(PersistFailure {
+        save_id: 902,
+        session_id: session_id.clone(),
+        message: "session writer ownership was lost".into(),
+        commit_failure: Some(smelt_store::SessionCommitFailure::OwnershipLost),
+    });
+
+    assert!(resumed.app.session_is_read_only());
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let replacement = smelt_store::OwnedSessionWriter::open(&session_dir, &session_id)
+        .expect("ownership loss releases the lifetime lock");
+    drop(replacement);
 }
 
 #[test]
@@ -1333,29 +1336,11 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
 
     let session_id = writer.app.core.session.id.clone();
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
-    let before = smelt_store::SessionDb::open_read_only(&db_path)
+    let before = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
         .session_state()
         .unwrap()
         .expect("session state before readonly loops");
-    drop(writer);
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    smelt_store::SessionDb::open(&db_path)
-        .unwrap()
-        .set_writer_lease(&smelt_store::WriterLease {
-            owner_id: "other-host:555".into(),
-            hostname: "other-host".into(),
-            pid: 555,
-            app_version: "test".into(),
-            started_at: now,
-            heartbeat_at: now,
-        })
-        .unwrap();
-
     for idx in 0..5 {
         let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
         reader.app.load_session_by_id(&session_id);
@@ -1373,7 +1358,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
         reader.app.save_session_and_flush();
     }
 
-    let after = smelt_store::SessionDb::open_read_only(&db_path)
+    let after = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
         .session_state()
         .unwrap()
@@ -1381,7 +1366,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.history_len, before.history_len);
     assert_eq!(
-        smelt_store::SessionDb::open_read_only(&db_path)
+        smelt_store::SessionReader::open_database(&db_path)
             .unwrap()
             .history_item_count()
             .unwrap(),

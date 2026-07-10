@@ -5,6 +5,8 @@ pub enum StoreError {
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
+    OwnershipConflict { owner: Option<String> },
+    OwnershipLost,
     Integrity(String),
     UnsupportedSchema { found: i32, expected: i32 },
 }
@@ -28,6 +30,11 @@ impl fmt::Display for StoreError {
             StoreError::Io(err) => write!(f, "io error: {err}"),
             StoreError::Sqlite(err) => write!(f, "sqlite error: {err}"),
             StoreError::Json(err) => write!(f, "json error: {err}"),
+            StoreError::OwnershipConflict { owner } => match owner {
+                Some(owner) => write!(f, "session is owned by another writer: {owner}"),
+                None => f.write_str("session is owned by another writer"),
+            },
+            StoreError::OwnershipLost => f.write_str("session writer ownership was lost"),
             StoreError::Integrity(message) => write!(f, "integrity error: {message}"),
             StoreError::UnsupportedSchema { found, expected } => {
                 write!(f, "unsupported schema version {found}; expected {expected}")

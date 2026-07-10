@@ -488,6 +488,7 @@ pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     Ok(out)
 }
 
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) fn replace_transcript_descriptor_records(
     conn: &Connection,
     records: &[TranscriptDescriptorRecord],
@@ -496,6 +497,7 @@ pub(crate) fn replace_transcript_descriptor_records(
     replace_transcript_descriptor_suffix(conn, 0, records, compression)
 }
 
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) fn replace_transcript_descriptor_suffix(
     conn: &Connection,
     start_descriptor_idx: usize,

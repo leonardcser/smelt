@@ -185,21 +185,9 @@ pub struct Session {
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
 
 pub use crate::session_store::{
-    ensure_session_db_read_only, ensure_session_db_writable, export_history_jsonl,
-    export_requests_jsonl, SessionStoreError, SessionStoreResult,
+    ensure_session_db_read_only, export_history_jsonl, export_requests_jsonl, SessionStoreError,
+    SessionStoreResult,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionAccessDecision {
-    Owned,
-    ReadOnly { reason: String },
-}
-
-#[derive(Debug, Clone)]
-pub struct LoadedSession {
-    pub session: Session,
-    pub access: SessionAccessDecision,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionWireV2 {
@@ -1119,11 +1107,11 @@ pub fn save_with_blobs_result_with_history_start(
         std::borrow::Cow::Owned(s)
     };
 
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
-    let current_state = db.session_state()?;
+    let writer = smelt_store::OwnedSessionWriter::open(&session_dir, &session.id)?;
+    let current_state = writer.session_state()?;
     let base_revision = current_state.as_ref().map_or(0, |state| state.revision);
     let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
-    let base_descriptor_len = db.transcript_descriptor_count()? as u64;
+    let base_descriptor_len = writer.transcript_descriptor_count()? as u64;
     let history_len = session_out.history.len();
     let history_start_idx = history_start_idx.min(history_len);
     let command = smelt_store::SessionCommit {
@@ -1145,7 +1133,7 @@ pub fn save_with_blobs_result_with_history_start(
         )?,
         descriptors: None,
     };
-    let receipt = db
+    let receipt = writer
         .commit_session(&command)
         .map_err(session_commit_failure_to_store_error)?;
     if let Err(err) = refresh_derived_files(&session_dir) {
@@ -1480,21 +1468,6 @@ pub fn load_full_result(id_or_prefix: &str) -> SessionStoreResult<Option<Session
     load_session_files_result(&session_dir(&id))
 }
 
-pub fn load_full_for_resume(id_or_prefix: &str) -> Option<LoadedSession> {
-    load_full_for_resume_result(id_or_prefix).ok().flatten()
-}
-
-pub fn load_full_for_resume_result(
-    id_or_prefix: &str,
-) -> SessionStoreResult<Option<LoadedSession>> {
-    let _perf = smelt_perf::perf::begin("session:load_full_for_resume");
-    let id = {
-        let _perf = smelt_perf::perf::begin("session:load_full:resolve");
-        resolve_prefix(id_or_prefix)?
-    };
-    load_session_files_for_resume_result(&session_dir(&id))
-}
-
 pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
     load_meta_result(id_or_prefix).ok().flatten()
 }
@@ -1556,7 +1529,7 @@ pub fn load_store_header_for_dir_result(
     crate::session_store::reject_symlink(&session_dir, "read")?;
     let db_path = session_dir.join("session.db");
     crate::session_store::reject_symlink(&db_path, "read")?;
-    let db = smelt_store::SessionDb::open_read_only(&db_path)
+    let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
     let Some(state) = db
         .session_state()
@@ -1607,53 +1580,6 @@ fn load_session_files_result(dir_path: &std::path::Path) -> SessionStoreResult<O
     Ok(internalize_session_blobs(dir_path, session))
 }
 
-fn writer_lease_conflict_for_session_dir(dir_path: &Path) -> Option<SessionAccessDecision> {
-    let db_path = dir_path.join("session.db");
-    if !db_path.is_file() {
-        return None;
-    }
-    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
-    let lease = db.active_writer_lease_for_current_process().ok()??;
-    Some(SessionAccessDecision::ReadOnly {
-        reason: format!(
-            "session has active writer lease from pid {} on {}",
-            lease.pid, lease.hostname
-        ),
-    })
-}
-
-pub fn claim_access_for_session_dir(dir_path: &Path) -> SessionAccessDecision {
-    let db_path = dir_path.join("session.db");
-    if !db_path.is_file() {
-        return SessionAccessDecision::Owned;
-    }
-    if let Some(access) = writer_lease_conflict_for_session_dir(dir_path) {
-        return access;
-    }
-    match smelt_store::SessionDb::open(&db_path)
-        .and_then(|db| db.acquire_current_process_writer_lease())
-    {
-        Ok(_) => SessionAccessDecision::Owned,
-        Err(err) => SessionAccessDecision::ReadOnly {
-            reason: err.to_string(),
-        },
-    }
-}
-
-fn load_session_files_for_resume_result(
-    dir_path: &std::path::Path,
-) -> SessionStoreResult<Option<LoadedSession>> {
-    crate::session_store::reject_symlink(dir_path, "resume")?;
-    crate::session_store::reject_symlink(&dir_path.join("session.db"), "resume")?;
-    let access = writer_lease_conflict_for_session_dir(dir_path)
-        .unwrap_or_else(|| claim_access_for_session_dir(dir_path));
-    let Some(session) = load_db_session_result(dir_path)? else {
-        return Ok(None);
-    };
-    Ok(internalize_session_blobs(dir_path, session)
-        .map(|session| LoadedSession { session, access }))
-}
-
 fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -> Option<Session> {
     let blob_dir = dir_path.join("blobs");
     if blob_dir.is_dir() {
@@ -1675,7 +1601,7 @@ fn load_db_session_result(dir_path: &std::path::Path) -> SessionStoreResult<Opti
     if !db_path.is_file() {
         return Ok(None);
     }
-    let db = smelt_store::SessionDb::open_read_only(&db_path)
+    let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
     let Some(mut snapshot) = db
         .load_full_session_snapshot()
@@ -1779,8 +1705,13 @@ pub fn backfill_transcript_descriptor_records_from_history_range(
     descriptor_start_idx: usize,
     block_start_idx: u64,
 ) -> Result<usize, smelt_store::StoreError> {
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
-    let history = db.read_history_items_range(history_range.clone())?;
+    let session_id = session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| smelt_store::StoreError::Integrity("session directory has no id".into()))?;
+    let maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
+    let reader = smelt_store::SessionReader::open_existing(session_dir)?;
+    let history = reader.read_history_items_range(history_range.clone())?;
     let records = transcript_descriptor_records_from_history_items(
         history_range.start,
         block_start_idx,
@@ -1788,7 +1719,7 @@ pub fn backfill_transcript_descriptor_records_from_history_range(
         &std::collections::HashMap::new(),
     )?;
     let written = records.len();
-    db.replace_transcript_descriptor_suffix_for_repair(descriptor_start_idx, &records)?;
+    maintenance.replace_transcript_descriptor_suffix(descriptor_start_idx, &records)?;
     Ok(written)
 }
 
@@ -1798,7 +1729,7 @@ pub fn backfill_transcript_descriptors_in_history_chunks(
     max_chunks: Option<usize>,
 ) -> Result<usize, smelt_store::StoreError> {
     let chunk_items = chunk_items.max(1);
-    let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))?;
+    let db = smelt_store::SessionReader::open_existing(session_dir)?;
     let history_len = db.history_item_count()?;
     let mut history_start = db
         .transcript_descriptor_max_history_idx()?
@@ -1811,7 +1742,7 @@ pub fn backfill_transcript_descriptors_in_history_chunks(
     while history_start < history_len && max_chunks.is_none_or(|max| chunks < max) {
         let history_end = history_start.saturating_add(chunk_items).min(history_len);
         let descriptor_start = {
-            let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))?;
+            let db = smelt_store::SessionReader::open_existing(session_dir)?;
             db.transcript_descriptor_count()?
         };
         let written = backfill_transcript_descriptor_records_from_history_range(
@@ -2078,16 +2009,8 @@ pub fn delete(id_or_prefix: &str) -> SessionStoreResult<()> {
     }
     crate::session_store::reject_symlink(&session_dir, "delete")?;
     crate::session_store::reject_symlink(&session_dir.join("session.db"), "delete")?;
-    if let Some(SessionAccessDecision::ReadOnly { reason }) =
-        writer_lease_conflict_for_session_dir(&session_dir)
-    {
-        return Err(SessionStoreError::ReadOnlyOwnerConflict { owner: reason });
-    }
-    fs::remove_dir_all(&session_dir).map_err(|err| SessionStoreError::Io {
-        operation: "delete session",
-        path: session_dir.display().to_string(),
-        message: err.to_string(),
-    })
+    smelt_store::SessionMaintenance::delete_session(&session_dir)
+        .map_err(|err| crate::session_store::store_error("delete session", &session_dir, err))
 }
 
 pub fn list_sessions() -> Vec<SessionMeta> {
@@ -2197,7 +2120,8 @@ pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
     let meta_written = write_db_meta_sidecar(dir_path)?;
     let db_path = dir_path.join("session.db");
     if db_path.is_file() {
-        let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+        let db =
+            smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
         let blob = db.search_blob().map_err(|err| err.to_string())?;
         atomic_write(&dir_path.join("content.txt"), blob.as_bytes(), now_ms());
     }
@@ -2222,7 +2146,7 @@ fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMet
     if !db_path.is_file() {
         return Ok(None);
     }
-    let db = smelt_store::SessionDb::open_read_only(&db_path)
+    let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
     let Some(state) = db
         .session_state()
@@ -2295,7 +2219,7 @@ pub fn load_search_blob_result(id_or_prefix: &str) -> SessionStoreResult<Option<
     let session_dir = session_dir(&id);
     crate::session_store::ensure_session_db_read_only(&session_dir)?;
     let db_path = session_dir.join("session.db");
-    let db = smelt_store::SessionDb::open_read_only(&db_path)
+    let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
     db.search_blob()
         .map(Some)

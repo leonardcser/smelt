@@ -250,7 +250,7 @@ fn load_model_history(
             let mut history = prefix;
             if end_index > first_live_index {
                 let db_path = session_dir.join("session.db");
-                let db = smelt_store::SessionDb::open_read_only(&db_path)
+                let db = smelt_store::SessionReader::open_database(&db_path)
                     .map_err(|err| format!("open model history database {db_path:?}: {err}"))?;
                 let mut rows = db
                     .read_history_items_range(first_live_index..end_index)

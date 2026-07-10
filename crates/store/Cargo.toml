@@ -3,7 +3,13 @@ name = "smelt-store"
 version = "0.5.0-alpha.8"
 edition = "2021"
 
+[features]
+default = []
+test-util = []
+
 [dependencies]
+fs2 = "0.4.3"
+getrandom = "0.4.3"
 hostname = "0.4.2"
 libc.workspace = true
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }

@@ -40,4 +40,5 @@ smelt-store = { workspace = true }
 chrono = "0.4.45"
 
 [dev-dependencies]
+smelt-store = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }

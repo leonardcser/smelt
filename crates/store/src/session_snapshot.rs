@@ -6,7 +6,7 @@ use smelt_perf::perf;
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
 use crate::history;
-use crate::meta::{self, SessionState, WriterLease};
+use crate::meta::{self, SessionState};
 use crate::object::checked_i64;
 use crate::session_commit::{HistorySuffix, SideTableSuffixes};
 
@@ -37,7 +37,7 @@ pub(crate) fn save_session_snapshot(
     conn: &Connection,
     snapshot: &SessionSnapshot,
     expected_revision: Option<u64>,
-    writer_lease: Option<&WriterLease>,
+    owner_token: Option<&str>,
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -45,7 +45,7 @@ pub(crate) fn save_session_snapshot(
         conn,
         snapshot,
         expected_revision,
-        writer_lease,
+        owner_token,
         compression,
     );
     match result {
@@ -64,7 +64,7 @@ pub(crate) fn save_session_snapshot_in_transaction(
     conn: &Connection,
     snapshot: &SessionSnapshot,
     expected_revision: Option<u64>,
-    writer_lease: Option<&WriterLease>,
+    owner_token: Option<&str>,
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
     let _perf = perf::begin("store:session:save_snapshot_transaction");
@@ -76,8 +76,8 @@ pub(crate) fn save_session_snapshot_in_transaction(
         "store:session:total_history_rows",
         snapshot.history_len as u64,
     );
-    if let Some(lease) = writer_lease {
-        meta::acquire_writer_lease(conn, lease, 30 * 60)?;
+    if let Some(token) = owner_token {
+        meta::verify_writer_owner(conn, token)?;
     }
     let current_state = meta::session_state(conn)?;
     if let Some(expected_revision) = expected_revision {
@@ -164,7 +164,7 @@ pub(crate) fn apply_session_commit_history_in_transaction(
     history: &HistorySuffix,
     side_tables: &SideTableSuffixes,
     expected_revision: Option<u64>,
-    writer_lease: Option<&WriterLease>,
+    owner_token: Option<&str>,
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
     let _perf = perf::begin("store:session:save_history_suffix_transaction");
@@ -173,8 +173,8 @@ pub(crate) fn apply_session_commit_history_in_transaction(
         history.items.len() as u64,
     );
     perf::record_value("store:session:total_history_rows", history.final_len.get());
-    if let Some(lease) = writer_lease {
-        meta::acquire_writer_lease(conn, lease, 30 * 60)?;
+    if let Some(token) = owner_token {
+        meta::verify_writer_owner(conn, token)?;
     }
     let current_state = meta::session_state(conn)?;
     if let Some(expected_revision) = expected_revision {

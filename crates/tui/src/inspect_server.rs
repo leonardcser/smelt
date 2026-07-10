@@ -501,7 +501,7 @@ fn session_requests_json(id: &str) -> std::result::Result<String, String> {
         return Err(err.to_string());
     }
     let db_path = dir.join("session.db");
-    let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
     let attempts = db
         .query_request_attempts(&smelt_store::RequestAuditQuery {
             limit: u32::MAX,
@@ -550,7 +550,7 @@ fn request_payload_json(id: &str, request_id: &str) -> std::result::Result<Optio
         return Err(err.to_string());
     }
     let db_path = dir.join("session.db");
-    let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
     let Some(payloads) = db
         .request_payloads(attempt_id)
         .map_err(|err| err.to_string())?
@@ -693,7 +693,7 @@ fn request_stats_for_session(id: &str) -> RequestStats {
         return RequestStats::default();
     };
     let db_path = session_dir.join("session.db");
-    smelt_store::SessionDb::open_read_only(&db_path)
+    smelt_store::SessionReader::open_database(&db_path)
         .and_then(|db| db.request_audit_stats())
         .unwrap_or_default()
 }

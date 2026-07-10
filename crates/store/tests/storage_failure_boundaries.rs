@@ -8,6 +8,7 @@ const PROBE_DB: &str = "SMELT_STORAGE_PROBE_DB";
 const PROBE_READY: &str = "SMELT_STORAGE_PROBE_READY";
 const PROBE_GO: &str = "SMELT_STORAGE_PROBE_GO";
 const PROBE_RESULT: &str = "SMELT_STORAGE_PROBE_RESULT";
+const PROBE_RELEASE: &str = "SMELT_STORAGE_PROBE_RELEASE";
 
 #[test]
 fn storage_subprocess_probe() {
@@ -20,25 +21,31 @@ fn storage_subprocess_probe() {
 
     match role.as_str() {
         "claim" => {
-            let db = smelt_store::SessionDb::open(&db_path).expect("open claim database");
-            let observed = db.writer_lease().expect("read writer lease");
             touch(&ready);
             wait_for(&go);
-            let result = if observed.is_none() {
-                db.set_writer_lease(&smelt_store::WriterLease {
-                    owner_id: format!("probe:{}", std::process::id()),
-                    hostname: "probe-host".into(),
-                    pid: std::process::id(),
-                    app_version: "test".into(),
-                    started_at: 1,
-                    heartbeat_at: 1,
-                })
-                .map(|_| "owned".to_string())
-                .unwrap_or_else(|err| format!("error:{err}"))
-            } else {
-                "conflict".into()
-            };
-            std::fs::write(required_path(PROBE_RESULT), result).expect("write claim result");
+            let session_dir = db_path.parent().expect("database parent");
+            match smelt_store::OwnedSessionWriter::open(session_dir, "probe-session") {
+                Ok(_writer) => {
+                    std::fs::write(required_path(PROBE_RESULT), "owned")
+                        .expect("write claim result");
+                    wait_for(&required_path(PROBE_RELEASE));
+                }
+                Err(smelt_store::StoreError::OwnershipConflict { .. }) => {
+                    std::fs::write(required_path(PROBE_RESULT), "conflict")
+                        .expect("write claim result");
+                }
+                Err(err) => {
+                    std::fs::write(required_path(PROBE_RESULT), format!("error:{err}"))
+                        .expect("write claim result");
+                }
+            }
+        }
+        "crash-owner" => {
+            let session_dir = db_path.parent().expect("database parent");
+            let _writer = smelt_store::OwnedSessionWriter::open(session_dir, "probe-session")
+                .expect("claim session writer");
+            touch(&ready);
+            std::process::abort();
         }
         "lock" => {
             let conn = rusqlite::Connection::open(&db_path).expect("open lock database");
@@ -66,17 +73,19 @@ fn storage_subprocess_probe() {
 }
 
 #[test]
-fn simultaneous_process_claims_reproduce_non_atomic_writer_lease() {
+fn simultaneous_process_claims_have_one_lifetime_owner() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("session.db");
-    let db = smelt_store::SessionDb::open(&db_path).expect("create database");
-    db.clear_writer_lease().expect("clear writer lease");
-    drop(db);
+    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
+        .expect("create database")
+        .release()
+        .expect("release database owner");
 
     let first_ready = dir.path().join("first.ready");
     let second_ready = dir.path().join("second.ready");
     let first_go = dir.path().join("first.go");
     let second_go = dir.path().join("second.go");
+    let release = dir.path().join("owner.release");
     let first_result = dir.path().join("first.result");
     let second_result = dir.path().join("second.result");
     let mut first = spawn_probe(
@@ -85,6 +94,7 @@ fn simultaneous_process_claims_reproduce_non_atomic_writer_lease() {
         &first_ready,
         &first_go,
         Some(&first_result),
+        Some(&release),
     );
     let mut second = spawn_probe(
         "claim",
@@ -92,30 +102,60 @@ fn simultaneous_process_claims_reproduce_non_atomic_writer_lease() {
         &second_ready,
         &second_go,
         Some(&second_result),
+        Some(&release),
     );
-    // This barrier splits the same read-then-write sequence used by the
-    // current claim implementation. Both processes observe no owner before
-    // either is allowed to publish its lease.
     wait_for(&first_ready);
     wait_for(&second_ready);
     touch(&first_go);
     touch(&second_go);
+    wait_for(&first_result);
+    wait_for(&second_result);
 
+    let mut results = [read(&first_result), read(&second_result)];
+    results.sort();
+    assert_eq!(results, ["conflict", "owned"]);
+
+    touch(&release);
     assert_success(first.wait().expect("wait for first claim"));
     assert_success(second.wait().expect("wait for second claim"));
-    assert_eq!(read(&first_result), "owned");
-    assert_eq!(read(&second_result), "owned");
+}
+
+#[test]
+fn process_crash_releases_lifetime_ownership() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("session.db");
+    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
+        .expect("create database")
+        .release()
+        .expect("release database owner");
+
+    let ready = dir.path().join("crash-owner.ready");
+    let unused_go = dir.path().join("unused.go");
+    let mut owner = spawn_probe("crash-owner", &db_path, &ready, &unused_go, None, None);
+    wait_for(&ready);
+    let status = owner.wait().expect("wait for crashing owner");
+    assert!(!status.success(), "crash owner unexpectedly exited cleanly");
+
+    let replacement = smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
+        .expect("operating system releases the crashed process lock");
+    assert_eq!(replacement.owner().pid, std::process::id());
 }
 
 #[test]
 fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("session.db");
-    let db = smelt_store::SessionDb::open(&db_path).expect("create database");
+    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
+        .expect("create database")
+        .release()
+        .expect("release database owner");
+    let db = rusqlite::Connection::open(&db_path).expect("open database");
+    db.busy_timeout(Duration::from_secs(5))
+        .expect("set busy timeout");
 
     let short_ready = dir.path().join("short.ready");
     let short_go = dir.path().join("short.go");
-    let mut short_lock = spawn_probe("lock", &db_path, &short_ready, &short_go, None);
+    let mut short_lock = spawn_probe("lock", &db_path, &short_ready, &short_go, None, None);
     wait_for(&short_ready);
     let short_release = short_go.clone();
     let releaser = thread::spawn(move || {
@@ -123,8 +163,11 @@ fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
         touch(&short_release);
     });
     let started = Instant::now();
-    db.set_meta("short_contention", "committed")
-        .expect("short contention should clear");
+    db.execute(
+        "INSERT INTO store_meta (key, value) VALUES ('short_contention', 'committed')",
+        [],
+    )
+    .expect("short contention should clear");
     let short_elapsed = started.elapsed();
     releaser.join().expect("join short lock releaser");
     assert_success(short_lock.wait().expect("wait for short lock"));
@@ -135,18 +178,28 @@ fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
 
     let long_ready = dir.path().join("long.ready");
     let long_go = dir.path().join("long.go");
-    let mut long_lock = spawn_probe("lock", &db_path, &long_ready, &long_go, None);
+    let mut long_lock = spawn_probe("lock", &db_path, &long_ready, &long_go, None, None);
     wait_for(&long_ready);
     let started = Instant::now();
     let err = db
-        .set_meta("long_contention", "not committed")
+        .execute(
+            "INSERT INTO store_meta (key, value) VALUES ('long_contention', 'not committed')",
+            [],
+        )
         .expect_err("long contention should exhaust the sqlite timeout");
     let long_elapsed = started.elapsed();
     touch(&long_go);
     assert_success(long_lock.wait().expect("wait for long lock"));
 
     assert!(
-        err.is_database_locked(),
+        matches!(
+            &err,
+            rusqlite::Error::SqliteFailure(code, _)
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        ),
         "unexpected contention error: {err}"
     );
     assert!(
@@ -163,16 +216,26 @@ fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
 fn process_crash_rolls_back_an_open_canonical_transaction() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("session.db");
-    drop(smelt_store::SessionDb::open(&db_path).expect("create database"));
+    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
+        .expect("create database")
+        .release()
+        .expect("release database owner");
 
     let ready = dir.path().join("crash.ready");
     let unused_go = dir.path().join("unused.go");
-    let mut child = spawn_probe("crash-transaction", &db_path, &ready, &unused_go, None);
+    let mut child = spawn_probe(
+        "crash-transaction",
+        &db_path,
+        &ready,
+        &unused_go,
+        None,
+        None,
+    );
     wait_for(&ready);
     let status = child.wait().expect("wait for crashing child");
     assert!(!status.success(), "crash probe unexpectedly exited cleanly");
 
-    let db = smelt_store::SessionDb::open_read_only(&db_path).expect("reopen after crash");
+    let db = smelt_store::SessionReader::open_database(&db_path).expect("reopen after crash");
     assert_eq!(db.meta("crash_probe").expect("read crash row"), None);
     db.quick_check()
         .expect("database remains valid after crash");
@@ -184,6 +247,7 @@ fn spawn_probe(
     ready: &Path,
     go: &Path,
     result: Option<&Path>,
+    release: Option<&Path>,
 ) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
@@ -196,6 +260,9 @@ fn spawn_probe(
         .env(PROBE_GO, go);
     if let Some(result) = result {
         command.env(PROBE_RESULT, result);
+    }
+    if let Some(release) = release {
+        command.env(PROBE_RELEASE, release);
     }
     command.spawn().expect("spawn storage subprocess probe")
 }

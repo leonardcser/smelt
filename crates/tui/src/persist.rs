@@ -16,14 +16,12 @@ pub(crate) struct Blob {
 }
 
 pub(crate) struct PersistRequest {
-    pub(crate) session_dir: PathBuf,
     pub(crate) command: smelt_store::SessionCommit,
     pub(crate) blobs: Vec<Blob>,
 }
 
 pub(crate) struct PersistRequestAudit {
     pub(crate) session_id: String,
-    pub(crate) session_dir: PathBuf,
     pub(crate) entry: protocol::request_log::RequestLogEntry,
     pub(crate) payload_mode: smelt_store::RequestAuditPayloadMode,
 }
@@ -52,9 +50,14 @@ pub(crate) enum SessionBackendEvent {
 }
 
 enum SessionBackendCommand {
+    OpenOwned(
+        smelt_core::session_id::SessionId,
+        Sender<Result<(), String>>,
+    ),
     CommitSession(Box<PersistRequest>),
     AppendRequestAudit(Box<PersistRequestAudit>),
     Flush(Sender<()>),
+    Release(Sender<Result<(), String>>),
 }
 
 pub(crate) struct Persister {
@@ -76,6 +79,32 @@ impl Persister {
             reports,
             handle: Some(handle),
         }
+    }
+
+    pub(crate) fn open_owned(&self, session_id: &str) -> Result<(), String> {
+        let session_id = smelt_core::session_id::SessionId::parse(session_id)
+            .map_err(|err| format!("invalid session id: {err}"))?;
+        let Some(tx) = &self.tx else {
+            return Err("persistence worker is closed".into());
+        };
+        let (reply_tx, reply_rx) = mpsc::channel();
+        tx.send(SessionBackendCommand::OpenOwned(session_id, reply_tx))
+            .map_err(|_| "persistence worker is closed".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "persistence worker stopped during open".to_string())?
+    }
+
+    pub(crate) fn release(&self) -> Result<(), String> {
+        let Some(tx) = &self.tx else {
+            return Ok(());
+        };
+        let (reply_tx, reply_rx) = mpsc::channel();
+        tx.send(SessionBackendCommand::Release(reply_tx))
+            .map_err(|_| "persistence worker is closed".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "persistence worker stopped during release".to_string())?
     }
 
     pub(crate) fn save(&self, req: PersistRequest) {
@@ -114,6 +143,7 @@ impl Persister {
 impl Drop for Persister {
     fn drop(&mut self) {
         self.flush();
+        let _ = self.release();
         self.tx = None;
         if let Some(h) = self.handle.take() {
             let _ = h.join();
@@ -121,44 +151,128 @@ impl Drop for Persister {
     }
 }
 
-struct PersistDbCache {
-    current: Option<(PathBuf, smelt_store::SessionDb)>,
+enum SessionBackendState {
+    Closed,
+    ReadOnly {
+        session_id: smelt_core::session_id::SessionId,
+        reason: String,
+    },
+    Owned {
+        session_id: smelt_core::session_id::SessionId,
+        writer: smelt_store::OwnedSessionWriter,
+    },
 }
 
-impl PersistDbCache {
-    fn db(&mut self, path: &Path) -> Result<&smelt_store::SessionDb, smelt_store::StoreError> {
-        if self
-            .current
-            .as_ref()
-            .is_some_and(|(current_path, _)| current_path == path)
-        {
+struct SessionBackend {
+    state: SessionBackendState,
+}
+
+impl SessionBackend {
+    fn new() -> Self {
+        Self {
+            state: SessionBackendState::Closed,
+        }
+    }
+
+    fn open_owned(&mut self, session_id: smelt_core::session_id::SessionId) -> Result<(), String> {
+        if matches!(
+            &self.state,
+            SessionBackendState::Owned {
+                session_id: current,
+                ..
+            } if current == &session_id
+        ) {
+            return Ok(());
+        }
+        self.release()?;
+        let session_dir = smelt_core::session::session_dir(&session_id);
+        smelt_core::session::create_private_dir_all(&session_dir)
+            .map_err(|err| format!("create session directory: {err}"))?;
+        match smelt_store::OwnedSessionWriter::open(&session_dir, session_id.as_str()) {
+            Ok(writer) => {
+                self.state = SessionBackendState::Owned { session_id, writer };
+                Ok(())
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                self.state = SessionBackendState::ReadOnly {
+                    session_id,
+                    reason: reason.clone(),
+                };
+                Err(reason)
+            }
+        }
+    }
+
+    fn writer(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(&smelt_store::OwnedSessionWriter, PathBuf), String> {
+        let session_id = smelt_core::session_id::SessionId::parse(session_id)
+            .map_err(|err| format!("invalid session id: {err}"))?;
+        let already_owned = match &self.state {
+            SessionBackendState::ReadOnly {
+                session_id: current,
+                reason,
+            } if current == &session_id => return Err(reason.clone()),
+            SessionBackendState::Owned {
+                session_id: current,
+                ..
+            } if current == &session_id => true,
+            _ => false,
+        };
+        if already_owned {
             smelt_perf::perf::record_value("store:db:cached_read_write", 1);
         } else {
-            self.current = Some((path.to_path_buf(), smelt_store::SessionDb::open(path)?));
+            self.open_owned(session_id.clone())?;
         }
-        Ok(&self.current.as_ref().expect("database cache populated").1)
+        match &self.state {
+            SessionBackendState::Owned { writer, .. } => {
+                Ok((writer, smelt_core::session::session_dir(&session_id)))
+            }
+            _ => Err("persistence backend did not enter owned state".into()),
+        }
+    }
+
+    fn release(&mut self) -> Result<(), String> {
+        match std::mem::replace(&mut self.state, SessionBackendState::Closed) {
+            SessionBackendState::Owned { writer, .. } => {
+                writer.release().map_err(|err| err.to_string())
+            }
+            SessionBackendState::Closed | SessionBackendState::ReadOnly { .. } => Ok(()),
+        }
     }
 }
 
 fn worker_loop(rx: Receiver<SessionBackendCommand>, reports: Sender<SessionBackendEvent>) {
-    let mut db_cache = PersistDbCache { current: None };
+    let mut backend = SessionBackend::new();
     while let Ok(cmd) = rx.recv() {
         match cmd {
+            SessionBackendCommand::OpenOwned(session_id, reply) => {
+                let _ = reply.send(backend.open_owned(session_id));
+            }
             SessionBackendCommand::CommitSession(req) => {
-                report_save_result(write(&req, &mut db_cache), &req, &reports);
+                let result = backend
+                    .writer(&req.command.session_id)
+                    .map_err(persist_write_error)
+                    .and_then(|(writer, session_dir)| write(&req, writer, &session_dir));
+                report_save_result(result, &req, &reports);
             }
             SessionBackendCommand::AppendRequestAudit(req) => {
-                report_request_audit_result(
-                    write_request_audit(&req, &mut db_cache),
-                    &req,
-                    &reports,
-                );
+                let result = backend
+                    .writer(&req.session_id)
+                    .and_then(|(writer, _)| write_request_audit(&req, writer));
+                report_request_audit_result(result, &req, &reports);
             }
             SessionBackendCommand::Flush(done) => {
                 let _ = done.send(());
             }
+            SessionBackendCommand::Release(done) => {
+                let _ = done.send(backend.release());
+            }
         }
     }
+    let _ = backend.release();
 }
 
 fn report_save_result(
@@ -289,6 +403,9 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
                 final_len.get()
             )
         }
+        smelt_store::SessionCommitFailure::OwnershipLost => {
+            "session writer ownership was lost".into()
+        }
         smelt_store::SessionCommitFailure::Integrity { message } => message.clone(),
     }
 }
@@ -305,7 +422,8 @@ fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
 
 fn write(
     req: &PersistRequest,
-    db_cache: &mut PersistDbCache,
+    writer: &smelt_store::OwnedSessionWriter,
+    session_dir: &Path,
 ) -> Result<smelt_store::SaveReceipt, PersistWriteError> {
     let _perf = smelt_perf::perf::begin("persist:write");
     smelt_perf::perf::record_value(
@@ -320,19 +438,13 @@ fn write(
         .map_or(0, |descriptors| descriptors.records.len() as u64);
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
 
-    smelt_core::session::create_private_dir_all(&req.session_dir)
-        .map_err(|err| persist_write_error(format!("create session directory: {err}")))?;
-    let blob_dir = req.session_dir.join("blobs");
+    let blob_dir = session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs).map_err(persist_write_error)?;
     let mut command = req.command.clone();
     if !url_to_blob.is_empty() {
         smelt_core::session::externalize_blobs(&mut command.history.items, &url_to_blob);
     }
-    let db_path = req.session_dir.join("session.db");
-    let db = db_cache
-        .db(&db_path)
-        .map_err(|err| persist_write_error(format!("open session database: {err}")))?;
-    let receipt = db
+    let receipt = writer
         .commit_session(&command)
         .map_err(PersistWriteError::Commit)?;
     record_save_receipt(&receipt);
@@ -343,7 +455,7 @@ fn write(
         .unwrap_or((0, 0));
     smelt_perf::perf::record_value("persist:write:descriptor_start_idx", descriptor_start_idx);
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
-    if let Err(err) = smelt_core::session::refresh_derived_files(&req.session_dir) {
+    if let Err(err) = smelt_core::session::refresh_derived_files(session_dir) {
         smelt_perf::perf::record_value("persist:write:derived_refresh_failed", 1);
         eprintln!(
             "smelt: failed to refresh derived files for session {}: {err}",
@@ -355,16 +467,11 @@ fn write(
 
 fn write_request_audit(
     req: &PersistRequestAudit,
-    db_cache: &mut PersistDbCache,
+    writer: &smelt_store::OwnedSessionWriter,
 ) -> Result<i64, String> {
     let _perf = smelt_perf::perf::begin("persist:request_audit");
-    smelt_core::session::create_private_dir_all(&req.session_dir)
-        .map_err(|err| format!("create session directory: {err}"))?;
-    let db_path = req.session_dir.join("session.db");
-    let db = db_cache
-        .db(&db_path)
-        .map_err(|err| format!("open session database: {err}"))?;
-    db.append_request_attempt(&req.entry, req.payload_mode)
+    writer
+        .append_request_attempt(&req.entry, req.payload_mode)
         .map_err(|err| err.to_string())
 }
 
@@ -394,7 +501,11 @@ pub(crate) fn write_transcript_descriptor_suffix(
     start_descriptor_idx: usize,
     records: &[smelt_core::TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
+    let session_id = session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| smelt_store::StoreError::Integrity("session directory has no id".into()))?;
+    let maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
     let rows = records
         .iter()
         .enumerate()
@@ -411,12 +522,35 @@ pub(crate) fn write_transcript_descriptor_suffix(
             )
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
-    db.replace_transcript_descriptor_suffix_for_repair(start_descriptor_idx, &rows)
+    maintenance.replace_transcript_descriptor_suffix(start_descriptor_idx, &rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SESSION_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const SECOND_SESSION_ID: &str =
+        "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    struct StateHomeGuard(Option<std::ffi::OsString>);
+
+    impl StateHomeGuard {
+        fn install(path: &Path) -> Self {
+            let previous = std::env::var_os("XDG_STATE_HOME");
+            std::env::set_var("XDG_STATE_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for StateHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
 
     fn commit(session_id: &str, base_revision: u64) -> smelt_store::SessionCommit {
         smelt_store::SessionCommit {
@@ -467,17 +601,17 @@ mod tests {
     fn failed_commit_currently_leaves_published_directory_and_attachment_blob() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("session-a");
+        std::fs::create_dir(&session_dir).unwrap();
         let request = PersistRequest {
-            session_dir: session_dir.clone(),
             command: commit("session-a", 9),
             blobs: vec![Blob {
                 filename: "attachment.png".into(),
                 data_url: "data:image/png;base64,AAAA".into(),
             }],
         };
-        let mut cache = PersistDbCache { current: None };
+        let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
-        let result = write(&request, &mut cache);
+        let result = write(&request, &writer, &session_dir);
 
         assert!(result.is_err(), "stale commit should fail");
         assert!(
@@ -489,7 +623,7 @@ mod tests {
             "data:image/png;base64,AAAA",
             "attachment is written before the failed canonical transaction"
         );
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
         assert!(db.session_state().unwrap().is_none());
     }
 
@@ -499,28 +633,51 @@ mod tests {
         let session_dir = dir.path().join("session-a");
         std::fs::create_dir_all(session_dir.join("meta.json")).unwrap();
         let request = PersistRequest {
-            session_dir: session_dir.clone(),
             command: commit("session-a", 0),
             blobs: Vec::new(),
         };
-        let mut cache = PersistDbCache { current: None };
+        let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
-        let receipt = write(&request, &mut cache).expect("canonical commit succeeds");
+        let receipt = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
 
         assert_eq!(receipt.revision.get(), 1);
         assert!(session_dir.join("meta.json").is_dir());
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
         assert_eq!(db.session_state().unwrap().unwrap().history_len, 1);
         assert_eq!(db.read_history_items_range(0..1).unwrap().len(), 1);
     }
 
     #[test]
-    fn request_audit_is_written_by_worker() {
+    fn opening_another_session_releases_the_previous_session_lock() {
+        let _serial = crate::app::test_harness::test_home_guard();
         let dir = tempfile::tempdir().unwrap();
+        let _state_home = StateHomeGuard::install(dir.path());
+        let first_dir = smelt_core::session::dir_for_id(SESSION_ID);
+        let second_dir = smelt_core::session::dir_for_id(SECOND_SESSION_ID);
+        let persister = Persister::spawn();
+
+        persister.open_owned(SESSION_ID).unwrap();
+        assert!(smelt_store::OwnedSessionWriter::open(&first_dir, SESSION_ID).is_err());
+
+        persister.open_owned(SECOND_SESSION_ID).unwrap();
+        let first_replacement =
+            smelt_store::OwnedSessionWriter::open(&first_dir, SESSION_ID).unwrap();
+        assert!(smelt_store::OwnedSessionWriter::open(&second_dir, SECOND_SESSION_ID).is_err());
+
+        persister.release().unwrap();
+        let second_replacement =
+            smelt_store::OwnedSessionWriter::open(&second_dir, SECOND_SESSION_ID).unwrap();
+        drop((first_replacement, second_replacement));
+    }
+
+    #[test]
+    fn request_audit_is_written_by_worker() {
+        let _serial = crate::app::test_harness::test_home_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _state_home = StateHomeGuard::install(dir.path());
         let persister = Persister::spawn();
         persister.append_request_audit(PersistRequestAudit {
-            session_id: "session-a".into(),
-            session_dir: dir.path().to_path_buf(),
+            session_id: SESSION_ID.into(),
             payload_mode: smelt_store::RequestAuditPayloadMode::Summary,
             entry: protocol::request_log::RequestLogEntry {
                 request_id: 42,
@@ -554,7 +711,8 @@ mod tests {
         persister.flush();
         assert!(persister.drain_reports().is_empty());
 
-        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+        let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
+        let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
         let attempts = db
             .query_request_attempts(&smelt_store::RequestAuditQuery::default())
             .unwrap();

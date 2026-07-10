@@ -305,13 +305,13 @@ impl LiveSession {
         Ok(session)
     }
 
-    fn open_store(&self) -> Result<smelt_store::SessionDb, String> {
+    fn open_store(&self) -> Result<smelt_store::SessionReader, String> {
         let db_path = self
             .store
             .as_ref()
             .map(|store| store.db_path.clone())
             .unwrap_or_else(|| self.session_dir.join("session.db"));
-        smelt_store::SessionDb::open_read_only(&db_path)
+        smelt_store::SessionReader::open_database(&db_path)
             .map_err(|err| format!("open session database {}: {err}", db_path.display()))
     }
 }

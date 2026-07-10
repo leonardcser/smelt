@@ -146,6 +146,7 @@ pub enum SessionCommitFailure {
         final_len: HistoryLen,
         bound: HistoryIndexBound,
     },
+    OwnershipLost,
     Integrity {
         message: String,
     },
@@ -180,6 +181,7 @@ mod tests {
             base: DescriptorLen::new(1),
             current: DescriptorLen::new(2),
         };
+        let ownership_lost = SessionCommitFailure::OwnershipLost;
         let integrity = SessionCommitFailure::Integrity {
             message: "bad suffix".into(),
         };
@@ -187,6 +189,7 @@ mod tests {
         assert!(stale_revision.is_recoverable_stale_base());
         assert!(stale_history.is_recoverable_stale_base());
         assert!(stale_descriptor.is_recoverable_stale_base());
+        assert!(!ownership_lost.is_recoverable_stale_base());
         assert!(!integrity.is_recoverable_stale_base());
     }
 

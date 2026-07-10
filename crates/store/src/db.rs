@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -12,7 +11,7 @@ use crate::history::{
     TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptSearchCandidate,
 };
 use crate::jsonl_export;
-use crate::meta::{self, SessionMeta, SessionState, WriterLease};
+use crate::meta::{self, SessionMeta, SessionState, WriterOwner};
 use crate::object::{self, ObjectMeta, StoredObject};
 use crate::request_audit::{
     self, RequestAuditPayloads, RequestAuditQuery, RequestAuditStats, RequestAuditSummary,
@@ -24,19 +23,17 @@ use crate::session_commit::{
 };
 use crate::session_snapshot::{self, SessionSaveReport, SessionSnapshot};
 
-const WRITER_LEASE_STALE_AFTER_SECS: i64 = 30 * 60;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpenMode {
+pub(crate) enum OpenMode {
     ReadWrite,
     ReadOnly,
 }
 
 #[derive(Clone, Debug)]
-pub struct OpenOptions {
-    pub mode: OpenMode,
-    pub app_version: String,
-    pub object_compression: ObjectCompression,
+pub(crate) struct OpenOptions {
+    mode: OpenMode,
+    app_version: String,
+    object_compression: ObjectCompression,
 }
 
 impl Default for OpenOptions {
@@ -53,7 +50,6 @@ impl Default for OpenOptions {
 pub struct SessionDb {
     conn: Connection,
     path: PathBuf,
-    mode: OpenMode,
     object_compression: ObjectCompression,
 }
 
@@ -72,7 +68,7 @@ impl SessionDb {
         )
     }
 
-    pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
+    pub(crate) fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         let _perf = smelt_perf::perf::begin(match options.mode {
             OpenMode::ReadWrite => "store:db:open_read_write",
             OpenMode::ReadOnly => "store:db:open_read_only",
@@ -102,7 +98,6 @@ impl SessionDb {
         Ok(Self {
             conn,
             path,
-            mode: options.mode,
             object_compression: options.object_compression,
         })
     }
@@ -111,14 +106,7 @@ impl SessionDb {
         &self.path
     }
 
-    pub fn mode(&self) -> OpenMode {
-        self.mode
-    }
-
-    pub fn object_compression(&self) -> ObjectCompression {
-        self.object_compression
-    }
-
+    #[cfg(any(test, feature = "test-util"))]
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -165,6 +153,7 @@ impl SessionDb {
         self.user_version()
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         meta::set_meta(&self.conn, key, value)
     }
@@ -173,18 +162,19 @@ impl SessionDb {
         meta::meta(&self.conn, key)
     }
 
-    pub fn set_writer_lease(&self, lease: &WriterLease) -> Result<()> {
-        meta::set_writer_lease(&self.conn, lease)
+    pub fn writer_owner(&self) -> Result<Option<WriterOwner>> {
+        meta::writer_owner(&self.conn)
     }
 
-    pub fn writer_lease(&self) -> Result<Option<WriterLease>> {
-        meta::writer_lease(&self.conn)
+    pub(crate) fn claim_writer_owner(&self, token: &str, owner: &WriterOwner) -> Result<()> {
+        self.immediate_transaction(|conn| meta::claim_writer_owner(conn, token, owner))
     }
 
-    pub fn clear_writer_lease(&self) -> Result<()> {
-        meta::clear_writer_lease(&self.conn)
+    pub(crate) fn release_writer_owner(&self, token: &str) -> Result<()> {
+        self.immediate_transaction(|conn| meta::clear_writer_owner(conn, token))
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn upsert_session_state(&self, state: &SessionState) -> Result<()> {
         meta::upsert_session_state(&self.conn, state)
     }
@@ -197,18 +187,22 @@ impl SessionDb {
         meta::session_meta(&self.conn)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn write_meta_sidecar(&self, path: impl AsRef<Path>) -> Result<Option<SessionMeta>> {
         meta::write_meta_sidecar(&self.conn, path)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn put_object(&self, kind: &str, bytes: &[u8]) -> Result<StoredObject> {
         object::put_object(&self.conn, kind, bytes, self.object_compression)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn put_object_uncompressed(&self, kind: &str, bytes: &[u8]) -> Result<StoredObject> {
         object::put_object(&self.conn, kind, bytes, ObjectCompression::none())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn put_object_with_compression(
         &self,
         kind: &str,
@@ -241,12 +235,30 @@ impl SessionDb {
         jsonl_export::export_requests_jsonl(&self.conn, out)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn append_request_attempt(
         &self,
         entry: &protocol::request_log::RequestLogEntry,
         payload_mode: request_audit::RequestAuditPayloadMode,
     ) -> Result<i64> {
         self.immediate_transaction(|conn| {
+            request_audit::append_request_attempt(
+                conn,
+                entry,
+                self.object_compression,
+                payload_mode,
+            )
+        })
+    }
+
+    pub(crate) fn append_request_attempt_owned(
+        &self,
+        token: &str,
+        entry: &protocol::request_log::RequestLogEntry,
+        payload_mode: request_audit::RequestAuditPayloadMode,
+    ) -> Result<i64> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
             request_audit::append_request_attempt(
                 conn,
                 entry,
@@ -289,7 +301,8 @@ impl SessionDb {
         )
     }
 
-    /// Import-only snapshot writer. Runtime session saves must use `commit_session`.
+    /// Import-only snapshot writer. Runtime session saves must use `commit_session_owned`.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn save_session_snapshot_for_import(
         &self,
         snapshot: &SessionSnapshot,
@@ -303,12 +316,25 @@ impl SessionDb {
         )
     }
 
+    pub(crate) fn save_session_snapshot_for_import_owned(
+        &self,
+        token: &str,
+        snapshot: &SessionSnapshot,
+    ) -> Result<SessionSaveReport> {
+        session_snapshot::save_session_snapshot(
+            &self.conn,
+            snapshot,
+            Some(0),
+            Some(token),
+            self.object_compression,
+        )
+    }
+
     #[cfg(test)]
     pub fn save_session_snapshot_as_writer(
         &self,
         snapshot: &SessionSnapshot,
     ) -> Result<SessionSaveReport> {
-        let lease = self.current_process_writer_lease()?;
         let expected_revision = self
             .session_state()?
             .as_ref()
@@ -317,7 +343,7 @@ impl SessionDb {
             &self.conn,
             snapshot,
             Some(expected_revision),
-            Some(&lease),
+            None,
             self.object_compression,
         )
     }
@@ -329,7 +355,6 @@ impl SessionDb {
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<SessionSaveReport> {
-        let lease = self.current_process_writer_lease()?;
         let expected_revision = self
             .session_state()?
             .as_ref()
@@ -339,7 +364,7 @@ impl SessionDb {
                 conn,
                 snapshot,
                 Some(expected_revision),
-                Some(&lease),
+                None,
                 self.object_compression,
             )?;
             history::replace_transcript_descriptor_suffix_in_transaction(
@@ -352,6 +377,7 @@ impl SessionDb {
         })
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn copy_prefix_to(
         &self,
         dest_path: impl AsRef<Path>,
@@ -359,11 +385,24 @@ impl SessionDb {
         history_len: usize,
     ) -> Result<()> {
         let dest = SessionDb::open(dest_path)?;
-        let source_path = self.path.to_string_lossy().to_string();
-        dest.conn
+        dest.copy_prefix_from(self, state, history_len, None)
+    }
+
+    pub(crate) fn copy_prefix_from(
+        &self,
+        source: &SessionDb,
+        state: &SessionState,
+        history_len: usize,
+        owner_token: Option<&str>,
+    ) -> Result<()> {
+        let source_path = source.path.to_string_lossy().to_string();
+        self.conn
             .execute("ATTACH DATABASE ?1 AS src", [source_path.as_str()])?;
         let history_len = history_len as i64;
-        let copy_result = dest.immediate_transaction(|conn| {
+        let copy_result = self.immediate_transaction(|conn| {
+            if let Some(token) = owner_token {
+                meta::verify_writer_owner(conn, token)?;
+            }
             meta::upsert_session_state(conn, state)?;
             conn.execute(
                 "INSERT OR IGNORE INTO objects
@@ -417,24 +456,42 @@ impl SessionDb {
             )?;
             Ok(())
         });
-        let detach_result = dest.conn.execute("DETACH DATABASE src", []);
+        let detach_result = self.conn.execute("DETACH DATABASE src", []);
         copy_result?;
         detach_result?;
-        dest.quick_check()
+        self.quick_check()
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn commit_session(
         &self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-        let lease = self
-            .current_process_writer_lease()
-            .map_err(session_commit_failure_from_store_error)?;
+        self.commit_session_with_owner(command, None)
+    }
+
+    pub(crate) fn commit_session_owned(
+        &self,
+        token: &str,
+        command: &SessionCommit,
+    ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+        self.commit_session_with_owner(command, Some(token))
+    }
+
+    fn commit_session_with_owner(
+        &self,
+        command: &SessionCommit,
+        owner_token: Option<&str>,
+    ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|err| session_commit_failure_from_store_error(err.into()))?;
-        let result =
-            commit_session_in_transaction(&self.conn, command, &lease, self.object_compression);
+        let result = commit_session_in_transaction(
+            &self.conn,
+            command,
+            owner_token,
+            self.object_compression,
+        );
         match result {
             Ok(receipt) => {
                 self.conn
@@ -449,14 +506,36 @@ impl SessionDb {
         }
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     pub fn repair_mismatched_transcript_descriptor_history_links(&self) -> Result<usize> {
         self.immediate_transaction(|conn| {
             history::repair_mismatched_transcript_descriptor_history_links(conn)
         })
     }
 
+    pub(crate) fn repair_mismatched_transcript_descriptor_history_links_owned(
+        &self,
+        token: &str,
+    ) -> Result<usize> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            history::repair_mismatched_transcript_descriptor_history_links(conn)
+        })
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
     pub fn repair_checkpoint_first_live_index_past_history(&self) -> Result<usize> {
         self.immediate_transaction(meta::repair_checkpoint_first_live_index_past_history)
+    }
+
+    pub(crate) fn repair_checkpoint_first_live_index_past_history_owned(
+        &self,
+        token: &str,
+    ) -> Result<usize> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            meta::repair_checkpoint_first_live_index_past_history(conn)
+        })
     }
 
     pub fn load_full_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
@@ -464,6 +543,7 @@ impl SessionDb {
     }
 
     /// Maintenance-only descriptor repair hook. Runtime session saves must use `commit_session`.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn replace_transcript_descriptor_records_for_repair(
         &self,
         records: &[TranscriptDescriptorRecord],
@@ -471,7 +551,24 @@ impl SessionDb {
         history::replace_transcript_descriptor_records(&self.conn, records, self.object_compression)
     }
 
+    pub(crate) fn replace_transcript_descriptor_records_owned(
+        &self,
+        token: &str,
+        records: &[TranscriptDescriptorRecord],
+    ) -> Result<()> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            history::replace_transcript_descriptor_suffix_in_transaction(
+                conn,
+                0,
+                records,
+                self.object_compression,
+            )
+        })
+    }
+
     /// Maintenance-only descriptor repair hook. Runtime session saves must use `commit_session`.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn replace_transcript_descriptor_suffix_for_repair(
         &self,
         start_descriptor_idx: usize,
@@ -483,6 +580,23 @@ impl SessionDb {
             records,
             self.object_compression,
         )
+    }
+
+    pub(crate) fn replace_transcript_descriptor_suffix_owned(
+        &self,
+        token: &str,
+        start_descriptor_idx: usize,
+        records: &[TranscriptDescriptorRecord],
+    ) -> Result<()> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            history::replace_transcript_descriptor_suffix_in_transaction(
+                conn,
+                start_descriptor_idx,
+                records,
+                self.object_compression,
+            )
+        })
     }
 
     pub fn transcript_descriptor_count(&self) -> Result<usize> {
@@ -655,55 +769,26 @@ impl SessionDb {
     pub fn search_blob(&self) -> Result<String> {
         session_snapshot::search_blob(&self.conn)
     }
-
-    pub fn active_writer_lease_for_current_process(&self) -> Result<Option<WriterLease>> {
-        let lease = self.current_process_writer_lease()?;
-        Ok(self.writer_lease()?.filter(|existing| {
-            meta::writer_lease_conflicts(existing, &lease, WRITER_LEASE_STALE_AFTER_SECS)
-        }))
-    }
-
-    pub fn acquire_current_process_writer_lease(&self) -> Result<WriterLease> {
-        let lease = self.current_process_writer_lease()?;
-        meta::acquire_writer_lease(&self.conn, &lease, WRITER_LEASE_STALE_AFTER_SECS)?;
-        Ok(lease)
-    }
-
-    fn current_process_writer_lease(&self) -> Result<WriterLease> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let hostname = local_hostname();
-        let pid = std::process::id();
-        let owner_id = format!("{hostname}:{pid}");
-        let started_at = self
-            .writer_lease()?
-            .filter(|lease| lease.owner_id == owner_id)
-            .map_or(now, |lease| lease.started_at);
-        Ok(WriterLease {
-            owner_id,
-            hostname,
-            pid,
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            started_at,
-            heartbeat_at: now,
-        })
-    }
 }
 
 fn session_commit_failure_from_store_error(err: StoreError) -> SessionCommitFailure {
-    SessionCommitFailure::Integrity {
-        message: err.to_string(),
+    match err {
+        StoreError::OwnershipLost => SessionCommitFailure::OwnershipLost,
+        err => SessionCommitFailure::Integrity {
+            message: err.to_string(),
+        },
     }
 }
 
 fn commit_session_in_transaction(
     conn: &Connection,
     command: &SessionCommit,
-    writer_lease: &WriterLease,
+    owner_token: Option<&str>,
     compression: ObjectCompression,
 ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+    if let Some(token) = owner_token {
+        meta::verify_writer_owner(conn, token).map_err(session_commit_failure_from_store_error)?;
+    }
     let current_state =
         meta::session_state(conn).map_err(session_commit_failure_from_store_error)?;
     if command.state.id != command.session_id {
@@ -789,7 +874,7 @@ fn commit_session_in_transaction(
         &command.history,
         &command.side_tables,
         Some(current_revision),
-        Some(writer_lease),
+        None,
         compression,
     )
     .map_err(session_commit_failure_from_store_error)?;
@@ -900,14 +985,6 @@ fn descriptor_index_usize(
         .ok_or_else(|| SessionCommitFailure::Integrity {
             message: format!("descriptor index {} does not fit usize", value.get()),
         })
-}
-
-fn local_hostname() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|name| name.into_string().ok())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "unknown-host".to_string())
 }
 
 fn validate_session_commit_invariants(conn: &Connection) -> Result<()> {
@@ -1277,7 +1354,6 @@ mod tests {
         drop(db);
 
         let db = SessionDb::open_read_only(&path).unwrap();
-        assert_eq!(db.mode(), OpenMode::ReadOnly);
         assert_eq!(db.schema_version().unwrap(), schema::SCHEMA_VERSION);
         db.quick_check().unwrap();
     }
@@ -3149,62 +3225,6 @@ mod tests {
         assert_eq!(db.object_bytes(&meta.hash).unwrap().unwrap(), object.bytes);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn writer_lease_allows_dead_same_host_pid() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let existing = WriterLease {
-            owner_id: "host:4294967295".into(),
-            hostname: "host".into(),
-            pid: u32::MAX,
-            app_version: "test".into(),
-            started_at: 100,
-            heartbeat_at: 100,
-        };
-        db.set_writer_lease(&existing).unwrap();
-
-        let replacement = WriterLease {
-            owner_id: "host:1".into(),
-            hostname: "host".into(),
-            pid: 1,
-            app_version: "test".into(),
-            started_at: 200,
-            heartbeat_at: 200,
-        };
-
-        crate::meta::acquire_writer_lease(db.connection(), &replacement, 30 * 60).unwrap();
-        assert_eq!(db.writer_lease().unwrap().unwrap().owner_id, "host:1");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn writer_lease_allows_dead_unknown_host_pid() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let existing = WriterLease {
-            owner_id: "unknown-host:4294967295".into(),
-            hostname: "unknown-host".into(),
-            pid: u32::MAX,
-            app_version: "test".into(),
-            started_at: 100,
-            heartbeat_at: 100,
-        };
-        db.set_writer_lease(&existing).unwrap();
-
-        let replacement = WriterLease {
-            owner_id: "host:1".into(),
-            hostname: "host".into(),
-            pid: 1,
-            app_version: "test".into(),
-            started_at: 200,
-            heartbeat_at: 200,
-        };
-
-        crate::meta::acquire_writer_lease(db.connection(), &replacement, 30 * 60).unwrap();
-        assert_eq!(db.writer_lease().unwrap().unwrap().owner_id, "host:1");
-    }
-
     #[test]
     fn duplicate_object_write_skips_new_kind_and_keeps_original_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -4032,23 +4052,22 @@ mod tests {
     }
 
     #[test]
-    fn roundtrips_writer_lease() {
+    fn roundtrips_writer_owner() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let lease = WriterLease {
-            owner_id: "owner".into(),
+        let owner = WriterOwner {
             hostname: "host".into(),
             pid: 42,
+            process_start_id: "process-start".into(),
             app_version: "test".into(),
-            started_at: 10,
-            heartbeat_at: 11,
+            claimed_at: 10,
         };
 
-        assert_eq!(db.writer_lease().unwrap(), None);
-        db.set_writer_lease(&lease).unwrap();
-        assert_eq!(db.writer_lease().unwrap(), Some(lease));
-        db.clear_writer_lease().unwrap();
-        assert_eq!(db.writer_lease().unwrap(), None);
+        assert_eq!(db.writer_owner().unwrap(), None);
+        db.claim_writer_owner("owner-token", &owner).unwrap();
+        assert_eq!(db.writer_owner().unwrap(), Some(owner));
+        db.release_writer_owner("owner-token").unwrap();
+        assert_eq!(db.writer_owner().unwrap(), None);
     }
 
     #[test]
