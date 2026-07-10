@@ -114,7 +114,7 @@ fn short_string(u: &mut Unstructured<'_>, max: usize) -> arbitrary::Result<Strin
 
 fn event_json(event: &Event) -> serde_json::Value {
     match event {
-        Event::Raw(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({"raw": s})),
+        Event::Raw(s) => serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({"raw": s})),
         Event::ChatText(text) => serde_json::json!({"choices":[{"delta":{"content":text}}]}),
         Event::ChatThinking(text) => serde_json::json!({"choices":[{"delta":{"reasoning_content":text}}]}),
         Event::ChatTool { idx, id, name, args } => serde_json::json!({

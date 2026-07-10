@@ -2,10 +2,10 @@ use crate::extract::extract_tool_calls_from_text;
 use crate::sse;
 use crate::{
     collect_indexed_tool_calls, non_empty, sanitize_tool_call_arguments, CancellationToken,
-    ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent, ToolCallStreamEvent,
-    ToolDefinition,
+    CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
+    ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
-use protocol::{Message, ReasoningEffort, TokenUsage, ToolCall};
+use protocol::{Message, ReasoningEffort, ReasoningKind, TokenUsage, ToolCall};
 
 use std::collections::HashMap;
 
@@ -104,6 +104,17 @@ pub fn build_body(
     body
 }
 
+fn raw_reasoning_parts(reasoning: Option<&str>) -> Vec<CompletedReasoningPart> {
+    reasoning
+        .map(|content| {
+            vec![CompletedReasoningPart {
+                kind: ReasoningKind::Raw,
+                content: content.to_string(),
+            }]
+        })
+        .unwrap_or_default()
+}
+
 pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
     let choice = data["choices"]
         .get(0)
@@ -139,6 +150,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 
     Ok(ParsedResponse {
         content,
+        reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
         reasoning,
         reasoning_blocks: None,
         tool_calls,
@@ -174,6 +186,7 @@ impl StreamState {
                     from_content.into_iter().chain(from_reasoning).collect();
                 return ParsedResponse {
                     content: cleaned_content,
+                    reasoning_parts: raw_reasoning_parts(cleaned_reasoning.as_deref()),
                     reasoning: cleaned_reasoning,
                     reasoning_blocks: None,
                     tool_calls,
@@ -184,6 +197,7 @@ impl StreamState {
 
         ParsedResponse {
             content,
+            reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
             reasoning,
             reasoning_blocks: None,
             tool_calls,
@@ -256,7 +270,14 @@ fn apply_sse_event(
     {
         if !text.is_empty() {
             state.reasoning.push_str(text);
-            on_delta(ProviderStreamEvent::ThinkingDelta(text));
+            on_delta(ProviderStreamEvent::Reasoning(
+                ReasoningStreamEvent::Delta {
+                    item_id: "reasoning",
+                    part_index: 0,
+                    kind: ReasoningKind::Raw,
+                    delta: text,
+                },
+            ));
         }
     }
 
@@ -788,8 +809,11 @@ mod tests {
             &mut state,
             &json!({"choices":[{"delta":{"reasoning_content":"why"}}]}),
             &mut |d| {
-                if let ProviderStreamEvent::ThinkingDelta(t) = d {
-                    got.push(t.into())
+                if let ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta {
+                    delta, ..
+                }) = d
+                {
+                    got.push(delta.into())
                 }
             },
         );

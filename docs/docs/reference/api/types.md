@@ -923,6 +923,9 @@ Semantic transcript block snapshot passed to the root renderer.
 | `text` | `string` |  | User/mode/process text. |
 | `user_lines` | `table` |  | User text as styled span lines, including slash/ref/image accents. |
 | `content` | `string` |  | Assistant/thinking/code content. |
+| `title` | `string` |  | Latest structured reasoning-summary title. |
+| `summary_titles` | `string[]` |  | Ordered structured reasoning-summary title history. |
+| `reasoning_kind` | `"summary"|"raw"` |  | Reasoning source for thinking blocks. |
 | `image_labels` | `string[]` |  | User image labels. |
 | `icon` | `string` |  | Mode icon. |
 | `hl_group` | `string` |  | Mode/process highlight group. |

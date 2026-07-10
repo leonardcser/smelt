@@ -1,8 +1,31 @@
+use protocol::ReasoningKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderStreamEvent<'a> {
     TextDelta(&'a str),
-    ThinkingDelta(&'a str),
+    Reasoning(ReasoningStreamEvent<'a>),
     ToolCall(ToolCallStreamEvent<'a>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningStreamEvent<'a> {
+    PartStarted {
+        item_id: &'a str,
+        part_index: u32,
+        kind: ReasoningKind,
+    },
+    Delta {
+        item_id: &'a str,
+        part_index: u32,
+        kind: ReasoningKind,
+        delta: &'a str,
+    },
+    PartFinished {
+        item_id: &'a str,
+        part_index: u32,
+        kind: ReasoningKind,
+        content: Option<&'a str>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

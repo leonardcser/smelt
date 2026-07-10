@@ -403,8 +403,12 @@ impl HeadlessApp {
             }
 
             match &ev {
-                EngineEvent::ThinkingDelta { .. } => {}
-                EngineEvent::Thinking { content } if self.sink.format == OutputFormat::Text => {
+                EngineEvent::ReasoningPartStarted { .. }
+                | EngineEvent::ReasoningPartDelta { .. }
+                | EngineEvent::ReasoningPartFinished { .. } => {}
+                EngineEvent::Reasoning { content, .. }
+                    if self.sink.format == OutputFormat::Text =>
+                {
                     self.sink.log_thinking(content);
                 }
                 EngineEvent::TextDelta { delta } => {

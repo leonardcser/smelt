@@ -6,7 +6,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use protocol::{Content, EngineEvent, HistoryItem};
+use protocol::{Content, EngineEvent, HistoryItem, ReasoningKind};
 use smelt_fuzz::{runtime::with_current_thread_runtime, TestApp};
 use tui::app::test_harness::SourceEvent;
 
@@ -48,8 +48,17 @@ fn run_with_app(input: Input) {
             Op::StartTurn(id) => app.start_turn(u64::from(id)),
             Op::Text(content) => app.feed_one(SourceEvent::engine(EngineEvent::Text { content })),
             Op::TextDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::TextDelta { delta })),
-            Op::Thinking(content) => app.feed_one(SourceEvent::engine(EngineEvent::Thinking { content })),
-            Op::ThinkingDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::ThinkingDelta { delta })),
+            Op::Thinking(content) => app.feed_one(SourceEvent::engine(EngineEvent::Reasoning {
+                kind: ReasoningKind::Raw,
+                title: None,
+                content,
+            })),
+            Op::ThinkingDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartDelta {
+                id: "fuzz:raw:0".into(),
+                kind: ReasoningKind::Raw,
+                delta,
+                title: None,
+            })),
             Op::ToolStart { id, name } => app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
                 call_id: call_id(id),
                 tool_name: name,

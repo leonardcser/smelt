@@ -7749,6 +7749,9 @@ mod tests {
     fn fold_preserves_transcript_document_anchors() {
         let mut app = TestApp::builder().build().app;
         app.push_block(smelt_core::Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: (0..20)
                 .map(|i| format!("folded prefix {i}"))
                 .collect::<Vec<_>>()

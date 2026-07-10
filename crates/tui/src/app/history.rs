@@ -288,9 +288,9 @@ fn descriptor_records_cover_history<'a>(
         if fallback_history_item_block_count(item) == 0 {
             return true;
         }
-        records.iter().any(|record| {
-            matches!(record.origin, Some(smelt_core::BlockOrigin::History(origin)) if origin == idx)
-        })
+        records
+            .iter()
+            .any(|record| matches!(record.origin, Some(smelt_core::BlockOrigin::History(origin)) if origin == idx))
     })
 }
 
@@ -425,7 +425,10 @@ fn push_assistant_blocks(
         if !reasoning.is_empty() {
             transcript.push_with_origin(
                 Block::Thinking {
+                    title: None,
+                    summary_titles: Vec::new(),
                     content: reasoning.clone(),
+                    kind: protocol::ReasoningKind::Raw,
                 },
                 smelt_core::BlockOrigin::History(history_index),
             );
@@ -1398,11 +1401,9 @@ impl TuiApp {
                     &self.core.session,
                 ) {
                     let transcript = build_transcript_from_session(&self.lua, &self.core.session);
-                    self.apply_session_document_mutation(
-                        crate::app::session_document::SessionMutation::ReplaceTranscriptFromHistory {
-                            transcript,
-                        },
-                    );
+                    self.apply_session_document_mutation(crate::app::session_document::SessionMutation::ReplaceTranscriptFromHistory {
+                        transcript,
+                    });
                 }
                 self.sync_session_snapshot();
             }
@@ -1852,11 +1853,10 @@ impl TuiApp {
             _ => false,
         };
         if duplicate {
-            let result = self.apply_session_document_mutation(
-                crate::app::session_document::SessionMutation::RemoveUnoriginatedTranscriptBlockAt {
+            let result =
+                self.apply_session_document_mutation(crate::app::session_document::SessionMutation::RemoveUnoriginatedTranscriptBlockAt {
                     block_index: index - 1,
-                },
-            );
+                });
             if result.applied {
                 return index - 1;
             }

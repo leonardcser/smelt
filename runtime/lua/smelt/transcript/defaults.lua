@@ -513,12 +513,28 @@ function smelt.transcript.defaults.render_thinking(block, ctx)
   return M.render_thinking_full(block, ctx)
 end
 
+local function thinking_markdown(block, include_summary_history)
+  local sections = {}
+  local titles = include_summary_history and block.summary_titles or nil
+  if titles and #titles > 0 then
+    for _, title in ipairs(titles) do
+      sections[#sections + 1] = "**" .. title .. "**"
+    end
+  elseif block.title and block.title ~= "" then
+    sections[#sections + 1] = "**" .. block.title .. "**"
+  end
+  if block.content and block.content ~= "" then
+    sections[#sections + 1] = block.content
+  end
+  return table.concat(sections, "\n")
+end
+
 --- Render the full thinking block with the current gutter.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_thinking_full(block, ctx)
   local _ = ctx
   return layout.gutter(
-    layout.style(M.render_llm_markdown(block.content), {
+    layout.style(M.render_llm_markdown(thinking_markdown(block, true)), {
       dim = true,
       italic = true,
     }),
@@ -536,7 +552,7 @@ end
 --- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_thinking_peek(block, ctx)
-  local content = block.content or ""
+  local content = thinking_markdown(block, false)
   if content == "" then content = block.thinking_summary or "thinking (0 lines)" end
   return layout.gutter(
     layout.cap(thinking_content_layout(content), {

@@ -1,11 +1,12 @@
 use crate::sse;
 use crate::{
     json_as_u64, non_empty, non_empty_blocks, parse_retry_from_body, rate_limit_error, unix_now,
-    CancellationToken, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
-    ToolCallStreamEvent, ToolDefinition,
+    CancellationToken, CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError,
+    ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
 use protocol::{
-    FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
+    FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
+    ToolCall,
 };
 use std::collections::HashMap;
 
@@ -279,6 +280,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 
     let mut content: Option<String> = None;
     let mut reasoning: Option<String> = None;
+    let mut reasoning_parts: Vec<CompletedReasoningPart> = Vec::new();
     let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -305,17 +307,40 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
             }
             Some("reasoning") => {
                 let data = normalize_openai_reasoning_item(item);
-                let mut texts: Vec<&str> = Vec::new();
-                if let Some(summaries) = data["summary"].as_array() {
-                    texts.extend(summaries.iter().filter_map(|s| s["text"].as_str()));
-                }
-                if texts.is_empty() {
-                    if let Some(parts) = data["content"].as_array() {
-                        texts.extend(parts.iter().filter_map(|p| p["text"].as_str()));
-                    }
-                }
+                let summaries: Vec<&str> = data["summary"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|summary| summary["text"].as_str())
+                    .collect();
+                let (kind, texts) = if summaries.is_empty() {
+                    let content = data["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|part| part["text"].as_str())
+                        .collect();
+                    (ReasoningKind::Raw, content)
+                } else {
+                    (ReasoningKind::Summary, summaries)
+                };
                 if !texts.is_empty() {
-                    reasoning = Some(texts.join("\n"));
+                    for text in &texts {
+                        reasoning_parts.push(CompletedReasoningPart {
+                            kind,
+                            content: (*text).to_string(),
+                        });
+                    }
+                    let joined = texts.join("\n");
+                    match &mut reasoning {
+                        Some(reasoning) => {
+                            if !reasoning.is_empty() {
+                                reasoning.push('\n');
+                            }
+                            reasoning.push_str(&joined);
+                        }
+                        None => reasoning = Some(joined),
+                    }
                 }
                 reasoning_blocks.push(ReasoningBlock {
                     provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
@@ -331,6 +356,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
     Ok(ParsedResponse {
         content,
         reasoning,
+        reasoning_parts,
         reasoning_blocks: non_empty_blocks(reasoning_blocks),
         tool_calls,
         usage,
@@ -346,6 +372,8 @@ struct StreamState {
     /// Echoed back on the next turn after normalization; item ids are
     /// omitted because stateless requests do not persist server items.
     reasoning_items: Vec<serde_json::Value>,
+    /// Current reasoning output item. Summary-part events may omit `item_id`.
+    active_reasoning_item_id: Option<String>,
     /// item ids in provider output order.
     tool_order: Vec<String>,
     /// item_id -> (call_id, name, args)
@@ -395,6 +423,7 @@ impl StreamState {
         Ok(ParsedResponse {
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
+            reasoning_parts: Vec::new(),
             reasoning_blocks: non_empty_blocks(reasoning_blocks),
             tool_calls,
             usage: self.usage,
@@ -415,6 +444,13 @@ pub fn parse_stream_events<'a>(
 }
 
 /// Apply one SSE event to the accumulator. Pure (modulo the on_delta callback).
+fn reasoning_item_id<'a>(state: &'a StreamState, ev: &'a serde_json::Value) -> &'a str {
+    ev["item_id"]
+        .as_str()
+        .or(state.active_reasoning_item_id.as_deref())
+        .unwrap_or("reasoning")
+}
+
 fn apply_sse_event(
     state: &mut StreamState,
     ev: &serde_json::Value,
@@ -424,6 +460,9 @@ fn apply_sse_event(
     let ev_type = ev["type"].as_str().unwrap_or("");
 
     match ev_type {
+        "response.output_item.added" if ev["item"]["type"].as_str() == Some("reasoning") => {
+            state.active_reasoning_item_id = ev["item"]["id"].as_str().map(str::to_string);
+        }
         "response.output_item.added" if ev["item"]["type"].as_str() == Some("function_call") => {
             let item = &ev["item"];
             let id = item["id"].as_str().unwrap_or("").to_string();
@@ -499,6 +538,7 @@ fn apply_sse_event(
             // Capture the full reasoning item - `id` + `encrypted_content`
             // + `summary` - so it can be echoed back on the next request.
             state.reasoning_items.push(ev["item"].clone());
+            state.active_reasoning_item_id = None;
         }
         "response.output_text.delta" => {
             if let Some(text) = ev["delta"].as_str() {
@@ -544,13 +584,62 @@ fn apply_sse_event(
                 }
             }
         }
-        "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
-            if let Some(text) = ev["delta"].as_str() {
-                if !text.is_empty() {
-                    state.reasoning.push_str(text);
-                    on_delta(ProviderStreamEvent::ThinkingDelta(text));
-                }
+        "response.reasoning_summary_part.added" => {
+            let item_id = reasoning_item_id(state, ev);
+            let part_index = ev["summary_index"].as_u64().unwrap_or(0) as u32;
+            on_delta(ProviderStreamEvent::Reasoning(
+                ReasoningStreamEvent::PartStarted {
+                    item_id,
+                    part_index,
+                    kind: ReasoningKind::Summary,
+                },
+            ));
+        }
+        "response.reasoning_summary_text.delta" => {
+            if let Some(text) = ev["delta"].as_str().filter(|text| !text.is_empty()) {
+                state.reasoning.push_str(text);
+                on_delta(ProviderStreamEvent::Reasoning(
+                    ReasoningStreamEvent::Delta {
+                        item_id: reasoning_item_id(state, ev),
+                        part_index: ev["summary_index"].as_u64().unwrap_or(0) as u32,
+                        kind: ReasoningKind::Summary,
+                        delta: text,
+                    },
+                ));
             }
+        }
+        "response.reasoning_summary_text.done" => {
+            on_delta(ProviderStreamEvent::Reasoning(
+                ReasoningStreamEvent::PartFinished {
+                    item_id: reasoning_item_id(state, ev),
+                    part_index: ev["summary_index"].as_u64().unwrap_or(0) as u32,
+                    kind: ReasoningKind::Summary,
+                    content: ev["text"].as_str(),
+                },
+            ));
+        }
+        "response.reasoning.delta" => {
+            if let Some(text) = ev["delta"].as_str().filter(|text| !text.is_empty()) {
+                state.reasoning.push_str(text);
+                on_delta(ProviderStreamEvent::Reasoning(
+                    ReasoningStreamEvent::Delta {
+                        item_id: reasoning_item_id(state, ev),
+                        part_index: ev["content_index"].as_u64().unwrap_or(0) as u32,
+                        kind: ReasoningKind::Raw,
+                        delta: text,
+                    },
+                ));
+            }
+        }
+        "response.reasoning.done" => {
+            on_delta(ProviderStreamEvent::Reasoning(
+                ReasoningStreamEvent::PartFinished {
+                    item_id: reasoning_item_id(state, ev),
+                    part_index: ev["content_index"].as_u64().unwrap_or(0) as u32,
+                    kind: ReasoningKind::Raw,
+                    content: ev["text"].as_str(),
+                },
+            ));
         }
         "response.completed" | "response.done" => {
             state.saw_completed = true;
@@ -1179,6 +1268,19 @@ mod tests {
         });
         let r = parse_response(&v).unwrap();
         assert_eq!(r.reasoning.as_deref(), Some("sum1\nsum2"));
+        assert_eq!(
+            r.reasoning_parts,
+            vec![
+                CompletedReasoningPart {
+                    kind: ReasoningKind::Summary,
+                    content: "sum1".into(),
+                },
+                CompletedReasoningPart {
+                    kind: ReasoningKind::Summary,
+                    content: "sum2".into(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1209,6 +1311,13 @@ mod tests {
         });
         let r = parse_response(&v).unwrap();
         assert_eq!(r.reasoning.as_deref(), Some("fallback"));
+        assert_eq!(
+            r.reasoning_parts,
+            vec![CompletedReasoningPart {
+                kind: ReasoningKind::Raw,
+                content: "fallback".into(),
+            }]
+        );
     }
 
     #[test]
@@ -1551,8 +1660,11 @@ mod tests {
             &mut state,
             &json!({"type": "response.reasoning.delta", "delta": "ponder"}),
             &mut |d| {
-                if let ProviderStreamEvent::ThinkingDelta(t) = d {
-                    thinking.push(t.into())
+                if let ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta {
+                    delta, ..
+                }) = d
+                {
+                    thinking.push(delta.into())
                 }
             },
             1_000,
@@ -1561,14 +1673,122 @@ mod tests {
             &mut state,
             &json!({"type": "response.reasoning_summary_text.delta", "delta": "ing"}),
             &mut |d| {
-                if let ProviderStreamEvent::ThinkingDelta(t) = d {
-                    thinking.push(t.into())
+                if let ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta {
+                    delta, ..
+                }) = d
+                {
+                    thinking.push(delta.into())
                 }
             },
             1_000,
         );
         assert_eq!(state.reasoning, "pondering");
         assert_eq!(thinking, vec!["ponder", "ing"]);
+    }
+
+    #[test]
+    fn sse_preserves_reasoning_summary_part_boundaries() {
+        type CapturedEvent = (&'static str, String, u32, ReasoningKind, String);
+
+        fn capture(event: ProviderStreamEvent<'_>, events: &mut Vec<CapturedEvent>) {
+            match event {
+                ProviderStreamEvent::Reasoning(ReasoningStreamEvent::PartStarted {
+                    item_id,
+                    part_index,
+                    kind,
+                }) => events.push((
+                    "started",
+                    item_id.to_string(),
+                    part_index,
+                    kind,
+                    String::new(),
+                )),
+                ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta {
+                    item_id,
+                    part_index,
+                    kind,
+                    delta,
+                }) => events.push((
+                    "delta",
+                    item_id.to_string(),
+                    part_index,
+                    kind,
+                    delta.to_string(),
+                )),
+                ProviderStreamEvent::Reasoning(ReasoningStreamEvent::PartFinished {
+                    item_id,
+                    part_index,
+                    kind,
+                    content,
+                }) => events.push((
+                    "finished",
+                    item_id.to_string(),
+                    part_index,
+                    kind,
+                    content.unwrap_or_default().to_string(),
+                )),
+                _ => {}
+            }
+        }
+
+        let mut state = StreamState::default();
+        let mut events = Vec::new();
+
+        for event in [
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.added",
+                "summary_index": 3,
+            }),
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 3,
+                "delta": "**Checking accounting**\n\n<!-- -->",
+            }),
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs_1",
+                "summary_index": 3,
+                "text": "**Checking accounting**\n\n<!-- -->",
+            }),
+        ] {
+            apply_sse_event(
+                &mut state,
+                &event,
+                &mut |event| capture(event, &mut events),
+                1_000,
+            );
+        }
+
+        assert_eq!(
+            events,
+            vec![
+                (
+                    "started",
+                    "rs_1".into(),
+                    3,
+                    ReasoningKind::Summary,
+                    String::new()
+                ),
+                (
+                    "delta",
+                    "rs_1".into(),
+                    3,
+                    ReasoningKind::Summary,
+                    "**Checking accounting**\n\n<!-- -->".into(),
+                ),
+                (
+                    "finished",
+                    "rs_1".into(),
+                    3,
+                    ReasoningKind::Summary,
+                    "**Checking accounting**\n\n<!-- -->".into(),
+                ),
+            ]
+        );
     }
 
     #[test]

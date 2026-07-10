@@ -534,7 +534,10 @@ fn heterogeneous_resume_records(count: usize) -> Vec<TranscriptBlockRecord> {
                 ),
             }),
             2 => source.push(Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
                 content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)),
+                kind: protocol::ReasoningKind::Raw,
             }),
             3 => source.push(Block::CodeLine {
                 content: format!("{marker} let value_{idx} = compute({idx});"),

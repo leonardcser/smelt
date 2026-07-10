@@ -22,7 +22,7 @@ pub mod usage;
 pub use content::{Content, ContentPart};
 pub use event::{
     AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
-    ModelHistorySource, StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation,
+    ModelHistorySource, ReasoningKind, StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation,
     ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };
 pub use history::{

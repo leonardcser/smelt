@@ -1,12 +1,14 @@
 use crate::sse;
 use crate::{
     collect_indexed_tool_calls, non_empty, non_empty_blocks, parse_claude_model_version,
-    CacheConfig, CancellationToken, ClaudeModelFamily, ModelConfig, ParsedResponse, ProviderError,
-    ProviderStreamEvent, ToolCallStreamEvent, ToolDefinition,
+    CacheConfig, CancellationToken, ClaudeModelFamily, CompletedReasoningPart, ModelConfig,
+    ParsedResponse, ProviderError, ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent,
+    ToolDefinition,
 };
 use base64::Engine;
 use protocol::{
-    FunctionCall, Message, ReasoningBlock, ReasoningEffort, Role, TokenUsage, ToolCall,
+    FunctionCall, Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage,
+    ToolCall,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -389,6 +391,7 @@ pub fn build_body(
 pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
     let mut content: Option<String> = None;
     let mut reasoning: Option<String> = None;
+    let mut reasoning_parts: Vec<CompletedReasoningPart> = Vec::new();
     let mut reasoning_blocks: Vec<ReasoningBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -407,6 +410,12 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
                         match &mut reasoning {
                             Some(r) => r.push_str(text),
                             None => reasoning = Some(text.to_string()),
+                        }
+                        if !text.is_empty() {
+                            reasoning_parts.push(CompletedReasoningPart {
+                                kind: ReasoningKind::Raw,
+                                content: text.to_string(),
+                            });
                         }
                     }
                     reasoning_blocks.push(ReasoningBlock {
@@ -440,6 +449,12 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
                         Some(r) => r.push_str(text),
                         None => reasoning = Some(text.to_string()),
                     }
+                    if !text.is_empty() {
+                        reasoning_parts.push(CompletedReasoningPart {
+                            kind: ReasoningKind::Summary,
+                            content: text.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -449,6 +464,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 
     Ok(ParsedResponse {
         content,
+        reasoning_parts,
         reasoning,
         reasoning_blocks: non_empty_blocks(reasoning_blocks),
         tool_calls,
@@ -507,6 +523,7 @@ impl StreamState {
         ParsedResponse {
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
+            reasoning_parts: Vec::new(),
             reasoning_blocks: non_empty_blocks(reasoning_blocks),
             tool_calls: collect_indexed_tool_calls(self.tool_calls),
             usage: self.usage,
@@ -577,10 +594,29 @@ fn apply_sse_event(
                             state.thinking_blocks.insert(
                                 idx as usize,
                                 ThinkingAccum {
-                                    text: initial,
+                                    text: initial.clone(),
                                     ..Default::default()
                                 },
                             );
+                            let stream_id = idx.to_string();
+                            on_delta(ProviderStreamEvent::Reasoning(
+                                ReasoningStreamEvent::PartStarted {
+                                    item_id: &stream_id,
+                                    part_index: 0,
+                                    kind: ReasoningKind::Raw,
+                                },
+                            ));
+                            if !initial.is_empty() {
+                                state.reasoning.push_str(&initial);
+                                on_delta(ProviderStreamEvent::Reasoning(
+                                    ReasoningStreamEvent::Delta {
+                                        item_id: &stream_id,
+                                        part_index: 0,
+                                        kind: ReasoningKind::Raw,
+                                        delta: &initial,
+                                    },
+                                ));
+                            }
                         }
                         Some("redacted_thinking") => {
                             let data = cb["data"].as_str().unwrap_or("").to_string();
@@ -617,7 +653,15 @@ fn apply_sse_event(
                                         state.thinking_blocks.entry(idx as usize).or_default();
                                     entry.text.push_str(text);
                                 }
-                                on_delta(ProviderStreamEvent::ThinkingDelta(text));
+                                let stream_id = ev["index"].as_u64().unwrap_or(0).to_string();
+                                on_delta(ProviderStreamEvent::Reasoning(
+                                    ReasoningStreamEvent::Delta {
+                                        item_id: &stream_id,
+                                        part_index: 0,
+                                        kind: ReasoningKind::Raw,
+                                        delta: text,
+                                    },
+                                ));
                             }
                         }
                     }
@@ -658,6 +702,21 @@ fn apply_sse_event(
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+        "content_block_stop" => {
+            if let Some(idx) = ev["index"].as_u64() {
+                if state.thinking_blocks.contains_key(&(idx as usize)) {
+                    let stream_id = idx.to_string();
+                    on_delta(ProviderStreamEvent::Reasoning(
+                        ReasoningStreamEvent::PartFinished {
+                            item_id: &stream_id,
+                            part_index: 0,
+                            kind: ReasoningKind::Raw,
+                            content: None,
+                        },
+                    ));
                 }
             }
         }
@@ -1452,16 +1511,42 @@ mod tests {
         ]});
         let r = parse_response(&v).unwrap();
         assert_eq!(r.reasoning.as_deref(), Some("pondering"));
+        assert_eq!(
+            r.reasoning_parts,
+            vec![
+                CompletedReasoningPart {
+                    kind: ReasoningKind::Raw,
+                    content: "ponder".into(),
+                },
+                CompletedReasoningPart {
+                    kind: ReasoningKind::Raw,
+                    content: "ing".into(),
+                },
+            ]
+        );
     }
 
     #[test]
     fn parse_response_uses_top_level_thinking_when_content_blocks_lack_it() {
         let v = json!({
             "content": [{"type": "text", "text": "hi"}],
-            "thinking": [{"text": "summary"}],
+            "thinking": [{"text": "summary one"}, {"text": "summary two"}],
         });
         let r = parse_response(&v).unwrap();
-        assert_eq!(r.reasoning.as_deref(), Some("summary"));
+        assert_eq!(r.reasoning.as_deref(), Some("summary onesummary two"));
+        assert_eq!(
+            r.reasoning_parts,
+            vec![
+                CompletedReasoningPart {
+                    kind: ReasoningKind::Summary,
+                    content: "summary one".into(),
+                },
+                CompletedReasoningPart {
+                    kind: ReasoningKind::Summary,
+                    content: "summary two".into(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1595,8 +1680,11 @@ mod tests {
             &mut state,
             &json!({"type":"content_block_delta", "delta":{"type":"thinking_delta","thinking":"why"}}),
             &mut |d| {
-                if let ProviderStreamEvent::ThinkingDelta(t) = d {
-                    got.push(t.into())
+                if let ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta {
+                    delta, ..
+                }) = d
+                {
+                    got.push(delta.into())
                 }
             },
         );

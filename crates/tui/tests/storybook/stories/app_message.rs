@@ -20,7 +20,9 @@ app_story!(text_block_plain, |ctx| {
 
 app_story!(thinking_block_then_answer, |ctx| {
     ctx.set_viewport(40, 12);
-    ctx.engine(EngineEvent::Thinking {
+    ctx.engine(EngineEvent::Reasoning {
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         content: "let me think about this carefully.".into(),
     });
     ctx.engine(EngineEvent::Text {
@@ -52,7 +54,9 @@ app_story!(text_block_code_fence_no_language, |ctx| {
 
 app_story!(thinking_block_renders_full_markdown_when_expanded, |ctx| {
     ctx.set_viewport(70, 18);
-    ctx.engine(EngineEvent::Thinking {
+    ctx.engine(EngineEvent::Reasoning {
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         content: "Plan:\n\n```rust\nfn main() {}\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |".into(),
     });
     ctx.run_lua("smelt.transcript.fold_all('open')");
@@ -68,7 +72,10 @@ app_story!(thinking_block_renders_full_markdown_when_expanded, |ctx| {
 app_story!(thinking_streams_table_in_tiny_deltas, |ctx| {
     ctx.set_viewport(70, 18);
     for ch in "| A | B |\n|---|---|\n| 1 | 2 |\n".chars() {
-        ctx.engine(EngineEvent::ThinkingDelta {
+        ctx.engine(EngineEvent::ReasoningPartDelta {
+            id: "raw:0".into(),
+            kind: protocol::ReasoningKind::Raw,
+            title: None,
             delta: ch.to_string(),
         });
         ctx.run_lua("smelt.transcript.fold_all('open')");
@@ -88,7 +95,10 @@ app_story!(thinking_streams_table_in_tiny_deltas, |ctx| {
 
 app_story!(thinking_peek_suppresses_blank_only_omission, |ctx| {
     ctx.set_viewport(72, 12);
-    ctx.engine(EngineEvent::ThinkingDelta {
+    ctx.engine(EngineEvent::ReasoningPartDelta {
+        id: "raw:0".into(),
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         delta: "first paragraph\n\nsecond paragraph\nthird paragraph\nfourth paragraph".into(),
     });
     ctx.run_lua("smelt.transcript.fold_kind('thinking', 'peek')");
@@ -97,7 +107,10 @@ app_story!(thinking_peek_suppresses_blank_only_omission, |ctx| {
 
 app_story!(thinking_stream_title_sections, |ctx| {
     ctx.set_viewport(88, 16);
-    ctx.engine(EngineEvent::ThinkingDelta {
+    ctx.engine(EngineEvent::ReasoningPartDelta {
+        id: "raw:0".into(),
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         delta: concat!(
             "I’m thinking about deriving directories from paths.\n\n",
             "Regarding the watcher, it needs to rescan on changes.\n",
@@ -108,6 +121,87 @@ app_story!(thinking_stream_title_sections, |ctx| {
     });
     ctx.run_lua("smelt.transcript.fold_all('open')");
     ctx.assert_snapshot();
+});
+
+app_story!(reasoning_summary_titles_update_thinking_block, |ctx| {
+    ctx.set_viewport(100, 12);
+    let titles = [
+        "Removing unused BlockIndex and assessing index wrappers",
+        "Simplifying save acknowledgment and error handling layers",
+        "Outlining consolidation and rewrite options",
+        "Summarizing completed system components",
+        "Identifying partial implementations and open concerns",
+        "Confirming audit and accounting table retention",
+    ];
+
+    for (index, title) in titles.iter().enumerate() {
+        let id = format!("reasoning:summary:{index}");
+        ctx.engine(EngineEvent::ReasoningPartStarted {
+            id: id.clone(),
+            kind: protocol::ReasoningKind::Summary,
+        });
+        ctx.engine(EngineEvent::ReasoningPartDelta {
+            id: id.clone(),
+            kind: protocol::ReasoningKind::Summary,
+            delta: format!("**{title}**\n\n<!-- -->"),
+            title: Some((*title).to_string()),
+        });
+        ctx.engine(EngineEvent::ReasoningPartFinished {
+            id,
+            kind: protocol::ReasoningKind::Summary,
+            title: Some((*title).to_string()),
+            content: if index == titles.len() - 1 {
+                "The accounting table is still required.".into()
+            } else {
+                String::new()
+            },
+        });
+    }
+
+    let latest_title = titles.last().unwrap();
+    let frame = ctx.frame_text();
+    assert!(
+        frame
+            .lines()
+            .any(|line| line.contains("│ ") && line.contains(latest_title)),
+        "latest summary title should be inside a thinking block: {frame}"
+    );
+    assert!(
+        frame.lines().any(|line| line.contains("─ ✿ working… ")),
+        "prompt title changed: {frame}"
+    );
+    assert!(
+        frame.contains("The accounting table is still required."),
+        "thinking body missing: {frame}"
+    );
+    assert!(!frame.contains("<!-- -->"), "frame: {frame}");
+    for stale_title in &titles[..titles.len() - 1] {
+        assert!(
+            !frame.contains(stale_title),
+            "stale title appeared in peek view: {frame}"
+        );
+    }
+    ctx.assert_snapshot_named("peek");
+
+    ctx.run_lua("smelt.transcript.fold_kind('thinking', 'close')");
+    ctx.assert_snapshot_named("collapsed");
+
+    ctx.run_lua("smelt.transcript.fold_kind('thinking', 'open')");
+    let frame = ctx.frame_text();
+    for title in titles {
+        assert!(frame.contains(title), "expanded title missing: {frame}");
+    }
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.engine(EngineEvent::ReasoningPartStarted {
+        id: "reasoning:raw:0".into(),
+        kind: protocol::ReasoningKind::Raw,
+    });
+    let frame = ctx.frame_text();
+    assert!(
+        frame.contains(latest_title),
+        "thinking block disappeared: {frame}"
+    );
 });
 
 // ── User messages ─────────────────────────────────────────────────
@@ -192,7 +286,9 @@ app_story!(full_agent_turn_composite, |ctx| {
     // before any per-block story catches it.
     ctx.set_viewport(70, 22);
     ctx.push_user_turn("rename `add` to `checked_add`");
-    ctx.engine(EngineEvent::Thinking {
+    ctx.engine(EngineEvent::Reasoning {
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         content: "scan the file, then issue an edit_file with the renamed signature.".into(),
     });
     ctx.engine(EngineEvent::Text {

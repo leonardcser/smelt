@@ -5,13 +5,15 @@ use crate::{ApiConfig, EngineConfig};
 use protocol::Decision;
 use protocol::{
     AgentMode, AskModel, AssistantStep, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
-    HistoryItem, Message, ReasoningEffort, ToolInvocation, ToolOutcome, TurnMeta, UiCommand,
+    HistoryItem, Message, ReasoningEffort, ReasoningKind, ToolInvocation, ToolOutcome, TurnMeta,
+    UiCommand,
 };
 use serde_json::Value;
 use smelt_provider::{
     quota_exceeded_message, sort_tools_for_cache_stability, CancellationToken, ChatOptions,
     ChatRequestOptions, ChatResponse, FunctionSchema, ModelConfig, ProviderError,
-    ProviderStreamEvent, RequestAttemptInfo, ResponseFormat, ToolCallStreamEvent, ToolDefinition,
+    ProviderStreamEvent, ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat,
+    ToolCallStreamEvent, ToolDefinition,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -1581,6 +1583,7 @@ impl<'a> Turn<'a> {
             let content = resp.content.map(Content::text);
             let tool_calls = resp.tool_calls;
             let reasoning = resp.reasoning_content;
+            let reasoning_parts = resp.reasoning_parts;
             let reasoning_details = resp.reasoning_details;
 
             // Injected message arrived during the LLM call; loop so the model can respond.
@@ -1590,11 +1593,24 @@ impl<'a> Turn<'a> {
 
             // Streaming already delivered deltas; only emit batch events for non-streaming.
             if partial_text.is_empty() && partial_reasoning.is_empty() {
-                if let Some(ref reasoning) = reasoning {
-                    let trimmed = reasoning.trim();
-                    if !trimmed.is_empty() {
-                        self.emit(EngineEvent::Thinking {
-                            content: trimmed.to_string(),
+                if reasoning_parts.is_empty() {
+                    if let Some(ref reasoning) = reasoning {
+                        let trimmed = reasoning.trim();
+                        if !trimmed.is_empty() {
+                            self.emit(EngineEvent::Reasoning {
+                                kind: ReasoningKind::Raw,
+                                title: None,
+                                content: trimmed.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    for part in &reasoning_parts {
+                        let (title, content) = normalize_reasoning_part(part.kind, &part.content);
+                        self.emit(EngineEvent::Reasoning {
+                            kind: part.kind,
+                            title,
+                            content,
                         });
                     }
                 }
@@ -2447,6 +2463,7 @@ impl<'a> Turn<'a> {
 
         let partial_text = std::sync::Mutex::new(String::new());
         let partial_reasoning = std::sync::Mutex::new(String::new());
+        let reasoning_stream = std::sync::Mutex::new(ReasoningStreamState::default());
 
         let reasoning_changes_apply_now = self.provider.supports_mid_turn_reasoning_changes();
 
@@ -2465,11 +2482,12 @@ impl<'a> Turn<'a> {
                         delta: text.to_string(),
                     });
                 }
-                ProviderStreamEvent::ThinkingDelta(text) => {
-                    partial_reasoning.lock().unwrap().push_str(text);
-                    let _ = self.event_tx.send(EngineEvent::ThinkingDelta {
-                        delta: text.to_string(),
-                    });
+                ProviderStreamEvent::Reasoning(event) => {
+                    reasoning_stream.lock().unwrap().apply(
+                        event,
+                        self.event_tx,
+                        &partial_reasoning,
+                    );
                 }
                 ProviderStreamEvent::ToolCall(tool_event) => match tool_event {
                     ToolCallStreamEvent::Started {
@@ -2607,6 +2625,10 @@ impl<'a> Turn<'a> {
             }
         };
 
+        reasoning_stream
+            .into_inner()
+            .unwrap_or_default()
+            .finish_all(self.event_tx);
         let pt = partial_text.into_inner().unwrap_or_default();
         let pr = partial_reasoning.into_inner().unwrap_or_default();
 
@@ -2665,6 +2687,168 @@ impl<'a> Turn<'a> {
             }
         }
     }
+}
+
+#[derive(Default)]
+struct ReasoningStreamState {
+    parts: HashMap<String, ActiveReasoningPart>,
+}
+
+struct ActiveReasoningPart {
+    kind: ReasoningKind,
+    source: String,
+}
+
+impl ReasoningStreamState {
+    fn apply(
+        &mut self,
+        event: ReasoningStreamEvent<'_>,
+        tx: &mpsc::UnboundedSender<EngineEvent>,
+        partial_reasoning: &std::sync::Mutex<String>,
+    ) {
+        match event {
+            ReasoningStreamEvent::PartStarted {
+                item_id,
+                part_index,
+                kind,
+            } => {
+                let id = reasoning_part_id(item_id, part_index, kind);
+                self.parts
+                    .entry(id.clone())
+                    .or_insert_with(|| start_reasoning_part(tx, id, kind));
+            }
+            ReasoningStreamEvent::Delta {
+                item_id,
+                part_index,
+                kind,
+                delta,
+            } => {
+                let id = reasoning_part_id(item_id, part_index, kind);
+                let part = self
+                    .parts
+                    .entry(id.clone())
+                    .or_insert_with(|| start_reasoning_part(tx, id.clone(), kind));
+                part.source.push_str(delta);
+                partial_reasoning.lock().unwrap().push_str(delta);
+                let title = (kind == ReasoningKind::Summary)
+                    .then(|| streaming_summary_title(&part.source))
+                    .flatten();
+                let _ = tx.send(EngineEvent::ReasoningPartDelta {
+                    id,
+                    kind,
+                    delta: delta.to_string(),
+                    title,
+                });
+            }
+            ReasoningStreamEvent::PartFinished {
+                item_id,
+                part_index,
+                kind,
+                content,
+            } => {
+                let id = reasoning_part_id(item_id, part_index, kind);
+                let mut part = self
+                    .parts
+                    .remove(&id)
+                    .unwrap_or_else(|| start_reasoning_part(tx, id.clone(), kind));
+                if let Some(content) = content {
+                    if part.source.is_empty() && !content.is_empty() {
+                        partial_reasoning.lock().unwrap().push_str(content);
+                        let title = (kind == ReasoningKind::Summary)
+                            .then(|| streaming_summary_title(content))
+                            .flatten();
+                        let _ = tx.send(EngineEvent::ReasoningPartDelta {
+                            id: id.clone(),
+                            kind,
+                            delta: content.to_string(),
+                            title,
+                        });
+                    }
+                    part.source.clear();
+                    part.source.push_str(content);
+                }
+                send_reasoning_part_finished(tx, id, part);
+            }
+        }
+    }
+
+    fn finish_all(self, tx: &mpsc::UnboundedSender<EngineEvent>) {
+        let mut parts: Vec<_> = self.parts.into_iter().collect();
+        parts.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, part) in parts {
+            send_reasoning_part_finished(tx, id, part);
+        }
+    }
+}
+
+fn start_reasoning_part(
+    tx: &mpsc::UnboundedSender<EngineEvent>,
+    id: String,
+    kind: ReasoningKind,
+) -> ActiveReasoningPart {
+    let _ = tx.send(EngineEvent::ReasoningPartStarted { id, kind });
+    ActiveReasoningPart {
+        kind,
+        source: String::new(),
+    }
+}
+
+fn reasoning_part_id(item_id: &str, part_index: u32, kind: ReasoningKind) -> String {
+    let item_id = if item_id.is_empty() {
+        "reasoning"
+    } else {
+        item_id
+    };
+    let kind = match kind {
+        ReasoningKind::Summary => "summary",
+        ReasoningKind::Raw => "raw",
+    };
+    format!("{item_id}:{kind}:{part_index}")
+}
+
+fn leading_bold_title(source: &str) -> Option<(&str, &str)> {
+    let after_open = source.trim_start().strip_prefix("**")?;
+    let close = after_open.find("**")?;
+    let title = after_open[..close].trim();
+    (!title.is_empty()).then_some((title, &after_open[close + 2..]))
+}
+
+fn streaming_summary_title(source: &str) -> Option<String> {
+    leading_bold_title(source).map(|(title, _)| title.to_string())
+}
+
+fn normalize_reasoning_part(kind: ReasoningKind, source: &str) -> (Option<String>, String) {
+    let source = source.trim();
+    if kind == ReasoningKind::Raw {
+        return (None, source.to_string());
+    }
+
+    let Some((title, after_title)) = leading_bold_title(source) else {
+        return (None, source.to_string());
+    };
+    if after_title.trim().is_empty() || !after_title.starts_with(char::is_whitespace) {
+        return (None, source.to_string());
+    }
+    let content = after_title
+        .lines()
+        .filter(|line| line.trim() != "<!-- -->")
+        .collect::<Vec<_>>()
+        .join("\n");
+    (Some(title.to_string()), content.trim().to_string())
+}
+
+fn send_reasoning_part_finished(
+    tx: &mpsc::UnboundedSender<EngineEvent>,
+    id: String,
+    part: ActiveReasoningPart,
+) {
+    let (title, content) = normalize_reasoning_part(part.kind, &part.source);
+    let _ = tx.send(EngineEvent::ReasoningPartFinished {
+        id,
+        kind: part.kind,
+        title,
+        content,
+    });
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -2728,6 +2912,68 @@ impl PricingContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_only_reasoning_part_emits_its_content_as_a_delta() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let partial_reasoning = std::sync::Mutex::new(String::new());
+        let mut state = ReasoningStreamState::default();
+
+        state.apply(
+            ReasoningStreamEvent::PartFinished {
+                item_id: "reasoning",
+                part_index: 0,
+                kind: ReasoningKind::Raw,
+                content: Some("complete thought"),
+            },
+            &tx,
+            &partial_reasoning,
+        );
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartStarted { .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartDelta { delta, .. }) if delta == "complete thought"
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartFinished { content, .. }) if content == "complete thought"
+        ));
+        assert_eq!(partial_reasoning.into_inner().unwrap(), "complete thought");
+    }
+
+    #[test]
+    fn summary_placeholder_normalizes_to_thinking_title_only() {
+        assert_eq!(
+            normalize_reasoning_part(
+                ReasoningKind::Summary,
+                "**Removing unused BlockIndex**\n\n<!-- -->",
+            ),
+            (Some("Removing unused BlockIndex".into()), String::new())
+        );
+    }
+
+    #[test]
+    fn summary_body_is_kept_separate_from_its_title() {
+        assert_eq!(
+            normalize_reasoning_part(
+                ReasoningKind::Summary,
+                "**Checking tests**\n\n<!-- -->\nAll tests passed.",
+            ),
+            (Some("Checking tests".into()), "All tests passed.".into(),)
+        );
+    }
+
+    #[test]
+    fn standalone_bold_summary_content_is_not_discarded() {
+        assert_eq!(
+            normalize_reasoning_part(ReasoningKind::Summary, "**Important conclusion**"),
+            (None, "**Important conclusion**".into())
+        );
+    }
 
     #[test]
     fn load_model_history_reads_requested_store_range() {

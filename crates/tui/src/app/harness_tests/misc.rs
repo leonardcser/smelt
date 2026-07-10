@@ -2564,10 +2564,7 @@ fn transcript_scroll_replay_covers_velocity_latency_and_sparse_scenarios() {
         .cloned()
         .collect();
     assert!(
-        !wheel_up_frames.is_empty()
-            && !drag_top_frames.is_empty()
-            && !wheel_down_frames.is_empty()
-            && !drag_bottom_frames.is_empty(),
+        !wheel_up_frames.is_empty() && !drag_top_frames.is_empty() && !wheel_down_frames.is_empty() && !drag_bottom_frames.is_empty(),
         "replay missing local scroll frame groups: wheel_up={}, probe={}, drag_top={}, wheel_down={}, drag_bottom={}",
         wheel_up_frames.len(),
         wheel_probe_frames.len(),
@@ -3420,6 +3417,9 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                 ),
             }),
             2 => source.push(Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: format!("{marker} thinking trace {}", "reasoning ".repeat(28)),
             }),
             3 => source.push(Block::CodeLine {

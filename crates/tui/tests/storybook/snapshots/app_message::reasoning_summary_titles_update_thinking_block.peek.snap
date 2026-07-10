@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ Confirming audit and accounting table retention
+│ The accounting table is still required.
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                                   1:1 100%

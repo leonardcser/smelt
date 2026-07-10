@@ -516,7 +516,18 @@ fn block_snapshot_json(
             value.insert("text".into(), serde_json::json!(text));
             insert_process_status_event_json_fields(&mut value, event.as_ref());
         }
-        Block::Thinking { content } | Block::Text { content } => {
+        Block::Thinking {
+            title,
+            summary_titles,
+            content,
+            kind,
+        } => {
+            value.insert("title".into(), serde_json::json!(title));
+            value.insert("summary_titles".into(), serde_json::json!(summary_titles));
+            value.insert("content".into(), serde_json::json!(content));
+            value.insert("reasoning_kind".into(), serde_json::json!(kind));
+        }
+        Block::Text { content } => {
             value.insert("content".into(), serde_json::json!(content));
         }
         Block::CodeLine { content, lang } => {
@@ -1123,6 +1134,9 @@ mod tests {
                 event: None,
             },
             Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "**Plan**\nThink through a long line that wraps in expanded thinking mode.".into(),
             },
             Block::Exec {

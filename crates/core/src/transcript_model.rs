@@ -164,7 +164,13 @@ pub enum Block {
         event: Option<protocol::ProcessStatusEvent>,
     },
     Thinking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary_titles: Vec<String>,
         content: String,
+        #[serde(default)]
+        kind: protocol::ReasoningKind,
     },
     Text {
         content: String,
@@ -207,10 +213,18 @@ pub enum Block {
 impl Block {
     pub(crate) fn normalize_content(self) -> Self {
         match self {
-            Block::Thinking { content } => Block::Thinking {
+            Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind,
+            } => Block::Thinking {
+                title,
+                summary_titles,
                 content: crate::content::markdown_stream::normalize_thinking_title_spacing(
                     &content,
                 ),
+                kind,
             },
             other => other,
         }
@@ -250,10 +264,19 @@ impl Block {
             Block::User { text, .. }
             | Block::ProcessStatus { text, .. }
             | Block::Text { content: text }
-            | Block::Thinking { content: text }
             | Block::Compacted { summary: text }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(BlockText::Plain(text)),
+            Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                ..
+            } => Some(BlockText::Thinking {
+                title: title.as_deref(),
+                summary_titles,
+                content,
+            }),
             Block::Mode { text, icon, .. } => Some(BlockText::Prefixed { prefix: icon, text }),
             Block::Exec { command, output } => Some(BlockText::Exec { command, output }),
             Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
@@ -284,7 +307,17 @@ impl Block {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
             Block::ProcessStatus { text, .. } => Some(text.clone()),
-            Block::Text { content } | Block::Thinking { content } => Some(content.clone()),
+            Block::Text { content } => Some(content.clone()),
+            Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                ..
+            } => Some(thinking_markdown_source(
+                title.as_deref(),
+                summary_titles,
+                content,
+            )),
             Block::Compacted { summary } | Block::CompactionPreview { summary } => {
                 Some(summary.clone())
             }
@@ -293,6 +326,25 @@ impl Block {
             Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
         }
     }
+}
+
+pub(crate) fn thinking_markdown_source(
+    title: Option<&str>,
+    summary_titles: &[String],
+    content: &str,
+) -> String {
+    let mut sections = Vec::with_capacity(summary_titles.len().saturating_add(1));
+    if summary_titles.is_empty() {
+        if let Some(title) = title {
+            sections.push(format!("**{title}**"));
+        }
+    } else {
+        sections.extend(summary_titles.iter().map(|title| format!("**{title}**")));
+    }
+    if !content.is_empty() {
+        sections.push(content.to_string());
+    }
+    sections.join("\n")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -409,8 +461,19 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockText<'a> {
     Plain(&'a str),
-    Prefixed { prefix: &'a str, text: &'a str },
-    Exec { command: &'a str, output: &'a str },
+    Prefixed {
+        prefix: &'a str,
+        text: &'a str,
+    },
+    Thinking {
+        title: Option<&'a str>,
+        summary_titles: &'a [String],
+        content: &'a str,
+    },
+    Exec {
+        command: &'a str,
+        output: &'a str,
+    },
 }
 
 /// Cache key for a block's per-frame layout. When content changes, the new
@@ -439,7 +502,13 @@ pub enum TranscriptBlockDescriptor {
         event: Option<protocol::ProcessStatusEvent>,
     },
     Thinking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary_titles: Vec<String>,
         content: String,
+        #[serde(default)]
+        kind: protocol::ReasoningKind,
     },
     Text {
         content: String,
@@ -478,10 +547,18 @@ pub enum TranscriptBlockDescriptor {
 impl TranscriptBlockDescriptor {
     fn normalize_content(self) -> Self {
         match self {
-            Self::Thinking { content } => Self::Thinking {
+            Self::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind,
+            } => Self::Thinking {
+                title,
+                summary_titles,
                 content: crate::content::markdown_stream::normalize_thinking_title_spacing(
                     &content,
                 ),
+                kind,
             },
             other => other,
         }
@@ -500,7 +577,17 @@ impl TranscriptBlockDescriptor {
                 hl_group,
             },
             Block::ProcessStatus { text, event } => Self::ProcessStatus { text, event },
-            Block::Thinking { content } => Self::Thinking { content },
+            Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind,
+            } => Self::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind,
+            },
             Block::Text { content } => Self::Text { content },
             Block::CodeLine { content, lang } => Self::CodeLine { content, lang },
             Block::ToolDraft {
@@ -556,8 +643,16 @@ impl TranscriptBlockDescriptor {
                 text: text.clone(),
                 event: event.clone(),
             },
-            Self::Thinking { content } => Block::Thinking {
+            Self::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind,
+            } => Block::Thinking {
+                title: title.clone(),
+                summary_titles: summary_titles.clone(),
                 content: content.clone(),
+                kind: *kind,
             },
             Self::Text { content } => Block::Text {
                 content: content.clone(),
@@ -611,11 +706,20 @@ impl TranscriptBlockDescriptor {
         match self {
             Self::User { text, .. }
             | Self::ProcessStatus { text, .. }
-            | Self::Thinking { content: text }
             | Self::Text { content: text }
             | Self::CodeLine { content: text, .. }
             | Self::Compacted { summary: text }
             | Self::CompactionPreview { summary: text } => Some(BlockText::Plain(text)),
+            Self::Thinking {
+                title,
+                summary_titles,
+                content,
+                ..
+            } => Some(BlockText::Thinking {
+                title: title.as_deref(),
+                summary_titles,
+                content,
+            }),
             Self::Mode { text, icon, .. } => Some(BlockText::Prefixed { prefix: icon, text }),
             Self::Exec { command, output } => Some(BlockText::Exec { command, output }),
             Self::ToolDraft { .. } | Self::ToolCall { .. } => None,
@@ -631,7 +735,17 @@ impl TranscriptBlockDescriptor {
             Self::User { text, .. } => Some(text.clone()),
             Self::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
             Self::ProcessStatus { text, .. } => Some(text.clone()),
-            Self::Thinking { content } | Self::Text { content } => Some(content.clone()),
+            Self::Text { content } => Some(content.clone()),
+            Self::Thinking {
+                title,
+                summary_titles,
+                content,
+                ..
+            } => Some(thinking_markdown_source(
+                title.as_deref(),
+                summary_titles,
+                content,
+            )),
             Self::CodeLine { content, .. } => Some(content.clone()),
             Self::Exec { command, output } => Some(format!("$ {command}\n{output}")),
             Self::Compacted { summary } | Self::CompactionPreview { summary } => {
@@ -1234,6 +1348,11 @@ impl BlockHistory {
             .expect("block id in transcript order")
     }
 
+    pub fn last_block(&self) -> Option<(BlockId, &Block)> {
+        let id = *self.order.last()?;
+        Some((id, self.block(id).expect("block id in transcript order")))
+    }
+
     pub fn has_history_origin_at_or_after(&self, before_history_index: usize) -> bool {
         self.first_block_index_for_history_origin_at_or_after(before_history_index)
             .is_some()
@@ -1249,9 +1368,9 @@ impl BlockHistory {
         &self,
         before_history_index: usize,
     ) -> Option<usize> {
-        self.order.iter().position(|id| {
-            matches!(self.origins.get(id), Some(BlockOrigin::History(history_index)) if *history_index >= before_history_index)
-        })
+        self.order.iter().position(
+            |id| matches!(self.origins.get(id), Some(BlockOrigin::History(history_index)) if *history_index >= before_history_index),
+        )
     }
 
     #[cfg(test)]
@@ -1696,19 +1815,14 @@ fn gap_between_parts(
 }
 
 fn entry_starts_with_thinking_title(entry: &BlockEntry) -> bool {
-    let content = match entry {
-        BlockEntry::Materialized(Block::Thinking { content })
+    match entry {
+        BlockEntry::Materialized(Block::Thinking { title, content, .. })
         | BlockEntry::Descriptor(LazyBlock {
-            descriptor: TranscriptBlockDescriptor::Thinking { content },
+            descriptor: TranscriptBlockDescriptor::Thinking { title, content, .. },
             ..
-        }) => content,
-        _ => return false,
-    };
-    content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .and_then(crate::content::markdown_stream::thinking_title)
-        .is_some()
+        }) => has_thinking_title(title.as_deref(), content),
+        _ => false,
+    }
 }
 
 fn entry_ends_with_heading(entry: &BlockEntry) -> bool {
@@ -1724,14 +1838,19 @@ fn entry_ends_with_heading(entry: &BlockEntry) -> bool {
 }
 
 fn starts_with_thinking_title(block: &Block) -> bool {
-    let Block::Thinking { content } = block else {
-        return false;
-    };
-    content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .and_then(crate::content::markdown_stream::thinking_title)
-        .is_some()
+    match block {
+        Block::Thinking { title, content, .. } => has_thinking_title(title.as_deref(), content),
+        _ => false,
+    }
+}
+
+fn has_thinking_title(title: Option<&str>, content: &str) -> bool {
+    title.is_some()
+        || content
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .and_then(crate::content::markdown_stream::thinking_title)
+            .is_some()
 }
 
 fn ends_with_heading(block: &Block) -> bool {
@@ -2165,21 +2284,45 @@ mod tests {
     #[test]
     fn raw_text_for_thinking_returns_content() {
         let block = Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: "ponder".into(),
         };
         assert_eq!(block.raw_text().as_deref(), Some("ponder"));
     }
 
     #[test]
+    fn reasoning_summary_raw_text_includes_title_history_and_real_body() {
+        let block = Block::Thinking {
+            title: Some("Latest title".into()),
+            summary_titles: vec!["First title".into(), "Latest title".into()],
+            content: "real body".into(),
+            kind: protocol::ReasoningKind::Summary,
+        };
+
+        assert_eq!(
+            block.raw_text().as_deref(),
+            Some("**First title**\n**Latest title**\nreal body")
+        );
+    }
+
+    #[test]
     fn block_history_normalizes_thinking_title_spacing() {
         let mut history = BlockHistory::new();
         let id = history.push(Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: "**Plan**\n\nbody".into(),
         });
 
         assert_eq!(
             history.block(id),
             Some(&Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "**Plan**\nbody".into(),
             })
         );
@@ -2190,6 +2333,9 @@ mod tests {
         let mut history = BlockHistory::new();
         let id = history.push_descriptor_with_origin(
             TranscriptBlockDescriptor::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "**Plan**\n\nbody".into(),
             },
             BlockOrigin::History(0),
@@ -2198,6 +2344,9 @@ mod tests {
         assert_eq!(
             history.block(id),
             Some(&Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "**Plan**\nbody".into(),
             })
         );
@@ -2433,13 +2582,19 @@ mod tests {
         );
         history.push_descriptor_with_origin(
             TranscriptBlockDescriptor::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "plain thought".into(),
             },
             BlockOrigin::History(2),
         );
         history.push_descriptor_with_origin(
             TranscriptBlockDescriptor::Thinking {
-                content: "**New section**\nbody".into(),
+                title: Some("New section".into()),
+                summary_titles: vec!["New section".into()],
+                kind: protocol::ReasoningKind::Summary,
+                content: "body".into(),
             },
             BlockOrigin::History(3),
         );
@@ -2486,7 +2641,20 @@ mod tests {
         }
     }
     fn thinking(s: &str) -> Block {
-        Block::Thinking { content: s.into() }
+        Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            content: s.into(),
+            kind: protocol::ReasoningKind::Raw,
+        }
+    }
+    fn reasoning_summary(title: &str, content: &str) -> Block {
+        Block::Thinking {
+            title: Some(title.into()),
+            summary_titles: vec![title.into()],
+            content: content.into(),
+            kind: protocol::ReasoningKind::Summary,
+        }
     }
     fn tool(call_id: &str) -> Block {
         Block::ToolCall {
@@ -2560,12 +2728,12 @@ mod tests {
         assert_eq!(
             gap_between(
                 &thinking("a"),
-                &thinking("**Assessing directory exclusions**\n\nbody")
+                &reasoning_summary("Assessing directory exclusions", "body")
             ),
             1
         );
         assert_eq!(
-            gap_between(&thinking("**First title**\nbody"), &thinking("body")),
+            gap_between(&reasoning_summary("First title", "body"), &thinking("body")),
             0
         );
     }

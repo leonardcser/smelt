@@ -23,8 +23,25 @@ expression: out.events
     }
   },
   {
-    "ThinkingDelta": {
-      "delta": "let me think"
+    "ReasoningPartStarted": {
+      "id": "0:raw:0",
+      "kind": "raw"
+    }
+  },
+  {
+    "ReasoningPartDelta": {
+      "delta": "let me think",
+      "id": "0:raw:0",
+      "kind": "raw",
+      "title": null
+    }
+  },
+  {
+    "ReasoningPartFinished": {
+      "content": "let me think",
+      "id": "0:raw:0",
+      "kind": "raw",
+      "title": null
     }
   },
   {

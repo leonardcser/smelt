@@ -2325,9 +2325,29 @@ fn transcript_block_to_lua_table(
             t.set("text", text.as_str())?;
             set_process_status_event_lua_fields(lua, &t, event.as_ref())?;
         }
-        Block::Thinking { content } => {
+        Block::Thinking {
+            title,
+            summary_titles,
+            content,
+            kind,
+        } => {
+            t.set("title", title.as_deref())?;
+            t.set(
+                "summary_titles",
+                crate::lua::serde_to_lua(lua, summary_titles)?,
+            )?;
             t.set("content", content.as_str())?;
-            t.set("thinking_summary", thinking_fallback_summary(content))?;
+            t.set(
+                "reasoning_kind",
+                match kind {
+                    protocol::ReasoningKind::Summary => "summary",
+                    protocol::ReasoningKind::Raw => "raw",
+                },
+            )?;
+            t.set(
+                "thinking_summary",
+                thinking_fallback_summary(title.as_deref(), content),
+            )?;
         }
         Block::Text { content } => {
             t.set("content", content.as_str())?;
@@ -2613,12 +2633,32 @@ fn fallback_transcript_layout(
             hl_group,
         } => layout_text(format!("{icon}{text}"), Some(hl_group), false),
         Block::ProcessStatus { text, .. } => layout_text(text.clone(), Some("SmeltProcess"), false),
-        Block::Thinking { content } => {
+        Block::Thinking {
+            title,
+            summary_titles,
+            content,
+            ..
+        } => {
             if matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
-                layout_text(thinking_fallback_summary(content), None, false)
+                layout_text(
+                    thinking_fallback_summary(title.as_deref(), content),
+                    None,
+                    false,
+                )
             } else {
+                let visible_titles =
+                    if matches!(view_state, crate::transcript_model::ViewState::Expanded) {
+                        summary_titles.as_slice()
+                    } else {
+                        &[]
+                    };
+                let content = crate::transcript_model::thinking_markdown_source(
+                    title.as_deref(),
+                    visible_titles,
+                    content,
+                );
                 BlockLayout::Gutter {
-                    child: Box::new(layout_text(content.clone(), None, false)),
+                    child: Box::new(layout_text(content, None, false)),
                     spec: crate::content::block_layout::GutterSpec {
                         text: "│ ".to_string(),
                         styled: true,
@@ -2729,9 +2769,13 @@ fn format_elapsed_secs(secs: u64) -> String {
     }
 }
 
-fn thinking_fallback_summary(content: &str) -> String {
-    let (label, line_count) = thinking_summary(content);
-    let collapsed_lines = if label == "thinking" {
+fn thinking_fallback_summary(title: Option<&str>, content: &str) -> String {
+    if let Some(title) = title.filter(|_| content.trim().is_empty()) {
+        return title.to_string();
+    }
+    let (inferred_label, line_count) = thinking_summary(content);
+    let label = title.unwrap_or(&inferred_label);
+    let collapsed_lines = if title.is_some() || inferred_label == "thinking" {
         line_count
     } else {
         line_count.saturating_sub(1)
@@ -3099,6 +3143,14 @@ fn build_tool_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_only_thinking_summary_has_no_empty_line_count() {
+        assert_eq!(
+            thinking_fallback_summary(Some("Checking files"), ""),
+            "Checking files"
+        );
+    }
 
     #[test]
     fn module_relpath_translates_dots_to_slashes() {

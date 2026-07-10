@@ -64,13 +64,31 @@ impl Transcript {
                     content: t.to_string(),
                 }
             }
-            Block::Thinking { content } => {
-                let t = content.trim();
-                if t.is_empty() {
+            Block::Thinking {
+                title,
+                summary_titles,
+                content,
+                kind,
+            } => {
+                let summary_titles: Vec<_> = summary_titles
+                    .into_iter()
+                    .map(|title| title.trim().to_string())
+                    .filter(|title| !title.is_empty())
+                    .collect();
+                let title = summary_titles
+                    .last()
+                    .cloned()
+                    .or_else(|| title.map(|title| title.trim().to_string()))
+                    .filter(|title| !title.is_empty());
+                let content = content.trim();
+                if title.is_none() && content.is_empty() {
                     return None;
                 }
                 Block::Thinking {
-                    content: t.to_string(),
+                    title,
+                    summary_titles,
+                    content: content.to_string(),
+                    kind,
                 }
             }
             Block::Compacted { summary } => {
@@ -275,9 +293,32 @@ mod tests {
     fn push_drops_blank_thinking_block() {
         let mut t = Transcript::new();
         t.push(Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: "\n\n".into(),
         });
         assert!(t.history.is_empty());
+    }
+
+    #[test]
+    fn push_keeps_title_only_thinking_block() {
+        let mut t = Transcript::new();
+        t.push(Block::Thinking {
+            title: Some("Checking files".into()),
+            summary_titles: vec!["Checking files".into()],
+            kind: protocol::ReasoningKind::Summary,
+            content: String::new(),
+        });
+        assert_eq!(
+            t.history.block_at(0),
+            &Block::Thinking {
+                title: Some("Checking files".into()),
+                summary_titles: vec!["Checking files".into()],
+                kind: protocol::ReasoningKind::Summary,
+                content: String::new(),
+            }
+        );
     }
 
     #[test]

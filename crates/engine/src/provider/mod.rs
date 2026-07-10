@@ -1534,6 +1534,7 @@ mod tests {
         let p = ParsedResponse {
             content: Some("c".into()),
             reasoning: Some("r".into()),
+            reasoning_parts: Vec::new(),
             reasoning_blocks: None,
             tool_calls: vec![ToolCall::new(
                 "id".into(),

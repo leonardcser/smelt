@@ -102,7 +102,19 @@ mod tests {
 
     fn thinking(s: &str) -> Block {
         Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
             content: s.to_string(),
+            kind: protocol::ReasoningKind::Raw,
+        }
+    }
+
+    fn reasoning_summary(title: &str, content: &str) -> Block {
+        Block::Thinking {
+            title: Some(title.to_string()),
+            summary_titles: vec![title.to_string()],
+            content: content.to_string(),
+            kind: protocol::ReasoningKind::Summary,
         }
     }
 
@@ -356,7 +368,10 @@ mod tests {
         let gap = gap_between(&thinking("titled"), &thinking("untitled"));
         assert_eq!(gap, 0, "Thinking→Thinking gap without new title = 0");
 
-        let titled_gap = gap_between(&thinking("untitled"), &thinking("**New title**\n\nbody"));
+        let titled_gap = gap_between(
+            &thinking("untitled"),
+            &reasoning_summary("New title", "body"),
+        );
         assert_eq!(titled_gap, 1, "Thinking→Thinking gap before new title = 1");
     }
 
@@ -505,7 +520,8 @@ mod tests {
 
     #[test]
     fn exec_command_controls_are_sanitized_before_wrapping() {
-        let command = "\0\0\x00677S7\0\0\0\0\0\0*\x001k77 @crates/term/tests/storybook/snapshots/layout::vbox_mixed_length_fill_and_min.snap @FI";
+        let command =
+            "\0\0\x00677S7\0\0\0\0\0\0*\x001k77 @crates/term/tests/storybook/snapshots/layout::vbox_mixed_length_fill_and_min.snap @FI";
         let (mut buf, theme) = mk_collector_buf();
         let block = Block::Exec {
             command: command.into(),

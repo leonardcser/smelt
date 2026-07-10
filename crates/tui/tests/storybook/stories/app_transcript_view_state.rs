@@ -76,10 +76,14 @@ app_story!(exec_block_states, |ctx| {
 
 app_story!(thinking_block_states, |ctx| {
     ctx.set_viewport(56, 18);
-    ctx.engine(EngineEvent::Thinking {
+    ctx.engine(EngineEvent::Reasoning {
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         content: THINKING.into(),
     });
-    ctx.engine(EngineEvent::Thinking {
+    ctx.engine(EngineEvent::Reasoning {
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         content: THINKING_UNTITLED.into(),
     });
 

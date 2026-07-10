@@ -52,7 +52,7 @@ pub(crate) use error::{
     retry_delay_for,
 };
 pub use error::{quota_exceeded_message, unix_now, ProviderError};
-pub use event::{ProviderStreamEvent, ToolCallStreamEvent};
+pub use event::{ProviderStreamEvent, ReasoningStreamEvent, ToolCallStreamEvent};
 #[cfg(not(feature = "test-support"))]
 pub(crate) use format::apply_response_format;
 pub use format::ResponseFormat;
@@ -74,7 +74,7 @@ pub(crate) use response::{
 pub use response::{
     collect_indexed_tool_calls, non_empty, non_empty_blocks, sanitize_tool_call_arguments,
 };
-pub use response::{ChatResponse, ChatResponseMetadata, ParsedResponse};
+pub use response::{ChatResponse, ChatResponseMetadata, CompletedReasoningPart, ParsedResponse};
 pub use tokio_util::sync::CancellationToken;
 pub use tool::{FunctionSchema, ToolDefinition};
 
@@ -125,7 +125,11 @@ fn fuzz_summary(
 fn count_delta(summary: &mut FuzzProviderSummary, event: ProviderStreamEvent<'_>) {
     match event {
         ProviderStreamEvent::TextDelta(_) => summary.text_deltas += 1,
-        ProviderStreamEvent::ThinkingDelta(_) => summary.thinking_deltas += 1,
+        ProviderStreamEvent::Reasoning(event) => {
+            if matches!(event, ReasoningStreamEvent::Delta { .. }) {
+                summary.thinking_deltas += 1;
+            }
+        }
         ProviderStreamEvent::ToolCall(ToolCallStreamEvent::ArgsDelta { .. }) => {
             summary.tool_arg_deltas += 1
         }

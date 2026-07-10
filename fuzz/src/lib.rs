@@ -18,7 +18,7 @@ use crossterm::event::{
 use protocol::UiCommand;
 use protocol::{
     AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message, ReasoningBlock,
-    TokenUsage, ToolOutcome,
+    ReasoningKind, TokenUsage, ToolOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1393,7 +1393,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             if pre.agent_running {
                 assert!(
                     !post.streaming.thinking,
-                    "EngineEvent::Thinking left streaming thinking active: {:?}",
+                    "EngineEvent::Reasoning left streaming thinking active: {:?}",
                     post.streaming
                 );
             }
@@ -1863,11 +1863,20 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             PostCheck::None,
         ),
         FuzzOp::EngineThinking(s) => (
-            Some(SourceEvent::engine(EngineEvent::Thinking { content: s })),
+            Some(SourceEvent::engine(EngineEvent::Reasoning {
+                kind: ReasoningKind::Raw,
+                title: None,
+                content: s,
+            })),
             PostCheck::ThinkingFlushed,
         ),
         FuzzOp::EngineThinkingDelta(s) => (
-            Some(SourceEvent::engine(EngineEvent::ThinkingDelta { delta: s })),
+            Some(SourceEvent::engine(EngineEvent::ReasoningPartDelta {
+                id: "fuzz:raw:0".into(),
+                kind: ReasoningKind::Raw,
+                delta: s,
+                title: None,
+            })),
             PostCheck::None,
         ),
         FuzzOp::EngineToolStart {

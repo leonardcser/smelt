@@ -641,6 +641,9 @@
 ---@field text? string User/mode/process text.
 ---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field content? string Assistant/thinking/code content.
+---@field title? string Latest structured reasoning-summary title.
+---@field summary_titles? string[] Ordered structured reasoning-summary title history.
+---@field reasoning_kind? "summary"|"raw" Reasoning source for thinking blocks.
 ---@field image_labels? string[] User image labels.
 ---@field icon? string Mode icon.
 ---@field hl_group? string Mode/process highlight group.

@@ -1,11 +1,18 @@
-use protocol::{FunctionCall, ReasoningBlock, TokenUsage, ToolCall};
+use protocol::{FunctionCall, ReasoningBlock, ReasoningKind, TokenUsage, ToolCall};
 use std::collections::HashMap;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletedReasoningPart {
+    pub kind: ReasoningKind,
+    pub content: String,
+}
 
 /// Provider chat response normalized across wire APIs.
 #[derive(Clone)]
 pub struct ChatResponse {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
+    pub reasoning_parts: Vec<CompletedReasoningPart>,
     pub reasoning_details: Option<Vec<ReasoningBlock>>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: TokenUsage,
@@ -31,6 +38,7 @@ impl ChatResponse {
         Self {
             content: parsed.content,
             reasoning_content: parsed.reasoning,
+            reasoning_parts: parsed.reasoning_parts,
             reasoning_details: parsed.reasoning_blocks,
             tool_calls: parsed.tool_calls,
             usage: parsed.usage,
@@ -44,6 +52,7 @@ impl ChatResponse {
 pub struct ParsedResponse {
     pub content: Option<String>,
     pub reasoning: Option<String>,
+    pub reasoning_parts: Vec<CompletedReasoningPart>,
     /// Provider-shaped reasoning blocks to round-trip on the next request.
     pub reasoning_blocks: Option<Vec<ReasoningBlock>>,
     pub tool_calls: Vec<ToolCall>,

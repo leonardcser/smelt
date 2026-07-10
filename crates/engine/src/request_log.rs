@@ -214,6 +214,7 @@ mod tests {
         let resp = ChatResponse {
             content: Some("hello".into()),
             reasoning_content: None,
+            reasoning_parts: Vec::new(),
             reasoning_details: None,
             tool_calls: Vec::new(),
             usage: sample_usage(),
@@ -269,6 +270,7 @@ mod tests {
         let resp = ChatResponse {
             content: Some("hello".into()),
             reasoning_content: None,
+            reasoning_parts: Vec::new(),
             reasoning_details: None,
             tool_calls: Vec::new(),
             usage: sample_usage(),

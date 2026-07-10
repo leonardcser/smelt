@@ -189,6 +189,14 @@ pub struct ToolEvaluation {
     pub metadata: ToolMetadata,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningKind {
+    Summary,
+    #[default]
+    Raw,
+}
+
 /// Events emitted by the engine. The UI consumes these to update its display.
 ///
 /// Most variants are fire-and-forget. The exception is `RequestPermission`,
@@ -196,7 +204,7 @@ pub struct ToolEvaluation {
 /// `UiCommand::PermissionDecision`.
 ///
 /// Event ordering within a turn:
-///   Ready → (Thinking* → Text* → ToolCallDraft* → tool-lifecycle)*
+///   Ready → (ReasoningPart* → Text* → ToolCallDraft* → tool-lifecycle)*
 ///         → TurnComplete | TurnError
 ///
 /// tool-lifecycle is one of:
@@ -211,11 +219,33 @@ pub enum EngineEvent {
     /// Engine has initialized and is ready to accept commands.
     Ready,
 
-    /// Extended thinking / chain-of-thought text.
-    Thinking { content: String },
+    /// A complete non-streamed reasoning part.
+    Reasoning {
+        kind: ReasoningKind,
+        title: Option<String>,
+        content: String,
+    },
 
-    /// Incremental thinking token from the LLM (streaming delta).
-    ThinkingDelta { delta: String },
+    /// A provider started a structured reasoning part.
+    ReasoningPartStarted { id: String, kind: ReasoningKind },
+
+    /// Incremental reasoning content. Summary deltas may also expose a parsed
+    /// thinking title while their transcript body remains buffered.
+    ReasoningPartDelta {
+        id: String,
+        kind: ReasoningKind,
+        delta: String,
+        title: Option<String>,
+    },
+
+    /// A structured reasoning part completed. Raw parts were already streamed;
+    /// summary parts are committed from this normalized title and body.
+    ReasoningPartFinished {
+        id: String,
+        kind: ReasoningKind,
+        title: Option<String>,
+        content: String,
+    },
 
     /// Streamed assistant text (may arrive in chunks).
     Text { content: String },

@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ Removing unused BlockIndex and assessing index wrappers
+│ Simplifying save acknowledgment and error handling layers
+│ Outlining consolidation and rewrite options
+│ Summarizing completed system components
+│ Identifying partial implementations and open concerns
+│ Confirming audit and accounting table retention
+│ The accounting table is still required.
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                                   1:1 100%

@@ -137,6 +137,9 @@ fn shutdown_flushes_descriptor_only_transcript_blocks() {
     let session_id = app.app.core.session.id.clone();
 
     app.app.push_block(Block::Thinking {
+        title: None,
+        summary_titles: Vec::new(),
+        kind: protocol::ReasoningKind::Raw,
         content: "descriptor-only interrupted thinking".into(),
     });
     app.app.save_session_and_flush();
@@ -375,9 +378,10 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
     assert_eq!(loaded.history.len(), 6);
     assert_committed_tool_invocation(&loaded.history);
     for cycle in 0..4 {
-        assert!(loaded.history.iter().any(|item| {
-            matches!(item, HistoryItem::User { content, .. } if content.text_content() == format!("cycle {cycle}"))
-        }));
+        assert!(loaded
+            .history
+            .iter()
+            .any(|item| { matches!(item, HistoryItem::User { content, .. } if content.text_content() == format!("cycle {cycle}")) }));
     }
 }
 
@@ -509,6 +513,9 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
     fake_pending_history_save(&mut resumed, 701, before_len);
 
     resumed.app.push_block(Block::Thinking {
+        title: None,
+        summary_titles: Vec::new(),
+        kind: protocol::ReasoningKind::Raw,
         content: "late thinking block".into(),
     });
     assert!(resumed

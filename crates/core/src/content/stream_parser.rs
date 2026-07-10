@@ -136,9 +136,7 @@ impl StreamParser {
     // ── Streaming text ──────────────────────────────────────────────
 
     pub fn append_streaming_text(&mut self, history: &mut BlockHistory, delta: &str) {
-        if self.active_thinking.is_active() {
-            self.flush_streaming_thinking(history);
-        }
+        self.flush_streaming_thinking(history);
         self.active_text.append(history, delta);
     }
 
@@ -537,6 +535,9 @@ mod tests {
         assert_eq!(
             history.block_at(0),
             &Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "thinking...".into(),
             }
         );
@@ -553,13 +554,16 @@ mod tests {
         assert_eq!(
             history.block_at(0),
             &Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "thinking".into(),
             }
         );
         assert_eq!(
             history.block_at(1),
             &Block::Text {
-                content: "text".into(),
+                content: "text".into()
             }
         );
     }
@@ -576,6 +580,9 @@ mod tests {
         assert_eq!(
             history.block_at(1),
             &Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "thinking after clear".into(),
             }
         );
@@ -591,6 +598,9 @@ mod tests {
         assert_eq!(
             history.block_at(0),
             &Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "```rust\nfn main() {}".into(),
             }
         );
@@ -613,6 +623,9 @@ mod tests {
         assert_eq!(
             history.block_at(0),
             &Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
             }
         );
@@ -979,7 +992,7 @@ mod tests {
         assert_eq!(
             history.block_at(0),
             &Block::Text {
-                content: "partial".into(),
+                content: "partial".into()
             }
         );
         assert_eq!(history.status(history.order[0]), Status::Done);
@@ -1070,7 +1083,7 @@ mod tests {
         assert_eq!(
             history.block_at(0),
             &Block::Text {
-                content: full.into(),
+                content: full.into()
             }
         );
     }

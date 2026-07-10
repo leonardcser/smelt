@@ -33,11 +33,12 @@ fn append_search_line(out: &mut String, text: Option<&str>) {
 }
 
 fn thinking_summary(descriptor: &TranscriptBlockDescriptor) -> Option<String> {
-    let TranscriptBlockDescriptor::Thinking { content } = descriptor else {
+    let TranscriptBlockDescriptor::Thinking { title, content, .. } = descriptor else {
         return None;
     };
-    let (label, line_count) = thinking_summary_label(content);
-    let collapsed_lines = if label == "thinking" {
+    let (inferred_label, line_count) = thinking_summary_label(content);
+    let label = title.as_deref().unwrap_or(&inferred_label);
+    let collapsed_lines = if title.is_some() || inferred_label == "thinking" {
         line_count
     } else {
         line_count.saturating_sub(1)
@@ -271,15 +272,24 @@ mod tests {
     #[test]
     fn descriptor_search_text_includes_thinking_summary_chrome() {
         let descriptor = TranscriptBlockDescriptor::Thinking {
-            content: "**Analyzing the bug**\n\nChecking files\nReviewing output".to_string(),
+            title: Some("Analyzing the bug".to_string()),
+            summary_titles: vec![
+                "Inspecting the report".to_string(),
+                "Analyzing the bug".to_string(),
+            ],
+            content: "Checking files\nReviewing output".to_string(),
+            kind: protocol::ReasoningKind::Summary,
         };
         assert_eq!(
             descriptor_search_text(&descriptor, None),
-            "**Analyzing the bug**\n\nChecking files\nReviewing output\nAnalyzing the bug\n… 2 lines collapsed …"
+            "**Inspecting the report**\n**Analyzing the bug**\nChecking files\nReviewing output\nAnalyzing the bug\n… 2 lines collapsed …"
         );
 
         let descriptor = TranscriptBlockDescriptor::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
             content: "Checking files\nReviewing output".to_string(),
+            kind: protocol::ReasoningKind::Raw,
         };
         assert_eq!(
             descriptor_search_text(&descriptor, None),

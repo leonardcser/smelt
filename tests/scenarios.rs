@@ -260,8 +260,8 @@ async fn incomplete_stream() {
 }
 
 /// Thinking + text: provider streams a `thinking_delta` then a
-/// `text_delta`. Engine emits ThinkingDelta, then TextDelta, then
-/// Messages with the assistant content (thinking is dropped from the
+/// `text_delta`. Engine emits a raw reasoning-part lifecycle, then TextDelta,
+/// then Messages with the assistant content (thinking is dropped from the
 /// persisted message tail when reasoning effort is off).
 #[tokio::test]
 async fn thinking_then_text() {

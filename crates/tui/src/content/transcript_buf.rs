@@ -934,6 +934,25 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
         Some(BlockText::Prefixed { prefix, text }) => {
             estimate_text_rows_with_prefix(prefix, text, width)
         }
+        Some(BlockText::Thinking {
+            title,
+            summary_titles,
+            content,
+        }) => {
+            let content_rows = if content.is_empty() {
+                0
+            } else {
+                estimate_text_rows(content, width)
+            };
+            let title_rows = if summary_titles.is_empty() {
+                title.map_or(0, |title| estimate_text_rows(title, width))
+            } else {
+                summary_titles.iter().fold(0 as RowIndex, |rows, title| {
+                    rows.saturating_add(estimate_text_rows(title, width))
+                })
+            };
+            content_rows.saturating_add(title_rows).max(1)
+        }
         Some(BlockText::Exec { command, output }) => {
             let command_rows = estimate_text_rows_with_prefix("$ ", command, width);
             if output.is_empty() {
@@ -3753,6 +3772,9 @@ mod tests {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         transcript.push(Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: "first thought\nsecond thought\nthird thought\nfourth thought\nfifth thought"
                 .into(),
         });
@@ -3833,9 +3855,15 @@ mod tests {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         transcript.push(Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: "a\nb".into(),
         });
         transcript.push(Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            kind: protocol::ReasoningKind::Raw,
             content: "c\nd".into(),
         });
         let mut projection = TranscriptProjection::new();
@@ -6047,6 +6075,9 @@ mod tests {
                 ),
             },
             2 => Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: randomish_text(seed, 20),
             },
             3 => Block::CodeLine {
@@ -6133,7 +6164,12 @@ mod tests {
                     "validate row-count and copy-source equivalence ".repeat(20)
                 );
                 approx_bytes += reasoning.len();
-                transcript.push(Block::Thinking { content: reasoning });
+                transcript.push(Block::Thinking {
+                    title: None,
+                    summary_titles: Vec::new(),
+                    content: reasoning,
+                    kind: protocol::ReasoningKind::Raw,
+                });
             }
 
             if i.is_multiple_of(7) {
@@ -6331,7 +6367,12 @@ mod tests {
                     content: format!("let tiny_{i} = {i};"),
                     lang: "rust".into(),
                 }),
-                3 => transcript.push(Block::Thinking { content: text }),
+                3 => transcript.push(Block::Thinking {
+                    title: None,
+                    summary_titles: Vec::new(),
+                    content: text,
+                    kind: protocol::ReasoningKind::Raw,
+                }),
                 4 => transcript.push(Block::Compacted { summary: text }),
                 _ => transcript.push(Block::ProcessStatus { text, event: None }),
             }
@@ -6350,8 +6391,7 @@ mod tests {
             let content = format!(
                 "# Huge block {i}\n\n{}\n\n```text\n{}\n```\n\n{}",
                 "large paragraph with wrapping pressure and markdown spans `code` **bold** ".repeat(900),
-                "preformatted output still contributes exact rows without visible materialization\n"
-                    .repeat(420),
+                "preformatted output still contributes exact rows without visible materialization\n".repeat(420),
                 "closing paragraph ".repeat(700),
             );
             approx_bytes += content.len();

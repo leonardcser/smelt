@@ -48,7 +48,7 @@ fn run(input: Input) {
 }
 
 fn run_with_app(input: Input) {
-    let heavy_fixture = input.fixture % 16 == 0;
+    let heavy_fixture = input.fixture.is_multiple_of(16);
     let descriptor_count = if heavy_fixture {
         256 + usize::from(input.descriptors % 512)
     } else {
@@ -63,7 +63,7 @@ fn run_with_app(input: Input) {
     for op in input.ops.into_iter().take(op_limit) {
         match op {
             Op::Wheel { down, row, ticks } => {
-                for _ in 0..ticks.min(8).max(1) {
+                for _ in 0..ticks.clamp(1, 8) {
                     app.transcript_scroll_probe_wheel(down, u16::from(row));
                     app.transcript_scroll_probe_render();
                 }
@@ -88,7 +88,7 @@ fn run_with_app(input: Input) {
                 app.transcript_scroll_probe_start_edge_drag(edge);
             }
             Op::DragAutoscroll { ticks } => {
-                for _ in 0..ticks.min(16).max(1) {
+                for _ in 0..ticks.clamp(1, 16) {
                     let _ = app.transcript_scroll_probe_drag_autoscroll_tick();
                     app.transcript_scroll_probe_render();
                 }
@@ -97,7 +97,7 @@ fn run_with_app(input: Input) {
             Op::FinishDrag => app.transcript_scroll_probe_finish_drag(),
             Op::Command { kind, repeat } => {
                 let command = command(kind);
-                for _ in 0..repeat.min(12).max(1) {
+                for _ in 0..repeat.clamp(1, 12) {
                     app.transcript_scroll_probe_command(command);
                     app.transcript_scroll_probe_render();
                 }

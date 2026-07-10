@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ Confirming audit and accounting table retention
+│ … 1 line collapsed …
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                                   1:1 100%

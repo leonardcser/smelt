@@ -7,10 +7,16 @@ use std::time::Duration;
 
 fn starts_assistant_or_tool_output(ev: &EngineEvent) -> bool {
     match ev {
-        EngineEvent::Thinking { content } | EngineEvent::Text { content } => !content.is_empty(),
-        EngineEvent::ThinkingDelta { delta } | EngineEvent::TextDelta { delta } => {
+        EngineEvent::Reasoning { content, .. } | EngineEvent::Text { content } => {
+            !content.is_empty()
+        }
+        EngineEvent::ReasoningPartDelta { delta, .. } | EngineEvent::TextDelta { delta } => {
             !delta.is_empty()
         }
+        EngineEvent::ReasoningPartFinished { title, content, .. } => {
+            title.is_some() || !content.is_empty()
+        }
+        EngineEvent::ReasoningPartStarted { .. } => false,
         EngineEvent::ToolCallDraftStarted { .. }
         | EngineEvent::ToolCallDraftFinished { .. }
         | EngineEvent::ToolStarted { .. }
@@ -150,6 +156,64 @@ impl TuiApp {
         }
     }
 
+    fn complete_reasoning_summary_part(&mut self, title: Option<String>, content: String) {
+        let title = title
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty());
+        let content = content.trim().to_string();
+        if title.is_none() && content.is_empty() {
+            return;
+        }
+
+        self.flush_streaming_thinking();
+        let previous = self
+            .session_document
+            .transcript
+            .history()
+            .last_block()
+            .and_then(|(id, block)| match block {
+                Block::Thinking {
+                    title,
+                    summary_titles,
+                    content,
+                    kind: protocol::ReasoningKind::Summary,
+                } => Some((id, title.clone(), summary_titles.clone(), content.clone())),
+                _ => None,
+            });
+
+        let Some((id, previous_title, mut summary_titles, previous_content)) = previous else {
+            self.push_block(Block::Thinking {
+                summary_titles: title.iter().cloned().collect(),
+                title,
+                content,
+                kind: protocol::ReasoningKind::Summary,
+            });
+            return;
+        };
+
+        if let Some(title) = title.as_ref() {
+            if summary_titles.last() != Some(title) {
+                summary_titles.push(title.clone());
+            }
+        }
+        let content = match (previous_content.is_empty(), content.is_empty()) {
+            (_, true) => previous_content,
+            (true, false) => content,
+            (false, false) => format!("{previous_content}\n{content}"),
+        };
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::RewriteTranscriptBlock {
+                id,
+                block: Block::Thinking {
+                    title: title.or(previous_title),
+                    summary_titles,
+                    content,
+                    kind: protocol::ReasoningKind::Summary,
+                },
+            },
+        );
+    }
+
     /// Route an `EngineEvent` through the correct branch of the agent
     /// state machine. When a turn is active, delegates to
     /// `handle_engine_event` + `dispatch_control` and discards the turn on
@@ -264,9 +328,17 @@ impl TuiApp {
                 }
                 SessionControl::Continue
             }
-            EngineEvent::ThinkingDelta { delta } => {
+            EngineEvent::ReasoningPartStarted { kind, .. } => {
+                if kind == protocol::ReasoningKind::Raw {
+                    self.flush_streaming_thinking();
+                }
+                SessionControl::Continue
+            }
+            EngineEvent::ReasoningPartDelta { kind, delta, .. } => {
                 let bytes = delta.len();
-                self.append_streaming_thinking(&delta);
+                if kind == protocol::ReasoningKind::Raw {
+                    self.append_streaming_thinking(&delta);
+                }
                 self.core.signals.emit_dyn(
                     "stream_delta",
                     std::rc::Rc::new(smelt_core::signals::StreamDelta {
@@ -279,9 +351,37 @@ impl TuiApp {
                 );
                 SessionControl::Continue
             }
-            EngineEvent::Thinking { content } => {
-                self.flush_streaming_thinking();
-                self.push_block(Block::Thinking { content });
+            EngineEvent::ReasoningPartFinished {
+                kind,
+                title,
+                content,
+                ..
+            } => {
+                if kind == protocol::ReasoningKind::Raw {
+                    self.flush_streaming_thinking();
+                } else {
+                    self.complete_reasoning_summary_part(title, content);
+                }
+                SessionControl::Continue
+            }
+            EngineEvent::Reasoning {
+                kind,
+                title,
+                content,
+            } => {
+                if kind == protocol::ReasoningKind::Summary {
+                    self.complete_reasoning_summary_part(title, content);
+                } else {
+                    self.flush_streaming_thinking();
+                    if !content.is_empty() {
+                        self.push_block(Block::Thinking {
+                            title,
+                            summary_titles: Vec::new(),
+                            content,
+                            kind,
+                        });
+                    }
+                }
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {

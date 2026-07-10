@@ -1077,6 +1077,9 @@ mod tests {
         let policy = TranscriptDefaultViewPolicy::default();
         assert_eq!(
             policy.block_default_view_state(&Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                kind: protocol::ReasoningKind::Raw,
                 content: "preview".into(),
             }),
             ViewState::Peek
@@ -1095,7 +1098,7 @@ mod tests {
         );
         assert_eq!(
             policy.block_default_view_state(&Block::Text {
-                content: "shown".into(),
+                content: "shown".into()
             }),
             ViewState::Expanded
         );

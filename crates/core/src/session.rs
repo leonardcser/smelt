@@ -2293,7 +2293,10 @@ fn push_history_item_descriptor_rows(
                 records.push(transcript_descriptor_record(
                     records.len(),
                     crate::transcript_model::TranscriptBlockDescriptor::Thinking {
+                        title: None,
+                        summary_titles: Vec::new(),
                         content: reasoning.clone(),
+                        kind: protocol::ReasoningKind::Raw,
                     },
                     origin,
                     None,

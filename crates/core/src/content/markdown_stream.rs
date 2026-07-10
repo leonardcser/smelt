@@ -50,7 +50,12 @@ impl MarkdownStreamKind {
     fn block(self, content: String) -> Block {
         match self {
             Self::Text => Block::Text { content },
-            Self::Thinking => Block::Thinking { content },
+            Self::Thinking => Block::Thinking {
+                title: None,
+                summary_titles: Vec::new(),
+                content,
+                kind: protocol::ReasoningKind::Raw,
+            },
         }
     }
 }
@@ -583,7 +588,7 @@ mod tests {
 
     fn thinking_at(history: &BlockHistory, index: usize) -> &str {
         match history.block_at(index) {
-            Block::Thinking { content } => content,
+            Block::Thinking { content, .. } => content,
             block => panic!("expected thinking block, got {block:?}"),
         }
     }
