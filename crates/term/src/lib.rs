@@ -32,9 +32,9 @@ pub use grid::{
 };
 pub use hit::HitRegistry;
 pub use layout::{
-    resolve_layout, resolve_layout_ordered, resolve_layout_ordered_with, resolve_layout_with,
-    Align, Border, Constraint, Corner, Gutters, LayoutRect, LayoutTree, LeafSizer, Natural,
-    NaturalRef, NoopSizer, PaintId, Rect, StaticNatural,
+    resolve_containers_with, resolve_layout, resolve_layout_ordered, resolve_layout_ordered_with,
+    resolve_layout_with, Align, Border, Constraint, ContainerId, Corner, Gutters, LayoutRect,
+    LayoutTree, LeafSizer, Natural, NaturalRef, NoopSizer, PaintId, Rect, StaticNatural,
 };
 pub use line::{Line, Span};
 pub use session::{SuspendScreen, TerminalSession, TerminalSessionBuilder};

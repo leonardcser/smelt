@@ -6,6 +6,7 @@
 pub mod callback;
 pub(crate) mod event;
 pub mod gutter;
+pub(crate) mod modal;
 pub(crate) mod motions;
 pub mod named;
 pub(crate) mod overlay;
@@ -27,8 +28,8 @@ pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
     flush_diff, paint_layout_tree, Align, Border, Cell, CellUpdate, Color, Compositor, Constraint,
-    Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, Natural, NaturalRef,
-    PaintDispatch, PaintId, Rect, SnapshotFrame, Span, StaticNatural, Style, Theme,
+    ContainerId, Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, Natural,
+    NaturalRef, PaintDispatch, PaintId, Rect, SnapshotFrame, Span, StaticNatural, Style, Theme,
 };
 pub use smelt_term::{grid, layout};
 
@@ -57,15 +58,16 @@ impl From<WinId> for PaintId {
 /// Routes `Callback::Lua` handles out to the host's Lua runtime.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, WinId, &callback::Payload) + 'a;
 
-use callback::Callbacks;
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, MouseButton, Payload, WinEvent,
 };
+use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
+pub use modal::ModalId;
 use overlay::OverlayHitTarget;
 pub use overlay::{
-    BodyDrag, ChromeAction, Decoration, DecorationId, DragConfig, HitTarget, Overlay, OverlayId,
-    ResizeConfig, ResizeEdges,
+    BodyDrag, ChromeAction, ChromeOwner, Decoration, DecorationId, DragConfig, HitTarget, Overlay,
+    OverlayId, ResizeConfig, ResizeEdges,
 };
 pub use row::{
     display_row_matches, doc_range_for_match, row_match_is_selectable, row_to_usize,
@@ -178,6 +180,12 @@ pub struct Ui {
     /// Insertion order is the secondary z-order sort key; see [`Self::overlays_in_z_order`].
     overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
+    /// Modal focus scopes in opening order. The last entry owns keyboard input.
+    modals: Vec<(ModalId, modal::Modal)>,
+    next_modal_id: u32,
+    /// Host-owned containers embedded in the root layout.
+    docked_surfaces: Vec<(ContainerId, DockedSurface)>,
+    next_docked_surface_id: u64,
     /// Window-owned decorations paint with their owner pane, below later split
     /// leaves and below global overlays.
     decorations: Vec<(DecorationId, Decoration)>,
@@ -218,6 +226,51 @@ pub struct Ui {
     scroll_groups: Vec<ScrollGroup>,
 }
 
+/// Sizing and interaction policy for a root-docked surface.
+#[derive(Clone, Copy, Debug)]
+pub struct DockedSurfaceConfig {
+    pub height: Constraint,
+    pub min_height: Option<Constraint>,
+    pub max_height: Option<Constraint>,
+    pub resize: ResizeConfig,
+    /// Rows kept available to surrounding content when `height` is `Fit`.
+    pub fit_reserved_rows: u16,
+    pub blocks_agent: bool,
+}
+
+/// UI-owned root container with stable identity and modal association.
+#[derive(Clone, Debug)]
+pub struct DockedSurface {
+    layout: LayoutTree,
+    height: Constraint,
+    min_height: Option<Constraint>,
+    max_height: Option<Constraint>,
+    height_override: Option<u16>,
+    resize: ResizeConfig,
+    fit_reserved_rows: u16,
+    expanded: bool,
+    modal: ModalId,
+    resolved_rect: Option<Rect>,
+}
+
+impl DockedSurface {
+    pub fn modal(&self) -> ModalId {
+        self.modal
+    }
+
+    pub fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    pub fn resize_config(&self) -> ResizeConfig {
+        self.resize
+    }
+
+    pub fn resolved_rect(&self) -> Option<Rect> {
+        self.resolved_rect
+    }
+}
+
 /// One scroll-mirror group. `members` lists the participating window ids;
 /// `last` is the post-sync `(scroll_top, scroll_left)` of each member captured
 /// the previous frame, used to detect which side moved on which axis this
@@ -244,7 +297,7 @@ enum DragAutoscrollEdge {
 
 #[derive(Clone, Copy, Debug)]
 struct ChromeDrag {
-    overlay: OverlayId,
+    owner: overlay::ChromeOwner,
     action: overlay::ChromeAction,
     start_rect: Rect,
     origin_row: u16,
@@ -270,6 +323,10 @@ impl Ui {
             callbacks: Callbacks::new(),
             overlays: Vec::new(),
             next_overlay_id: 1,
+            modals: Vec::new(),
+            next_modal_id: 1,
+            docked_surfaces: Vec::new(),
+            next_docked_surface_id: 1,
             decorations: Vec::new(),
             next_decoration_id: 1,
             named_bufs: NamedSlots::new(),
@@ -501,6 +558,7 @@ impl Ui {
     /// are no longer reachable.
     pub fn set_layout(&mut self, tree: LayoutTree) {
         self.surface.set_layout(tree);
+        self.refresh_docked_surface_rects();
         if let Some(focus) = self.focus {
             if !self.splits().contains_leaf(focus)
                 && self.overlay_for_leaf(focus).is_none()
@@ -524,10 +582,29 @@ impl Ui {
     }
 
     fn resolve_splits(&self) -> HashMap<WinId, Rect> {
-        layout::resolve_layout(self.splits(), self.surface.area())
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        layout::resolve_layout_with(self.splits(), self.surface.area(), &sizer)
             .into_iter()
             .map(|(p, r)| (WinId(p.0), r))
             .collect()
+    }
+
+    fn resolved_docked_surface_rects(&self) -> HashMap<ContainerId, Rect> {
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        layout::resolve_containers_with(self.splits(), self.surface.area(), &sizer)
+    }
+
+    fn refresh_docked_surface_rects(&mut self) {
+        let rects = self.resolved_docked_surface_rects();
+        for (id, surface) in &mut self.docked_surfaces {
+            surface.resolved_rect = rects.get(id).copied();
+        }
     }
 
     pub fn split_rect(&self, win: WinId) -> Option<Rect> {
@@ -712,19 +789,283 @@ impl Ui {
         (win_ref, buf_ref)
     }
 
+    // ── Docked surfaces and modals ───────────────────────────────────
+
+    /// Register a root-docked surface and its modal focus scope.
+    pub fn docked_surface_open(
+        &mut self,
+        layout: LayoutTree,
+        leaves: Vec<WinId>,
+        config: DockedSurfaceConfig,
+    ) -> (ContainerId, ModalId) {
+        let modal = self.modal_open(leaves, config.blocks_agent);
+        let id = ContainerId(self.next_docked_surface_id);
+        self.next_docked_surface_id = self.next_docked_surface_id.wrapping_add(1);
+        self.docked_surfaces.push((
+            id,
+            DockedSurface {
+                layout,
+                height: config.height,
+                min_height: config.min_height,
+                max_height: config.max_height,
+                height_override: None,
+                resize: config.resize,
+                fit_reserved_rows: config.fit_reserved_rows,
+                expanded: false,
+                modal,
+                resolved_rect: None,
+            },
+        ));
+        (id, modal)
+    }
+
+    pub fn docked_surface(&self, id: ContainerId) -> Option<&DockedSurface> {
+        self.docked_surfaces
+            .iter()
+            .find_map(|(surface_id, surface)| (*surface_id == id).then_some(surface))
+    }
+
+    pub fn active_docked_surface(&self) -> Option<ContainerId> {
+        self.docked_surfaces.last().map(|(id, _)| *id)
+    }
+
+    pub fn docked_surface_for_modal(&self, modal: ModalId) -> Option<ContainerId> {
+        self.docked_surfaces
+            .iter()
+            .find_map(|(id, surface)| (surface.modal == modal).then_some(*id))
+    }
+
+    fn docked_surface_mut(&mut self, id: ContainerId) -> Option<&mut DockedSurface> {
+        self.docked_surfaces
+            .iter_mut()
+            .find_map(|(surface_id, surface)| (*surface_id == id).then_some(surface))
+    }
+
+    /// Clone the canonical surface subtree with its stable container marker attached.
+    pub fn docked_surface_layout(&self, id: ContainerId) -> Option<LayoutTree> {
+        self.docked_surface(id)
+            .map(|surface| surface.layout.clone().with_container(id))
+    }
+
+    /// Resolve the surface's current height policy against the terminal and its content.
+    pub fn docked_surface_height(&mut self, id: ContainerId) -> Option<Constraint> {
+        let surface = self.docked_surface(id)?.clone();
+        if surface.expanded {
+            return Some(Constraint::Fill);
+        }
+        let term = self.surface.terminal_size();
+        let leaves = self.modal_leaves(surface.modal)?.to_vec();
+        for leaf in leaves {
+            let width = self.win_content_width(leaf).unwrap_or(term.0);
+            if let Some(buf) = self.win(leaf).map(|window| window.buf) {
+                if let Some(buf) = self.buf_mut(buf) {
+                    buf.ensure_rendered_at(width);
+                }
+            }
+        }
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        let natural = surface.layout.natural_size_with(term, &sizer).1;
+        let mut height = surface
+            .height_override
+            .unwrap_or_else(|| resolve_constraint(surface.height, term.1, natural));
+        if surface.height_override.is_none() && surface.height == Constraint::Fit {
+            height = height.min(term.1.saturating_sub(surface.fit_reserved_rows).max(1));
+        }
+        if let Some(max_height) = surface.max_height {
+            height = height.min(resolve_constraint(max_height, term.1, natural));
+        }
+        if let Some(min_height) = surface.min_height {
+            height = height.max(resolve_constraint(min_height, term.1, natural));
+        }
+        Some(Constraint::Length(height.clamp(1, term.1.max(1))))
+    }
+
+    pub fn docked_surface_toggle_expanded(&mut self, id: ContainerId) -> bool {
+        let Some(surface) = self.docked_surface_mut(id) else {
+            return false;
+        };
+        surface.expanded = !surface.expanded;
+        true
+    }
+
+    /// Remove a docked surface. The caller closes the associated modal after
+    /// removing the surface from the root composition.
+    pub fn docked_surface_remove(&mut self, id: ContainerId) -> Option<DockedSurface> {
+        let index = self
+            .docked_surfaces
+            .iter()
+            .position(|(surface_id, _)| *surface_id == id)?;
+        if self
+            .chrome_drag
+            .is_some_and(|drag| drag.owner == overlay::ChromeOwner::Container(id))
+        {
+            self.chrome_drag = None;
+            self.capture = None;
+        }
+        Some(self.docked_surfaces.remove(index).1)
+    }
+
+    /// Register a modal focus scope for windows mounted in the root layout.
+    pub fn modal_open(&mut self, leaves: Vec<WinId>, blocks_agent: bool) -> ModalId {
+        self.open_modal(leaves, blocks_agent, None)
+    }
+
+    fn open_modal(
+        &mut self,
+        leaves: Vec<WinId>,
+        blocks_agent: bool,
+        overlay: Option<OverlayId>,
+    ) -> ModalId {
+        let id = ModalId(self.next_modal_id);
+        self.next_modal_id += 1;
+        let initial_focus = self.modal_focus_target(&leaves);
+        self.modals.push((
+            id,
+            modal::Modal {
+                leaves,
+                blocks_agent,
+                overlay,
+            },
+        ));
+        if let Some(win) = initial_focus {
+            self.set_focus(win);
+        }
+        id
+    }
+
+    fn modal_focus_target(&self, leaves: &[WinId]) -> Option<WinId> {
+        leaves
+            .iter()
+            .copied()
+            .find(|win| {
+                self.wins
+                    .get(win)
+                    .is_some_and(|window| window.accepts_focus())
+            })
+            .or_else(|| leaves.first().copied())
+    }
+
+    /// Close a modal focus scope and return Lua callback handles owned by it.
+    #[must_use]
+    pub fn modal_close(&mut self, id: ModalId) -> Vec<u64> {
+        let Some(pos) = self.modals.iter().position(|(mid, _)| *mid == id) else {
+            return Vec::new();
+        };
+        self.modals.remove(pos);
+        self.callbacks.clear_scope(KeymapScope::Modal(id))
+    }
+
+    pub(crate) fn modal(&self, id: ModalId) -> Option<&modal::Modal> {
+        self.modals
+            .iter()
+            .find_map(|(mid, modal)| (*mid == id).then_some(modal))
+    }
+
+    fn modal_mut(&mut self, id: ModalId) -> Option<&mut modal::Modal> {
+        self.modals
+            .iter_mut()
+            .find_map(|(mid, modal)| (*mid == id).then_some(modal))
+    }
+
+    pub fn active_modal(&self) -> Option<ModalId> {
+        self.modals.last().map(|(id, _)| *id)
+    }
+
+    pub fn focused_modal(&self) -> Option<ModalId> {
+        let focus = self.focus?;
+        self.modals
+            .iter()
+            .rev()
+            .find_map(|(id, modal)| modal.contains(focus).then_some(*id))
+    }
+
+    pub fn active_modal_blocks_agent(&self) -> bool {
+        self.active_modal()
+            .and_then(|id| self.modal(id))
+            .is_some_and(|modal| modal.blocks_agent)
+    }
+
+    pub fn modal_overlay(&self, id: ModalId) -> Option<OverlayId> {
+        self.modal(id).and_then(|modal| modal.overlay)
+    }
+
+    pub fn modal_leaves(&self, id: ModalId) -> Option<&[WinId]> {
+        self.modal(id).map(|modal| modal.leaves.as_slice())
+    }
+
+    fn modal_for_overlay(&self, overlay: OverlayId) -> Option<ModalId> {
+        self.modals
+            .iter()
+            .find_map(|(id, modal)| (modal.overlay == Some(overlay)).then_some(*id))
+    }
+
+    pub fn sync_overlay_modal(&mut self, overlay: OverlayId) {
+        let Some((is_modal, blocks_agent, leaves)) = self.overlay(overlay).map(|value| {
+            (
+                value.modal,
+                value.blocks_agent,
+                value
+                    .layout
+                    .leaves_in_order()
+                    .into_iter()
+                    .map(|leaf| WinId(leaf.0))
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            return;
+        };
+        let existing = self.modal_for_overlay(overlay);
+        match (is_modal, existing) {
+            (true, Some(id)) => {
+                if let Some(modal) = self.modal_mut(id) {
+                    modal.leaves = leaves;
+                    modal.blocks_agent = blocks_agent;
+                }
+            }
+            (true, None) => {
+                if !leaves.is_empty() {
+                    self.open_modal(leaves, blocks_agent, Some(overlay));
+                }
+            }
+            (false, Some(id)) => {
+                let _ = self.modal_close(id);
+            }
+            (false, None) => {}
+        }
+    }
+
+    pub fn focus_active_modal(&mut self) -> bool {
+        let Some(target) = self
+            .active_modal()
+            .and_then(|id| self.modal(id))
+            .and_then(|modal| self.modal_focus_target(&modal.leaves))
+        else {
+            return false;
+        };
+        self.set_focus(target)
+    }
+
     // ── Overlay ──────────────────────────────────────────────────────
 
-    /// Register an overlay and return its `OverlayId`. Modal overlays auto-focus the first leaf.
+    /// Register an overlay and return its `OverlayId`. Modal overlays register
+    /// a separate focus scope over the overlay's leaves.
     pub fn overlay_open(&mut self, overlay: Overlay) -> OverlayId {
         let id = OverlayId(self.next_overlay_id);
         self.next_overlay_id += 1;
         let modal = overlay.modal;
-        let first_leaf = overlay.layout.leaves_in_order().into_iter().next();
+        let blocks_agent = overlay.blocks_agent;
+        let leaves = overlay
+            .layout
+            .leaves_in_order()
+            .into_iter()
+            .map(|leaf| WinId(leaf.0))
+            .collect::<Vec<_>>();
         self.overlays.push((id, overlay));
-        if modal {
-            if let Some(leaf) = first_leaf {
-                self.set_focus(WinId(leaf.0));
-            }
+        if modal && !leaves.is_empty() {
+            self.open_modal(leaves, blocks_agent, Some(id));
         }
         id
     }
@@ -736,9 +1077,12 @@ impl Ui {
         let pos = self.overlays.iter().position(|(oid, _)| *oid == id)?;
         let (_, removed) = self.overlays.remove(pos);
         self.named_overlays.unbind_by_id(id);
+        if let Some(modal) = self.modal_for_overlay(id) {
+            let _ = self.modal_close(modal);
+        }
         if let Some(cap) = self.capture {
             let owned = match cap {
-                HitTarget::Chrome { owner, .. } => owner == id,
+                HitTarget::Chrome { owner, .. } => owner == overlay::ChromeOwner::Overlay(id),
                 HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
                     removed.layout.contains_leaf(w)
                 }
@@ -770,7 +1114,6 @@ impl Ui {
                         return Some(removed);
                     }
                 }
-                // History exhausted - focus stays cleared.
             }
         }
         Some(removed)
@@ -912,12 +1255,12 @@ impl Ui {
         entries
     }
 
-    /// Topmost (highest-z) open modal overlay, if any.
-    pub fn active_modal(&self) -> Option<OverlayId> {
-        self.overlays_in_z_order()
-            .into_iter()
-            .rev()
-            .find_map(|(id, ov)| ov.modal.then_some(id))
+    /// Overlay backing the active modal, if the modal is floating rather than
+    /// mounted in the root layout.
+    pub fn active_modal_overlay(&self) -> Option<OverlayId> {
+        self.active_modal()
+            .and_then(|id| self.modal(id))
+            .and_then(|modal| modal.overlay)
     }
 
     /// Overlay whose layout contains the currently-focused window, if any.
@@ -1004,10 +1347,16 @@ impl Ui {
                 OverlayHitTarget::Window(w) => HitTarget::Window(w),
                 OverlayHitTarget::Paint(p) => HitTarget::Paint(p),
                 OverlayHitTarget::Scrollbar(w) => HitTarget::Scrollbar { owner: w },
-                OverlayHitTarget::Chrome(action) => HitTarget::Chrome { owner: id, action },
+                OverlayHitTarget::Chrome(action) => HitTarget::Chrome {
+                    owner: overlay::ChromeOwner::Overlay(id),
+                    action,
+                },
             });
         }
         if let Some(target) = self.decoration_hit_test(row, col) {
+            return Some(target);
+        }
+        if let Some(target) = self.docked_surface_chrome_hit_test(row, col) {
             return Some(target);
         }
         let split_rects = self.resolve_splits();
@@ -1034,6 +1383,20 @@ impl Ui {
             }
         }
         None
+    }
+
+    fn docked_surface_chrome_hit_test(&self, row: u16, col: u16) -> Option<HitTarget> {
+        self.docked_surfaces.iter().rev().find_map(|(id, surface)| {
+            let rect = surface.resolved_rect?;
+            if !rect.contains(row, col) {
+                return None;
+            }
+            let action = resize_chrome_action(rect, surface.resize, row, col);
+            (action != overlay::ChromeAction::None).then_some(HitTarget::Chrome {
+                owner: overlay::ChromeOwner::Container(*id),
+                action,
+            })
+        })
     }
 
     fn decoration_hit_test(&self, row: u16, col: u16) -> Option<HitTarget> {
@@ -1079,7 +1442,7 @@ impl Ui {
         col: u16,
         cursor: Option<(u16, u16)>,
     ) -> Option<(OverlayId, OverlayHitTarget)> {
-        let modal_id = self.active_modal();
+        let modal_id = self.active_modal_overlay();
         let resolved = self.resolve_overlays(cursor);
         let modal_info: Option<(Rect, u16)> = modal_id.and_then(|mid| {
             resolved
@@ -1218,7 +1581,7 @@ impl Ui {
                 all_ids.extend(self.callbacks.clear_all(win));
             }
         }
-        all_ids.extend(self.callbacks.clear_overlay_all(id));
+        all_ids.extend(self.callbacks.clear_scope(KeymapScope::Overlay(id)));
         all_ids
     }
 
@@ -1271,18 +1634,38 @@ impl Ui {
         key: KeyBind,
         cb: Callback,
     ) -> Option<Callback> {
-        self.callbacks.set_overlay_keymap(overlay, key, cb)
+        self.callbacks
+            .set_scoped_keymap(KeymapScope::Overlay(overlay), key, cb)
     }
 
     #[must_use]
     pub fn overlay_clear_keymap(&mut self, overlay: OverlayId, key: KeyBind) -> Option<Callback> {
-        self.callbacks.clear_overlay_keymap(overlay, key)
+        self.callbacks
+            .clear_scoped_keymap(KeymapScope::Overlay(overlay), key)
     }
 
     /// Remove every overlay-scoped binding. Returns Lua handle ids for caller cleanup.
     #[must_use]
     pub fn overlay_clear_callbacks(&mut self, overlay: OverlayId) -> Vec<u64> {
-        self.callbacks.clear_overlay_all(overlay)
+        self.callbacks.clear_scope(KeymapScope::Overlay(overlay))
+    }
+
+    /// Bind a key across every leaf in a modal focus scope.
+    #[must_use]
+    pub fn modal_set_keymap(
+        &mut self,
+        modal: ModalId,
+        key: KeyBind,
+        cb: Callback,
+    ) -> Option<Callback> {
+        self.callbacks
+            .set_scoped_keymap(KeymapScope::Modal(modal), key, cb)
+    }
+
+    #[must_use]
+    pub fn modal_clear_keymap(&mut self, modal: ModalId, key: KeyBind) -> Option<Callback> {
+        self.callbacks
+            .clear_scoped_keymap(KeymapScope::Modal(modal), key)
     }
 
     /// Register an event callback. Multiple callbacks per (win, event) fire in registration order.
@@ -1395,6 +1778,7 @@ impl Ui {
             self.reflow_overlay_size_overrides(old, new);
         }
         self.surface.set_terminal_size(w, h);
+        self.refresh_docked_surface_rects();
     }
 
     fn reflow_overlay_size_overrides(&mut self, old_term: (u16, u16), new_term: (u16, u16)) {
@@ -1533,15 +1917,14 @@ impl Ui {
         let Some(modal_id) = self.active_modal() else {
             return false;
         };
-        let Some(modal) = self.overlay(modal_id) else {
+        let Some(modal) = self.modal(modal_id) else {
             return false;
         };
         let leaves: Vec<WinId> = modal
-            .layout
-            .leaves_in_order()
-            .into_iter()
-            .map(|p| WinId(p.0))
-            .filter(|w| self.wins.contains_key(w))
+            .leaves
+            .iter()
+            .copied()
+            .filter(|win| self.wins.contains_key(win))
             .collect();
         if leaves.is_empty() {
             return false;
@@ -1727,7 +2110,12 @@ impl Ui {
                     || self.overlay_for_paint(p).is_some()
                     || self.decoration_for_paint(p).is_some()
             }
-            HitTarget::Chrome { owner, .. } => self.overlays.iter().any(|(id, _)| *id == owner),
+            HitTarget::Chrome { owner, .. } => match owner {
+                overlay::ChromeOwner::Overlay(owner) => {
+                    self.overlays.iter().any(|(id, _)| *id == owner)
+                }
+                overlay::ChromeOwner::Container(owner) => self.docked_surface(owner).is_some(),
+            },
         }
     }
 
@@ -1993,6 +2381,7 @@ impl Ui {
         for request in prepared_windows {
             after_layout(self, request);
         }
+        self.refresh_docked_surface_rects();
         let focus = self.focus;
         let active_cursor = self.active_cursor_leaf();
         let cursor_shape = self.cursor_shape;
@@ -2005,7 +2394,7 @@ impl Ui {
         let theme_arc = std::sync::Arc::clone(self.surface.theme());
         let theme_for_compositor = std::sync::Arc::clone(&theme_arc);
         let active_resize = self.chrome_drag.and_then(|drag| match drag.action {
-            overlay::ChromeAction::Resize(edges) => Some((drag.overlay, resize_chrome_ctx(edges))),
+            overlay::ChromeAction::Resize(edges) => Some((drag.owner, resize_chrome_ctx(edges))),
             overlay::ChromeAction::None | overlay::ChromeAction::Move => None,
         });
         self.surface
@@ -2058,6 +2447,7 @@ impl Ui {
                     term_size,
                     sizer: &sizer,
                     decorations: &resolved_decorations,
+                    active_resize,
                 };
                 paint_layout_tree_with_decorations(
                     grid,
@@ -2069,7 +2459,9 @@ impl Ui {
                 );
                 for (id, rect, overlay) in &resolved {
                     let chrome_ctx = active_resize
-                        .and_then(|(active_id, ctx)| (*id == active_id).then_some(ctx))
+                        .and_then(|(owner, ctx)| {
+                            (owner == overlay::ChromeOwner::Overlay(*id)).then_some(ctx)
+                        })
                         .unwrap_or_default();
                     let overlay_ctx = OverlayPaintCtx {
                         root_chrome: chrome_ctx,
@@ -2094,13 +2486,13 @@ impl Ui {
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
         let (term_w, term_h) = self.surface.terminal_size();
         let area = Rect::new(0, 0, term_w, term_h);
-        if let Some(rect) = layout::resolve_layout(self.splits(), area).get(&id) {
-            return Some(*rect);
-        }
         let sizer = UiLeafSizer {
             wins: &self.wins,
             bufs: &self.bufs,
         };
+        if let Some(rect) = layout::resolve_layout_with(self.splits(), area, &sizer).get(&id) {
+            return Some(*rect);
+        }
         for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
             if let Some(rect) = layout::resolve_layout_with(&ov.layout, ov_rect, &sizer).get(&id) {
                 return Some(*rect);
@@ -2168,7 +2560,10 @@ impl Ui {
                         }
                         let hit = self.hit_test(me.row, me.column, None);
                         let raise = match hit {
-                            Some(HitTarget::Chrome { owner, .. }) => Some(owner),
+                            Some(HitTarget::Chrome {
+                                owner: overlay::ChromeOwner::Overlay(owner),
+                                ..
+                            }) => Some(owner),
                             Some(HitTarget::Window(w)) => self.overlay_for_leaf(w),
                             Some(HitTarget::Paint(p)) => self.overlay_for_paint(p),
                             _ => None,
@@ -2178,51 +2573,58 @@ impl Ui {
                         }
                         // Inert leaf bodies can opt into the same move action as chrome.
                         // Selectable leaves opt out: dragging inside them starts text selection.
-                        let drag_target: Option<(OverlayId, overlay::ChromeAction)> = match hit {
-                            Some(HitTarget::Chrome { owner, action }) => Some((owner, action)),
-                            Some(HitTarget::Window(w)) => {
-                                let leaf = self.wins.get(&w);
-                                let leaf_focusable = leaf.is_some_and(|win| win.accepts_focus());
-                                let leaf_selectable =
-                                    leaf.is_some_and(|win| win.supports_text_selection());
-                                self.overlay_for_leaf(w).and_then(|owner| {
-                                    let body_drag = self
-                                        .overlay(owner)
-                                        .map(|o| o.draggable.body)
-                                        .unwrap_or(overlay::BodyDrag::Never);
-                                    let can_drag = match body_drag {
-                                        overlay::BodyDrag::Never => false,
-                                        overlay::BodyDrag::Always => true,
-                                        overlay::BodyDrag::Inert => {
-                                            !leaf_focusable && !leaf_selectable
-                                        }
-                                    };
-                                    can_drag.then_some((owner, overlay::ChromeAction::Move))
-                                })
-                            }
-                            Some(HitTarget::Paint(p)) => {
-                                self.overlay_for_paint(p).and_then(|owner| {
-                                    let body_drag = self
-                                        .overlay(owner)
-                                        .map(|o| o.draggable.body)
-                                        .unwrap_or(overlay::BodyDrag::Never);
-                                    let can_drag = match body_drag {
-                                        overlay::BodyDrag::Never => false,
-                                        overlay::BodyDrag::Always | overlay::BodyDrag::Inert => {
-                                            true
-                                        }
-                                    };
-                                    can_drag.then_some((owner, overlay::ChromeAction::Move))
-                                })
-                            }
-                            _ => None,
-                        };
+                        let drag_target: Option<(overlay::ChromeOwner, overlay::ChromeAction)> =
+                            match hit {
+                                Some(HitTarget::Chrome { owner, action }) => Some((owner, action)),
+                                Some(HitTarget::Window(w)) => {
+                                    let leaf = self.wins.get(&w);
+                                    let leaf_focusable =
+                                        leaf.is_some_and(|win| win.accepts_focus());
+                                    let leaf_selectable =
+                                        leaf.is_some_and(|win| win.supports_text_selection());
+                                    self.overlay_for_leaf(w).and_then(|owner| {
+                                        let body_drag = self
+                                            .overlay(owner)
+                                            .map(|o| o.draggable.body)
+                                            .unwrap_or(overlay::BodyDrag::Never);
+                                        let can_drag = match body_drag {
+                                            overlay::BodyDrag::Never => false,
+                                            overlay::BodyDrag::Always => true,
+                                            overlay::BodyDrag::Inert => {
+                                                !leaf_focusable && !leaf_selectable
+                                            }
+                                        };
+                                        can_drag.then_some((
+                                            overlay::ChromeOwner::Overlay(owner),
+                                            overlay::ChromeAction::Move,
+                                        ))
+                                    })
+                                }
+                                Some(HitTarget::Paint(p)) => {
+                                    self.overlay_for_paint(p).and_then(|owner| {
+                                        let body_drag = self
+                                            .overlay(owner)
+                                            .map(|o| o.draggable.body)
+                                            .unwrap_or(overlay::BodyDrag::Never);
+                                        let can_drag = match body_drag {
+                                            overlay::BodyDrag::Never => false,
+                                            overlay::BodyDrag::Always
+                                            | overlay::BodyDrag::Inert => true,
+                                        };
+                                        can_drag.then_some((
+                                            overlay::ChromeOwner::Overlay(owner),
+                                            overlay::ChromeAction::Move,
+                                        ))
+                                    })
+                                }
+                                _ => None,
+                            };
                         if let Some((owner, action)) = drag_target {
                             if action != overlay::ChromeAction::None {
-                                if let Some(rect) = self.resolved_overlay_rect(owner) {
+                                if let Some(rect) = self.chrome_owner_rect(owner) {
                                     self.set_capture(HitTarget::Chrome { owner, action });
                                     self.chrome_drag = Some(ChromeDrag {
-                                        overlay: owner,
+                                        owner,
                                         action,
                                         start_rect: rect,
                                         origin_row: me.row,
@@ -2316,44 +2718,89 @@ impl Ui {
             .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
     }
 
-    /// Apply a chrome-drag delta. Title/Body move the overlay via `ScreenAt`; Resize changes its rect.
+    fn chrome_owner_rect(&self, owner: overlay::ChromeOwner) -> Option<Rect> {
+        match owner {
+            overlay::ChromeOwner::Overlay(id) => self.resolved_overlay_rect(id),
+            overlay::ChromeOwner::Container(id) => self
+                .docked_surface(id)
+                .and_then(DockedSurface::resolved_rect),
+        }
+    }
+
+    /// Apply a chrome-drag delta to its overlay or root container owner.
     fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
         let dy = row as i32 - drag.origin_row as i32;
         let dx = col as i32 - drag.origin_col as i32;
-        let Some(index) = self
-            .overlays
-            .iter()
-            .position(|(oid, _)| *oid == drag.overlay)
-        else {
-            return;
-        };
-        match drag.action {
-            overlay::ChromeAction::None => {}
-            overlay::ChromeAction::Move => {
-                let new_top = drag.start_rect.top as i32 + dy;
-                let new_left = drag.start_rect.left as i32 + dx;
-                self.overlays[index].1.anchor = layout::Anchor::ScreenAt {
-                    row: new_top,
-                    col: new_left,
-                    corner: Corner::NW,
+        match drag.owner {
+            overlay::ChromeOwner::Overlay(id) => {
+                let Some(index) = self.overlays.iter().position(|(oid, _)| *oid == id) else {
+                    return;
                 };
-            }
-            overlay::ChromeAction::Resize(edges) => {
-                let (term_w, term_h) = self.surface.terminal_size();
-                let sizer = UiLeafSizer {
-                    wins: &self.wins,
-                    bufs: &self.bufs,
-                };
-                let bounds =
-                    overlay_resize_bounds(&self.overlays[index].1, (term_w, term_h), &sizer);
-                let (top, left, new_w, new_h) =
-                    resize_overlay_geometry(drag.start_rect, edges, dx, dy, bounds);
+                match drag.action {
+                    overlay::ChromeAction::None => {}
+                    overlay::ChromeAction::Move => {
+                        let new_top = drag.start_rect.top as i32 + dy;
+                        let new_left = drag.start_rect.left as i32 + dx;
+                        self.overlays[index].1.anchor = layout::Anchor::ScreenAt {
+                            row: new_top,
+                            col: new_left,
+                            corner: Corner::NW,
+                        };
+                    }
+                    overlay::ChromeAction::Resize(edges) => {
+                        let term = self.surface.terminal_size();
+                        let sizer = UiLeafSizer {
+                            wins: &self.wins,
+                            bufs: &self.bufs,
+                        };
+                        let bounds = overlay_resize_bounds(&self.overlays[index].1, term, &sizer);
+                        let (top, left, new_w, new_h) =
+                            resize_chrome_geometry(drag.start_rect, edges, dx, dy, bounds);
 
-                let ov = &mut self.overlays[index].1;
-                ov.size_override = Some((new_w, new_h));
-                ov.anchor = anchor_after_resize(ov.anchor.clone(), edges, top, left);
+                        let ov = &mut self.overlays[index].1;
+                        ov.size_override = Some((new_w, new_h));
+                        ov.anchor = anchor_after_resize(ov.anchor.clone(), edges, top, left);
+                    }
+                }
+            }
+            overlay::ChromeOwner::Container(id) => {
+                let overlay::ChromeAction::Resize(edges) = drag.action else {
+                    return;
+                };
+                let Some(bounds) = self.docked_surface_resize_bounds(id) else {
+                    return;
+                };
+                let (_, _, _, new_height) =
+                    resize_chrome_geometry(drag.start_rect, edges, dx, dy, bounds);
+                if let Some(surface) = self.docked_surface_mut(id) {
+                    surface.height_override = Some(new_height);
+                    surface.expanded = false;
+                }
             }
         }
+    }
+
+    fn docked_surface_resize_bounds(&self, id: ContainerId) -> Option<(u16, u16, u16, u16)> {
+        let surface = self.docked_surface(id)?;
+        let term = self.surface.terminal_size();
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        let natural = surface.layout.natural_size_with(term, &sizer).1;
+        let min_height = surface
+            .min_height
+            .map(|constraint| resolve_constraint(constraint, term.1, natural))
+            .unwrap_or(1)
+            .max(1)
+            .min(term.1.max(1));
+        let max_height = surface
+            .max_height
+            .map(|constraint| resolve_constraint(constraint, term.1, natural))
+            .unwrap_or(term.1)
+            .max(min_height)
+            .min(term.1.max(1));
+        Some((1, term.0.max(1), min_height, max_height))
     }
 
     fn start_scrollbar_drag(&mut self, owner: WinId, row: u16) {
@@ -2445,59 +2892,60 @@ impl Ui {
         )
     }
 
-    /// Tier 1b of the key cascade: overlay-scoped keymaps. Fires when the
-    /// focused window belongs to an overlay and the overlay has a binding
-    /// for the chord. Runs after `dispatch_key` (per-window) miss and before
-    /// global Lua keymaps so an overlay's local intent beats site-wide chords.
+    /// Dispatch a keymap shared by every leaf in the focused modal.
+    pub fn dispatch_modal_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut LuaInvoke,
+    ) -> Status {
+        let Some(modal) = self.focused_modal() else {
+            return Status::Ignored;
+        };
+        let key = KeyBind::new(code, mods);
+        self.run_key_callback(
+            code,
+            mods,
+            lua_invoke,
+            |ui, _| {
+                ui.callbacks
+                    .take_scoped_keymap(KeymapScope::Modal(modal), key)
+            },
+            |ui, _, callback| {
+                ui.callbacks
+                    .restore_scoped_keymap(KeymapScope::Modal(modal), key, callback)
+            },
+        )
+    }
+
+    /// Overlay-scoped keymaps fire when the focused window belongs to an
+    /// overlay and the overlay has a binding for the chord.
     pub fn dispatch_overlay_key(
         &mut self,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
     ) -> Status {
-        let key = KeyBind::new(code, mods);
         let Some(win) = self.focus() else {
             return Status::Ignored;
         };
-        let Some(overlay_id) = self.overlay_for_leaf(win) else {
+        let Some(overlay) = self.overlay_for_leaf(win) else {
             return Status::Ignored;
         };
-        let Some(mut cb) = self.callbacks.take_overlay_keymap(overlay_id, key) else {
-            return Status::Ignored;
-        };
-
-        let mut follow_up: Option<(WinEvent, Payload)> = None;
-        let result = match &mut cb {
-            Callback::Rust(inner) => {
-                let mut ctx = CallbackCtx {
-                    ui: self,
-                    win,
-                    payload: Payload::Key { code, mods },
-                };
-                match inner(&mut ctx) {
-                    CallbackResult::Consumed => Status::Consumed,
-                    CallbackResult::Pass => Status::Ignored,
-                    CallbackResult::Event(ev, payload) => {
-                        follow_up = Some((ev, payload));
-                        Status::Consumed
-                    }
-                }
-            }
-            Callback::Lua(handle) => {
-                let payload = Payload::Key { code, mods };
-                lua_invoke(*handle, win, &payload);
-                Status::Consumed
-            }
-        };
-        self.callbacks.restore_overlay_keymap(overlay_id, key, cb);
-
-        if let Some((ev, payload)) = follow_up {
-            if let Some(win) = self.focus() {
-                self.fire_win_event(win, ev, payload, lua_invoke);
-            }
-        }
-
-        result
+        let key = KeyBind::new(code, mods);
+        self.run_key_callback(
+            code,
+            mods,
+            lua_invoke,
+            |ui, _| {
+                ui.callbacks
+                    .take_scoped_keymap(KeymapScope::Overlay(overlay), key)
+            },
+            |ui, _, callback| {
+                ui.callbacks
+                    .restore_scoped_keymap(KeymapScope::Overlay(overlay), key, callback);
+            },
+        )
     }
 
     /// Tier 3 of the key cascade: per-window catch-all fallback (the "text
@@ -2616,19 +3064,22 @@ impl Ui {
         if !is_dismiss_chord {
             return Status::Ignored;
         }
-        let Some(modal) = self.active_modal() else {
+        let Some(modal_id) = self.active_modal() else {
             return Status::Ignored;
         };
-        if let Some(root) = self
-            .overlay(modal)
-            .and_then(|o| o.layout.leaves_in_order().first().copied())
-            .map(|p| WinId(p.0))
-        {
-            self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
-        }
-        // Guard: Lua dismiss handler may have already closed the overlay.
-        if self.overlay(modal).is_some() {
-            let _ = self.overlay_close(modal);
+        let Some(modal) = self.modal(modal_id).cloned() else {
+            return Status::Ignored;
+        };
+        let Some(root) = modal.leaves.first().copied() else {
+            return Status::Ignored;
+        };
+        self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
+        // Floating overlays retain their historical close-on-unhandled-dismiss
+        // behavior. Root dialogs close through their Lua lifecycle callback.
+        if let Some(overlay) = modal.overlay {
+            if self.modal_for_overlay(overlay).is_some() {
+                let _ = self.overlay_close(overlay);
+            }
         }
         Status::Consumed
     }
@@ -2949,11 +3400,27 @@ fn resize_chrome_ctx(edges: overlay::ResizeEdges) -> layout::ChromePaintCtx {
 /// Resolve the concrete action for a chrome cell. Resize handles win over drag
 /// handles, but top-row drag remains intact unless top resizing is explicitly enabled.
 fn chrome_action(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeAction {
+    let action = resize_chrome_action(rect, ov.resizable, row, col);
+    if action != overlay::ChromeAction::None {
+        return action;
+    }
+    if ov.draggable.title {
+        overlay::ChromeAction::Move
+    } else {
+        overlay::ChromeAction::None
+    }
+}
+
+fn resize_chrome_action(
+    rect: Rect,
+    resize: overlay::ResizeConfig,
+    row: u16,
+    col: u16,
+) -> overlay::ChromeAction {
     let top = row == rect.top;
     let bottom = row + 1 == rect.bottom();
     let left = col == rect.left;
     let right = col + 1 == rect.right();
-    let resize = ov.resizable;
 
     if resize.corners {
         if top && left && resize.top && resize.left {
@@ -2989,14 +3456,10 @@ fn chrome_action(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::Chrom
     if right && resize.right && !top {
         return overlay::ChromeAction::Resize(overlay::ResizeEdges::east());
     }
-    if ov.draggable.title {
-        overlay::ChromeAction::Move
-    } else {
-        overlay::ChromeAction::None
-    }
+    overlay::ChromeAction::None
 }
 
-fn resize_overlay_geometry(
+fn resize_chrome_geometry(
     start: Rect,
     edges: overlay::ResizeEdges,
     dx: i32,
@@ -3061,32 +3524,32 @@ fn overlay_resize_bounds(
     let natural = overlay.layout.natural_size_with(term, sizer);
     let min_w = overlay
         .min_width
-        .map(|c| resolve_overlay_constraint_value(c, term.0, natural.0))
+        .map(|c| resolve_constraint(c, term.0, natural.0))
         .unwrap_or(MIN_OVERLAY_SIZE.0)
         .max(MIN_OVERLAY_SIZE.0)
         .min(term.0);
     let min_h = overlay
         .min_height
-        .map(|c| resolve_overlay_constraint_value(c, term.1, natural.1))
+        .map(|c| resolve_constraint(c, term.1, natural.1))
         .unwrap_or(MIN_OVERLAY_SIZE.1)
         .max(MIN_OVERLAY_SIZE.1)
         .min(term.1);
     let max_w = overlay
         .max_width
-        .map(|c| resolve_overlay_constraint_value(c, term.0, natural.0))
+        .map(|c| resolve_constraint(c, term.0, natural.0))
         .unwrap_or(term.0)
         .max(min_w)
         .min(term.0);
     let max_h = overlay
         .max_height
-        .map(|c| resolve_overlay_constraint_value(c, term.1, natural.1))
+        .map(|c| resolve_constraint(c, term.1, natural.1))
         .unwrap_or(term.1)
         .max(min_h)
         .min(term.1);
     (min_w, max_w, min_h, max_h)
 }
 
-fn resolve_overlay_constraint_value(
+pub fn resolve_constraint(
     constraint: layout::Constraint,
     term_axis: u16,
     natural_axis: u16,
@@ -3125,19 +3588,19 @@ fn resolve_overlay_size(
     } else {
         (0, 0)
     };
-    let mut w = resolve_overlay_constraint_value(overlay.width, term.0, natural.0);
-    let mut h = resolve_overlay_constraint_value(overlay.height, term.1, natural.1);
+    let mut w = resolve_constraint(overlay.width, term.0, natural.0);
+    let mut h = resolve_constraint(overlay.height, term.1, natural.1);
     if let Some(cap) = overlay.max_width {
-        w = w.min(resolve_overlay_constraint_value(cap, term.0, natural.0));
+        w = w.min(resolve_constraint(cap, term.0, natural.0));
     }
     if let Some(cap) = overlay.max_height {
-        h = h.min(resolve_overlay_constraint_value(cap, term.1, natural.1));
+        h = h.min(resolve_constraint(cap, term.1, natural.1));
     }
     if let Some(floor) = overlay.min_width {
-        w = w.max(resolve_overlay_constraint_value(floor, term.0, natural.0));
+        w = w.max(resolve_constraint(floor, term.0, natural.0));
     }
     if let Some(floor) = overlay.min_height {
-        h = h.max(resolve_overlay_constraint_value(floor, term.1, natural.1));
+        h = h.max(resolve_constraint(floor, term.1, natural.1));
     }
     // Floors can't push past the terminal extent.
     w = w.min(term.0);
@@ -3161,19 +3624,19 @@ fn resolve_decoration_size(
     } else {
         (0, 0)
     };
-    let mut w = resolve_overlay_constraint_value(decoration.width, cap.0, natural.0);
-    let mut h = resolve_overlay_constraint_value(decoration.height, cap.1, natural.1);
+    let mut w = resolve_constraint(decoration.width, cap.0, natural.0);
+    let mut h = resolve_constraint(decoration.height, cap.1, natural.1);
     if let Some(cap_w) = decoration.max_width {
-        w = w.min(resolve_overlay_constraint_value(cap_w, cap.0, natural.0));
+        w = w.min(resolve_constraint(cap_w, cap.0, natural.0));
     }
     if let Some(cap_h) = decoration.max_height {
-        h = h.min(resolve_overlay_constraint_value(cap_h, cap.1, natural.1));
+        h = h.min(resolve_constraint(cap_h, cap.1, natural.1));
     }
     if let Some(floor_w) = decoration.min_width {
-        w = w.max(resolve_overlay_constraint_value(floor_w, cap.0, natural.0));
+        w = w.max(resolve_constraint(floor_w, cap.0, natural.0));
     }
     if let Some(floor_h) = decoration.min_height {
-        h = h.max(resolve_overlay_constraint_value(floor_h, cap.1, natural.1));
+        h = h.max(resolve_constraint(floor_h, cap.1, natural.1));
     }
     (w.min(cap.0), h.min(cap.1))
 }
@@ -3233,6 +3696,25 @@ struct LayoutPaintCtx<'a> {
     term_size: (u16, u16),
     sizer: &'a dyn layout::LeafSizer,
     decorations: &'a [(DecorationId, WinId, Rect, Decoration)],
+    active_resize: Option<(overlay::ChromeOwner, layout::ChromePaintCtx)>,
+}
+
+fn paint_root_container_chrome(
+    grid: &mut Grid,
+    theme: &std::sync::Arc<Theme>,
+    area: Rect,
+    chrome: &layout::Chrome,
+    active_resize: Option<(overlay::ChromeOwner, layout::ChromePaintCtx)>,
+) {
+    let chrome_ctx = active_resize
+        .and_then(|(owner, ctx)| {
+            chrome
+                .container
+                .is_some_and(|id| owner == overlay::ChromeOwner::Container(id))
+                .then_some(ctx)
+        })
+        .unwrap_or_default();
+    layout::paint_chrome_with(grid, area, chrome, theme, chrome_ctx);
 }
 
 fn paint_layout_tree_with_decorations(
@@ -3245,7 +3727,7 @@ fn paint_layout_tree_with_decorations(
 ) {
     match node {
         LayoutTree::Leaf { id, chrome, .. } => {
-            layout::paint_chrome(grid, area, chrome, theme);
+            paint_root_container_chrome(grid, theme, area, chrome, ctx.active_resize);
             let inner = layout::inset_for_chrome(area, chrome);
             paint(*id, inner, grid, theme, ctx.term_size);
             let owner = WinId(id.0);
@@ -3264,7 +3746,7 @@ fn paint_layout_tree_with_decorations(
             }
         }
         LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
-            layout::paint_chrome(grid, area, chrome, theme);
+            paint_root_container_chrome(grid, theme, area, chrome, ctx.active_resize);
             let vertical = matches!(node, LayoutTree::Vbox { .. });
             let (_, rects) = layout::layout_box_children(items, chrome, area, vertical, ctx.sizer);
             for ((_, child), &rect) in items.iter().zip(rects.iter()) {
@@ -3676,6 +4158,38 @@ mod tests {
     }
 
     #[test]
+    fn fit_sized_split_geometry_matches_painted_viewport() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        ui.buf_mut(buf)
+            .expect("buffer")
+            .set_all_lines((0..6).map(|row| format!("row {row}")).collect());
+        let win = WinId(200);
+        assert!(ui.win_open_split_at(
+            win,
+            buf,
+            SplitConfig {
+                region: "fit-list".into(),
+                gutters: layout::Gutters::default(),
+            },
+        ));
+        ui.set_layout(LayoutTree::vbox(vec![
+            (Constraint::Fill, LayoutTree::vbox(Vec::new())),
+            (Constraint::Fit, LayoutTree::leaf(win)),
+        ]));
+
+        let expected = Rect::new(18, 0, 80, 6);
+        assert_eq!(ui.split_rect(win), Some(expected));
+        assert_eq!(ui.paint_rect(PaintId::from(win)), Some(expected));
+
+        ui.render(&mut std::io::sink()).expect("render fit split");
+        assert_eq!(
+            ui.win(win).and_then(|win| win.viewport).map(|vp| vp.rect),
+            Some(expected)
+        );
+    }
+
+    #[test]
     fn resolve_overlays_centers_screen_center_anchor() {
         let mut ui = make_ui();
         let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
@@ -3857,10 +4371,23 @@ mod tests {
         let _bg = ui.overlay_open(stub_overlay().with_z(100)); // higher z but non-modal
         let m_low = ui.overlay_open(stub_overlay().with_z(10).modal(true));
         let m_mid = ui.overlay_open(stub_overlay().with_z(50).modal(true));
-        assert_eq!(ui.active_modal(), Some(m_mid));
+        assert_eq!(ui.active_modal_overlay(), Some(m_mid));
         // Closing the topmost modal falls back to the next.
         ui.overlay_close(m_mid);
-        assert_eq!(ui.active_modal(), Some(m_low));
+        assert_eq!(ui.active_modal_overlay(), Some(m_low));
+    }
+
+    #[test]
+    fn removing_overlay_modality_preserves_focus() {
+        let mut ui = make_ui();
+        let overlay = ui.overlay_open(stub_overlay().modal(true));
+        assert_eq!(ui.focus(), Some(WinId(99)));
+
+        ui.overlay_mut(overlay).expect("overlay").modal = false;
+        ui.sync_overlay_modal(overlay);
+
+        assert_eq!(ui.active_modal(), None);
+        assert_eq!(ui.focus(), Some(WinId(99)));
     }
 
     #[test]
@@ -3974,7 +4501,7 @@ mod tests {
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
         let drag = ui.chrome_drag.expect("title row should start drag");
-        assert_eq!(drag.overlay, id);
+        assert_eq!(drag.owner, overlay::ChromeOwner::Overlay(id));
         assert_eq!(drag.action, overlay::ChromeAction::Move);
     }
 
@@ -4057,7 +4584,7 @@ mod tests {
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
         let drag = ui.chrome_drag.expect("top row should start resize");
-        assert_eq!(drag.overlay, id);
+        assert_eq!(drag.owner, overlay::ChromeOwner::Overlay(id));
         assert_eq!(
             drag.action,
             overlay::ChromeAction::Resize(overlay::ResizeEdges::north())
@@ -4083,7 +4610,7 @@ mod tests {
 
         ui.apply_chrome_drag(
             ChromeDrag {
-                overlay: id,
+                owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::north()),
                 start_rect,
                 origin_row: 18,
@@ -4128,7 +4655,7 @@ mod tests {
 
         ui.apply_chrome_drag(
             ChromeDrag {
-                overlay: id,
+                owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::north()),
                 start_rect,
                 origin_row: 18,
@@ -4162,7 +4689,7 @@ mod tests {
         let start_rect = ui.resolved_overlay_rect(id).unwrap();
         ui.apply_chrome_drag(
             ChromeDrag {
-                overlay: id,
+                owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::west()),
                 start_rect,
                 origin_row: 5,
@@ -4203,7 +4730,7 @@ mod tests {
         let start_rect = ui.resolved_overlay_rect(id).unwrap();
         ui.apply_chrome_drag(
             ChromeDrag {
-                overlay: id,
+                owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::east()),
                 start_rect,
                 origin_row: 5,
@@ -4216,7 +4743,7 @@ mod tests {
 
         ui.apply_chrome_drag(
             ChromeDrag {
-                overlay: id,
+                owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::south()),
                 start_rect,
                 origin_row: 10,
@@ -4283,7 +4810,10 @@ mod tests {
             ui.chrome_drag.is_some(),
             "body click on inert leaf of a draggable overlay should latch drag (no modal)"
         );
-        assert_eq!(ui.chrome_drag.unwrap().overlay, perf);
+        assert_eq!(
+            ui.chrome_drag.unwrap().owner,
+            overlay::ChromeOwner::Overlay(perf)
+        );
     }
 
     #[test]
@@ -4342,7 +4872,10 @@ mod tests {
             ui.chrome_drag.is_some(),
             "body click on non-focusable leaf of a draggable overlay should latch drag"
         );
-        assert_eq!(ui.chrome_drag.unwrap().overlay, perf);
+        assert_eq!(
+            ui.chrome_drag.unwrap().owner,
+            overlay::ChromeOwner::Overlay(perf)
+        );
     }
 
     #[test]
@@ -4390,7 +4923,7 @@ mod tests {
             "chrome drag should latch on perf panel even with modal open: hit={hit:?} modal={modal:?} status={status:?}"
         );
         let drag = ui.chrome_drag.unwrap();
-        assert_eq!(drag.overlay, perf);
+        assert_eq!(drag.owner, overlay::ChromeOwner::Overlay(perf));
     }
 
     #[test]
@@ -4527,7 +5060,7 @@ mod tests {
         assert_eq!(
             hit,
             HitTarget::Chrome {
-                owner: id,
+                owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::None
             }
         );
@@ -4728,7 +5261,7 @@ mod tests {
         let mut ui = make_ui();
         let id = ui.overlay_open(stub_overlay());
         ui.set_capture(HitTarget::Chrome {
-            owner: id,
+            owner: overlay::ChromeOwner::Overlay(id),
             action: overlay::ChromeAction::Move,
         });
         ui.overlay_close(id);
@@ -4855,7 +5388,7 @@ mod tests {
     fn dispatch_event_esc_closes_active_modal() {
         let mut ui = make_ui();
         let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
-        assert_eq!(ui.active_modal(), Some(id));
+        assert_eq!(ui.active_modal_overlay(), Some(id));
         let result = dispatch_key(
             &mut ui,
             crossterm::event::KeyCode::Esc,
@@ -4876,7 +5409,7 @@ mod tests {
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::SHIFT,
         );
-        assert_eq!(ui.active_modal(), Some(id));
+        assert_eq!(ui.active_modal_overlay(), Some(id));
     }
 
     #[test]
@@ -4919,7 +5452,7 @@ mod tests {
     fn dispatch_event_ctrl_c_closes_active_modal() {
         let mut ui = make_ui();
         let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
-        assert_eq!(ui.active_modal(), Some(id));
+        assert_eq!(ui.active_modal_overlay(), Some(id));
         let result = dispatch_key(
             &mut ui,
             crossterm::event::KeyCode::Char('c'),

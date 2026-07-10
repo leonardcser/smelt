@@ -1,7 +1,7 @@
 //! Z-stacked overlay window groups positioned via an `Anchor` over a `LayoutTree`.
 
 use super::WinId;
-use crate::layout::{Align, Anchor, Constraint, Corner, LayoutTree, PaintId, Rect};
+use crate::layout::{Align, Anchor, Constraint, ContainerId, Corner, LayoutTree, PaintId, Rect};
 use std::collections::HashMap;
 
 /// Stable handle for an overlay. Distinct from `WinId` to avoid chrome/content hit collision.
@@ -151,6 +151,13 @@ pub enum OverlayHitTarget {
     Chrome(ChromeAction),
 }
 
+/// Stable owner of interactive container chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChromeOwner {
+    Overlay(OverlayId),
+    Container(ContainerId),
+}
+
 /// Global mouse hit-test result covering both overlays and splits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitTarget {
@@ -160,7 +167,7 @@ pub enum HitTarget {
         owner: super::WinId,
     },
     Chrome {
-        owner: OverlayId,
+        owner: ChromeOwner,
         action: ChromeAction,
     },
 }

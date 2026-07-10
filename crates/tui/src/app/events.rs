@@ -42,8 +42,11 @@ impl TuiApp {
             code, modifiers, ..
         }) = &ev
         {
-            // Skip when an overlay or cmdline is focused - they get first dibs.
-            if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
+            // Skip when transient modal UI or cmdline is focused - it gets first dibs.
+            if self.ui.focused_overlay().is_none()
+                && self.ui.focused_modal().is_none()
+                && self.well_known.cmdline.is_none()
+            {
                 let pctx = crate::input::prompt_ctx_ref(&self.ui);
                 let ctx = self.input.key_context(pctx, self.turn_input_is_active());
                 match keymap::lookup(*code, *modifiers, &ctx) {
@@ -252,7 +255,7 @@ impl TuiApp {
                     }
                 };
                 // Don't restore stash if a dialog opened - it restores on close.
-                if accepted && self.ui.focused_overlay().is_none() {
+                if accepted && self.ui.active_modal().is_none() {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                     self.input.restore_stash(&mut pctx);
                 }
@@ -286,7 +289,7 @@ impl TuiApp {
         }
 
         if let Some(win) = self.ui.focus() {
-            if self.ui.focused_overlay().is_some() {
+            if self.ui.focused_overlay().is_some() || self.ui.focused_modal().is_some() {
                 let Some(win) = self.ui.win(win) else {
                     return false;
                 };
@@ -1144,12 +1147,9 @@ impl TuiApp {
         self.flush_lua_callbacks();
     }
 
-    /// True when the focused overlay blocks engine-event drain (Confirm/Question/Lua dialogs).
-    pub(crate) fn focused_overlay_blocks_agent(&self) -> bool {
-        self.ui
-            .focused_overlay()
-            .and_then(|id| self.ui.overlay(id))
-            .is_some_and(|o| o.blocks_agent)
+    /// True when the active modal blocks engine-event drain.
+    pub(crate) fn modal_blocks_agent(&self) -> bool {
+        self.ui.active_modal_blocks_agent()
     }
 
     /// Snap the transcript cursor to the nearest selectable cell, skipping gutters and padding.
@@ -1219,15 +1219,14 @@ impl TuiApp {
         }
 
         // Tier 1b: bare Esc that belongs to Vim (Visual mode or a pending
-        // Normal-mode sequence) must beat dialog-level <Esc> keymaps, which
-        // are otherwise allowed to close the overlay from idle Normal mode.
-        if self.overlay_viewer_vim_owns_escape(k) && self.dispatch_overlay_viewer_key(k) {
+        // Normal-mode sequence) must beat modal-level <Esc> keymaps, which
+        // may otherwise close the transient surface from idle Normal mode.
+        if self.transient_viewer_vim_owns_escape(k) && self.dispatch_transient_viewer_key(k) {
             return Status::Consumed;
         }
 
-        // Tier 1c: overlay-scoped keymap on the overlay containing the
-        // focused leaf. Owned by the overlay, so any leaf inside it sees
-        // the same bindings without per-leaf re-registration.
+        // Tier 1c: modal- and overlay-scoped keymaps shared by every leaf in
+        // their container.
         {
             let lua = &self.lua;
             let mut lua_invoke =
@@ -1237,6 +1236,10 @@ impl TuiApp {
                     lua.queue_invocation(handle, win, payload);
                 };
             if matches!(
+                self.ui
+                    .dispatch_modal_key(k.code, k.modifiers, &mut lua_invoke),
+                Status::Consumed
+            ) || matches!(
                 self.ui
                     .dispatch_overlay_key(k.code, k.modifiers, &mut lua_invoke),
                 Status::Consumed
@@ -1251,10 +1254,10 @@ impl TuiApp {
             return Status::Consumed;
         }
 
-        // Tier 3: vim viewer keys for vim-enabled read-only overlay leaves.
+        // Tier 3: vim viewer keys for vim-enabled read-only transient leaves.
         // Run before per-window catch-alls so generic dialog/list fallbacks do
         // not swallow Normal/Visual-mode motions and yanks.
-        if self.dispatch_overlay_viewer_key(k) {
+        if self.dispatch_transient_viewer_key(k) {
             return Status::Consumed;
         }
 
@@ -1297,14 +1300,14 @@ impl TuiApp {
         self.ui.dispatch_paste_fallback(content, &mut lua_invoke)
     }
 
-    fn overlay_viewer_vim_owns_escape(&self, k: KeyEvent) -> bool {
+    fn transient_viewer_vim_owns_escape(&self, k: KeyEvent) -> bool {
         if k.code != KeyCode::Esc || k.modifiers != KeyModifiers::NONE {
             return false;
         }
         let Some(win_id) = self.ui.focus() else {
             return false;
         };
-        if self.ui.overlay_for_leaf(win_id).is_none() {
+        if self.ui.overlay_for_leaf(win_id).is_none() && self.ui.focused_modal().is_none() {
             return false;
         }
         let Some(win) = self.ui.win(win_id) else {
@@ -1318,13 +1321,13 @@ impl TuiApp {
             ) || !win.vim_state().is_idle())
     }
 
-    /// Overlay-focus key cascade tier 3. Wraps the shared
-    /// [`Self::dispatch_window_viewer_key`] with two overlay-specific gates:
-    ///   * Insert-mode skip - typing inside an editable overlay leaf must
-    ///     not bubble nav keys here.
+    /// Transient-focus key cascade tier 3. Wraps the shared
+    /// [`Self::dispatch_window_viewer_key`] with two gates:
+    ///   * Insert-mode skip - typing inside an editable leaf must not bubble
+    ///     navigation keys here.
     ///   * Esc-in-idle-Normal falls through so the modal-dismiss tier (5)
-    ///     can close the overlay; Visual / pending-sequence Esc stays with vim.
-    pub(crate) fn dispatch_overlay_viewer_key(&mut self, k: KeyEvent) -> bool {
+    ///     can close the surface; Visual / pending-sequence Esc stays with vim.
+    pub(crate) fn dispatch_transient_viewer_key(&mut self, k: KeyEvent) -> bool {
         let win = match self.ui.focus() {
             Some(w) => w,
             None => return false,
@@ -1787,6 +1790,7 @@ impl TuiApp {
             let win = win.expect("window");
             let buf = buf.expect("buffer");
             win.set_cpos(new_cpos);
+            win.set_curswant(None);
             // A shift-motion that resolved to no movement (e.g. Shift+End at
             // EOL) leaves `selection_anchor == cpos` - a degenerate, empty
             // selection that downstream code treats as "no selection" but

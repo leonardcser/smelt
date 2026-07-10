@@ -4,7 +4,7 @@ use crate::app::transcript::TranscriptProjectionRestore;
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
 use crate::app::{AppFocus, EventOutcome, PromptResizeClick, PromptResizeDrag, TuiApp};
 use crate::content::layout::HitRegion;
-use crate::smelt_edit::{HitTarget, RowIndex, WinId};
+use crate::smelt_edit::{ChromeOwner, HitTarget, RowIndex, WinId};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 const PROMPT_RESIZE_DOUBLE_CLICK_WINDOW: std::time::Duration =
@@ -359,13 +359,29 @@ impl TuiApp {
                 .dispatch_event(crate::smelt_edit::Event::Mouse(me), &mut |_, _, _| {}),
             crate::smelt_edit::Status::Consumed
         ) {
+            let cap_after = self.ui.capture();
+            let docked_resize = matches!(
+                cap_before,
+                Some(HitTarget::Chrome {
+                    owner: ChromeOwner::Container(_),
+                    ..
+                })
+            ) || matches!(
+                cap_after,
+                Some(HitTarget::Chrome {
+                    owner: ChromeOwner::Container(_),
+                    ..
+                })
+            );
             self.record_transcript_scroll_input(scroll_input);
             if is_scroll_event(me.kind) {
                 self.pin_well_known_horizontal_scroll();
             }
-            if let Some(owner) =
-                scrollbar_owner_from_capture_transition(cap_before, self.ui.capture())
-            {
+            if docked_resize {
+                self.refresh_main_layout();
+                return EventOutcome::Redraw;
+            }
+            if let Some(owner) = scrollbar_owner_from_capture_transition(cap_before, cap_after) {
                 // While a modal is open, the modal keeps focus - scrolling a
                 // background pane's scrollbar must not steal it.
                 if is_left_down(me.kind) && self.ui.active_modal().is_none() {

@@ -69,13 +69,20 @@ impl TuiApp {
         self.prompt_input_rows = input_rows;
         let tree = self
             .invoke_lua_layout_composer(term_w, term_h, input_rows)
-            .unwrap_or_else(|| layout::seed_layout_tree(input_rows));
+            .unwrap_or_else(|| self.fallback_main_layout(term_w, term_h, input_rows));
         self.ui.set_layout(tree);
         self.layout = layout::LayoutState::from_ui(&self.ui);
         // Prompt-docked pickers size themselves to the headroom above the
         // prompt chrome; recompute them whenever the main layout changes.
         crate::picker::sync_layouts(self);
-        (self.layout.prompt, self.layout.viewport_rows())
+        let prompt_rect = if self.has_docked_dialog() {
+            // Keep the hidden prompt's parser/cursor projection current without
+            // mounting it in the root layout. This makes restoration lossless.
+            layout::Rect::new(0, 0, term_w, input_rows)
+        } else {
+            self.layout.prompt
+        };
+        (prompt_rect, self.layout.viewport_rows())
     }
 
     /// Render variant parameterised by the output sink. Production passes
@@ -114,7 +121,7 @@ impl TuiApp {
         // Freeze timer/spinner while a blocking dialog is up. Done before
         // Lua renderers run so the prompt top-bar indicator they paint
         // this frame already reflects the pause.
-        self.set_agent_blocked_paused(self.focused_overlay_blocks_agent());
+        self.set_agent_blocked_paused(self.ui.active_modal_blocks_agent());
 
         {
             let _p = smelt_perf::perf::begin("compositor:lua_renderers");
@@ -151,12 +158,9 @@ impl TuiApp {
             self.ui.cursor_shape(),
             crate::smelt_edit::CursorShape::Hidden
         ) {
-            let focus_on_overlay = self
-                .ui
-                .focus()
-                .map(|f| self.ui.overlay_for_leaf(f).is_some())
-                .unwrap_or(false);
-            if focus_on_overlay || self.ui.any_drag_active() {
+            let transient_focus =
+                self.ui.focused_overlay().is_some() || self.ui.focused_modal().is_some();
+            if transient_focus || self.ui.any_drag_active() {
                 self.ui
                     .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
             }
@@ -327,11 +331,12 @@ impl TuiApp {
     }
 
     /// Compute which pane owns the cursor this frame.
-    /// Cmdline/overlay steals it; terminal-unfocused suppresses it.
+    /// Cmdline/modal/overlay focus steals it; terminal-unfocused suppresses it.
     fn compute_cursor_ownership(&self) -> (bool, bool) {
-        let overlay_owns_cursor = self.ui.focused_overlay().is_some();
+        let transient_ui_owns_cursor =
+            self.ui.focused_overlay().is_some() || self.ui.focused_modal().is_some();
         let cmdline_active = self.well_known.cmdline.is_some();
-        let suppress = cmdline_active || overlay_owns_cursor;
+        let suppress = cmdline_active || transient_ui_owns_cursor;
         let has_prompt_cursor = !suppress
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Prompt);
@@ -349,7 +354,7 @@ impl TuiApp {
             .win(crate::app::PROMPT_WIN)
             .map(|w| w.config.gutters)
             .unwrap_or_default();
-        // Use the same content width the auto-attach pre-pass will use — both pad
+        // Use the same content width the auto-attach pre-pass will use - both pad
         // gutters AND the reserved scrollbar column. PromptBufferParser now
         // emits unwrapped display rows; Window::ensure_layout owns wrapping at
         // this exact width so cursor projection and paint agree.
@@ -388,6 +393,50 @@ impl TuiApp {
         }
     }
 
+    fn fallback_main_layout(
+        &mut self,
+        _term_w: u16,
+        _term_h: u16,
+        prompt_input_rows: u16,
+    ) -> crate::smelt_edit::LayoutTree {
+        let content = if let Some(id) = self.active_docked_dialog() {
+            let expanded = self.ui.docked_surface(id).map(|dialog| dialog.expanded());
+            let height = self.ui.docked_surface_height(id);
+            let dialog_tree = self.ui.docked_surface_layout(id);
+            match (expanded, height, dialog_tree) {
+                (Some(expanded), Some(height), Some(dialog_tree)) => {
+                    crate::smelt_edit::LayoutTree::vbox(vec![
+                        (
+                            if expanded {
+                                crate::smelt_edit::Constraint::Length(
+                                    crate::app::DOCKED_DIALOG_TRANSCRIPT_ROWS,
+                                )
+                            } else {
+                                crate::smelt_edit::Constraint::Fill
+                            },
+                            crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+                        ),
+                        (height, dialog_tree),
+                    ])
+                }
+                _ => crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+            }
+        } else {
+            layout::seed_layout_tree(prompt_input_rows)
+        };
+
+        let Some(statusline) = self.ui.named_win("smelt.statusline") else {
+            return content;
+        };
+        crate::smelt_edit::LayoutTree::vbox(vec![
+            (crate::smelt_edit::Constraint::Fill, content),
+            (
+                crate::smelt_edit::Constraint::Length(1),
+                crate::smelt_edit::LayoutTree::leaf(statusline),
+            ),
+        ])
+    }
+
     /// Invoke the Lua main-layout composer if one is registered via
     /// `smelt.ui.layout.set(fn)`. Returns `None` when no composer is
     /// registered, the resolved function is missing/invalid, the
@@ -400,6 +449,12 @@ impl TuiApp {
         term_h: u16,
         prompt_input_rows: u16,
     ) -> Option<crate::smelt_edit::LayoutTree> {
+        let dialog = if let Some(id) = self.active_docked_dialog() {
+            let expanded = self.ui.docked_surface(id)?.expanded();
+            Some((id, self.ui.docked_surface_height(id)?, expanded))
+        } else {
+            None
+        };
         let lua = self.lua.lua();
         let shared = self.lua.shared();
         let composer_func: Option<mlua::Function> = {
@@ -412,6 +467,20 @@ impl TuiApp {
         let _ = state.set("term_w", term_w);
         let _ = state.set("term_h", term_h);
         let _ = state.set("prompt_input_rows", prompt_input_rows);
+        if let Some((id, height, expanded)) = dialog {
+            let layout = lua
+                .create_userdata(crate::lua::api::overlay_layout::LuaUiLayout(
+                    crate::lua::api::overlay_layout::LayoutNode::Surface { id },
+                ))
+                .ok()?;
+            let _ = state.set("dialog", layout);
+            let _ = state.set("dialog_height", constraint_to_lua(lua, height).ok()?);
+            let _ = state.set("dialog_expanded", expanded);
+            let _ = state.set(
+                "dialog_transcript_rows",
+                crate::app::DOCKED_DIALOG_TRANSCRIPT_ROWS,
+            );
+        }
         let result: mlua::Result<mlua::AnyUserData> = func.call((state,));
         let ud = match result {
             Ok(ud) => ud,
@@ -428,7 +497,20 @@ impl TuiApp {
             .clone();
         let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
         match crate::lua::api::overlay_layout::build_layout_tree(self, &node, &mut window_leaves) {
-            Ok((_constraint, tree)) => Some(tree),
+            Ok((_constraint, tree)) => {
+                let Some(dialog) = dialog else {
+                    return Some(tree);
+                };
+                if tree.contains_container(dialog.0) {
+                    return Some(tree);
+                }
+
+                self.lua.record_error(
+                    "smelt.ui.layout composer omitted the active dialog; using the safe fallback layout"
+                        .into(),
+                );
+                None
+            }
             Err(e) => {
                 self.lua
                     .record_error(format!("smelt.ui.layout composer tree: {e}"));
@@ -481,8 +563,8 @@ impl TuiApp {
     }
 
     fn finalize_layer_rects(&mut self) {
-        // Re-assert focus when no overlay is up so app-pane focus tracks user intent.
-        if self.ui.focused_overlay().is_none() {
+        // Re-assert app-pane focus only when no transient surface owns focus.
+        if self.ui.focused_overlay().is_none() && self.ui.active_modal().is_none() {
             match self.app_focus {
                 crate::app::AppFocus::Prompt => {
                     self.ui.set_focus(crate::app::PROMPT_WIN);
@@ -492,6 +574,31 @@ impl TuiApp {
                 }
             }
         }
+    }
+}
+
+fn constraint_to_lua(
+    lua: &mlua::Lua,
+    constraint: crate::smelt_edit::Constraint,
+) -> mlua::Result<mlua::Value> {
+    use crate::smelt_edit::Constraint;
+
+    match constraint {
+        Constraint::Length(value) => Ok(mlua::Value::Integer(value.into())),
+        Constraint::Percentage(value) => {
+            Ok(mlua::Value::String(lua.create_string(format!("{value}%"))?))
+        }
+        Constraint::Ratio(numerator, denominator) => Ok(mlua::Value::String(
+            lua.create_string(format!("ratio:{numerator}/{denominator}"))?,
+        )),
+        Constraint::Min(value) => Ok(mlua::Value::String(
+            lua.create_string(format!("min:{value}"))?,
+        )),
+        Constraint::Max(value) => Ok(mlua::Value::String(
+            lua.create_string(format!("max:{value}"))?,
+        )),
+        Constraint::Fill => Ok(mlua::Value::String(lua.create_string("fill")?)),
+        Constraint::Fit => Ok(mlua::Value::String(lua.create_string("fit")?)),
     }
 }
 

@@ -88,6 +88,8 @@ impl Natural for LuaMeasureNatural {
 /// constructors and consumed by `smelt.overlay.new`.
 #[derive(Clone)]
 pub(crate) enum LayoutNode {
+    /// Opaque host-owned container placed by the main layout composer.
+    Surface { id: crate::smelt_edit::ContainerId },
     /// A window/paint id leaf. Resolution to `WinId` vs `PaintId` happens at
     /// `overlay.open` time via `resolve_leaf_id`.
     Leaf {
@@ -346,6 +348,21 @@ pub(crate) fn build_layout_tree(
     window_leaves: &mut Vec<crate::smelt_edit::WinId>,
 ) -> Result<(Constraint, LayoutTree), String> {
     match node {
+        LayoutNode::Surface { id } => {
+            let surface = app
+                .ui
+                .docked_surface(*id)
+                .ok_or_else(|| format!("layout references missing docked surface {}", id.0))?;
+            let modal = surface.modal();
+            let tree = app
+                .ui
+                .docked_surface_layout(*id)
+                .ok_or_else(|| format!("layout references missing docked surface {}", id.0))?;
+            if let Some(leaves) = app.ui.modal_leaves(modal) {
+                window_leaves.extend_from_slice(leaves);
+            }
+            Ok((Constraint::Fill, tree))
+        }
         LayoutNode::Leaf {
             raw_id,
             chrome,

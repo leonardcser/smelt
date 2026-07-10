@@ -4,6 +4,7 @@
 mod buf;
 mod config;
 mod confirm;
+mod dialog;
 mod engine;
 mod history;
 mod input;
@@ -88,7 +89,7 @@ impl LuaRuntime {
         record_module_doc("smelt", "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.");
         record_module_doc("smelt.build", "Compile-time build identity: `version` (CARGO_PKG_VERSION, for semver comparison), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), `display` (canonical user-facing identity string, e.g. `v0.5.0-alpha.2` for a clean tagged build or `v0.5.0-alpha.2-122-97dce0e8-dirty` for a dev build. Shared by banner, `/version`, `/upgrade`, and `smelt --version`.");
         record_module_doc("smelt.tick", "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.");
-        record_module_doc("smelt.dialog", "Modal overlay builders. Compose a dialog from one or more `panels` of `smelt.dialog.content(...)` leaves, then call `smelt.dialog.open(...)` to push it; convenience entry points (`smelt.dialog.input`, `.options`, `.list`, `.picker`, `.markdown`) wrap the common shapes. UiHost-only.");
+        record_module_doc("smelt.dialog", "Root-docked modal builders. A dialog replaces the complete composer block while preserving transcript context and the statusline; convenience entry points (`smelt.dialog.input`, `.options`, `.list`, `.picker`, `.markdown`) wrap common panel shapes. UiHost-only.");
         record_module_doc("smelt.input", "First-class single-line input widget. `smelt.input.new(opts)` returns a handle with `:win()`, `:buf()`, `:text()`, `:set_text()`, `:on()`, and `:key()`; editing keys and paste use the shared line-input core. UiHost-only.");
         record_module_doc("smelt.list", "Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.");
 
@@ -97,6 +98,7 @@ impl LuaRuntime {
         // UiHost-tier bindings
         buf::register(lua, &smelt, shared)?;
         win::register(lua, &smelt, shared)?;
+        dialog::register(lua, &smelt)?;
         overlay::register(lua, &smelt)?;
         picker::register(lua, &smelt)?;
         notify::register(lua, &smelt)?;

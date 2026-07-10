@@ -32,7 +32,7 @@ fn vim_insert_double_esc_opens_rewind_dialog_when_idle() {
     let after_first = app.state();
     assert_eq!(after_first.vim_mode, VimMode::Normal);
     assert!(
-        after_first.focused_overlay.is_none(),
+        after_first.active_modal.is_none(),
         "first Esc is only the local Vim action"
     );
 
@@ -40,7 +40,7 @@ fn vim_insert_double_esc_opens_rewind_dialog_when_idle() {
     drive_lua_tasks(&mut app);
 
     assert!(
-        app.state().focused_overlay.is_some(),
+        app.state().active_modal.is_some(),
         "second Esc should complete the idle Esc-Esc rewind chord"
     );
 }

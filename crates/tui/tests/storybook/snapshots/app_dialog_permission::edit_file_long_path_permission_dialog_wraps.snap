@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 580
 expression: frame.text()
 ---
 * edit_file /tmp/smelt-storybook-nonexistent-session-93e4220e873c5539

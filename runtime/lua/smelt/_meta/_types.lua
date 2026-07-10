@@ -109,10 +109,10 @@
 ---@field on_submit? fun(ctx: any): any Override the submit path. `ctx` carries the dialog handles plus `ctx.index` (1-based) and `ctx.item`. Default resolves the active dialog with `{ index, item }`.
 
 --- Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
---- Body sizing is body-relative: integer `height` values are forwarded
---- through with the chrome row added automatically; `"N%"`, `"fill"`,
---- and `"fit"` pass through verbatim. Pick one of `height` or
---- `max_height`; setting both raises.
+--- Dialogs fit their content by default while preserving transcript context.
+--- Integer `height` values are body-relative and gain
+--- the top chrome row automatically. Pick one of `height` or `max_height`;
+--- setting both raises.
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
@@ -120,8 +120,8 @@
 ---@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 0).
 ---@field focus? smelt.win.Win Leaf that should receive initial focus.
 ---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
----@field max_height? any Shrink-to-content cap that pairs with `min_height`.
----@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
+---@field max_height? any Maximum root-layout height while fitting content.
+---@field min_height? any Minimum root-layout height while fitting content.
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
 ---@field border? table Top border style override; defaults to `{ top = "SmeltAccent" }`.
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.

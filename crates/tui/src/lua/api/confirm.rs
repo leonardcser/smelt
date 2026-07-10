@@ -1,7 +1,7 @@
 //! `smelt.confirm.__*` primitives consumed by
 //! `runtime/lua/smelt/dialogs/confirm.lua`.
 //!
-//! The Lua side owns dialog orchestration (open the overlay, attach
+//! The Lua side owns dialog orchestration (mount the root dialog, attach
 //! keymaps, route Submit / Dismiss) and composes the title / summary /
 //! preview buffers itself via `buf:styled`,
 //! `smelt.render.syntax`, and friends. The request payload (tool name /

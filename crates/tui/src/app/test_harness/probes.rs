@@ -83,13 +83,9 @@ impl TestApp {
         if self.app.well_known.cmdline.is_some() {
             self.app.close_cmdline();
         }
-        while let Some(overlay_id) = self
-            .app
-            .ui
-            .focused_overlay()
-            .or_else(|| self.app.ui.active_modal())
-        {
-            self.app.close_overlay(overlay_id);
+        while self.app.close_active_modal() {}
+        while let Some(overlay) = self.app.ui.focused_overlay() {
+            self.app.close_overlay(overlay);
         }
         // Prompt-docked pickers own the prompt through Lua registrations on
         // the prompt window, not through overlay focus. Reloading drops those

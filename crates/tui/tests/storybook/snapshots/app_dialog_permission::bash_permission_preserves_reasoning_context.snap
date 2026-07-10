@@ -2,25 +2,25 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-* bash cat /etc/hosts
+│ I need to inspect the generated fixtures before choosing an implementation.
+│
+│ The temporary directory should reveal whether reusable outputs already
+│ exist.
 
-
-
-
-
-
+* bash ls -la /tmp/foo
 
 
 
 
 ────────────────────────────────────────────────────────────────────────────────
- bash: cat /etc/hosts
+ bash: ls -la /tmp/foo
+ List files in /tmp/foo
 
  Allow?
   1. allow once
   2. deny
-  3. allow cat *, /etc for this session
-  4. allow cat *, /etc in ~/cwd
+  3. allow ls * for this session
+  4. allow ls * in ~/cwd
 
   press tab to add a reason…
  ○ normal  permission pending                                             1:1 0%

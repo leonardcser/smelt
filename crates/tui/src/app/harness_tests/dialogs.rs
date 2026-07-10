@@ -1,12 +1,207 @@
 use super::*;
 
+fn open_root_test_dialog(app: &mut TestApp) {
+    assert!(app.run_lua(
+        r#"
+        local leaf = smelt.dialog.content({ text = "Review this action" })
+        smelt.dialog.open_handle({
+          panels = { { leaf = leaf, height = "fit" } },
+          blocks_agent = true,
+        })
+        "#
+    ));
+}
+
 #[test]
-fn vim_readonly_dialog_arrows_use_viewer_navigation() {
-    let mut app = TestApp::builder().with_vim(true).build();
+fn root_dialog_replaces_composer_and_restores_prompt_state() {
+    let mut app = TestApp::builder().build();
+    app.type_text("draft response");
+    assert_eq!(app.state().prompt_text, "draft response");
+
+    open_root_test_dialog(&mut app);
+    app.render_silent();
+
+    assert!(app.state().active_modal.is_some());
+    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_none());
+    assert_eq!(app.state().prompt_text, "draft response");
+    assert!(!app.render_to_frame().text().contains("draft response"));
+
+    assert!(app.run_lua("smelt.dialog.current().close()"));
+    app.render_silent();
+
+    assert!(app.state().active_modal.is_none());
+    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_some());
+    assert_eq!(app.state().prompt_text, "draft response");
+    assert!(app.render_to_frame().text().contains("draft response"));
+}
+
+#[test]
+fn failed_root_dialog_open_does_not_pollute_dialog_stack() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        local leaf = smelt.dialog.content({ text = "Review this action" })
+        local ok = pcall(function()
+          smelt.dialog.open_handle({
+            panels = { { leaf = leaf, height = "fit" } },
+            min_height = "invalid",
+          })
+        end)
+        assert(not ok, "invalid dialog constraint should fail")
+        assert(smelt.dialog.current() == nil, "failed dialog leaked into stack")
+        "#
+    ));
+    assert!(app.app.active_docked_dialog().is_none());
+}
+
+#[test]
+fn root_dialog_can_disable_top_edge_resize() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        local leaf = smelt.dialog.content({ text = "Fixed dialog" })
+        smelt.dialog.open_handle({
+          panels = { { leaf = leaf, height = "fit" } },
+          resizable = false,
+        })
+        "#
+    ));
+
+    let dialog = app.app.active_docked_dialog().expect("active dialog");
+    assert!(
+        !app.app
+            .ui
+            .docked_surface(dialog)
+            .expect("docked surface")
+            .resize_config()
+            .top
+    );
+}
+
+#[test]
+fn root_dialog_uses_safe_fallback_when_custom_composer_omits_it() {
+    let mut app = TestApp::builder().build();
+    open_root_test_dialog(&mut app);
+    assert!(app.run_lua(
+        r#"
+        smelt.ui.layout.set(function()
+          return smelt.ui.layout.leaf(smelt.win.PROMPT)
+        end)
+        "#
+    ));
+
+    app.render_silent();
+
+    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_none());
+    let dialog = app.app.active_docked_dialog().expect("active dialog");
+    let root = app
+        .app
+        .ui
+        .modal_leaves(
+            app.app
+                .ui
+                .docked_surface(dialog)
+                .expect("docked surface")
+                .modal(),
+        )
+        .and_then(|leaves| leaves.first())
+        .copied()
+        .expect("dialog root");
+    assert!(app.app.ui.split_rect(root).is_some());
+    let statusline = app
+        .app
+        .ui
+        .named_win("smelt.statusline")
+        .expect("statusline window");
+    let status_rect = app
+        .app
+        .ui
+        .split_rect(statusline)
+        .expect("statusline remains mounted");
+    assert_eq!(
+        status_rect.top + status_rect.height,
+        app.app.ui.terminal_size().1
+    );
+}
+
+#[test]
+fn root_dialog_hides_and_restores_queued_input_chrome() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.type_text("queued follow-up");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.state().queued_inputs, vec!["queued follow-up"]);
+    assert!(app.render_to_frame().text().contains("queued follow-up"));
+
+    open_root_test_dialog(&mut app);
+
+    assert_eq!(app.state().queued_inputs, vec!["queued follow-up"]);
+    assert!(!app.render_to_frame().text().contains("queued follow-up"));
+
+    assert!(app.run_lua("smelt.dialog.current().close()"));
+
+    assert_eq!(app.state().queued_inputs, vec!["queued follow-up"]);
+    assert!(app.render_to_frame().text().contains("queued follow-up"));
+}
+
+#[test]
+fn expanding_root_dialog_preserves_focused_panel() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        local first = smelt.dialog.content({ text = "First panel", interactive = true })
+        local second = smelt.dialog.content({ text = "Second panel", interactive = true })
+        smelt.dialog.open_handle({
+          panels = {
+            { leaf = first, height = "fit" },
+            { leaf = second, height = "fit" },
+          },
+        })
+        second:focus()
+        "#
+    ));
+    app.render_silent();
+    let focused = app.app.ui.focus().expect("second dialog panel focused");
+
+    app.press_mod(KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.app.ui.focus(), Some(focused));
+    assert!(app
+        .app
+        .active_docked_dialog()
+        .and_then(|dialog| app.app.ui.docked_surface(dialog))
+        .is_some_and(|dialog| dialog.expanded()));
+}
+
+#[test]
+fn root_dialog_pauses_notification_visibility_and_ttl() {
+    let mut app = TestApp::builder().build();
+    app.app.notify_error("deferred notification".into());
+    assert!(app.app.notification_win().is_some());
+
+    open_root_test_dialog(&mut app);
+
+    assert!(app.app.notification_win().is_none());
+    assert!(app.app.suspended_notification.is_some());
+    app.clock.advance(std::time::Duration::from_millis(
+        crate::app::NOTIFICATION_TTL_MS * 2,
+    ));
+    assert!(!app.app.dismiss_expired_notification());
+
+    assert!(app.run_lua("smelt.dialog.current().close()"));
+
+    assert!(app.app.suspended_notification.is_none());
+    assert!(app.app.notification_win().is_some());
+}
+
+#[test]
+fn readonly_dialog_arrows_move_without_vim() {
+    let mut app = TestApp::builder().build();
     assert!(app.run_lua(
         r#"
         local buf = smelt.buf.new({ readonly = true })
-        buf:lines({ "one", "two", "three", "four", "five", "six" })
+        buf:lines({ "alpha", "bravo", "charlie" })
         local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
         smelt.dialog.open_handle({
           title = "viewer",
@@ -18,14 +213,126 @@ fn vim_readonly_dialog_arrows_use_viewer_navigation() {
     app.render_silent();
 
     let win_id = app.app.ui.focus().expect("dialog leaf focused");
-    let before = app.app.ui.win(win_id).expect("window").cursor_row();
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 0);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 0);
 
     app.press(KeyCode::Down);
+    app.press(KeyCode::Right);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 1);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
 
-    let after = app.app.ui.win(win_id).expect("window").cursor_row();
+    app.press(KeyCode::Up);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 0);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+
+    app.press(KeyCode::Left);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 0);
+}
+
+#[test]
+fn vim_readonly_dialog_arrows_and_vim_motions_move_cursor() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha one", "bravo two", "charlie three", "delta four", "echo five", "foxtrot six" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+
+    app.press(KeyCode::Down);
+    app.press(KeyCode::Right);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 1);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 1);
+
+    app.type_char('j');
+    app.type_char('l');
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 2);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 2);
+
+    app.press(KeyCode::Up);
+    app.press(KeyCode::Left);
+    app.type_char('k');
+    app.type_char('h');
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 0);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 0);
+
+    app.type_char('w');
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 6);
+    app.type_char('j');
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_row(), 1);
+    assert_eq!(app.app.ui.win(win_id).expect("window").cursor_col(), 6);
+}
+
+#[test]
+fn vim_readonly_dialog_visual_modes_copy_character_and_whole_buffer() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "alpha beta", "gamma", "delta" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+
+    app.type_char('v');
+    app.type_char('e');
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::Visual
+    );
+    app.type_char('y');
+    assert_eq!(app.app.core.clipboard.kill_ring.current(), "alpha");
+    assert_eq!(
+        app.app.core.clipboard.kill_ring.last_clipboard_write(),
+        Some("alpha")
+    );
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::Normal
+    );
+
+    app.type_char('g');
+    app.type_char('g');
+    app.type_char('V');
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::VisualLine
+    );
+    app.type_char('G');
+    app.type_char('y');
+
+    assert_eq!(
+        app.app.core.clipboard.kill_ring.current(),
+        "alpha beta\ngamma\ndelta"
+    );
+    assert_eq!(
+        app.app.core.clipboard.kill_ring.last_clipboard_write(),
+        Some("alpha beta\ngamma\ndelta")
+    );
+    assert_eq!(
+        app.app.ui.win(win_id).expect("window").vim_mode(),
+        VimMode::Normal
+    );
     assert!(
-        after > before,
-        "Down should move within readonly viewer, before={before}, after={after}"
+        app.app.ui.active_modal().is_some(),
+        "copying must keep the dialog open"
     );
 }
 
@@ -72,7 +379,7 @@ fn vim_readonly_dialog_escape_exits_visual_before_dialog_keymap() {
     app.press(KeyCode::Esc);
 
     assert!(
-        app.app.ui.focused_overlay().is_some(),
+        app.app.ui.active_modal().is_some(),
         "Esc from Visual should not close the dialog"
     );
     assert_eq!(
@@ -303,7 +610,7 @@ fn public_status_open_confirm_needs_attention() {
     }
 
     assert_eq!(app.pending_confirm_count(), 1);
-    assert!(app.state().focused_overlay.is_some());
+    assert!(app.state().active_modal.is_some());
 
     let (state, reason) = app.app.public_status_state_reason();
     assert_eq!(
@@ -314,6 +621,199 @@ fn public_status_open_confirm_needs_attention() {
         reason,
         Some(smelt_core::public_status::PublicReason::Permission)
     );
+}
+
+#[test]
+fn confirm_down_moves_selection_without_scrolling_options() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(14), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+    app.render_silent();
+
+    let options = app.app.ui.focus().expect("confirm options focused");
+    let before = app.app.ui.win(options).expect("confirm options window");
+    assert_eq!(before.cursor_abs_row(), 0);
+    assert_eq!(before.scroll_top(), 0);
+    assert!(
+        before
+            .viewport
+            .expect("confirm options viewport")
+            .rect
+            .height
+            >= 2,
+        "both confirm options should be visible"
+    );
+
+    app.press(KeyCode::Down);
+
+    let after = app.app.ui.win(options).expect("confirm options window");
+    assert_eq!(after.cursor_abs_row(), 1, "Down should select deny");
+    assert_eq!(
+        after.scroll_top(),
+        0,
+        "the options viewport should stay fixed while deny is visible"
+    );
+}
+
+#[test]
+fn confirm_top_border_drag_resizes_dialog() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(15), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+    app.render_silent();
+
+    let dialog = app.app.active_docked_dialog().expect("confirm dialog");
+    let first_leaf = app
+        .app
+        .ui
+        .modal_leaves(
+            app.app
+                .ui
+                .docked_surface(dialog)
+                .expect("docked surface")
+                .modal(),
+        )
+        .and_then(|leaves| leaves.first())
+        .copied()
+        .expect("confirm dialog leaf");
+    let before_top = app
+        .app
+        .ui
+        .split_rect(first_leaf)
+        .expect("confirm dialog leaf rect")
+        .top
+        .saturating_sub(1);
+    let target_top = before_top.saturating_sub(3);
+
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: if matches!(kind, MouseEventKind::Down(_)) {
+                before_top
+            } else {
+                target_top
+            },
+            column: 10,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+    app.render_silent();
+
+    let after_top = app
+        .app
+        .ui
+        .split_rect(first_leaf)
+        .expect("resized confirm dialog leaf rect")
+        .top
+        .saturating_sub(1);
+    assert_eq!(after_top, target_top);
+}
+
+#[test]
+fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().build();
+    open_root_test_dialog(&mut app);
+    assert!(app.run_lua(
+        r#"
+        smelt.ui.layout.set(function(state)
+          if not state.dialog then
+            return smelt.ui.layout.leaf(smelt.win.PROMPT)
+          end
+          return smelt.ui.layout.vbox({
+            { smelt.ui.layout.leaf(smelt.win.TRANSCRIPT), height = "fill" },
+            { smelt.ui.layout.leaf(smelt.win.PROMPT), height = 1 },
+            { state.dialog, height = state.dialog_height },
+          })
+        end)
+        "#
+    ));
+    app.render_silent();
+
+    let dialog = app.app.active_docked_dialog().expect("active dialog");
+    let before = app
+        .app
+        .ui
+        .docked_surface(dialog)
+        .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
+        .expect("custom-composed dialog rect");
+    let prompt_bottom = app
+        .app
+        .ui
+        .split_rect(crate::app::PROMPT_WIN)
+        .expect("custom spacer rect")
+        .bottom();
+    assert_eq!(prompt_bottom, before.top);
+    let target_top = before.top.saturating_sub(2);
+
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: if matches!(kind, MouseEventKind::Down(_)) {
+                before.top
+            } else {
+                target_top
+            },
+            column: 10,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+    app.render_silent();
+
+    let resized = app
+        .app
+        .ui
+        .docked_surface(dialog)
+        .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
+        .expect("resized custom-composed dialog rect");
+    assert_eq!(resized.top, target_top);
+    assert_eq!(resized.height, before.height + 2);
+
+    app.set_terminal_size(80, 3);
+    app.render_silent();
+    let constrained = app
+        .app
+        .ui
+        .docked_surface(dialog)
+        .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
+        .expect("constrained dialog rect");
+    assert!(constrained.height < resized.height);
+    assert!(constrained.bottom() <= 3);
+
+    app.set_terminal_size(80, 24);
+    app.render_silent();
+    let restored = app
+        .app
+        .ui
+        .docked_surface(dialog)
+        .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
+        .expect("restored dialog rect");
+    assert_eq!(restored.height, resized.height);
 }
 
 #[test]
@@ -393,7 +893,7 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
         tool_name: "present_plan".into(),
         args,
     }));
-    assert!(app.state().focused_overlay.is_some());
+    assert!(app.state().active_modal.is_some());
 
     assert!(app.run_lua(r#"smelt.dialog.current().resolve("draft")"#));
     drive_lua_tasks(&mut app);
@@ -485,7 +985,7 @@ fn present_plan_existing_path_approves_without_overwriting_plan_body() {
         tool_name: "present_plan".into(),
         args,
     }));
-    assert!(app.state().focused_overlay.is_some());
+    assert!(app.state().active_modal.is_some());
 
     app.press(KeyCode::Char('2'));
     drive_lua_tasks(&mut app);
@@ -527,7 +1027,7 @@ fn present_plan_dismiss_does_not_echo_plan_body() {
         tool_name: "present_plan".into(),
         args,
     }));
-    assert!(app.state().focused_overlay.is_some());
+    assert!(app.state().active_modal.is_some());
 
     app.press(KeyCode::Esc);
     drive_lua_tasks(&mut app);
@@ -561,7 +1061,7 @@ fn present_plan_dialog_tracks_terminal_width_on_resize() {
         tool_name: "present_plan".into(),
         args,
     }));
-    assert!(app.state().focused_overlay.is_some());
+    assert!(app.state().active_modal.is_some());
 
     let before = app.render_to_frame();
     assert!(before
@@ -606,7 +1106,7 @@ fn public_status_open_question_needs_attention() {
         tool_name: "ask_user_question".into(),
         args,
     }));
-    assert!(app.state().focused_overlay.is_some());
+    assert!(app.state().active_modal.is_some());
 
     let (state, reason) = app.app.public_status_state_reason();
     assert_eq!(
@@ -658,7 +1158,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
 
     let first = app
         .state()
-        .focused_overlay
+        .active_modal
         .expect("first question dialog should open");
 
     app.press(KeyCode::Enter);
@@ -670,7 +1170,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
 
     let second = app
         .state()
-        .focused_overlay
+        .active_modal
         .expect("second question dialog should open after first answer");
     assert_ne!(first, second);
 
@@ -681,7 +1181,7 @@ fn ask_user_question_multiple_questions_wakes_between_dialogs() {
     );
     app.feed_one(SourceEvent::LuaWakeup);
 
-    assert!(app.state().focused_overlay.is_none());
+    assert!(app.state().active_modal.is_none());
     let result = app
         .actions()
         .iter()

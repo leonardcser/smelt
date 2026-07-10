@@ -1375,7 +1375,7 @@ fn resume_dialog_open_benchmark_suite() {
     let open_snapshot = smelt_perf::perf::snapshot();
     print_resume_perf("open", &open_snapshot);
     assert!(
-        app.state().focused_overlay.is_some(),
+        app.state().active_modal.is_some(),
         "resume command did not open a dialog"
     );
     let open_ro = duration_count(&open_snapshot, "store:db:open_read_only");

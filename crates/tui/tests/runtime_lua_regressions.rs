@@ -297,6 +297,11 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
                 if row == nil then return self.cursor_row end
                 self.cursor_row = row
               end
+              function leaf:reveal(row, opts)
+                self.revealed_row = row
+                self.reveal_opts = opts
+                return self
+              end
               function leaf:on() end
               function leaf:content_width() return 80 end
               function leaf:row_highlights(specs) self.highlights = specs; return self end

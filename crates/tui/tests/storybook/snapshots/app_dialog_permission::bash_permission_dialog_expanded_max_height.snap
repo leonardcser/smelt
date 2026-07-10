@@ -1,16 +1,15 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 580
 expression: frame.text()
 ---
+* bash ls -la /tmp/foo
+
+
+
+
 ────────────────────────────────────────────────────────────────────────────────
  bash: ls -la /tmp/foo
  List files in /tmp/foo
-
-
-
-
-
 
 
 

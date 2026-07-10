@@ -2,6 +2,11 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
+
+
+
+
+
 ─ Auth method ──────────────────────────────────────────────────────────────────
  Which authentication method should I use?
   1. OAuth
@@ -11,11 +16,6 @@ expression: frame.text()
   3. Anonymous
      skip auth entirely
  press tab to add your own answer…
-
-
-
-
-
 
 
 

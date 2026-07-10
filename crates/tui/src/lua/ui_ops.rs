@@ -85,6 +85,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             ov.blocks_agent = blocks_agent;
             ov.draggable = draggable;
             ov.resizable = resizable;
+            app.ui.sync_overlay_modal(id);
             return Ok(id.0 as u64);
         }
     }

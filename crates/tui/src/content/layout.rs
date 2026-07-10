@@ -13,10 +13,9 @@ use crate::smelt_edit::{Align, Ui};
 /// or differently-named window will fall through to the `PROMPT_WIN`
 /// branch and the picker will sit immediately above the input row.
 ///
-/// This is the only spot in the host that reaches into a Lua-allocated
-/// chrome window by name. The statusline is *not* referenced from Rust;
-/// plugins that need a screen-bottom overlay to clear the statusline
-/// anchor against `require("smelt.statusline").win` directly from Lua.
+/// Screen-bottom overlays that need to clear the Lua-owned statusline still
+/// anchor against `require("smelt.statusline").win` directly from Lua. The
+/// render loop only resolves that named window in its emergency fallback layout.
 pub(crate) fn prompt_chrome_top_win(ui: &Ui) -> crate::smelt_edit::WinId {
     ui.named_win("smelt.prompt_bar.top")
         .unwrap_or(crate::app::PROMPT_WIN)

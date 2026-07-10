@@ -62,9 +62,7 @@ impl TuiApp {
     }
 
     pub(crate) fn reload_lua_dismissing_modal(&mut self) {
-        if let Some(modal_id) = self.ui.active_modal() {
-            self.close_overlay(modal_id);
-        }
+        while self.close_active_modal() {}
         self.reload_lua();
     }
 

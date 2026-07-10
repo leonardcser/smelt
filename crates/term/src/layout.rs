@@ -12,6 +12,10 @@ impl PaintId {
     }
 }
 
+/// Stable identity for a host-owned container embedded in a layout tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContainerId(pub u64);
+
 /// Sizing constraint for a layout child along the parent's primary
 /// axis. Resolved by `resolve_constraints` against the parent's total
 /// size, in declaration order:
@@ -79,6 +83,8 @@ pub struct Chrome {
     /// border. Increases the container's natural size by `2 * padding` on
     /// each axis; children are laid out in the padded-inset rect.
     pub padding: u16,
+    /// Stable host identity for this node when it represents an interactive container.
+    pub container: Option<ContainerId>,
 }
 
 /// Per-leaf natural-size hook. Plugins attach one to a leaf to drive
@@ -228,6 +234,12 @@ impl LayoutTree {
         self
     }
 
+    /// Mark this node as a stable host-owned container.
+    pub fn with_container(mut self, id: ContainerId) -> Self {
+        self.chrome_mut().container = Some(id);
+        self
+    }
+
     /// Replace the root chrome's title in place.
     pub fn set_title(&mut self, t: Option<crate::line::Line<'static>>) {
         self.chrome_mut().title = t;
@@ -249,6 +261,19 @@ impl LayoutTree {
             LayoutTree::Leaf { id: p, .. } => *p == id,
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
                 items.iter().any(|(_, child)| child.contains_leaf_id(id))
+            }
+        }
+    }
+
+    /// Whether a stable host-owned container appears in this tree.
+    pub fn contains_container(&self, id: ContainerId) -> bool {
+        if self.chrome().container == Some(id) {
+            return true;
+        }
+        match self {
+            LayoutTree::Leaf { .. } => false,
+            LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
+                items.iter().any(|(_, child)| child.contains_container(id))
             }
         }
     }
@@ -727,6 +752,17 @@ pub fn resolve_layout_ordered_with(
     result
 }
 
+/// Resolve every stable host-owned container to its outer node rectangle.
+pub fn resolve_containers_with(
+    tree: &LayoutTree,
+    area: Rect,
+    sizer: &dyn LeafSizer,
+) -> HashMap<ContainerId, Rect> {
+    let mut result = HashMap::new();
+    resolve_container_nodes(tree, area, sizer, &mut result);
+    result
+}
+
 /// Inner area after subtracting the border's per-side reservations.
 /// Returns `area` unchanged when `border` is `None`. Does not account for
 /// `Chrome.padding`; prefer [`inset_for_chrome`] when you have the full
@@ -934,6 +970,27 @@ fn merge_title_span_style(
         underline: base.underline || span.underline,
         crossedout: base.crossedout || span.crossedout,
         reverse: base.reverse || span.reverse,
+    }
+}
+
+fn resolve_container_nodes(
+    node: &LayoutTree,
+    area: Rect,
+    sizer: &dyn LeafSizer,
+    out: &mut HashMap<ContainerId, Rect>,
+) {
+    if let Some(id) = node.chrome().container {
+        out.insert(id, area);
+    }
+    match node {
+        LayoutTree::Leaf { .. } => {}
+        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
+            let vertical = matches!(node, LayoutTree::Vbox { .. });
+            let (_, rects) = layout_box_children(items, chrome, area, vertical, sizer);
+            for ((_, child), rect) in items.iter().zip(rects) {
+                resolve_container_nodes(child, rect, sizer, out);
+            }
+        }
     }
 }
 
@@ -2001,5 +2058,27 @@ mod tests {
         assert_eq!(grid.cell(1, 0).symbol, 'm');
         assert_eq!(grid.cell(6, 0).symbol, 'o');
         assert_eq!(grid.cell(7, 0).symbol, '┐');
+    }
+
+    #[test]
+    fn resolves_stable_container_outer_rect() {
+        let container = ContainerId(7);
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(3), LayoutTree::leaf(A)),
+            (
+                Constraint::Length(5),
+                LayoutTree::leaf(B)
+                    .with_border(Border::SINGLE)
+                    .with_container(container),
+            ),
+        ]);
+
+        let rects = resolve_containers_with(&tree, Rect::new(2, 4, 20, 8), &NoopSizer);
+
+        assert_eq!(rects.get(&container), Some(&Rect::new(5, 4, 20, 5)));
+        assert_eq!(
+            resolve_layout(&tree, Rect::new(2, 4, 20, 8))[&B],
+            Rect::new(6, 5, 18, 3)
+        );
     }
 }

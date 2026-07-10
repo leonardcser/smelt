@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 580
 expression: frame.text()
 ---
 * read_file crates/tui/src/app.rs:120-159

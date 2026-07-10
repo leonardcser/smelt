@@ -2,6 +2,11 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
+
+
+
+
+
 ─ plan ─────────────────────────────────────────────────────────────────────────
  # Goal
  Refactor parser state.
@@ -9,11 +14,6 @@ expression: frame.text()
  # Sequence
  1. Add tests.
  2. Move state handling.
-
-
-
-
-
 
 
 

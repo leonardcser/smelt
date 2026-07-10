@@ -314,7 +314,7 @@ fn idle_placeholder_dismissal_does_not_swallow_second_escape_rewind() {
 
     app.press(KeyCode::Esc);
     assert!(
-        app.state().focused_overlay.is_none(),
+        app.state().active_modal.is_none(),
         "first Esc only dismisses the placeholder"
     );
 
@@ -322,7 +322,7 @@ fn idle_placeholder_dismissal_does_not_swallow_second_escape_rewind() {
     drive_lua_tasks(&mut app);
 
     assert!(
-        app.state().focused_overlay.is_some(),
+        app.state().active_modal.is_some(),
         "second Esc should still complete the idle Esc-Esc rewind chord"
     );
 }

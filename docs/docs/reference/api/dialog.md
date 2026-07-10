@@ -6,7 +6,7 @@
 
 **Visibility:** `Public` - Stable Lua API intended for user config and plugins.
 
-Modal overlay builders. Compose a dialog from one or more `panels` of `smelt.dialog.content(...)` leaves, then call `smelt.dialog.open(...)` to push it; convenience entry points (`smelt.dialog.input`, `.options`, `.list`, `.picker`, `.markdown`) wrap the common shapes. UiHost-only.
+Root-docked modal dialog primitives. UiHost-only.
 
 ## `smelt.dialog.content`
 
@@ -93,7 +93,7 @@ fun(opts: smelt.dialog.Opts): any
 
 Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
 
-Coroutine-blocking dialog opener. Builds the overlay from `opts.panels`
+Coroutine-blocking dialog opener. Builds the root dialog from `opts.panels`
 (each `{ leaf, height }`), wires `opts.keymaps`, then yields the
 caller until a handler calls `ctx.resolve(value)`. Must run inside a
 `smelt.spawn` (or tool execute) frame; returns the resolved value or

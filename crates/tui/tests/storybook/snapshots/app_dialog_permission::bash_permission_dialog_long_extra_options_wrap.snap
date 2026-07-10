@@ -6,6 +6,7 @@ expression: frame.text()
   y-long-permission-target.log
 
 
+
 ──────────────────────────────────────────────────────────────────────
  bash: cat
 
@@ -13,14 +14,13 @@ expression: frame.text()
        ng-permission-target.log
 
  Allow?
-  1. allow once
-  2. deny
-  3. allow cat /var/log/smelt/projects/alpha/beta/gamma/delta/eps
-     ilon/very-long-permission-target.log, /var/log/smelt/project
-     s/alpha/beta/gamma/delta/epsilon for this session
   4. allow cat /var/log/smelt/projects/alpha/beta/gamma/delta/eps
      ilon/very-long-permission-target.log, /var/log/smelt/project
      s/alpha/beta/gamma/delta/epsilon in ~/cwd
 
+
+
+
+
   press tab to add a reason…
- ○ normal  permission pending                                  3:1 28%
+ ○ normal  permission pending                                  6:1 71%

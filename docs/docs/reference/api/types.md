@@ -158,10 +158,10 @@ Options accepted by `smelt.dialog.menu`.
 ### `smelt.dialog.Opts`
 
 Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
-Body sizing is body-relative: integer `height` values are forwarded
-through with the chrome row added automatically; `"N%"`, `"fill"`,
-and `"fit"` pass through verbatim. Pick one of `height` or
-`max_height`; setting both raises.
+Dialogs fit their content by default while preserving transcript context.
+Integer `height` values are body-relative and gain
+the top chrome row automatically. Pick one of `height` or `max_height`;
+setting both raises.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -171,8 +171,8 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | `bottom_gap` | `integer` |  | Minimum blank rows between `panels` and `bottom_panels` (default 0). |
 | `focus` | [smelt.win.Win](types.md#smeltwinwin) |  | Leaf that should receive initial focus. |
 | `height` | `any` |  | Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`. |
-| `max_height` | `any` |  | Shrink-to-content cap that pairs with `min_height`. |
-| `min_height` | `any` |  | Floor for the body size (defaults to `"30%"` in fit mode). |
+| `max_height` | `any` |  | Maximum root-layout height while fitting content. |
+| `min_height` | `any` |  | Minimum root-layout height while fitting content. |
 | `blocks_agent` | `boolean` |  | Block the agent loop while the dialog is open. Defaults to `false`. |
 | `border` | `table` |  | Top border style override; defaults to `{ top = "SmeltAccent" }`. |
 | `resizable` | `boolean` |  | Set `false` to disable the default top-edge resize handle. |

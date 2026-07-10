@@ -1,7 +1,7 @@
-//! Per-window keymap and event callback registry. Also hosts overlay-scoped
-//! keymaps: bindings that fire when any leaf of the overlay holds focus,
-//! letting an overlay own its key handling without each leaf re-registering.
-use super::{OverlayId, RowIndex, WinId};
+//! Per-window keymap and event callback registry. Also hosts group-scoped
+//! keymaps for overlays and modal dialogs, letting a container own key handling
+//! without registering the same callback on every leaf.
+use super::{ModalId, OverlayId, RowIndex, WinId};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
@@ -178,6 +178,13 @@ pub struct CallbackCtx<'a> {
     pub payload: Payload,
 }
 
+/// Identity for a keymap shared by all leaves in one UI scope.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum KeymapScope {
+    Overlay(OverlayId),
+    Modal(ModalId),
+}
+
 /// Per-window callback registry owned by `Ui`.
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -185,9 +192,8 @@ pub(crate) struct Callbacks {
     events: HashMap<WinId, HashMap<WinEvent, Vec<Callback>>>,
     /// Per-window fallback key handler tried after specific keymaps miss.
     key_fallback: HashMap<WinId, Callback>,
-    /// Per-overlay keymaps. Fire when any leaf of the overlay holds focus,
-    /// after a per-window keymap miss but before global Lua keymaps.
-    overlay_keymaps: HashMap<OverlayId, HashMap<KeyBind, Callback>>,
+    /// Keymaps shared by every leaf in an overlay or modal focus scope.
+    scoped_keymaps: HashMap<KeymapScope, HashMap<KeyBind, Callback>>,
 }
 
 impl Callbacks {
@@ -291,7 +297,7 @@ impl Callbacks {
         self.key_fallback
             .retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
 
-        self.overlay_keymaps.retain(|_, table| {
+        self.scoped_keymaps.retain(|_, table| {
             table.retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
             !table.is_empty()
         });
@@ -331,63 +337,55 @@ impl Callbacks {
         self.keymaps.entry(win).or_default().insert(key, cb);
     }
 
-    // ── Overlay-scoped keymaps ───────────────────────────────────────
+    // ── Scoped keymaps ───────────────────────────────────────────────
 
     #[must_use]
-    pub(crate) fn set_overlay_keymap(
+    pub(crate) fn set_scoped_keymap(
         &mut self,
-        overlay: OverlayId,
+        scope: KeymapScope,
         key: KeyBind,
         cb: Callback,
     ) -> Option<Callback> {
-        self.overlay_keymaps
-            .entry(overlay)
+        self.scoped_keymaps
+            .entry(scope)
             .or_default()
             .insert(key, cb)
     }
 
-    pub(crate) fn clear_overlay_keymap(
+    pub(crate) fn clear_scoped_keymap(
         &mut self,
-        overlay: OverlayId,
+        scope: KeymapScope,
         key: KeyBind,
     ) -> Option<Callback> {
-        self.overlay_keymaps
-            .get_mut(&overlay)
-            .and_then(|t| t.remove(&key))
+        self.scoped_keymaps
+            .get_mut(&scope)
+            .and_then(|table| table.remove(&key))
     }
 
-    pub(crate) fn take_overlay_keymap(
+    pub(crate) fn take_scoped_keymap(
         &mut self,
-        overlay: OverlayId,
+        scope: KeymapScope,
         key: KeyBind,
     ) -> Option<Callback> {
-        self.overlay_keymaps.get_mut(&overlay)?.remove(&key)
+        self.scoped_keymaps.get_mut(&scope)?.remove(&key)
     }
 
-    pub(crate) fn restore_overlay_keymap(
-        &mut self,
-        overlay: OverlayId,
-        key: KeyBind,
-        cb: Callback,
-    ) {
-        self.overlay_keymaps
-            .entry(overlay)
+    pub(crate) fn restore_scoped_keymap(&mut self, scope: KeymapScope, key: KeyBind, cb: Callback) {
+        self.scoped_keymaps
+            .entry(scope)
             .or_default()
             .insert(key, cb);
     }
 
-    /// Remove every overlay-scoped binding. Returns Lua handle ids for caller cleanup.
+    /// Remove every keymap in one scope. Returns Lua handle ids for caller cleanup.
     #[must_use]
-    pub(crate) fn clear_overlay_all(&mut self, overlay: OverlayId) -> Vec<u64> {
-        let mut lua_ids = Vec::new();
-        if let Some(table) = self.overlay_keymaps.remove(&overlay) {
-            for cb in table.into_values() {
-                if let Callback::Lua(LuaHandle(id)) = cb {
-                    lua_ids.push(id);
-                }
-            }
-        }
-        lua_ids
+    pub(crate) fn clear_scope(&mut self, scope: KeymapScope) -> Vec<u64> {
+        self.scoped_keymaps
+            .remove(&scope)
+            .into_iter()
+            .flat_map(HashMap::into_values)
+            .filter_map(|callback| callback.lua_id())
+            .collect()
     }
 
     /// Same take/restore pattern for event callbacks (takes the whole Vec).
@@ -433,26 +431,45 @@ mod tests {
     }
 
     #[test]
-    fn set_and_take_overlay_keymap() {
+    fn set_and_take_scoped_keymap() {
         let mut cbs = Callbacks::new();
         let key = KeyBind::plain(KeyCode::Tab);
-        let _ = cbs.set_overlay_keymap(oid(1), key, Callback::Lua(LuaHandle(7)));
-        let taken = cbs.take_overlay_keymap(oid(1), key);
+        let scope = KeymapScope::Overlay(oid(1));
+        let _ = cbs.set_scoped_keymap(scope, key, Callback::Lua(LuaHandle(7)));
+        let taken = cbs.take_scoped_keymap(scope, key);
         assert!(matches!(taken, Some(Callback::Lua(LuaHandle(7)))));
-        assert!(cbs.take_overlay_keymap(oid(1), key).is_none());
+        assert!(cbs.take_scoped_keymap(scope, key).is_none());
     }
 
     #[test]
-    fn clear_overlay_all_returns_lua_ids() {
+    fn typed_scopes_keep_matching_raw_ids_independent() {
         let mut cbs = Callbacks::new();
-        let _ = cbs.set_overlay_keymap(oid(2), KeyBind::char('q'), Callback::Lua(LuaHandle(11)));
-        let _ = cbs.set_overlay_keymap(oid(2), KeyBind::char('w'), Callback::Lua(LuaHandle(12)));
-        let mut ids = cbs.clear_overlay_all(oid(2));
+        let key = KeyBind::plain(KeyCode::Enter);
+        let overlay = KeymapScope::Overlay(OverlayId(3));
+        let modal = KeymapScope::Modal(ModalId(3));
+        let _ = cbs.set_scoped_keymap(overlay, key, Callback::Lua(LuaHandle(1)));
+        let _ = cbs.set_scoped_keymap(modal, key, Callback::Lua(LuaHandle(2)));
+
+        assert!(matches!(
+            cbs.take_scoped_keymap(overlay, key),
+            Some(Callback::Lua(LuaHandle(1)))
+        ));
+        assert!(matches!(
+            cbs.take_scoped_keymap(modal, key),
+            Some(Callback::Lua(LuaHandle(2)))
+        ));
+    }
+
+    #[test]
+    fn clear_scope_returns_lua_ids() {
+        let mut cbs = Callbacks::new();
+        let scope = KeymapScope::Overlay(oid(2));
+        let _ = cbs.set_scoped_keymap(scope, KeyBind::char('q'), Callback::Lua(LuaHandle(11)));
+        let _ = cbs.set_scoped_keymap(scope, KeyBind::char('w'), Callback::Lua(LuaHandle(12)));
+        let mut ids = cbs.clear_scope(scope);
         ids.sort();
         assert_eq!(ids, vec![11, 12]);
-        assert!(cbs
-            .take_overlay_keymap(oid(2), KeyBind::char('q'))
-            .is_none());
+        assert!(cbs.take_scoped_keymap(scope, KeyBind::char('q')).is_none());
     }
 
     #[test]

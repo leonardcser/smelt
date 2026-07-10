@@ -52,26 +52,12 @@ impl AppStoryCtx {
         self.app.set_terminal_size(w, h);
     }
 
-    /// Apply the same size override a top-edge resize would produce when the
-    /// active bottom-docked dialog is dragged as tall as it can go. Stories use
-    /// this to pin fully expanded dialog layouts without depending on exact
-    /// mouse-hit coordinates in each dialog's chrome.
+    /// Expand the active root-docked dialog while retaining a small transcript
+    /// viewport above it.
     pub fn expand_active_dialog_to_max_height(&mut self) {
-        let id = self
-            .app
-            .app
-            .ui
-            .active_modal()
-            .expect("active modal dialog exists");
-        let (width, height) = self.app.app.ui.terminal_size();
-        let height = height.saturating_sub(1).max(1);
-        self.app
-            .app
-            .ui
-            .overlay_mut(id)
-            .expect("active modal overlay exists")
-            .size_override = Some((width, height));
-        self.pump_lua();
+        self.run_lua(
+            "assert(smelt.dialog.current(), 'active docked dialog exists').toggle_expanded()",
+        )
     }
 
     /// Set the configured context window so prompt-bar token percentages

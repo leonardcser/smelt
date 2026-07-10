@@ -4,6 +4,7 @@ pub(crate) mod cmdline_edit;
 pub(crate) mod cmdline_history;
 pub(crate) mod content_keys;
 pub(crate) mod cwd;
+pub(crate) mod dialog;
 pub(crate) mod document;
 pub(crate) mod drafts;
 pub(crate) mod engine_events;
@@ -48,6 +49,7 @@ use std::time::{Duration, Instant};
 
 const TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME: usize = 64;
 const TERMINAL_EVENT_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
+pub(crate) const DOCKED_DIALOG_TRANSCRIPT_ROWS: u16 = 5;
 
 pub(crate) struct ContextWindowUpdate {
     pub(crate) request_id: u64,
@@ -160,6 +162,7 @@ pub struct TuiApp {
     pub(crate) pending_dialog: bool,
     pub(crate) pending_quit: bool,
     pub(crate) notification: Option<Notification>,
+    pub(crate) suspended_notification: Option<SuspendedNotification>,
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
     pub(crate) search: crate::app::search::SearchState,
     pub(crate) picker_state: HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
@@ -294,6 +297,19 @@ type AutoReloadSetup = Option<(
     tokio::sync::mpsc::UnboundedReceiver<()>,
 )>;
 type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<AutoReloadSetup>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct SuspendedNotification {
+    pub(crate) lifetime: SuspendedNotificationLifetime,
+    pub(crate) kind: smelt_core::messages::MessageKind,
+    pub(crate) summary: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SuspendedNotificationLifetime {
+    Timed(Duration),
+    Sticky,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Notification {
@@ -1407,6 +1423,7 @@ impl TuiApp {
             pending_dialog: false,
             pending_quit: false,
             notification: None,
+            suspended_notification: None,
             cmdline: crate::app::cmdline::CmdlineState::default(),
             search: crate::app::search::SearchState::default(),
             picker_state: HashMap::new(),
@@ -1838,7 +1855,7 @@ impl TuiApp {
 
         if !self.core.confirms.is_clear() {
             Some(PublicReason::Permission)
-        } else if self.focused_overlay_blocks_agent() {
+        } else if self.modal_blocks_agent() {
             Some(PublicReason::Question)
         } else if self.pending_dialog {
             Some(PublicReason::Permission)
@@ -2318,6 +2335,22 @@ impl TuiApp {
         }
 
         let summary = body.lines().next().unwrap_or("");
+        if self.has_docked_dialog() {
+            let now = self.core.clock.instant_now();
+            let lifetime = match lifetime {
+                NotificationLifetime::Timed { expires_at } => {
+                    SuspendedNotificationLifetime::Timed(expires_at.saturating_duration_since(now))
+                }
+                NotificationLifetime::Sticky => SuspendedNotificationLifetime::Sticky,
+            };
+            self.suspended_notification = Some(SuspendedNotification {
+                lifetime,
+                kind,
+                summary: summary.to_string(),
+            });
+            return;
+        }
+
         let width = self.ui.terminal_size().0 as usize;
         let buf = self
             .ui
@@ -2435,6 +2468,7 @@ impl TuiApp {
     }
 
     pub(crate) fn dismiss_notification(&mut self) {
+        self.suspended_notification = None;
         if let Some(notification) = self.notification.take() {
             self.close_overlay_leaf(notification.win);
         }
@@ -2710,7 +2744,7 @@ impl TuiApp {
                 self.pending_dialog = false;
             }
             if !self.pending_dialogs.is_empty()
-                && !self.focused_overlay_blocks_agent()
+                && !self.modal_blocks_agent()
                 && self.agent.is_some()
             {
                 let idle = self
@@ -2720,7 +2754,7 @@ impl TuiApp {
                     .unwrap_or(true);
                 while idle
                     && !self.pending_dialogs.is_empty()
-                    && !self.focused_overlay_blocks_agent()
+                    && !self.modal_blocks_agent()
                     && self.agent.is_some()
                 {
                     let deferred = self.pending_dialogs.pop_front().unwrap();

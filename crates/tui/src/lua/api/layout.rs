@@ -93,11 +93,13 @@ screen.",
         m.fn_(
             "set",
             "Register the main layout composer. The callback receives a state \
-table (`term_w`, `term_h`, `prompt_input_rows`) and returns a layout \
-userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. Passing `nil` \
-clears the composer and reverts to the engine's hardcoded layout. Only \
-the most recent registration is active; later calls replace earlier \
-ones.",
+table (`term_w`, `term_h`, `prompt_input_rows`, plus `dialog`, \
+`dialog_height`, `dialog_expanded`, and `dialog_transcript_rows` while a root dialog is active) and \
+returns a layout userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. While \
+a root dialog is active, the returned tree must include `state.dialog`; otherwise \
+the host rejects it and uses the safe transcript-dialog-statusline fallback. Passing \
+`nil` clears the composer and reverts to the engine's hardcoded layout. Only the \
+most recent registration is active; later calls replace earlier ones.",
             &["composer"],
             move |lua, composer: Option<mlua::Function>| -> LuaResult<()> {
                 let handle = match composer {

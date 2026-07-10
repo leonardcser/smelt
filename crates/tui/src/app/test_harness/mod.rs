@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use crate::app::{AppFocus, TuiApp};
-use crate::smelt_edit::{OverlayId, VimMode, WinId};
+use crate::smelt_edit::{ModalId, OverlayId, VimMode, WinId};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use engine::clock::VirtualClock;
 use engine::EngineHandle;
@@ -48,7 +48,7 @@ pub struct AppSnapshot {
     pub cmdline_open: bool,
     pub cmdline_text: String,
     pub focused_overlay: Option<OverlayId>,
-    pub active_modal: Option<OverlayId>,
+    pub active_modal: Option<ModalId>,
     pub picker_count: usize,
     pub prompt_text: String,
     pub queued_inputs: Vec<String>,

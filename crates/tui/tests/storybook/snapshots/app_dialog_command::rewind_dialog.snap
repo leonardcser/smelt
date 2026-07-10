@@ -2,7 +2,6 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-
  write the parser
 
 
@@ -12,6 +11,7 @@ expression: frame.text()
 
 
  wire up the CLI flag
+
 ─ rewind ───────────────────────────────────────────────────
   1. write the parser
   2. add the renderer

@@ -1,23 +1,25 @@
--- `smelt.dialog`: opinionated framing on top of `smelt.overlay`.
+-- `smelt.dialog`: root-docked modal interactions.
 --
--- A dialog is always docked at the bottom of the screen with a top border and is modal.
--- For anything else (centered info viewers, transient overlays), use `smelt.overlay`
--- directly.
+-- A dialog replaces the composer block at the bottom of the root layout, keeping
+-- the transcript visible above it. For centered viewers and other floating
+-- content, use `smelt.overlay` directly.
 --
 -- The dialog primitive does not know what's inside it. Consumers build their own
 -- buffers and leaves (using the helpers below or `smelt.win.new` directly) and pass
 -- the leaves in `opts.panels`. Dialog handles only:
---   1. Opening the overlay at dock_bottom with a top border.
---   2. Setting initial focus.
---   3. Installing dialog-level keymaps at overlay scope.
+--   1. Mounting the panel tree in the root composer with a top border.
+--   2. Setting and containing focus.
+--   3. Installing dialog-level keymaps across the modal scope.
 --   4. Bridging Submit/Dismiss/Tick events to user callbacks.
 --   5. Coroutine lifecycle: `open(opts)` blocks until `ctx.resolve(v)` is called.
 --
 -- Keymap scoping (important):
---   - `opts.keymaps` are DIALOG-WIDE - installed at overlay scope (tier 1b of
---     the key cascade) so they fire regardless of which panel is focused.
+--   - `opts.keymaps` are DIALOG-WIDE - installed on the modal scope so they
+--     fire regardless of which panel is focused.
 --     Use these for shortcuts that should always work in the dialog (e.g.
 --     Alt-W, Ctrl-D).
+--   - Ctrl-O toggles the dialog between its context-preserving height and an
+--     expanded review layout.
 --   - To scope a key to a specific panel, install it directly on that leaf via
 --     `leaf:key(key, fn)` after `open_handle` returns. Example:
 --     the confirm dialog binds `tab` only on the options leaf (jump into the
@@ -44,7 +46,7 @@ local M = {}
 
 smelt.dialog = smelt.dialog or {}
 
-local REGION = "dialog_overlay"
+local REGION = "dialog"
 
 local function report_callback_error(event, err)
   local msg = tostring(err)
@@ -113,10 +115,10 @@ local GUTTER = 1
 ---@field on_press fun(ctx: any): any Handler invoked when the key fires.
 
 --- Options accepted by `smelt.dialog.open` / `smelt.dialog.open_handle`.
---- Body sizing is body-relative: integer `height` values are forwarded
---- through with the chrome row added automatically; `"N%"`, `"fill"`,
---- and `"fit"` pass through verbatim. Pick one of `height` or
---- `max_height`; setting both raises.
+--- Dialogs fit their content by default while preserving transcript context.
+--- Integer `height` values are body-relative and gain
+--- the top chrome row automatically. Pick one of `height` or `max_height`;
+--- setting both raises.
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
@@ -124,8 +126,8 @@ local GUTTER = 1
 ---@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 0).
 ---@field focus? smelt.win.Win Leaf that should receive initial focus.
 ---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
----@field max_height? any Shrink-to-content cap that pairs with `min_height`.
----@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
+---@field max_height? any Maximum root-layout height while fitting content.
+---@field min_height? any Minimum root-layout height while fitting content.
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
 ---@field border? table Top border style override; defaults to `{ top = "SmeltAccent" }`.
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
@@ -398,6 +400,14 @@ function smelt.dialog.menu(items, opts)
     initial_cursor = row_of(selected),
   })
 
+  local function place_cursor(index)
+    local row = row_of(index)
+    local item = menu_meta[index]
+    local continuation_rows = item and (item.last_row - item.label_row) or 0
+    leaf:cursor(row)
+    leaf:reveal(row, { cursor = false, bottom_padding = continuation_rows })
+  end
+
   local function sync_highlight()
     buf:clear_ns(NS_MENU_SELECTED)
     local m = menu_meta[selected]
@@ -426,7 +436,7 @@ function smelt.dialog.menu(items, opts)
   if wrap then
     leaf:on("resized", function(ctx)
       render_current((ctx and ctx.content_width) or leaf:content_width())
-      leaf:cursor(row_of(selected))
+      place_cursor(selected)
       sync_highlight()
     end)
   end
@@ -439,7 +449,7 @@ function smelt.dialog.menu(items, opts)
     item_count = #normalized
     render_current(wrap and leaf:content_width() or nil)
     selected = selectable_index(index_of_row(leaf:cursor() or 0), 1)
-    leaf:cursor(row_of(selected))
+    place_cursor(selected)
     sync_highlight()
   end
 
@@ -449,7 +459,7 @@ function smelt.dialog.menu(items, opts)
       return selectable_index(index_of_row(leaf:cursor() or 0), 1)
     end
     selected = selectable_index(i, 1)
-    leaf:cursor(row_of(selected))
+    place_cursor(selected)
     sync_highlight()
     return self
   end
@@ -473,7 +483,7 @@ function smelt.dialog.menu(items, opts)
   local function submit_at(i)
     if i < 1 or i > item_count or not enabled(i) then return end
     selected = i
-    leaf:cursor(row_of(i))
+    place_cursor(i)
     sync_highlight()
     local dlg = smelt.dialog.current() or {}
     local ctx = {
@@ -499,7 +509,7 @@ function smelt.dialog.menu(items, opts)
       if target < 1 then target = 1 end
       if target > item_count then target = item_count end
       selected = selectable_index(target, units < 0 and -1 or 1)
-      leaf:cursor(row_of(selected))
+      place_cursor(selected)
       sync_highlight()
     end
   end
@@ -667,36 +677,7 @@ function smelt.dialog.viewer(opts)
   return handle, buf, leaf
 end
 
--- ── Dialog overlay wrapper ────────────────────────────────────────────
-
--- Build the overlay items table from panels and open the overlay. Returns
--- the root leaf and the array of leaves.
---
--- Dialog height (pick one; setting both is an error):
---   * `opts.height`     - fixed size: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
---   * `opts.max_height` - shrink to content, capped at this size.
---   * `opts.min_height` - floor that pairs with either mode. Fit-mode dialogs
---                         default to `min_height = "30%"` so a placeholder
---                         body stays visible when content collapses; pass
---                         `min_height = 0` to opt out.
---
--- All three knobs are **body-relative** when given as integer cells: the
--- wrapper adds the dialog's chrome (top border + title row, 1 cell) before
--- forwarding to the overlay (which uses total-rect semantics). `"N%"` /
--- `"fill"` / `"fit"` are forwarded verbatim - percentages of the terminal
--- don't compose with absolute chrome offsets, and the extra row is negligible
--- at typical percentages anyway.
-
--- The dialog draws a single chrome row at the top (border + title share it).
-local CHROME_H = 1
-
--- Convert a body-relative size spec to a total-overlay spec. Integer cells
--- get the chrome offset added; non-numeric specs (`"N%"`, `"fill"`, `"fit"`)
--- pass through unchanged.
-local function with_chrome(spec)
-  if type(spec) == "number" then return spec + CHROME_H end
-  return spec
-end
+-- ── Dialog root-layout wrapper ───────────────────────────────────────
 
 local function copy_title_span(span)
   if type(span) == "string" then
@@ -740,18 +721,12 @@ function smelt.dialog.title(title, opts)
   return spans
 end
 
-local function open_overlay(opts)
+local function build_dialog(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
     error("smelt.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
   end
-  local fit_mode = opts.max_height ~= nil
+  local fit_mode = opts.max_height ~= nil or opts.height == nil
   local default_panel_height = fit_mode and "fit" or nil
-  -- Fit-mode dialogs read their natural size - for trivial content (one
-  -- placeholder line) that collapses to just the chrome row. Default to a
-  -- 30% terminal-height floor so the placeholder + a comfortable margin stay
-  -- visible. Callers can override via `opts.min_height` (including `0` to opt
-  -- out entirely).
-  local default_min_height = fit_mode and "30%" or nil
 
   local top_panels = opts.panels or {}
   local bottom_panels = opts.bottom_panels or {}
@@ -779,65 +754,34 @@ local function open_overlay(opts)
 
   local top_items = build_layout_items(top_panels, 1)
   local bottom_items = build_layout_items(bottom_panels, #top_panels + 1)
+  local chrome = {
+    border = opts.border or { top = "SmeltAccent" },
+    title = smelt.dialog.title(opts.title, { pad = true }),
+  }
 
-  -- The wrapper is responsible for the single-cell gutter on each side of the
-  -- title content. Callers MUST NOT pad - pass `"messages"` not `" messages "`,
-  -- and for multi-span titles drop the leading space on the first span and the
-  -- trailing space on the last span.
-  local title = smelt.dialog.title(opts.title, { pad = true })
-
-  local panel_vbox
+  local layout
   if #top_items > 0 and #bottom_items > 0 then
-    panel_vbox = smelt.ui.layout.vbox({
+    chrome.gap = opts.bottom_gap or 0
+    chrome.justify = "space-between"
+    layout = smelt.ui.layout.vbox({
       { smelt.ui.layout.vbox(top_items),    height = "fit" },
       { smelt.ui.layout.vbox(bottom_items), height = "fit" },
-    }, { gap = opts.bottom_gap or 0, justify = "space-between" })
+    }, chrome)
   else
-    panel_vbox = smelt.ui.layout.vbox(#top_items > 0 and top_items or bottom_items)
+    layout = smelt.ui.layout.vbox(#top_items > 0 and top_items or bottom_items, chrome)
   end
 
-  -- fixed: width = "100%", height = opts.height (or "60%" default)
-  -- fit:   width = "100%", height = "fit", max_height = opts.max_height
-  local height_spec, max_height_spec
-  if opts.max_height ~= nil then
-    height_spec, max_height_spec = "fit", opts.max_height
-  else
-    height_spec, max_height_spec = (opts.height or "60%"), nil
-  end
-
-  -- Reserve rows for the Lua-allocated statusline so the dialog docks
-  -- above it instead of overlapping. The host has no statusline concept
-  -- of its own; `statusline.rows` is the composer's self-reported row
-  -- count (the window's `:rect()` isn't usable on cold start because
-  -- the layout hasn't placed it yet).
-  local statusline = require("smelt.statusline")
-  local overlay = smelt.overlay.new({
-    title        = title,
-    anchor       = "dock_bottom",
-    above_rows   = statusline.rows or 0,
-    border       = opts.border or { top = "SmeltAccent" },
-    modal        = true,
-    blocks_agent = opts.blocks_agent or false,
-    draggable    = false,
-    resizable    = opts.resizable == false and false or { top = true },
-    layout       = panel_vbox,
-    width        = "100%",
-    height       = with_chrome(height_spec),
-    max_height   = with_chrome(max_height_spec),
-    min_height   = with_chrome(opts.min_height or default_min_height),
-  })
-
-  return leaves[1], leaves, overlay
+  -- Root-docked dialogs fit their content by default. An explicit numeric
+  -- height remains body-relative, so include the top chrome row.
+  local height = opts.height or "fit"
+  if type(height) == "number" then height = height + 1 end
+  return leaves[1], leaves, layout, height
 end
 
 -- Wire dialog-level keymaps, focus, events, and the resolve handle. Shared between
 -- `open` (coroutine) and `open_handle` (sync).
-local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
+local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
   local root = leaves[1]
-
-  -- Explicit focus override; otherwise the overlay's own modal-focus logic picks
-  -- the first focusable leaf at open() time.
-  if opts.focus then opts.focus:focus() end
 
   -- Shared dialog ctx. `focused_leaf` is mutated live by the focus event
   -- handlers below so callbacks always read the current value. Exposed via
@@ -867,13 +811,26 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
         break
       end
     end
-    root:close()
+    ctx.host:close()
     resolve_fn(value)
   end
   ctx.resolve = resolve
   ctx.close   = function() resolve(nil) end
 
+  ctx.host = smelt.dialog.__open({
+    layout = layout,
+    height = height,
+    min_height = opts.min_height,
+    max_height = opts.max_height,
+    blocks_agent = opts.blocks_agent or false,
+    resizable = opts.resizable ~= false,
+  })
+  ctx.toggle_expanded = function() ctx.host:toggle_expanded() end
   table.insert(dialog_stack, ctx)
+
+  -- Explicit focus override; otherwise the modal host focuses the first
+  -- focusable leaf after mounting the dialog in the root layout.
+  if opts.focus then opts.focus:focus() end
 
   for _, leaf in ipairs(leaves) do
     leaf:on("focus", function()
@@ -889,8 +846,9 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
       win          = ctx.win,
       panels       = ctx.panels,
       focused_leaf = ctx.focused_leaf,
-      resolve      = ctx.resolve,
-      close        = ctx.close,
+      resolve         = ctx.resolve,
+      close           = ctx.close,
+      toggle_expanded = ctx.toggle_expanded,
     }
     if type(raw_ctx) == "table" then
       for k, v in pairs(raw_ctx) do out[k] = v end
@@ -898,16 +856,15 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
     return out
   end
 
-  -- Dialog-level keymaps install at the overlay scope so they fire regardless
-  -- of which leaf holds focus, without per-leaf re-registration. Tier 1b of
-  -- the key cascade routes the chord to whichever overlay contains the focused
-  -- leaf, which is always this overlay while the dialog is open + modal.
+  -- Dialog-level keymaps belong to the modal scope, independent of whether
+  -- the dialog is mounted in the root layout or a future floating container.
+  ctx.host:key("ctrl-o", function() ctx.toggle_expanded() end)
   local keymaps = dialog_keymaps(opts)
   if #keymaps > 0 then
     for _, km in ipairs(keymaps) do
       if type(km) == "table" and km.key and type(km.on_press) == "function" then
         local on_press = km.on_press
-        overlay:key(km.key, function(raw_ctx)
+        ctx.host:key(km.key, function(raw_ctx)
           local ok, err = pcall(on_press, make_ctx(raw_ctx))
           if not ok then report_callback_error("keymap", err) end
         end)
@@ -964,7 +921,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   return resolve, root
 end
 
--- Coroutine-blocking dialog opener. Builds the overlay from `opts.panels`
+-- Coroutine-blocking dialog opener. Builds the root dialog from `opts.panels`
 -- (each `{ leaf, height }`), wires `opts.keymaps`, then yields the
 -- caller until a handler calls `ctx.resolve(value)`. Must run inside a
 -- `smelt.spawn` (or tool execute) frame; returns the resolved value or
@@ -978,9 +935,9 @@ function smelt.dialog.open(opts)
     error("smelt.dialog.open: expected table of options", 2)
   end
 
-  local _, leaves, overlay = open_overlay(opts)
+  local _, leaves, layout, height = build_dialog(opts)
   local task_id = smelt.task.alloc()
-  setup_lifecycle(opts, leaves, overlay, function(value)
+  setup_lifecycle(opts, leaves, layout, height, function(value)
     smelt.task.resume(task_id, value)
   end)
   return smelt.task.wait(task_id, { interactive = true })
@@ -1146,8 +1103,8 @@ function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.dialog.open_handle: expected table of options", 2)
   end
-  local _, leaves, overlay = open_overlay(opts)
-  local resolve, root = setup_lifecycle(opts, leaves, overlay, function(_) end)
+  local _, leaves, layout, height = build_dialog(opts)
+  local resolve, root = setup_lifecycle(opts, leaves, layout, height, function(_) end)
   return {
     win    = root,
     panels = leaves,

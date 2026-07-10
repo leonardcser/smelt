@@ -3,11 +3,15 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.styles_text()
 ---
 dim: 80 22
-  0   0   1 fg=AnsiValue(208)
-  0   1   5 attrs=dim
-  0   7   2 fg=Rgb { r: 255, g: 255, b: 255 }
-  0   9   4 fg=Rgb { r: 253, g: 151, b: 31 }
-  0  13   9 fg=Rgb { r: 255, g: 255, b: 255 }
+  0   0  77 attrs=dim|italic
+  1   0   2 attrs=dim|italic
+  2   0  73 attrs=dim|italic
+  3   0   8 attrs=dim|italic
+  5   0   1 fg=AnsiValue(208)
+  5   1   5 attrs=dim
+  5   7   2 fg=Rgb { r: 255, g: 255, b: 255 }
+  5   9   4 fg=Rgb { r: 253, g: 151, b: 31 }
+  5  13   9 fg=Rgb { r: 255, g: 255, b: 255 }
  10   0  80 fg=AnsiValue(208)
  11   1   4 fg=AnsiValue(208)
  12   1  22 attrs=dim

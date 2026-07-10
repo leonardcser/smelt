@@ -936,6 +936,7 @@ impl Window {
                     cpos = text::word_forward_pos(&text, cpos, text::CharClass::Word);
                 }
                 self.set_cpos(cpos);
+                self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
             DocumentCommand::WordBackward(count) => {
@@ -945,6 +946,7 @@ impl Window {
                     cpos = text::word_backward_pos(&text, cpos, text::CharClass::Word);
                 }
                 self.set_cpos(cpos);
+                self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
             DocumentCommand::WordEnd(count) => {
@@ -954,6 +956,7 @@ impl Window {
                     cpos = text::word_end_pos(&text, cpos, text::CharClass::Word);
                 }
                 self.set_cpos(cpos);
+                self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
             DocumentCommand::StartVisual => {
@@ -1033,6 +1036,7 @@ impl Window {
                     }
                 }
                 self.set_cpos(cpos);
+                self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
             DocumentCommand::OpenAction => {}

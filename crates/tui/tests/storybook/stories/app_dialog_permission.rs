@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use protocol::EngineEvent;
 use serde_json::json;
 
 use crate::app_story;
@@ -27,6 +28,16 @@ fn open_bash_permission_dialog(ctx: &mut AppStoryCtx) {
 
 app_story!(bash_permission_dialog, |ctx| {
     ctx.set_viewport(80, 22);
+    open_bash_permission_dialog(ctx);
+    ctx.assert_snapshot();
+});
+
+app_story!(bash_permission_preserves_reasoning_context, |ctx| {
+    ctx.set_viewport(80, 22);
+    ctx.engine(EngineEvent::Thinking {
+        content: "I need to inspect the generated fixtures before choosing an implementation.\n\nThe temporary directory should reveal whether reusable outputs already exist.".into(),
+    });
+    ctx.run_lua("smelt.transcript.fold_all('open')");
     open_bash_permission_dialog(ctx);
     ctx.assert_snapshot();
 });
@@ -113,6 +124,7 @@ app_story!(bash_permission_dialog_long_extra_options_wrap, |ctx| {
             "cat /var/log/smelt/projects/alpha/beta/gamma/delta/epsilon/*".into(),
         ],
     );
+    ctx.press_char('j');
     ctx.press_char('j');
     ctx.press_char('j');
     ctx.assert_snapshot();

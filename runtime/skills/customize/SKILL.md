@@ -1278,7 +1278,7 @@ Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resol
 
 #### `smelt.dialog`
 
-Modal overlay builders.
+Root-docked modal dialog primitives.
 
 - `smelt.dialog.content` :: `fun(opts: table?): smelt.win.Win, smelt.buf.Buf`
   General-purpose body leaf.
