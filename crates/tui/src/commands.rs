@@ -574,30 +574,30 @@ impl TuiApp {
             return;
         };
         let Some(active) = self.core.config.active_model().cloned() else {
-            self.core.config.context_window = None;
+            if self.context_window.prepare(None).is_some() {
+                self.core.config.context_window = None;
+            }
             return;
         };
-        self.context_window_request_id = self.context_window_request_id.wrapping_add(1);
-        let request_id = self.context_window_request_id;
-        let api_base = active.api_base;
         let Some(api_key) = self.resolve_api_key_for_env(&active.api_key_env) else {
             return;
         };
-        let provider_type = active.provider_type;
-        let model = active.model_name;
-        let model_config = active.config;
-        let update_api_base = api_base.clone();
+        let target = crate::app::ContextWindowTarget::from_active(&active);
+        let Some(revision) = self.context_window.prepare(Some(target.clone())) else {
+            return;
+        };
+        let api_base = target.api_base.clone();
+        let provider_type = target.provider_type.clone();
+        let model = target.model.clone();
         let clock = std::sync::Arc::clone(&self.core.clock);
         tokio::spawn(async move {
             let provider =
                 engine::EngineProvider::new(api_base, api_key, &provider_type, client, clock)
-                    .with_model_config(model_config);
+                    .with_model_config(target.config.clone());
             let value = provider.fetch_context_window(&model).await;
             let _ = tx.send(ContextWindowUpdate {
-                request_id,
-                model,
-                api_base: update_api_base,
-                provider_type,
+                revision,
+                target,
                 value,
             });
         });
@@ -644,44 +644,20 @@ impl TuiApp {
         }
     }
 
+    fn committed_watch_paths(&self) -> crate::auto_reload::WatchPaths {
+        crate::auto_reload::WatchPaths::from_manifest(
+            self.lua.manifest.roots.clone(),
+            self.lua.manifest.target_cwd.as_deref(),
+        )
+    }
+
     fn set_auto_reload_enabled(&mut self, enabled: bool) {
-        if enabled {
-            if self.auto_reload.is_none() && self.auto_reload_setup_rx.is_none() {
-                self.auto_reload_start_pending = true;
-            }
-            return;
-        }
-        self.auto_reload_start_pending = false;
-        self.auto_reload_setup_rx = None;
-        self.auto_reload_rx = None;
-        self.auto_reload = None;
+        let paths = self.committed_watch_paths();
+        self.auto_reload.set_desired(enabled, paths);
     }
 
-    pub(crate) fn restart_auto_reload_for_cwd(&mut self) {
-        if !self.core.config.settings.auto_reload {
-            return;
-        }
-        self.auto_reload_setup_rx = None;
-        self.auto_reload_rx = None;
-        self.auto_reload = None;
-        self.auto_reload_start_pending = true;
-    }
-
-    pub(crate) fn start_auto_reload_setup(&mut self) {
-        self.auto_reload_start_pending = false;
-        if !self.core.config.settings.auto_reload
-            || self.auto_reload.is_some()
-            || self.auto_reload_setup_rx.is_some()
-        {
-            return;
-        }
-        let cwd = self.cwd.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::task::spawn_blocking(move || {
-            let paths = crate::auto_reload::WatchPaths::discover(std::path::Path::new(&cwd));
-            let _ = tx.send(crate::auto_reload::spawn(paths));
-        });
-        self.auto_reload_setup_rx = Some(rx);
+    pub(crate) fn reconcile_auto_reload(&mut self) {
+        self.set_auto_reload_enabled(self.core.config.settings.auto_reload);
     }
 
     #[cfg(any(test, feature = "harness"))]

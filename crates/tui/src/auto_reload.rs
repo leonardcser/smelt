@@ -33,6 +33,93 @@ impl Drop for AutoReloadHandle {
     }
 }
 
+pub(crate) type AutoReloadSetup = Option<(AutoReloadHandle, UnboundedReceiver<()>)>;
+pub(crate) type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<(u64, AutoReloadSetup)>;
+
+pub(crate) struct AutoReloadController {
+    pub(crate) handle: Option<AutoReloadHandle>,
+    pub(crate) events: Option<UnboundedReceiver<()>>,
+    pub(crate) setup: Option<AutoReloadSetupRx>,
+    pub(crate) start_pending: bool,
+    desired: Option<WatchPaths>,
+    desired_revision: u64,
+    observed_revision: u64,
+    last_error: Option<String>,
+}
+
+impl AutoReloadController {
+    pub(crate) fn new(enabled: bool, paths: WatchPaths) -> Self {
+        Self {
+            handle: None,
+            events: None,
+            setup: None,
+            start_pending: enabled,
+            desired: enabled.then_some(paths),
+            desired_revision: u64::from(enabled),
+            observed_revision: 0,
+            last_error: None,
+        }
+    }
+
+    pub(crate) fn set_desired(&mut self, enabled: bool, paths: WatchPaths) -> bool {
+        let desired = enabled.then_some(paths);
+        if self.desired == desired {
+            return false;
+        }
+        self.desired_revision = self.desired_revision.wrapping_add(1);
+        self.desired = desired;
+        self.setup = None;
+        self.events = None;
+        self.handle = None;
+        self.start_pending = enabled;
+        self.last_error = None;
+        if !enabled {
+            self.observed_revision = self.desired_revision;
+        }
+        true
+    }
+
+    pub(crate) fn start_setup(&mut self) {
+        self.start_pending = false;
+        if self.handle.is_some() || self.setup.is_some() {
+            return;
+        }
+        let Some(paths) = self.desired.clone() else {
+            return;
+        };
+        let revision = self.desired_revision;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send((revision, spawn(paths)));
+        });
+        self.setup = Some(rx);
+    }
+
+    pub(crate) fn apply_setup(&mut self, revision: u64, setup: AutoReloadSetup) -> bool {
+        self.setup = None;
+        if revision != self.desired_revision || self.desired.is_none() {
+            return false;
+        }
+        self.observed_revision = revision;
+        if let Some((handle, events)) = setup {
+            self.handle = Some(handle);
+            self.events = Some(events);
+            self.last_error = None;
+        } else {
+            self.last_error = Some("no committed Lua config root could be watched".into());
+        }
+        true
+    }
+
+    pub(crate) fn status(&self) -> (u64, u64, Option<String>) {
+        (
+            self.desired_revision,
+            self.observed_revision,
+            self.last_error.clone(),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum AutoReloadMsg {
     Event,
@@ -43,12 +130,12 @@ enum AutoReloadMsg {
 /// development only; prompt inputs (`AGENTS.md`, `SKILL.md`, command-backed
 /// skill metadata in `commands/*.md`, and `--system-prompt`) are refreshed by
 /// manual `/reload` so instruction changes remain explicit.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchPaths {
-    /// `~/.config/smelt/` - recursive.
-    pub global_config: Option<PathBuf>,
-    /// `.smelt/` under cwd - recursive when present. When missing, the
-    /// parent is watched non-recursively just long enough to notice `.smelt/`
-    /// creation, then the watcher upgrades to recursive `.smelt/` watching.
+    /// Every root that contributed to the committed Lua generation.
+    pub roots: Vec<PathBuf>,
+    /// `.smelt/` under cwd. When missing, the parent is watched
+    /// non-recursively until the directory appears.
     pub project_config: Option<PathBuf>,
 }
 
@@ -58,21 +145,28 @@ impl WatchPaths {
     /// logged and skipped per-path so a missing optional root never
     /// disables the entire watcher.
     pub fn discover(cwd: &Path) -> Self {
+        let project_config = cwd.join(".smelt");
+        Self::from_manifest(
+            vec![smelt_core::config::config_dir(), project_config.clone()],
+            Some(cwd),
+        )
+    }
+
+    pub fn from_manifest(mut roots: Vec<PathBuf>, target_cwd: Option<&Path>) -> Self {
+        let project_config = target_cwd.map(|cwd| cwd.join(".smelt"));
+        if let Some(project_config) = project_config.as_ref() {
+            roots.push(project_config.clone());
+        }
+        roots.sort();
+        roots.dedup();
         Self {
-            global_config: Some(smelt_core::config::config_dir()),
-            project_config: Some(cwd.join(".smelt")),
+            roots,
+            project_config,
         }
     }
 
     fn relevant_roots(&self) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        if let Some(p) = self.global_config.as_ref() {
-            roots.push(p.clone());
-        }
-        if let Some(p) = self.project_config.as_ref() {
-            roots.push(p.clone());
-        }
-        roots
+        self.roots.clone()
     }
 }
 
@@ -272,8 +366,11 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
     };
 
     let mut subscribed_any = false;
-    if let Some(p) = paths.global_config.as_ref() {
-        if try_watch(&mut watcher, p, RecursiveMode::Recursive) {
+    for path in &paths.roots {
+        if paths.project_config.as_ref() == Some(path) {
+            continue;
+        }
+        if try_watch(&mut watcher, path, RecursiveMode::Recursive) {
             subscribed_any = true;
         }
     }
@@ -591,7 +688,7 @@ mod tests {
         std::fs::write(&init, "before = true\n").unwrap();
 
         let (_handle, mut rx) = spawn(WatchPaths {
-            global_config: Some(dir.path().to_path_buf()),
+            roots: vec![dir.path().to_path_buf()],
             project_config: None,
         })
         .expect("watcher starts");
@@ -634,6 +731,60 @@ mod tests {
 
         raw_tx.send(AutoReloadMsg::Shutdown).unwrap();
         task.join().unwrap();
+    }
+
+    #[test]
+    fn stale_setup_cannot_replace_newer_watcher_desired_paths() {
+        let old_dir = tempfile::tempdir().unwrap();
+        let new_dir = tempfile::tempdir().unwrap();
+        let old_paths = WatchPaths {
+            roots: vec![old_dir.path().to_path_buf()],
+            project_config: None,
+        };
+        let new_paths = WatchPaths {
+            roots: vec![new_dir.path().to_path_buf()],
+            project_config: None,
+        };
+        let mut controller = AutoReloadController::new(true, old_paths.clone());
+        let old_revision = controller.desired_revision;
+        let old_setup = spawn(old_paths);
+
+        assert!(controller.set_desired(true, new_paths));
+        assert!(!controller.apply_setup(old_revision, old_setup));
+        assert!(controller.handle.is_none());
+        assert_eq!(controller.observed_revision, 0);
+    }
+
+    #[test]
+    fn equal_watcher_desired_paths_do_not_restart_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = WatchPaths {
+            roots: vec![dir.path().to_path_buf()],
+            project_config: None,
+        };
+        let mut controller = AutoReloadController::new(true, paths.clone());
+        let revision = controller.desired_revision;
+
+        assert!(!controller.set_desired(true, paths));
+        assert_eq!(controller.desired_revision, revision);
+    }
+
+    #[test]
+    fn successful_watcher_revision_clears_the_previous_setup_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = WatchPaths {
+            roots: vec![dir.path().to_path_buf()],
+            project_config: None,
+        };
+        let mut controller = AutoReloadController::new(true, paths.clone());
+        assert!(controller.apply_setup(controller.desired_revision, None));
+        assert!(controller.last_error.is_some());
+
+        controller.set_desired(false, paths.clone());
+        controller.set_desired(true, paths.clone());
+        let revision = controller.desired_revision;
+        assert!(controller.apply_setup(revision, spawn(paths)));
+        assert!(controller.last_error.is_none());
     }
 
     #[tokio::test]

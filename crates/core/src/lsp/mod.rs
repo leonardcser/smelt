@@ -35,7 +35,7 @@ pub struct LspServerConfig {
     pub settings: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LspConfig {
     #[serde(default)]
     pub servers: HashMap<String, LspServerConfig>,
@@ -72,6 +72,32 @@ enum LspClientState {
 #[derive(Default)]
 pub struct LspManager {
     servers: StdMutex<HashMap<String, ServerEntry>>,
+    controller: StdMutex<LspControllerState>,
+}
+
+#[derive(Default)]
+struct LspControllerState {
+    desired: LspConfig,
+    desired_revision: u64,
+    observed_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LspControllerStatus {
+    pub desired_revision: u64,
+    pub observed_revision: u64,
+}
+
+pub struct LspConfigure {
+    manager: Arc<LspManager>,
+    revision: u64,
+    desired: LspConfig,
+}
+
+struct LspConfigureCompletion {
+    manager: Arc<LspManager>,
+    revision: u64,
+    removed_clients: Vec<Arc<LspClientSlot>>,
 }
 
 type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -417,20 +443,93 @@ impl LspManager {
         removed_clients
     }
 
-    pub async fn configure(&self, config: LspConfig) {
-        for slot in self.reconcile_config(config) {
-            slot.shutdown().await;
+    fn reserve_configure(&self, desired: &LspConfig) -> Option<u64> {
+        let mut controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if &controller.desired == desired {
+            return None;
+        }
+        controller.desired_revision = controller.desired_revision.wrapping_add(1);
+        controller.desired = desired.clone();
+        Some(controller.desired_revision)
+    }
+
+    pub fn prepare_configure(self: &Arc<Self>, desired: LspConfig) -> Option<LspConfigure> {
+        self.reserve_configure(&desired)
+            .map(|revision| LspConfigure {
+                manager: Arc::clone(self),
+                revision,
+                desired,
+            })
+    }
+
+    pub async fn configure(&self, desired: LspConfig) {
+        let Some(revision) = self.reserve_configure(&desired) else {
+            return;
+        };
+        self.apply_configure(revision, desired).await;
+    }
+
+    pub fn configure_detached(self: &Arc<Self>, desired: LspConfig) {
+        let Some(completion) = self
+            .prepare_configure(desired)
+            .and_then(LspConfigure::install)
+        else {
+            return;
+        };
+        if completion.removed_clients.is_empty() {
+            completion.observe();
+        } else {
+            tokio::spawn(completion.finish());
         }
     }
 
-    pub fn configure_detached(&self, config: LspConfig) {
-        let removed_clients = self.reconcile_config(config);
-        if !removed_clients.is_empty() {
-            tokio::spawn(async move {
-                for slot in removed_clients {
-                    slot.shutdown().await;
-                }
-            });
+    fn install_configure(
+        &self,
+        revision: u64,
+        desired: LspConfig,
+    ) -> Option<Vec<Arc<LspClientSlot>>> {
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if controller.desired_revision != revision {
+            return None;
+        }
+        let removed_clients = self.reconcile_config(desired);
+        drop(controller);
+        Some(removed_clients)
+    }
+
+    async fn finish_configure(&self, revision: u64, removed_clients: Vec<Arc<LspClientSlot>>) {
+        for slot in removed_clients {
+            slot.shutdown().await;
+        }
+        let mut controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if controller.desired_revision == revision {
+            controller.observed_revision = revision;
+        }
+    }
+
+    async fn apply_configure(&self, revision: u64, desired: LspConfig) {
+        if let Some(removed_clients) = self.install_configure(revision, desired) {
+            self.finish_configure(revision, removed_clients).await;
+        }
+    }
+
+    pub fn controller_status(&self) -> LspControllerStatus {
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        LspControllerStatus {
+            desired_revision: controller.desired_revision,
+            observed_revision: controller.observed_revision,
         }
     }
 
@@ -940,6 +1039,44 @@ impl LspManager {
             value["server"] = json!(server_name);
             value.to_string()
         })
+    }
+}
+
+impl LspConfigure {
+    fn install(self) -> Option<LspConfigureCompletion> {
+        let removed_clients = self
+            .manager
+            .install_configure(self.revision, self.desired)?;
+        Some(LspConfigureCompletion {
+            manager: self.manager,
+            revision: self.revision,
+            removed_clients,
+        })
+    }
+
+    pub async fn apply(self) {
+        if let Some(completion) = self.install() {
+            completion.finish().await;
+        }
+    }
+}
+
+impl LspConfigureCompletion {
+    fn observe(self) {
+        let mut controller = self
+            .manager
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if controller.desired_revision == self.revision {
+            controller.observed_revision = self.revision;
+        }
+    }
+
+    async fn finish(self) {
+        self.manager
+            .finish_configure(self.revision, self.removed_clients)
+            .await;
     }
 }
 
@@ -2410,7 +2547,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "hot reload refactor characterization"]
     async fn older_configure_cannot_replace_newer_lsp_desired_state() {
         let manager = Arc::new(LspManager::default());
         let old_config = LspConfig {
@@ -2419,11 +2555,13 @@ mod tests {
                 test_server("unused", "text", &["txt"]).config,
             )]),
         };
+        let old_configure = manager
+            .prepare_configure(old_config)
+            .expect("old desired revision");
         let (control, completion) = crate::test_util::controlled_completion(());
-        let old_manager = Arc::clone(&manager);
         let old_task = tokio::spawn(async move {
             completion.complete().await;
-            old_manager.configure(old_config).await;
+            old_configure.apply().await;
         });
 
         let release = control.wait_started().await;
@@ -2439,5 +2577,39 @@ mod tests {
             manager.config_snapshot().servers.is_empty(),
             "an older configure completion must not reinstall a removed server"
         );
+        let status = manager.controller_status();
+        assert!(manager.prepare_configure(LspConfig::default()).is_none());
+        assert_eq!(manager.controller_status(), status);
+    }
+
+    #[tokio::test]
+    async fn stale_configure_completion_cannot_publish_after_server_removal() {
+        let manager = Arc::new(LspManager::default());
+        let old_config = LspConfig {
+            servers: HashMap::from([(
+                "old".into(),
+                test_server("unused", "text", &["txt"]).config,
+            )]),
+        };
+        let old_completion = manager
+            .prepare_configure(old_config)
+            .unwrap()
+            .install()
+            .unwrap();
+        assert!(manager.config_snapshot().servers.contains_key("old"));
+        let (control, completion) = crate::test_util::controlled_completion(());
+        let old_task = tokio::spawn(async move {
+            completion.complete().await;
+            old_completion.finish().await;
+        });
+
+        let release = control.wait_started().await;
+        manager.configure(LspConfig::default()).await;
+        let current_status = manager.controller_status();
+        release.send(()).unwrap();
+        old_task.await.unwrap();
+
+        assert!(manager.config_snapshot().servers.is_empty());
+        assert_eq!(manager.controller_status(), current_status);
     }
 }

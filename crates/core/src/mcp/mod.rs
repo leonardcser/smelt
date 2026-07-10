@@ -7,7 +7,7 @@ use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -331,6 +331,32 @@ impl McpServer {
 /// across `connect()` awaits.
 pub struct McpManager {
     servers: StdRwLock<HashMap<String, Arc<McpServer>>>,
+    controller: StdMutex<McpControllerState>,
+}
+
+#[derive(Default)]
+struct McpControllerState {
+    desired: HashMap<String, McpServerConfig>,
+    desired_revision: u64,
+    observed_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct McpControllerStatus {
+    pub desired_revision: u64,
+    pub observed_revision: u64,
+}
+
+pub struct McpReconcile {
+    manager: Arc<McpManager>,
+    revision: u64,
+    desired: HashMap<String, McpServerConfig>,
+}
+
+struct McpConnections {
+    manager: Arc<McpManager>,
+    revision: u64,
+    servers: Vec<Arc<McpServer>>,
 }
 
 impl McpManager {
@@ -340,6 +366,7 @@ impl McpManager {
     pub async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
         let manager = Arc::new(Self {
             servers: StdRwLock::new(HashMap::new()),
+            controller: StdMutex::new(McpControllerState::default()),
         });
         manager.reconcile(configs.clone()).await;
         manager
@@ -366,40 +393,45 @@ impl McpManager {
         guard.get(name).cloned()
     }
 
-    /// Diff the live server map against a freshly computed desired set
-    /// and reconcile in place. New servers spawn connectors; removed
-    /// servers are dropped (their `RunningService` shuts down with the
-    /// `McpServer`); servers whose config changed are stopped and
-    /// replaced. Runs the connectors concurrently and awaits all of
-    /// them so callers know reconcile is complete when this returns.
-    pub async fn reconcile(self: &Arc<Self>, desired: HashMap<String, McpServerConfig>) {
-        let new_servers: Vec<Arc<McpServer>> = {
-            let mut guard = match self.servers.write() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.retain(|name, server| match desired.get(name) {
-                Some(cfg) => &server.config == cfg,
-                None => false,
-            });
-            let mut spawned = Vec::new();
-            for (name, cfg) in desired.into_iter() {
-                if guard.contains_key(&name) {
-                    continue;
-                }
-                let server = Arc::new(McpServer::new(name.clone(), cfg));
-                guard.insert(name, Arc::clone(&server));
-                spawned.push(server);
-            }
-            spawned
-        };
-
-        let mut handles = Vec::new();
-        for server in new_servers {
-            handles.push(tokio::spawn(async move { server.connect().await }));
+    /// Reserve a desired revision before asynchronous reconciliation starts.
+    /// Equal desired maps are idempotent and do not create work.
+    pub fn prepare_reconcile(
+        self: &Arc<Self>,
+        desired: HashMap<String, McpServerConfig>,
+    ) -> Option<McpReconcile> {
+        let mut controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if controller.desired == desired {
+            return None;
         }
-        for h in handles {
-            let _ = h.await;
+        controller.desired_revision = controller.desired_revision.wrapping_add(1);
+        controller.desired = desired.clone();
+        Some(McpReconcile {
+            manager: Arc::clone(self),
+            revision: controller.desired_revision,
+            desired,
+        })
+    }
+
+    /// Diff the live server map against the latest desired set. The revision is
+    /// reserved synchronously, so delayed older tasks cannot publish after a
+    /// newer submission.
+    pub async fn reconcile(self: &Arc<Self>, desired: HashMap<String, McpServerConfig>) {
+        if let Some(reconcile) = self.prepare_reconcile(desired) {
+            reconcile.apply().await;
+        }
+    }
+
+    pub fn controller_status(&self) -> McpControllerStatus {
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        McpControllerStatus {
+            desired_revision: controller.desired_revision,
+            observed_revision: controller.observed_revision,
         }
     }
 
@@ -431,6 +463,71 @@ impl McpManager {
             .server(server_name)
             .ok_or_else(|| format!("MCP server '{}' not connected", server_name))?;
         server.call_tool(tool_name, args, timeout).await
+    }
+}
+
+impl McpReconcile {
+    fn install(self) -> Option<McpConnections> {
+        let controller = self
+            .manager
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if controller.desired_revision != self.revision {
+            return None;
+        }
+        let mut servers = self
+            .manager
+            .servers
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        servers.retain(|name, server| {
+            self.desired
+                .get(name)
+                .is_some_and(|config| &server.config == config)
+        });
+        let mut new_servers = Vec::new();
+        for (name, config) in self.desired {
+            if servers.contains_key(&name) {
+                continue;
+            }
+            let server = Arc::new(McpServer::new(name.clone(), config));
+            servers.insert(name, Arc::clone(&server));
+            new_servers.push(server);
+        }
+        drop(servers);
+        drop(controller);
+        Some(McpConnections {
+            manager: self.manager,
+            revision: self.revision,
+            servers: new_servers,
+        })
+    }
+
+    pub async fn apply(self) {
+        if let Some(connections) = self.install() {
+            connections.finish().await;
+        }
+    }
+}
+
+impl McpConnections {
+    async fn finish(self) {
+        let mut handles = Vec::new();
+        for server in self.servers {
+            handles.push(tokio::spawn(async move { server.connect().await }));
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+        let mut controller = self
+            .manager
+            .controller
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if controller.desired_revision == self.revision {
+            controller.observed_revision = self.revision;
+        }
     }
 }
 
@@ -661,7 +758,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "hot reload refactor characterization"]
     async fn older_reconcile_cannot_replace_newer_mcp_desired_state() {
         let manager = McpManager::start(&HashMap::new()).await;
         let old_desired = HashMap::from([(
@@ -676,11 +772,13 @@ mod tests {
                 },
             },
         )]);
+        let old_reconcile = manager
+            .prepare_reconcile(old_desired)
+            .expect("old desired revision");
         let (control, completion) = crate::test_util::controlled_completion(());
-        let old_manager = Arc::clone(&manager);
         let old_task = tokio::spawn(async move {
             completion.complete().await;
-            old_manager.reconcile(old_desired).await;
+            old_reconcile.apply().await;
         });
 
         let release = control.wait_started().await;
@@ -692,5 +790,45 @@ mod tests {
             manager.server("old").is_none(),
             "an older reconcile completion must not reinstall a removed server"
         );
+        let status = manager.controller_status();
+        assert!(manager.prepare_reconcile(HashMap::new()).is_none());
+        assert_eq!(manager.controller_status(), status);
+    }
+
+    #[tokio::test]
+    async fn stale_connection_completion_cannot_publish_after_server_removal() {
+        let manager = McpManager::start(&HashMap::new()).await;
+        let desired = HashMap::from([(
+            "old".into(),
+            McpServerConfig {
+                description: String::new(),
+                enabled: false,
+                transport: McpTransportConfig::Local {
+                    command: vec!["unused".into()],
+                    env: HashMap::new(),
+                    timeout: 30_000,
+                },
+            },
+        )]);
+        let connections = manager
+            .prepare_reconcile(desired)
+            .unwrap()
+            .install()
+            .unwrap();
+        assert!(manager.server("old").is_some());
+        let (control, completion) = crate::test_util::controlled_completion(());
+        let old_task = tokio::spawn(async move {
+            completion.complete().await;
+            connections.finish().await;
+        });
+
+        let release = control.wait_started().await;
+        manager.reconcile(HashMap::new()).await;
+        let current_status = manager.controller_status();
+        release.send(()).unwrap();
+        old_task.await.unwrap();
+
+        assert!(manager.server("old").is_none());
+        assert_eq!(manager.controller_status(), current_status);
     }
 }

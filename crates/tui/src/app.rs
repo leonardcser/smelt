@@ -52,12 +52,68 @@ const TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME: usize = 64;
 const TERMINAL_EVENT_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
 pub(crate) const DOCKED_DIALOG_TRANSCRIPT_ROWS: u16 = 5;
 
-pub(crate) struct ContextWindowUpdate {
-    pub(crate) request_id: u64,
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ContextWindowTarget {
+    pub(crate) model_key: String,
     pub(crate) model: String,
     pub(crate) api_base: String,
     pub(crate) provider_type: String,
+    pub(crate) config: protocol::ModelConfig,
+}
+
+impl ContextWindowTarget {
+    pub(crate) fn from_active(model: &smelt_core::ActiveModel) -> Self {
+        Self {
+            model_key: model.key.clone(),
+            model: model.model_name.clone(),
+            api_base: model.api_base.clone(),
+            provider_type: model.provider_type.clone(),
+            config: model.config.clone(),
+        }
+    }
+}
+
+pub(crate) struct ContextWindowUpdate {
+    pub(crate) revision: u64,
+    pub(crate) target: ContextWindowTarget,
     pub(crate) value: Option<u32>,
+}
+
+#[derive(Default)]
+pub(crate) struct ContextWindowController {
+    desired: Option<ContextWindowTarget>,
+    desired_revision: u64,
+    observed_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControllerRevisionStatus {
+    pub desired_revision: u64,
+    pub observed_revision: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeControllerStatus {
+    pub mcp: Option<smelt_core::mcp::McpControllerStatus>,
+    pub lsp: smelt_core::lsp::LspControllerStatus,
+    pub auto_reload: ControllerRevisionStatus,
+    pub context_window: ControllerRevisionStatus,
+}
+
+impl ContextWindowController {
+    pub(crate) fn prepare(&mut self, desired: Option<ContextWindowTarget>) -> Option<u64> {
+        if self.desired == desired {
+            return None;
+        }
+        self.desired_revision = self.desired_revision.wrapping_add(1);
+        self.desired = desired;
+        Some(self.desired_revision)
+    }
+
+    fn accepts(&self, update: &ContextWindowUpdate) -> bool {
+        update.revision == self.desired_revision && self.desired.as_ref() == Some(&update.target)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -234,13 +290,8 @@ pub struct TuiApp {
     /// the `--system-prompt` file content; refreshed in place by
     /// `/reload`.
     pub prompt_inputs: crate::prompt_inputs::PromptInputs,
-    /// Drop guard for the auto-reload filesystem watcher. `None` when
-    /// the watcher is disabled (`settings.auto_reload = false`) or when
-    /// `notify` failed to subscribe to any of the configured roots.
-    pub(crate) auto_reload: Option<crate::auto_reload::AutoReloadHandle>,
-    pub(crate) auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
-    pub(crate) auto_reload_setup_rx: Option<AutoReloadSetupRx>,
-    pub(crate) auto_reload_start_pending: bool,
+    /// Latest-desired owner for filesystem watcher setup and events.
+    pub(crate) auto_reload: crate::auto_reload::AutoReloadController,
     /// Latest requested cwd transition. It is committed only when no turn or
     /// modal can observe a half-updated project and permission context.
     pub(crate) pending_cwd_change: Option<crate::app::cwd::PendingCwdChange>,
@@ -275,8 +326,8 @@ pub struct TuiApp {
     /// `apply_model` spawns a fetch task that pushes the result here so the
     /// UI footer reflects the new model immediately.
     pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<ContextWindowUpdate>>,
-    /// Monotonic request id for context-window side fetches.
-    pub(crate) context_window_request_id: u64,
+    /// Latest-desired owner for context-window metadata fetches.
+    pub(crate) context_window: ContextWindowController,
     /// Current prompt input viewport height in rows after applying auto-wrap,
     /// manual resize, and terminal clamps. Updated during layout each frame.
     pub(crate) prompt_input_rows: u16,
@@ -332,12 +383,6 @@ pub enum AppEvent {
     },
     ShutdownSignal,
 }
-
-pub(crate) type AutoReloadSetup = Option<(
-    crate::auto_reload::AutoReloadHandle,
-    tokio::sync::mpsc::UnboundedReceiver<()>,
-)>;
-pub(crate) type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<AutoReloadSetup>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SuspendedNotification {
@@ -1263,17 +1308,35 @@ impl TuiApp {
     }
 
     pub(crate) fn apply_context_window_update(&mut self, update: ContextWindowUpdate) {
-        let matches_active = self.core.config.active_model().is_some_and(|model| {
-            update.model == model.model_name
-                && update.api_base == model.api_base
-                && update.provider_type == model.provider_type
-        });
-        if update.request_id == self.context_window_request_id
-            && matches_active
-            && self.core.config.context_window != update.value
-        {
+        if !self.context_window.accepts(&update) {
+            return;
+        }
+        self.context_window.observed_revision = update.revision;
+        if self.core.config.context_window != update.value {
             self.core.config.revision = self.core.config.revision.wrapping_add(1);
             self.core.config.context_window = update.value;
+        }
+    }
+
+    pub fn runtime_controller_status(&self) -> RuntimeControllerStatus {
+        let (auto_desired, auto_observed, auto_error) = self.auto_reload.status();
+        RuntimeControllerStatus {
+            mcp: self
+                .core
+                .mcp
+                .as_ref()
+                .map(|manager| manager.controller_status()),
+            lsp: self.lua.shared().lsp.controller_status(),
+            auto_reload: ControllerRevisionStatus {
+                desired_revision: auto_desired,
+                observed_revision: auto_observed,
+                error: auto_error,
+            },
+            context_window: ControllerRevisionStatus {
+                desired_revision: self.context_window.desired_revision,
+                observed_revision: self.context_window.observed_revision,
+                error: None,
+            },
         }
     }
 
@@ -1450,7 +1513,7 @@ impl TuiApp {
         let next_managed_auth_check = clock.instant_now() + Duration::from_secs(2);
         let initial_agent_mode = runtime_state.mode.clone();
         let initial_reasoning_effort = runtime_state.reasoning_effort;
-        let auto_reload_start_pending = runtime_state.settings.auto_reload;
+        let auto_reload_enabled = runtime_state.settings.auto_reload;
         let core = smelt_core::Core::new(
             runtime_state,
             startup_overrides,
@@ -1469,6 +1532,12 @@ impl TuiApp {
             Some(std::path::Path::new(&cwd)),
             project_trust.clone(),
         );
+        let watch_paths = crate::auto_reload::WatchPaths::from_manifest(
+            lua.manifest.roots.clone(),
+            lua.manifest.target_cwd.as_deref(),
+        );
+        let auto_reload =
+            crate::auto_reload::AutoReloadController::new(auto_reload_enabled, watch_paths);
         Self {
             core,
             lua,
@@ -1543,10 +1612,7 @@ impl TuiApp {
             prompt_placeholder_display,
             placeholders: HashMap::new(),
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
-            auto_reload: None,
-            auto_reload_rx: None,
-            auto_reload_setup_rx: None,
-            auto_reload_start_pending,
+            auto_reload,
             pending_cwd_change: None,
             pending_runtime_reconcile: false,
             pending_lua_reload: false,
@@ -1576,7 +1642,7 @@ impl TuiApp {
             },
             http_client: None,
             context_window_tx: None,
-            context_window_request_id: 0,
+            context_window: ContextWindowController::default(),
             placeholder_opts: HashMap::new(),
         }
     }
@@ -2843,8 +2909,8 @@ impl TuiApp {
             }
 
             self.render_normal_after_startup_work(&mut workspace_warmup_pending);
-            if self.auto_reload_start_pending {
-                self.start_auto_reload_setup();
+            if self.auto_reload.start_pending {
+                self.auto_reload.start_setup();
             }
             let last_frame = self.core.clock.instant_now();
 
@@ -3000,22 +3066,20 @@ impl TuiApp {
                 }
 
                 setup = async {
-                    match self.auto_reload_setup_rx.as_mut() {
+                    match self.auto_reload.setup.as_mut() {
                         Some(rx) => rx.await.ok(),
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.auto_reload_setup_rx = None;
-                    if self.core.config.settings.auto_reload {
-                        if let Some(Some((handle, rx))) = setup {
-                            self.auto_reload = Some(handle);
-                            self.auto_reload_rx = Some(rx);
-                        }
+                    if let Some((revision, setup)) = setup {
+                        self.auto_reload.apply_setup(revision, setup);
+                    } else {
+                        self.auto_reload.setup = None;
                     }
                 }
 
                 Some(_) = async {
-                    match self.auto_reload_rx.as_mut() {
+                    match self.auto_reload.events.as_mut() {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
@@ -3023,7 +3087,7 @@ impl TuiApp {
                     // Drain follow-up signals so an editor that produced
                     // a fresh burst right at the boundary doesn't queue
                     // a second reload tick we'd execute immediately.
-                    if let Some(rx) = self.auto_reload_rx.as_mut() {
+                    if let Some(rx) = self.auto_reload.events.as_mut() {
                         while rx.try_recv().is_ok() {}
                     }
                     if self.prompt_input_is_busy() || self.ui.active_modal().is_some() {
@@ -3159,18 +3223,28 @@ mod tests {
         active.provider_type = provider_type.into();
     }
 
+    fn active_context_target(app: &TuiApp) -> ContextWindowTarget {
+        ContextWindowTarget::from_active(app.core.config.active_model().unwrap())
+    }
+
     #[test]
     fn stale_context_window_update_does_not_overwrite_current_generation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.context_window_request_id = 2;
         set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
         app.app.core.config.context_window = Some(272_000);
+        let target = active_context_target(&app.app);
+        let stale_revision = app
+            .app
+            .context_window
+            .prepare(Some(target.clone()))
+            .unwrap();
+        let mut newer_target = target.clone();
+        newer_target.config.max_tokens = Some(16_384);
+        app.app.context_window.prepare(Some(newer_target)).unwrap();
 
         app.app.apply_context_window_update(ContextWindowUpdate {
-            request_id: 1,
-            model: "gpt-5.5".into(),
-            api_base: "https://codex.example".into(),
-            provider_type: "codex".into(),
+            revision: stale_revision,
+            target,
             value: None,
         });
 
@@ -3180,7 +3254,6 @@ mod tests {
     #[test]
     fn current_context_window_update_applies_even_when_value_is_none() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.context_window_request_id = 2;
         set_active_model(
             &mut app.app,
             "Qwen/Qwen3.6-27B",
@@ -3188,12 +3261,16 @@ mod tests {
             "openai-compatible",
         );
         app.app.core.config.context_window = Some(272_000);
+        let target = active_context_target(&app.app);
+        let revision = app
+            .app
+            .context_window
+            .prepare(Some(target.clone()))
+            .unwrap();
 
         app.app.apply_context_window_update(ContextWindowUpdate {
-            request_id: 2,
-            model: "Qwen/Qwen3.6-27B".into(),
-            api_base: "https://openai-compatible.example".into(),
-            provider_type: "openai-compatible".into(),
+            revision,
+            target,
             value: None,
         });
 
@@ -3201,20 +3278,50 @@ mod tests {
     }
 
     #[test]
-    fn matching_request_id_with_stale_model_identity_does_not_apply() {
+    fn matching_revision_with_stale_model_identity_does_not_apply() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.context_window_request_id = 2;
         set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
         app.app.core.config.context_window = Some(272_000);
+        let desired = active_context_target(&app.app);
+        let revision = app
+            .app
+            .context_window
+            .prepare(Some(desired.clone()))
+            .unwrap();
+        let mut stale = desired;
+        stale.model_key = "other/Qwen3.6-27B".into();
+        stale.model = "Qwen/Qwen3.6-27B".into();
+        stale.api_base = "https://openai-compatible.example".into();
+        stale.provider_type = "openai-compatible".into();
 
         app.app.apply_context_window_update(ContextWindowUpdate {
-            request_id: 2,
-            model: "Qwen/Qwen3.6-27B".into(),
-            api_base: "https://openai-compatible.example".into(),
-            provider_type: "openai-compatible".into(),
+            revision,
+            target: stale,
             value: None,
         });
 
         assert_eq!(app.app.core.config.context_window, Some(272_000));
+    }
+
+    #[test]
+    fn equal_context_window_target_does_not_start_another_revision() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let target = active_context_target(&app.app);
+        let revision = app
+            .app
+            .context_window
+            .prepare(Some(target.clone()))
+            .unwrap();
+
+        assert!(app.app.context_window.prepare(Some(target)).is_none());
+        assert_eq!(app.app.context_window.desired_revision, revision);
+        assert_eq!(
+            app.app.runtime_controller_status().context_window,
+            ControllerRevisionStatus {
+                desired_revision: revision,
+                observed_revision: 0,
+                error: None,
+            }
+        );
     }
 }

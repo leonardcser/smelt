@@ -624,14 +624,14 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
         app.app.core.signals.get::<bool>("settings_terminal_title"),
         Some(false)
     );
-    assert!(!app.app.auto_reload_start_pending);
-    assert!(app.app.auto_reload.is_none());
-    assert!(app.app.auto_reload_rx.is_none());
-    assert!(app.app.auto_reload_setup_rx.is_none());
+    assert!(!app.app.auto_reload.start_pending);
+    assert!(app.app.auto_reload.handle.is_none());
+    assert!(app.app.auto_reload.events.is_none());
+    assert!(app.app.auto_reload.setup.is_none());
     assert!(app.run_lua("smelt.settings.auto_reload = true"));
-    assert!(app.app.auto_reload_start_pending);
+    assert!(app.app.auto_reload.start_pending);
     assert!(app.run_lua("smelt.settings.auto_reload = false"));
-    assert!(!app.app.auto_reload_start_pending);
+    assert!(!app.app.auto_reload.start_pending);
     assert!(app.app.core.config.request_runtime_config().redact_secrets);
     assert!(app.app.core.config.request_runtime_config().cache_ttl_long);
 }

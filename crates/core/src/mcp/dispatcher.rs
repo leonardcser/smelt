@@ -151,7 +151,7 @@ mod tests {
     use crate::mcp::{McpServer, McpServerConfig, McpTransportConfig};
     use crate::permissions::rules::{RawPerms, RawRuleSet, ToolDefaults};
     use protocol::Decision;
-    use std::sync::RwLock;
+    use std::sync::{Mutex, RwLock};
     use std::time::Duration;
 
     fn manager_with_tool() -> Arc<McpManager> {
@@ -174,6 +174,7 @@ mod tests {
         }]);
         Arc::new(McpManager {
             servers: RwLock::new(HashMap::from([("demo".into(), server)])),
+            controller: Mutex::new(Default::default()),
         })
     }
 

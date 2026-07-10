@@ -284,9 +284,9 @@ impl TuiApp {
         self.managed_models = next_managed_models;
         self.commit_lua_runtime_config(next_runtime, next_permissions);
         self.submit_managed_model_refreshes();
+        self.reconcile_auto_reload();
         if let Some(mark_session_dirty) = committed_cwd {
             self.sync_inline_options();
-            self.restart_auto_reload_for_cwd();
             self.publish_cwd_change(mark_session_dirty);
             self.pending_lua_reload = false;
             self.pending_lua_reload_refresh_agent_inputs = false;
@@ -461,9 +461,9 @@ impl TuiApp {
         let Some(manager) = self.core.mcp.clone() else {
             return;
         };
-        tokio::spawn(async move {
-            manager.reconcile(desired).await;
-        });
+        if let Some(reconcile) = manager.prepare_reconcile(desired) {
+            tokio::spawn(reconcile.apply());
+        }
     }
 
     /// Replace live TUI generation projections with isolated candidate copies.
