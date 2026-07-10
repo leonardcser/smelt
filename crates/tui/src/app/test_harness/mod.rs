@@ -199,24 +199,35 @@ impl TestAppBuilder {
     }
 
     pub fn build(self) -> TestApp {
-        let _home_guard = test_home_guard();
+        let guard = test_environment_guard();
+        self.build_with_test_environment_guard(&guard)
+    }
+
+    pub(crate) fn build_with_test_home_guard(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
+        let _cwd_guard = crate::test_support::ProcessCwdGuard::capture();
         reset_test_home();
         self.build_after_test_home_setup()
     }
 
-    pub(crate) fn build_with_test_home_guard(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
+    pub(crate) fn build_with_test_environment_guard(
+        self,
+        _guard: &TestEnvironmentGuard,
+    ) -> TestApp {
         reset_test_home();
         self.build_after_test_home_setup()
     }
 
     pub(crate) fn build_without_test_home_reset(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
+        let _cwd_guard = crate::test_support::ProcessCwdGuard::capture();
         self.build_after_test_home_setup()
     }
 
     fn build_after_test_home_setup(self) -> TestApp {
         let (engine, cmd_rx, event_tx) = EngineHandle::for_test();
 
-        let permissions = Arc::new(smelt_core::permissions::Permissions::load());
+        let permissions = smelt_core::permissions::PermissionsHandle::new(
+            smelt_core::permissions::Permissions::load(),
+        );
         let settings = smelt_core::config::ResolvedSettings {
             vim: self.vim,
             ..Default::default()
@@ -397,6 +408,20 @@ fn cmdline_text(app: &TuiApp) -> String {
 
 static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
 static TEST_HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) struct TestEnvironmentGuard {
+    _cwd: crate::test_support::ProcessCwdGuard,
+    _home: MutexGuard<'static, ()>,
+}
+
+pub(crate) fn test_environment_guard() -> TestEnvironmentGuard {
+    let home = test_home_guard();
+    let cwd = crate::test_support::ProcessCwdGuard::capture();
+    TestEnvironmentGuard {
+        _cwd: cwd,
+        _home: home,
+    }
+}
 
 pub(crate) fn test_home_guard() -> MutexGuard<'static, ()> {
     TEST_HOME_LOCK

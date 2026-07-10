@@ -348,7 +348,7 @@ impl TestApp {
         settings.auto_compact = true;
         settings.compact_threshold = 0.8;
         settings.compact_keep_recent_groups = 1.0;
-        self.app.set_settings(settings);
+        self.app.set_settings_for_harness(settings);
 
         self.app.core.config.context_window = Some(100);
         let session = &mut self.app.core.session;

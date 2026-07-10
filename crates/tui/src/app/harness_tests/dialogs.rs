@@ -498,7 +498,7 @@ fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
     })
 }
 
-fn confirm_test_permissions() -> std::sync::Arc<smelt_core::permissions::Permissions> {
+fn confirm_test_permissions() -> smelt_core::permissions::Permissions {
     use smelt_core::permissions::rules::{RawModePerms, RawPerms, RawRuleSet, ToolDefaults};
     let mut modes = std::collections::HashMap::new();
     modes.insert(
@@ -521,13 +521,13 @@ fn confirm_test_permissions() -> std::sync::Arc<smelt_core::permissions::Permiss
             ..Default::default()
         },
     );
-    std::sync::Arc::new(smelt_core::permissions::Permissions::from_raw(
+    smelt_core::permissions::Permissions::from_raw(
         &RawPerms {
             default: RawModePerms::default(),
             modes,
         },
         &ToolDefaults::default(),
-    ))
+    )
 }
 
 fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
@@ -543,7 +543,7 @@ fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
 }
 
 fn install_confirm_test_permissions(app: &mut TestApp) {
-    app.app.core.permissions = confirm_test_permissions();
+    app.app.core.permissions.replace(confirm_test_permissions());
 }
 
 fn permission_decisions(cmds: Vec<protocol::UiCommand>) -> Vec<(u64, bool)> {
@@ -593,11 +593,11 @@ fn actions_permission_decisions(actions: &[Action]) -> Vec<(u64, bool)> {
 }
 
 #[test]
-fn request_permission_auto_allows_when_current_mode_allows() {
+fn request_permission_auto_allows_when_applied_turn_mode_allows() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
-    app.app.core.config.mode = protocol::AgentMode::parse("apply").unwrap();
+    app.app.applied_agent_mode = protocol::AgentMode::parse("apply").unwrap();
 
     let mut pending = Vec::new();
     let ctrl = dispatch_confirm_request(&mut app, confirm_req(10), &mut pending);
@@ -611,11 +611,11 @@ fn request_permission_auto_allows_when_current_mode_allows() {
 }
 
 #[test]
-fn request_permission_auto_denies_when_current_mode_denies() {
+fn request_permission_auto_denies_when_applied_turn_mode_denies() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
     app.start_turn(1);
-    app.app.core.config.mode = protocol::AgentMode::parse("deny").unwrap();
+    app.app.applied_agent_mode = protocol::AgentMode::parse("deny").unwrap();
 
     let mut pending = vec![crate::app::PendingTool {
         call_id: "call-11".into(),
@@ -631,6 +631,37 @@ fn request_permission_auto_denies_when_current_mode_denies() {
         permission_decisions(app.drain_engine_sends()),
         vec![(11, false)]
     );
+}
+
+#[test]
+fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+    app.app.core.config.mode = protocol::AgentMode::parse("deny").unwrap();
+    let _ = app.drain_engine_sends();
+
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::ToolEvaluationRequest {
+            request_id: 91,
+            call_id: "call-91".into(),
+            tool_name: "test_tool".into(),
+            args: std::collections::HashMap::new(),
+            mode: protocol::AgentMode::parse("apply").unwrap(),
+        },
+    ));
+
+    let decision = app.actions().iter().rev().find_map(|action| match action {
+        Action::EngineSend(command) => match command.as_ref() {
+            protocol::UiCommand::ToolEvaluationResponse {
+                request_id: 91,
+                evaluation,
+            } => Some(evaluation.decision.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(decision, Some(protocol::Decision::Allow));
 }
 
 #[test]
@@ -864,7 +895,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
 }
 
 #[test]
-fn shift_tab_on_open_confirm_cycles_mode_and_auto_allows() {
+fn shift_tab_on_open_confirm_waits_for_turn_mode_boundary_before_allowing() {
     let mut app = TestApp::builder()
         .with_mode_cycle(vec![
             protocol::AgentMode::normal(),
@@ -885,10 +916,17 @@ fn shift_tab_on_open_confirm_cycles_mode_and_auto_allows() {
 
     app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
 
-    assert_eq!(app.pending_confirm_count(), 0);
+    assert_eq!(app.pending_confirm_count(), 1);
     assert_eq!(app.app.core.config.mode.as_str(), "apply");
+    assert!(app.app.mode_pending());
+    assert!(actions_permission_decisions(app.actions()).is_empty());
+
+    app.app.sync_agent_mode_applied();
+    let handle_id = app.first_pending_confirm().unwrap();
+    assert!(app.app.resolve_open_confirm_for_current_mode(handle_id));
+    assert_eq!(app.pending_confirm_count(), 0);
     assert_eq!(
-        actions_permission_decisions(app.actions()),
+        permission_decisions(app.drain_engine_sends()),
         vec![(13, true)]
     );
 }
@@ -907,7 +945,7 @@ fn open_confirm_recheck_auto_denies_without_stopping_turn() {
     }
 
     let handle_id = app.first_pending_confirm().unwrap();
-    app.app.core.config.mode = protocol::AgentMode::parse("deny").unwrap();
+    app.app.applied_agent_mode = protocol::AgentMode::parse("deny").unwrap();
 
     assert!(app.app.resolve_open_confirm_for_current_mode(handle_id));
     assert_eq!(app.pending_confirm_count(), 0);

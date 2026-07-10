@@ -1044,33 +1044,22 @@ async fn async_main() {
         })
     };
 
-    let project_context = smelt_core::worktree::project_context(
-        &cwd,
-        Some(std::path::Path::new(&runtime.settings.worktree_root)),
-    );
-    let mut permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
-        &lua_permission_rules.unwrap_or_default(),
+    let permission_rules = lua_permission_rules.unwrap_or_default();
+    let permission_paths: Arc<smelt_core::permissions::PathsFn> =
+        std::sync::Arc::new(|name, args| {
+            tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
+                .unwrap_or_default()
+        });
+    let permission_resolution = smelt_core::permissions::resolve_permissions(
+        &permission_rules,
         &lua_tool_defaults,
         lua_mode_behaviors,
+        &runtime.settings,
+        &cwd,
+        Some(permission_paths),
     );
-    let permission_roots = project_context.allowed_roots.clone();
-    permissions.set_allowed_roots(project_context.active_root, project_context.allowed_roots);
-    permissions.set_restrict_to_workspace(runtime.settings.restrict_to_workspace);
-    permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
-        tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
-            .unwrap_or_default()
-    }));
-    {
-        let cwd_str = cwd.to_string_lossy();
-        let rules = smelt_core::permissions::store::load_for_roots(&cwd_str, &permission_roots);
-        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
-        permissions
-            .approvals
-            .write()
-            .unwrap()
-            .load_workspace(ws_tools, ws_dirs);
-    }
-    let permissions = Arc::new(permissions);
+    let permissions =
+        smelt_core::permissions::PermissionsHandle::from_resolution(permission_resolution);
 
     // Extra skill search roots (today the empty default; once a Lua API
     // for declaring them lands, plumb the resolved list through here).
@@ -1089,7 +1078,7 @@ async fn async_main() {
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
         Box::new(smelt_core::mcp::dispatcher::McpDispatcher::new(
             Arc::clone(&mcp_manager),
-            Arc::clone(&permissions),
+            permissions.clone(),
         ));
 
     let engine_handle = engine::start(
@@ -1127,7 +1116,7 @@ async fn async_main() {
             startup_overrides,
             engine_handle,
             smelt_core::FrontendKind::Headless,
-            Arc::clone(&permissions),
+            permissions.clone(),
             Arc::clone(&clock),
             Arc::clone(&env),
         );
@@ -1172,7 +1161,7 @@ async fn async_main() {
             runtime,
             startup_overrides,
             engine_handle,
-            Arc::clone(&permissions),
+            permissions.clone(),
             shared_session,
             lua_runtime,
             project_trust,

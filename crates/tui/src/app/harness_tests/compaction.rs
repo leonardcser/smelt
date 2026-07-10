@@ -122,7 +122,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
     settings.auto_compact = true;
     settings.compact_threshold = 0.8;
     settings.compact_keep_recent_groups = 1.0;
-    app.app.set_settings(settings);
+    app.app.set_settings_for_harness(settings);
     app.app.core.config.context_window = Some(100);
 
     app.app

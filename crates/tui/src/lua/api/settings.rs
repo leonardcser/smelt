@@ -64,22 +64,10 @@ fn apply_setting(
         .settings_overrides
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .insert(key.clone(), parsed.clone());
-    if !shared.core.external_effects_active() {
-        return Ok(());
+        .insert(key, parsed);
+    if shared.core.external_effects_active() {
+        crate::lua::try_with_app(|app| app.schedule_runtime_reconcile());
     }
-    crate::lua::try_with_app(|app| {
-        let effective = app
-            .core
-            .startup_overrides
-            .settings
-            .get(&key)
-            .unwrap_or(&parsed);
-        let mut settings = app.core.config.settings.clone();
-        if settings.set(&key, effective).is_ok() {
-            app.set_settings(settings);
-        }
-    });
     Ok(())
 }
 

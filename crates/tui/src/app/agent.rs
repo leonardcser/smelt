@@ -46,11 +46,14 @@ impl TuiApp {
         });
     }
 
-    pub(crate) fn active_permissions(&self) -> &smelt_core::permissions::Permissions {
+    pub(crate) fn active_permissions(
+        &self,
+    ) -> std::sync::Arc<smelt_core::permissions::Permissions> {
         self.agent
             .as_ref()
-            .map(|turn| turn.permissions.as_ref())
-            .unwrap_or_else(|| self.core.permissions.as_ref())
+            .map(|turn| turn.permissions.clone())
+            .or_else(|| self.dispatching_turn_permissions.clone())
+            .unwrap_or_else(|| self.core.permissions.snapshot())
     }
 
     fn prepare_turn_context(&mut self) -> (String, Vec<protocol::ToolDef>) {
@@ -159,7 +162,7 @@ impl TuiApp {
             request_config,
             reasoning_effort: self.core.config.reasoning_effort,
             permission_overrides: None,
-            permissions: self.core.permissions.clone(),
+            permissions: self.core.permissions.snapshot(),
             rewind_block_idx,
         })
     }
@@ -247,7 +250,7 @@ impl TuiApp {
             request_config,
             reasoning_effort: self.core.config.reasoning_effort,
             permission_overrides: None,
-            permissions: self.core.permissions.clone(),
+            permissions: self.core.permissions.snapshot(),
             rewind_block_idx: None,
         }))
     }
@@ -426,10 +429,11 @@ impl TuiApp {
             }
         };
 
+        let current_permissions = self.core.permissions.snapshot();
         let permissions = permission_overrides
             .as_ref()
-            .map(|overrides| std::sync::Arc::new(self.core.permissions.with_overrides(overrides)))
-            .unwrap_or_else(|| self.core.permissions.clone());
+            .map(|overrides| std::sync::Arc::new(current_permissions.with_overrides(overrides)))
+            .unwrap_or(current_permissions);
 
         if matches!(start, CommandTurnStart::ContinueFromLast) {
             self.working.continue_from_last(TurnPhase::Working);
@@ -723,7 +727,8 @@ impl TuiApp {
     }
 
     pub(crate) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
-        let rt = self.core.permissions.approvals.read().unwrap();
+        let approvals = self.core.permissions.approvals();
+        let rt = approvals.read().unwrap();
         let mut entries = Vec::new();
         for (tool, patterns) in rt.session_tool_entries() {
             if patterns.is_empty() {
@@ -752,7 +757,7 @@ impl TuiApp {
     pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
         self.core
             .permissions
-            .approvals
+            .approvals()
             .read()
             .unwrap()
             .session_path_grants()
@@ -765,7 +770,8 @@ impl TuiApp {
         access: smelt_core::permissions::PathAccess,
         dir: PathBuf,
     ) {
-        let mut approvals = self.core.permissions.approvals.write().unwrap();
+        let approval_store = self.core.permissions.approvals();
+        let mut approvals = approval_store.write().unwrap();
         if let Some(mode) = mode {
             approvals.add_session_path_grant(mode, tool, access, dir);
         } else {
@@ -792,30 +798,25 @@ impl TuiApp {
         }
 
         smelt_core::permissions::store::save(&self.cwd, &workspace_rules);
-        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&workspace_rules);
-        let mut rt = self.core.permissions.approvals.write().unwrap();
-        rt.set_session(session_tools, session_dirs, session_path_grants);
-        rt.load_workspace(ws_tools, ws_dirs);
+        {
+            let approval_store = self.core.permissions.approvals();
+            approval_store.write().unwrap().set_session(
+                session_tools,
+                session_dirs,
+                session_path_grants,
+            );
+        }
+        self.reconcile_permissions();
     }
 
     fn reload_workspace_permissions(&mut self) {
-        let cwd = std::path::Path::new(&self.cwd);
-        let worktree_root = std::path::Path::new(&self.core.config.settings.worktree_root);
-        let ctx = smelt_core::worktree::project_context(cwd, Some(worktree_root));
-        let rules = smelt_core::permissions::store::load_for_roots(&self.cwd, &ctx.allowed_roots);
-        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
-        self.core
-            .permissions
-            .approvals
-            .write()
-            .unwrap()
-            .load_workspace(ws_tools, ws_dirs);
+        self.reconcile_permissions();
     }
 
     pub(crate) fn reset_session_permissions(&mut self) {
         self.core
             .permissions
-            .approvals
+            .approvals()
             .write()
             .unwrap()
             .clear_session();
@@ -846,7 +847,8 @@ impl TuiApp {
             ConfirmChoice::Grant(option) => {
                 match option.scope {
                     ApprovalScope::Session => {
-                        let mut approvals = self.core.permissions.approvals.write().unwrap();
+                        let approval_store = self.core.permissions.approvals();
+                        let mut approvals = approval_store.write().unwrap();
                         for grant in option.grants {
                             approvals.add_session_grant(grant);
                         }
@@ -892,7 +894,7 @@ impl TuiApp {
     fn permission_decision_for_confirm(&self, req: &ConfirmRequest) -> Decision {
         self.active_permissions()
             .evaluate_tool_with_approvals(
-                self.core.config.mode.clone(),
+                self.applied_agent_mode.clone(),
                 smelt_core::permissions::ToolOrigin::Lua,
                 &req.tool_name,
                 &req.args,
@@ -986,7 +988,7 @@ impl TuiApp {
                 }
 
                 let outcome = turn.permissions.evaluate_tool_with_approvals(
-                    self.core.config.mode.clone(),
+                    self.applied_agent_mode.clone(),
                     smelt_core::permissions::ToolOrigin::Lua,
                     &req.tool_name,
                     &req.args,

@@ -3288,6 +3288,89 @@ fn approvals_load_workspace_replaces_existing_workspace_entries() {
 }
 
 #[test]
+fn permissions_handle_snapshots_policy_and_shares_session_approvals() {
+    let policy = |decision| {
+        permissions_from_mode(
+            mode_perms(HashMap::from([("demo".to_string(), decision)]), &[]),
+            false,
+            PathBuf::new(),
+        )
+    };
+    let handle = PermissionsHandle::new(policy(Decision::Ask));
+    let active_turn = handle.snapshot();
+
+    handle.replace(policy(Decision::Deny));
+    handle
+        .approvals()
+        .write()
+        .unwrap()
+        .add_session_tool("demo", Vec::new());
+
+    let args = HashMap::new();
+    assert_eq!(
+        active_turn
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "demo", &args)
+            .decision,
+        Decision::Allow,
+        "the active policy snapshot must observe newly granted session approval"
+    );
+    assert_eq!(
+        handle
+            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "demo", &args)
+            .decision,
+        Decision::Deny,
+        "future evaluations must use the replacement static policy"
+    );
+}
+
+#[test]
+fn permission_resolution_reloads_workspace_grants_without_losing_session_grants() {
+    let state = tempfile::tempdir().unwrap();
+    let _state_guard = crate::test_util::isolate_xdg_state(state.path());
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    store::save(
+        &first.path().to_string_lossy(),
+        &[store::Rule {
+            tool: "bash".into(),
+            patterns: vec!["git *".into()],
+        }],
+    );
+    let settings = crate::config::ResolvedSettings::default();
+    let handle = PermissionsHandle::from_resolution(resolve_permissions(
+        &RawPerms::default(),
+        &ToolDefaults::default(),
+        HashMap::new(),
+        &settings,
+        first.path(),
+        None,
+    ));
+    handle
+        .approvals()
+        .write()
+        .unwrap()
+        .add_session_tool("bash", vec![pat("cargo *")]);
+    assert!(handle
+        .approvals()
+        .read()
+        .unwrap()
+        .has_pattern("bash", "git *"));
+
+    handle.apply_resolution(resolve_permissions(
+        &RawPerms::default(),
+        &ToolDefaults::default(),
+        HashMap::new(),
+        &settings,
+        second.path(),
+        None,
+    ));
+    let approvals = handle.approvals();
+    let approvals = approvals.read().unwrap();
+    assert!(!approvals.has_pattern("bash", "git *"));
+    assert!(approvals.has_pattern("bash", "cargo *"));
+}
+
+#[test]
 fn approvals_set_session_replaces_existing_session_entries() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![pat("a *")]);

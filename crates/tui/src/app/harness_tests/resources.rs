@@ -484,6 +484,58 @@ fn engine_ask_probe_dispatches_complete_target_and_request_config() {
 }
 
 #[test]
+fn request_settings_changes_only_affect_requests_created_after_reconciliation() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let revision_before = app.app.core.config.revision;
+    app.start_engine_ask_probe("before settings change");
+    let before = app
+        .actions()
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::EngineAsk { request_config, .. } => Some(*request_config),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("first probe should send EngineAsk");
+
+    assert!(app.run_lua(
+        r#"
+            smelt.settings.redact_secrets = true
+            smelt.settings.cache_ttl_long = true
+            smelt.settings.request_audit = "full"
+        "#,
+    ));
+    assert_eq!(
+        app.app.core.config.revision,
+        revision_before.wrapping_add(1),
+        "one callback with multiple writes must commit one runtime revision"
+    );
+    app.start_engine_ask_probe("after settings change");
+    let after = app
+        .actions()
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::EngineAsk { request_config, .. } => Some(*request_config),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("second probe should send EngineAsk");
+
+    assert!(!before.redact_secrets);
+    assert!(!before.cache_ttl_long);
+    assert_eq!(before.request_audit, protocol::RequestAuditMode::Summary);
+    assert!(after.redact_secrets);
+    assert!(after.cache_ttl_long);
+    assert_eq!(after.request_audit, protocol::RequestAuditMode::Full);
+}
+
+#[test]
 fn ctrl_w_pane_chord_expires_after_tick_past_window() {
     let mut app = TestApp::builder().build();
     app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);

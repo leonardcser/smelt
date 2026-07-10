@@ -303,8 +303,160 @@ pub struct Permissions {
     tool_decisions: HashMap<String, ToolPermDefaults>,
     tool_effects: HashMap<String, ToolEffectKind>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
-    /// Interior-mutable so `Arc<Permissions>` holders can grant approvals without a writable handle.
+    /// Session approvals are shared across immutable policy snapshots. Static
+    /// rules and workspace roots are snapshotted; approvals intentionally stay
+    /// live for an active turn.
     pub approvals: Arc<RwLock<RuntimeApprovals>>,
+}
+
+/// Live owner for the current permission policy.
+///
+/// Long-lived consumers snapshot this handle when they evaluate a request.
+/// Active turns keep the returned [`Arc<Permissions>`], so later policy reloads
+/// affect future turns while grants added to the shared approval store remain
+/// visible immediately.
+#[derive(Clone)]
+pub struct PermissionsHandle {
+    current: Arc<RwLock<Arc<Permissions>>>,
+    approvals: Arc<RwLock<RuntimeApprovals>>,
+}
+
+impl std::fmt::Debug for PermissionsHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionsHandle")
+            .field("current", &self.snapshot())
+            .finish()
+    }
+}
+
+impl PermissionsHandle {
+    pub fn new(mut permissions: Permissions) -> Self {
+        let approvals = Arc::clone(&permissions.approvals);
+        permissions.approvals = Arc::clone(&approvals);
+        Self {
+            current: Arc::new(RwLock::new(Arc::new(permissions))),
+            approvals,
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<Permissions> {
+        self.current
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn replace(&self, mut permissions: Permissions) -> Arc<Permissions> {
+        permissions.approvals = Arc::clone(&self.approvals);
+        let permissions = Arc::new(permissions);
+        *self
+            .current
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Arc::clone(&permissions);
+        permissions
+    }
+
+    pub fn approvals(&self) -> Arc<RwLock<RuntimeApprovals>> {
+        Arc::clone(&self.approvals)
+    }
+
+    pub fn paths_fn(&self) -> Option<Arc<PathsFn>> {
+        self.snapshot().paths_fn.clone()
+    }
+
+    pub fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
+        self.snapshot().check_tool(mode, tool_name)
+    }
+
+    pub fn check_subcommand(&self, mode: AgentMode, bucket: &str, value: &str) -> Decision {
+        self.snapshot().check_subcommand(mode, bucket, value)
+    }
+
+    pub fn evaluate_tool(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+    ) -> PermissionOutcome {
+        self.snapshot().evaluate_tool(mode, origin, tool_name, args)
+    }
+
+    pub fn evaluate_tool_with_approvals(
+        &self,
+        mode: AgentMode,
+        origin: ToolOrigin,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+    ) -> PermissionOutcome {
+        self.snapshot()
+            .evaluate_tool_with_approvals(mode, origin, tool_name, args)
+    }
+
+    pub fn from_resolution(resolution: PermissionResolution) -> Self {
+        let handle = Self::new(resolution.policy);
+        handle.install_workspace_approvals(resolution.workspace_tools, resolution.workspace_dirs);
+        handle
+    }
+
+    pub fn apply_resolution(&self, mut resolution: PermissionResolution) -> Arc<Permissions> {
+        let mut current = self
+            .current
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        self.install_workspace_approvals(resolution.workspace_tools, resolution.workspace_dirs);
+        resolution.policy.approvals = Arc::clone(&self.approvals);
+        let permissions = Arc::new(resolution.policy);
+        *current = Arc::clone(&permissions);
+        permissions
+    }
+
+    fn install_workspace_approvals(
+        &self,
+        tools: HashMap<String, Vec<glob::Pattern>>,
+        dirs: Vec<PathBuf>,
+    ) {
+        self.approvals
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .load_workspace(tools, dirs);
+    }
+}
+
+/// A fully resolved static policy plus the workspace grants that become live
+/// with it. Building this value does not mutate the active permission handle.
+pub struct PermissionResolution {
+    policy: Permissions,
+    workspace_tools: HashMap<String, Vec<glob::Pattern>>,
+    workspace_dirs: Vec<PathBuf>,
+}
+
+/// Resolve permission declarations, setting-controlled workspace policy, cwd
+/// roots, and persisted workspace grants through one path.
+pub fn resolve_permissions(
+    raw: &RawPerms,
+    tool_defaults: &ToolDefaults,
+    mode_behaviors: HashMap<String, ModeBehavior>,
+    settings: &crate::config::ResolvedSettings,
+    cwd: &std::path::Path,
+    paths_fn: Option<Arc<PathsFn>>,
+) -> PermissionResolution {
+    let context =
+        crate::worktree::project_context(cwd, Some(std::path::Path::new(&settings.worktree_root)));
+    let roots = context.allowed_roots.clone();
+    let mut policy = Permissions::from_raw_with_mode_behaviors(raw, tool_defaults, mode_behaviors);
+    policy.set_allowed_roots(context.active_root, context.allowed_roots);
+    policy.set_restrict_to_workspace(settings.restrict_to_workspace);
+    if let Some(paths_fn) = paths_fn {
+        policy.set_paths_fn(paths_fn);
+    }
+    let rules = store::load_for_roots(&cwd.to_string_lossy(), &roots);
+    let (workspace_tools, workspace_dirs) = store::into_approvals(&rules);
+    PermissionResolution {
+        policy,
+        workspace_tools,
+        workspace_dirs,
+    }
 }
 
 impl std::fmt::Debug for Permissions {
@@ -371,26 +523,6 @@ impl Permissions {
         }
     }
 
-    /// Convenience: same as `from_raw`, plus loads workspace-scoped
-    /// auto-approvals from `<cwd>/.smelt/permissions.json` (or wherever
-    /// `permissions::store` reads from). Called once at startup.
-    pub fn from_raw_with_workspace(
-        raw: &RawPerms,
-        tool_defaults: &ToolDefaults,
-        cwd: &str,
-    ) -> Self {
-        let mut perms = Self::from_raw(raw, tool_defaults);
-        perms.set_workspace(PathBuf::from(cwd));
-        let rules = store::load(cwd);
-        let (ws_tools, ws_dirs) = store::into_approvals(&rules);
-        perms
-            .approvals
-            .write()
-            .unwrap()
-            .load_workspace(ws_tools, ws_dirs);
-        perms
-    }
-
     /// Create a clone with per-turn permission overrides layered on top.
     /// Override rules are prepended (checked first) to the existing rules
     /// for every mode.
@@ -454,22 +586,12 @@ impl Permissions {
         self.restrict_to_workspace = val;
     }
 
-    pub fn set_paths_fn(&mut self, f: Arc<PathsFn>) {
-        self.paths_fn = Some(f);
+    pub fn restrict_to_workspace(&self) -> bool {
+        self.restrict_to_workspace
     }
 
-    /// Carry live session state onto a freshly-built policy snapshot.
-    ///
-    /// Reload rebuilds mode rules and tool defaults from Lua, but runtime
-    /// approvals, workspace restriction, and path resolvers belong to the
-    /// running app and must survive that rebuild.
-    pub fn with_runtime_state_from(mut self, prev: &Self) -> Self {
-        self.restrict_to_workspace = prev.restrict_to_workspace;
-        self.active_root = prev.active_root.clone();
-        self.allowed_roots = prev.allowed_roots.clone();
-        self.paths_fn = prev.paths_fn.clone();
-        self.approvals = prev.approvals.clone();
-        self
+    pub fn set_paths_fn(&mut self, f: Arc<PathsFn>) {
+        self.paths_fn = Some(f);
     }
 
     fn paths_for_tool(&self, tool_name: &str, args: &HashMap<String, Value>) -> Vec<ToolPath> {

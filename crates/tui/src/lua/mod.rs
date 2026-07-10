@@ -830,6 +830,14 @@ impl LuaGeneration {
         &self.desired
     }
 
+    /// Refresh declarations after a live Lua desired-state write. Candidate
+    /// loads set this snapshot once before commit; runtime writes use the same
+    /// snapshot path before asking the app to reconcile effects.
+    pub fn refresh_desired_state(&mut self) -> Result<(), String> {
+        self.desired = self.runtime.snapshot_desired_state()?;
+        Ok(())
+    }
+
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }

@@ -66,7 +66,7 @@ impl HeadlessApp {
         args: &HashMap<String, serde_json::Value>,
     ) -> bool {
         let mode = self.core.config.mode.clone();
-        let permissions = &self.core.permissions;
+        let permissions = self.core.permissions.snapshot();
         permissions
             .evaluate_tool(
                 mode.clone(),
@@ -129,6 +129,7 @@ impl HeadlessApp {
         } else {
             self.core
                 .permissions
+                .snapshot()
                 .evaluate_tool_with_approvals(
                     self.core.config.mode.clone(),
                     crate::permissions::ToolOrigin::Lua,
@@ -612,7 +613,7 @@ mod tests {
             StartupOverrides::default(),
             engine,
             FrontendKind::Headless,
-            Arc::new(permissions::Permissions::load()),
+            permissions::PermissionsHandle::new(permissions::Permissions::load()),
             clock,
             env,
         );
@@ -646,7 +647,7 @@ mod tests {
             StartupOverrides::default(),
             engine,
             FrontendKind::Headless,
-            Arc::new(permissions::Permissions::load()),
+            permissions::PermissionsHandle::new(permissions::Permissions::load()),
             Arc::clone(&clock),
             env,
         );

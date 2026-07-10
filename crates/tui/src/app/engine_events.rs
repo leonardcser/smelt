@@ -234,9 +234,13 @@ impl TuiApp {
                 ag.assistant_output_started = true;
             }
             let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
+            let prev_dispatching_permissions = self
+                .dispatching_turn_permissions
+                .replace(ag.permissions.clone());
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
             let end = self.dispatch_control(ctrl, &mut ag);
             self.dispatching_turn_id = prev_dispatching_turn_id;
+            self.dispatching_turn_permissions = prev_dispatching_permissions;
             self.agent = Some(ag);
             match end {
                 SessionControl::Continue | SessionControl::NeedsConfirm(_) => true,
@@ -621,7 +625,7 @@ impl TuiApp {
                 call_id: _,
                 tool_name,
                 args,
-                mode: _,
+                mode,
             } => {
                 let _guard = crate::lua::install_app_ptr(self);
                 let metadata = self.lua.evaluate_tool_metadata(&tool_name, &args);
@@ -630,9 +634,8 @@ impl TuiApp {
                     protocol::Decision::Error(err)
                 } else {
                     let permissions = self.active_permissions();
-                    let active_mode = self.core.config.mode.clone();
                     let outcome = permissions.evaluate_tool_with_approvals(
-                        active_mode,
+                        mode,
                         smelt_core::permissions::ToolOrigin::Lua,
                         &tool_name,
                         &args,

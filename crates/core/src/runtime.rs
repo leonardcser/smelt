@@ -48,7 +48,7 @@ pub struct Core {
     pub files: crate::fs::FileStateCache,
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub processes: ProcessRegistry,
-    pub permissions: Arc<crate::permissions::Permissions>,
+    pub permissions: crate::permissions::PermissionsHandle,
     /// MCP server registry. Shared `Arc` with the engine's
     /// `McpDispatcher`; `None` when the user declared no MCP servers.
     /// Lua introspection reads through this handle without locking out
@@ -70,7 +70,7 @@ impl Core {
         startup_overrides: StartupOverrides,
         engine: EngineHandle,
         frontend: FrontendKind,
-        permissions: Arc<crate::permissions::Permissions>,
+        permissions: crate::permissions::PermissionsHandle,
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {

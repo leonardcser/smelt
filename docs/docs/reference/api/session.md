@@ -104,7 +104,7 @@ Absolute path of the current session directory. Ephemeral sessions return a temp
 fun(opts: table?): table
 ```
 
-Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. Returns `{ name, branch, path, base, created }`.
+Create or open a managed git worktree and request a coherent project-context transition. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. The transition updates Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots together. The returned `pending` field is true until the Lua callback returns and the event loop reaches a safe point; an active turn delays that point until idle. Returns `{ name, branch, path, base, created, pending }`.
 
 ## `smelt.session.fork`
 
@@ -216,7 +216,7 @@ Return compact live status for prompt/status bars: `{ model, provider, api_base,
 fun(path: string): table
 ```
 
-Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.
+Request a coherent project-context transition. Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots commit together. The returned `pending` field is true until the Lua callback returns and the event loop reaches a safe point; an active turn delays that point until idle. Returns `{ cwd, pending }`.
 
 ## `smelt.session.system`
 

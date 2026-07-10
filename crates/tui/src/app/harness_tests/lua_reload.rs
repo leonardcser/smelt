@@ -1,5 +1,4 @@
 use super::*;
-use crate::test_support::ProcessCwdGuard;
 
 #[test]
 fn lua_config_auto_reload_success_notifies_for_real_edits() {
@@ -390,6 +389,7 @@ fn changed_early_launch_declarations_use_defaults_and_warn_for_restart() {
 
 #[test]
 fn failed_candidate_at_each_filesystem_load_phase_recovers() {
+    let environment_guard = test_environment_guard();
     let project = tempfile::tempdir().unwrap();
     let smelt_dir = project.path().join(".smelt");
     std::fs::create_dir_all(&smelt_dir).unwrap();
@@ -416,7 +416,7 @@ fn failed_candidate_at_each_filesystem_load_phase_recovers() {
         .with_init_lua(&init)
         .with_lua_load_paths(&config_dir, Some(runtime.path().to_path_buf()))
         .with_cwd(project.path())
-        .build();
+        .build_with_test_environment_guard(&environment_guard);
     smelt_core::trust::mark_trusted(project.path()).unwrap();
     app.reload_lua();
     let mut committed_generation = app.app.lua.id;
@@ -532,15 +532,143 @@ fn provider_reload_rebuilds_the_running_model_catalog() {
 fn setting_write_updates_desired_state_before_live_effects() {
     let mut app = TestApp::builder().build();
 
-    assert!(app.run_lua(
-        r#"
-        smelt.settings.show_slug = false
-        assert(smelt.settings.show_slug == false)
-        "#,
+    let succeeded = {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load(
+                r#"
+                smelt.settings.show_slug = false
+                assert(smelt.settings.show_slug == false)
+                "#,
+            )
+            .exec()
+            .is_ok()
+    };
+    assert!(succeeded);
+    assert!(app.app.pending_runtime_reconcile);
+    assert!(app.app.core.config.settings.show_slug);
+    assert!(!app.app.lua.to_config().settings.show_slug);
+
+    assert!(app.drain_idle_work());
+    assert!(!app.app.core.config.settings.show_slug);
+}
+
+#[test]
+fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
+    use smelt_core::config::{SettingKind, SettingValue, SETTINGS};
+
+    let mut app = TestApp::builder().build();
+    app.app
+        .set_placeholder(crate::app::PROMPT_WIN, "stale prediction".into());
+
+    for declaration in SETTINGS {
+        let current = (declaration.read)(&app.app.core.config.settings);
+        let next = match (declaration.key, declaration.kind, current) {
+            (_, SettingKind::Bool, SettingValue::Bool(value)) => SettingValue::Bool(!value),
+            ("compact_threshold", SettingKind::Number, _) => SettingValue::Number(0.65),
+            ("compact_keep_recent_groups", SettingKind::Number, _) => SettingValue::Number(2.0),
+            ("autoupgrade_interval", SettingKind::Number, _) => SettingValue::Number(120.0),
+            (_, SettingKind::String, SettingValue::String(value)) => {
+                let value = declaration
+                    .choices
+                    .and_then(|choices| choices.iter().find(|choice| **choice != value))
+                    .map_or_else(
+                        || format!("phase4_{}", declaration.key),
+                        |value| value.to_string(),
+                    );
+                SettingValue::String(value)
+            }
+            _ => panic!("setting schema kind mismatch for {}", declaration.key),
+        };
+        let lua_value = match &next {
+            SettingValue::Bool(value) => value.to_string(),
+            SettingValue::Number(value) => value.to_string(),
+            SettingValue::String(value) => serde_json::to_string(value).unwrap(),
+        };
+        assert!(
+            app.run_lua(&format!(
+                "smelt.settings[{}] = {lua_value}",
+                serde_json::to_string(declaration.key).unwrap()
+            )),
+            "runtime write failed for {}",
+            declaration.key
+        );
+        assert_eq!(
+            app.app.core.config.settings.get(declaration.key),
+            Some(next.clone()),
+            "resolved setting stayed stale for {}",
+            declaration.key
+        );
+        assert_eq!(
+            app.app.lua.to_config().settings.get(declaration.key),
+            Some(next),
+            "desired setting stayed stale for {}",
+            declaration.key
+        );
+    }
+
+    assert!(app
+        .app
+        .ui
+        .win(crate::app::PROMPT_WIN)
+        .expect("prompt window")
+        .vim_enabled());
+    assert_eq!(
+        app.app.placeholder_text(crate::app::PROMPT_WIN),
+        None,
+        "disabling prediction must clear existing ghost text"
+    );
+    assert_eq!(
+        app.app.core.signals.get::<bool>("settings_terminal_title"),
+        Some(false)
+    );
+    assert!(!app.app.auto_reload_start_pending);
+    assert!(app.app.auto_reload.is_none());
+    assert!(app.app.auto_reload_rx.is_none());
+    assert!(app.app.auto_reload_setup_rx.is_none());
+    assert!(app.run_lua("smelt.settings.auto_reload = true"));
+    assert!(app.app.auto_reload_start_pending);
+    assert!(app.run_lua("smelt.settings.auto_reload = false"));
+    assert!(!app.app.auto_reload_start_pending);
+    assert!(app.app.core.config.request_runtime_config().redact_secrets);
+    assert!(app.app.core.config.request_runtime_config().cache_ttl_long);
+}
+
+#[test]
+fn permission_policy_is_snapshotted_per_turn_while_session_approvals_stay_live() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(7);
+    let turn_permissions = app.app.agent.as_ref().unwrap().permissions.clone();
+    assert!(turn_permissions.restrict_to_workspace());
+
+    assert!(app.run_lua("smelt.settings.restrict_to_workspace = false"));
+    let current_permissions = app.app.core.permissions.snapshot();
+    assert!(!current_permissions.restrict_to_workspace());
+    assert!(
+        turn_permissions.restrict_to_workspace(),
+        "active static policy must not change after a setting reconciliation"
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &turn_permissions.approvals,
+        &current_permissions.approvals,
     ));
 
-    assert!(!app.app.core.config.settings.show_slug);
-    assert!(!app.app.lua.to_config().settings.show_slug);
+    let trusted = std::env::temp_dir().join("smelt-phase4-session-approval");
+    app.app.grant_session_path(
+        None,
+        "read_file".into(),
+        smelt_core::permissions::PathAccess::Read,
+        trusted.clone(),
+    );
+    assert!(turn_permissions
+        .approvals
+        .read()
+        .unwrap()
+        .session_path_grants()
+        .iter()
+        .any(|grant| grant.dir == trusted));
 }
 
 #[test]
@@ -811,10 +939,9 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
 
 #[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
-    let home_guard = test_home_guard();
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");
-    let _cwd_guard = ProcessCwdGuard::capture();
-    let mut app = TestApp::builder().build_with_test_home_guard(&home_guard);
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
 
@@ -830,9 +957,11 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
         r#"
             local out = smelt.session.switch_cwd(_G.__switch_cwd_target)
             assert(out.cwd == _G.__switch_cwd_target)
-            assert(smelt.session.cwd() == _G.__switch_cwd_target)
+            assert(out.pending == true)
+            assert(smelt.session.cwd() ~= _G.__switch_cwd_target)
         "#,
     ));
+    assert!(app.drain_idle_work());
 
     assert_eq!(app.app.cwd, expected);
     assert_eq!(app.app.core.session.cwd.as_deref(), Some(expected.as_str()));
@@ -859,11 +988,125 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
 }
 
 #[test]
+fn cwd_request_during_turn_commits_project_context_only_after_idle() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create deferred cwd tempdir");
+    let smelt_dir = target_dir.path().join(".smelt");
+    std::fs::create_dir_all(&smelt_dir).unwrap();
+    std::fs::write(
+        smelt_dir.join("init.lua"),
+        r#"smelt.cmd.register("deferred_cwd_project", function() end)"#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    let original_cwd = app.app.cwd.clone();
+    let original_generation = app.app.lua.id;
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let expected = target.to_string_lossy().into_owned();
+    app.app
+        .lua
+        .lua
+        .globals()
+        .set("__deferred_cwd_target", expected.clone())
+        .unwrap();
+    let _ = app.drain_engine_sends();
+    app.start_turn(42);
+
+    assert!(app.run_lua(
+        r#"
+            local out = smelt.session.switch_cwd(_G.__deferred_cwd_target)
+            assert(out.cwd == _G.__deferred_cwd_target)
+            assert(out.pending == true)
+            assert(smelt.session.cwd() ~= _G.__deferred_cwd_target)
+        "#,
+    ));
+    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.app.lua.id, original_generation);
+    assert!(app.app.pending_cwd_change.is_some());
+    assert!(!app
+        .drain_engine_sends()
+        .into_iter()
+        .any(|cmd| matches!(cmd, protocol::UiCommand::SetCwd { .. })));
+
+    app.app.discard_turn(crate::app::TurnEnd::Complete);
+    assert!(app.drain_idle_work());
+
+    assert_eq!(app.app.cwd, expected);
+    assert_eq!(app.app.core.env.cwd(), target);
+    assert_eq!(app.app.lua.id, original_generation.wrapping_add(1));
+    assert!(app.app.pending_cwd_change.is_none());
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("deferred_cwd_project"));
+    assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
+        cmd,
+        protocol::UiCommand::SetCwd { cwd } if cwd == expected
+    )));
+}
+
+#[test]
+fn failed_cwd_candidate_preserves_the_complete_project_context() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create failed cwd tempdir");
+    let smelt_dir = target_dir.path().join(".smelt");
+    std::fs::create_dir_all(&smelt_dir).unwrap();
+    let init = smelt_dir.join("init.lua");
+    std::fs::write(&init, "this is invalid target Lua @@@").unwrap();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    let original_cwd = app.app.cwd.clone();
+    let original_runtime_cwd = app.app.core.env.cwd();
+    let original_process_cwd = std::env::current_dir().unwrap();
+    let original_generation = app.app.lua.id;
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let expected = target.to_string_lossy().into_owned();
+    app.app
+        .lua
+        .lua
+        .globals()
+        .set("__failed_cwd_target", expected.clone())
+        .unwrap();
+
+    assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__failed_cwd_target).pending == true)"));
+    assert!(app.drain_idle_work());
+    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.app.core.env.cwd(), original_runtime_cwd);
+    assert_eq!(app.app.lua.id, original_generation);
+    assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
+
+    std::fs::write(
+        &init,
+        r#"smelt.cmd.register("recovered_cwd_project", function() end)"#,
+    )
+    .unwrap();
+    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    assert!(app.run_lua("assert(smelt.session.switch_cwd(_G.__failed_cwd_target).pending == true)"));
+    assert!(app.drain_idle_work());
+    assert_eq!(app.app.cwd, expected);
+    assert_eq!(app.app.lua.id, original_generation.wrapping_add(1));
+    assert!(!app.app.notification.as_ref().is_some_and(|notification| {
+        notification.summary.starts_with("cwd change:")
+            || notification.summary.starts_with("session cwd unavailable:")
+    }));
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("recovered_cwd_project"));
+}
+
+#[test]
 fn loading_session_restores_persisted_cwd() {
-    let home_guard = test_home_guard();
+    let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create resumed cwd tempdir");
-    let _cwd_guard = ProcessCwdGuard::capture();
-    let mut app = TestApp::builder().build_with_test_home_guard(&home_guard);
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
     let _ = app.drain_engine_sends();
@@ -876,6 +1119,7 @@ fn loading_session_restores_persisted_cwd() {
         )));
 
     app.app.load_session(session);
+    assert!(app.drain_idle_work());
 
     assert_eq!(app.app.cwd, expected);
     assert_eq!(app.app.core.session.cwd.as_deref(), Some(expected.as_str()));
@@ -908,6 +1152,7 @@ fn loading_session_restores_persisted_cwd() {
             crate::app::history::live_session_for_test(display_session_id.clone(), 0, None),
         ),
     );
+    assert!(app.drain_idle_work());
 
     assert_eq!(app.app.cwd, display_expected);
     assert_eq!(
@@ -2349,6 +2594,7 @@ fn reload_lua_sweeps_state_for_deleted_plugins() {
 
 #[test]
 fn reload_clears_every_lua_surface() {
+    let environment_guard = test_environment_guard();
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     // Populate every observable surface from user init.lua so the
@@ -2412,7 +2658,9 @@ fn reload_clears_every_lua_surface() {
     )
     .unwrap();
 
-    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let mut app = TestApp::builder()
+        .with_init_lua(&init)
+        .build_with_test_environment_guard(&environment_guard);
     let shared = app.app.lua.shared().core.clone();
 
     // Pre-reload: every surface has at least the seeded entry.

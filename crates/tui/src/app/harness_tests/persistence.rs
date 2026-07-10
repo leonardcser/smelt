@@ -1207,7 +1207,7 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
     settings.auto_compact = true;
     settings.compact_threshold = 0.8;
     settings.compact_keep_recent_groups = 1.0;
-    app.app.set_settings(settings);
+    app.app.set_settings_for_harness(settings);
     app.app.core.config.context_window = Some(100);
     app.app.commit_request_history_item(
         HistoryItem::user(Content::text("request after compaction")),

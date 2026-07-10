@@ -70,7 +70,7 @@ Register a hook the engine calls immediately before each provider request. `hook
 fun(): nil
 ```
 
-Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. Cancels any in-flight `smelt.spawn` tasks and dismisses an open modal dialog before reloading (the parked coroutine is dropped with the rest). `early.lua` is intentionally skipped - its CLI-flag and `smelt.builtins.disable` effects are startup-only.
+Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. An open modal is dismissed before the request is queued.
 
 ## `smelt.engine.reload_when_idle`
 

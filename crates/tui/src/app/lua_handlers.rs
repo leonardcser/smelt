@@ -51,6 +51,7 @@ impl TuiApp {
 
     /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
     /// shared cold-start + reload pipeline) with a user-facing toast.
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn reload_lua(&mut self) {
         self.reload_lua_inner(LuaReloadKind::Manual);
     }
@@ -105,12 +106,29 @@ impl TuiApp {
         true
     }
 
+    pub(crate) fn schedule_runtime_reconcile(&mut self) {
+        self.pending_runtime_reconcile = true;
+    }
+
     pub(crate) fn drain_idle_work(&mut self) -> bool {
         let mut did_work = self.dismiss_expired_notification();
         did_work |= self.expire_pending_keymap_chord();
         did_work |= self.flush_due_tool_drafts();
+        did_work |= self.try_perform_scheduled_runtime_reconcile();
+        did_work |= self.try_perform_scheduled_cwd_change();
         did_work |= self.try_perform_scheduled_lua_reload();
         did_work
+    }
+
+    pub(crate) fn try_perform_scheduled_runtime_reconcile(&mut self) -> bool {
+        if !self.pending_runtime_reconcile {
+            return false;
+        }
+        self.pending_runtime_reconcile = false;
+        if let Err(error) = self.reconcile_committed_lua_runtime() {
+            self.notify_error_sticky(error);
+        }
+        true
     }
 
     fn try_perform_scheduled_lua_reload(&mut self) -> bool {
@@ -151,19 +169,39 @@ impl TuiApp {
         kind: &'static str,
         refresh_agent_inputs: bool,
     ) -> Option<String> {
-        if kind == "reload" {
+        self.bring_up_lua_at(kind, refresh_agent_inputs, None)
+    }
+
+    pub(crate) fn bring_up_lua_for_cwd(
+        &mut self,
+        path: std::path::PathBuf,
+        mark_session_dirty: bool,
+    ) -> Option<String> {
+        self.bring_up_lua_at("cwd", true, Some((path, mark_session_dirty)))
+    }
+
+    fn bring_up_lua_at(
+        &mut self,
+        kind: &'static str,
+        refresh_agent_inputs: bool,
+        cwd_transition: Option<(std::path::PathBuf, bool)>,
+    ) -> Option<String> {
+        if matches!(kind, "reload" | "cwd") {
             if let Some(error) = self.lua.flush_persistent_state() {
                 return Some(format!("flush persistent state: {error}"));
             }
         }
 
-        let cwd = self.core.env.cwd().clone();
+        let target_cwd = cwd_transition
+            .as_ref()
+            .map(|(path, _)| path.clone())
+            .unwrap_or_else(|| self.core.env.cwd().clone());
         let retired_generation = self.lua.id;
         let candidate_id = retired_generation.wrapping_add(1);
         let committed_tui = self.begin_lua_tui_candidate();
         let candidate_result =
             self.lua
-                .load_candidate(candidate_id, Some(&cwd), self.lua_wakeup_tx.clone());
+                .load_candidate(candidate_id, Some(&target_cwd), self.lua_wakeup_tx.clone());
         let mut candidate_tui = self.finish_lua_tui_candidate(committed_tui);
         let candidate = match candidate_result {
             Ok(candidate) => candidate,
@@ -179,6 +217,14 @@ impl TuiApp {
                 return Some(error);
             }
         };
+        let next_permissions = smelt_core::permissions::resolve_permissions(
+            &candidate.desired().permissions.rules,
+            &candidate.desired().permissions.tool_defaults,
+            candidate.desired().modes.behaviors.clone(),
+            &next_runtime.settings,
+            &target_cwd,
+            self.core.permissions.paths_fn(),
+        );
         for callback in candidate_tui
             .ui
             .finish_lua_generation(smelt_core::lua::LUA_BUF_ID_BASE)
@@ -195,10 +241,29 @@ impl TuiApp {
         candidate_tui
             .placeholder_opts
             .retain(|win, _| candidate_tui.ui.win(*win).is_some());
+        let staged_cwd = if let Some((path, _)) = &cwd_transition {
+            match Self::stage_process_cwd(path.clone()) {
+                Ok(staged) => Some(staged),
+                Err(error) => {
+                    self.discard_lua_candidate_resources(candidate_id);
+                    return Some(error);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = candidate.activate() {
             self.discard_lua_candidate_resources(candidate_id);
             return Some(format!("activate Lua candidate: {error}"));
         }
+        let committed_cwd = match (staged_cwd, cwd_transition) {
+            (Some(staged), Some((_, mark_session_dirty))) => {
+                self.install_runtime_cwd(staged.commit(), mark_session_dirty);
+                Some(mark_session_dirty)
+            }
+            (None, None) => None,
+            _ => unreachable!("staged cwd must match the requested transition"),
+        };
 
         self.core.signals.clear_lua_generation(retired_generation);
         self.core.timers.clear_generation(retired_generation);
@@ -214,7 +279,14 @@ impl TuiApp {
         for warning in self.lua.warnings().to_vec() {
             self.notify_warn(warning);
         }
-        self.commit_lua_runtime_config(next_runtime);
+        self.commit_lua_runtime_config(next_runtime, next_permissions);
+        if let Some(mark_session_dirty) = committed_cwd {
+            self.sync_inline_options();
+            self.restart_auto_reload_for_cwd();
+            self.publish_cwd_change(mark_session_dirty);
+            self.pending_lua_reload = false;
+            self.pending_lua_reload_refresh_agent_inputs = false;
+        }
         self.publish_diff_signals();
         if refresh_agent_inputs {
             self.refresh_agent_inputs();
@@ -260,6 +332,24 @@ impl TuiApp {
             .send(self.prompt_inputs.to_reload_command());
     }
 
+    pub(crate) fn reconcile_committed_lua_runtime(&mut self) -> Result<(), String> {
+        self.lua.refresh_desired_state()?;
+        let desired = self.lua.desired().clone();
+        let next = self.resolve_lua_runtime_config(&desired)?;
+        let permissions = smelt_core::permissions::resolve_permissions(
+            &desired.permissions.rules,
+            &desired.permissions.tool_defaults,
+            desired.modes.behaviors,
+            &next.settings,
+            &self.core.env.cwd(),
+            self.core.permissions.paths_fn(),
+        );
+        self.commit_lua_runtime_config(next, permissions);
+        self.publish_diff_signals();
+        self.drain_signals_pending();
+        Ok(())
+    }
+
     fn resolve_lua_runtime_config(
         &self,
         desired: &crate::lua::LuaDesiredState,
@@ -277,7 +367,26 @@ impl TuiApp {
         .map_err(|error| format!("runtime config reconciliation failed: {error}"))
     }
 
-    fn commit_lua_runtime_config(&mut self, mut next: smelt_core::RuntimeState) {
+    pub(crate) fn reconcile_permissions(&mut self) {
+        let desired = self.lua.desired();
+        let permission_resolution = smelt_core::permissions::resolve_permissions(
+            &desired.permissions.rules,
+            &desired.permissions.tool_defaults,
+            desired.modes.behaviors.clone(),
+            &self.core.config.settings,
+            &self.core.env.cwd(),
+            self.core.permissions.paths_fn(),
+        );
+        self.core
+            .permissions
+            .apply_resolution(permission_resolution);
+    }
+
+    fn commit_lua_runtime_config(
+        &mut self,
+        mut next: smelt_core::RuntimeState,
+        permissions: smelt_core::permissions::PermissionResolution,
+    ) {
         let old_settings = self.core.config.settings.clone();
         let old_mode = self.core.config.mode.clone();
         let old_reasoning = self.core.config.reasoning_effort;
@@ -314,14 +423,7 @@ impl TuiApp {
             }
         }
 
-        let desired = self.lua.desired();
-        let permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
-            &desired.permissions.rules,
-            &desired.permissions.tool_defaults,
-            desired.modes.behaviors.clone(),
-        )
-        .with_runtime_state_from(self.core.permissions.as_ref());
-        self.core.permissions = std::sync::Arc::new(permissions);
+        self.core.permissions.apply_resolution(permissions);
     }
 
     /// Reconcile MCP servers against the post-reload `smelt.mcp.register`

@@ -637,8 +637,8 @@ impl AppStoryCtx {
 #[macro_export]
 macro_rules! app_story {
     ($name:ident, |$ctx:ident| $body:block) => {
-        #[test]
-        fn $name() {
+        #[tokio::test]
+        async fn $name() {
             let snapshot_id = format!(
                 "{}::{}",
                 module_path!().rsplit("::").next().unwrap_or("app_story"),

@@ -1320,7 +1320,7 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
 - `smelt.engine.on_prepare_request` :: `fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: any))): smelt.Reg`
   Register a hook the engine calls immediately before each provider request.
 - `smelt.engine.reload` :: `fun(): nil`
-  Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.
+  Queue a transactional Lua reload for the next safe point.
 - `smelt.engine.reload_when_idle` :: `fun(): boolean`
   Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`.
 - `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil`
@@ -1573,7 +1573,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.dir` :: `fun(): string`
   Absolute path of the current session directory.
 - `smelt.session.enter_worktree` :: `fun(opts: table?): table`
-  Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions.
+  Create or open a managed git worktree and request a coherent project-context transition.
 - `smelt.session.fork` :: `fun(): nil`
   Fork the current session: clone its messages into a new session id and switch to it.
 - `smelt.session.history` :: `fun(opts: table?): table`
@@ -1601,7 +1601,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.status` :: `fun(): table`
   Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { tokens, window, stale, marker }, cost }`.
 - `smelt.session.switch_cwd` :: `fun(path: string): table`
-  Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions.
+  Request a coherent project-context transition.
 - `smelt.session.system` :: `fun(): string`
   Currently-assembled system prompt sent on the next turn.
 - `smelt.session.text` :: `fun(id: string): string?`

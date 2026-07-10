@@ -604,50 +604,99 @@ impl TuiApp {
     }
 
     pub(crate) fn apply_settings_effects(&mut self, old: &smelt_core::config::ResolvedSettings) {
-        let system_clipboard = self.core.config.settings.system_clipboard;
-        let vim = self.core.config.settings.vim;
-        let file_icon_options = (
-            self.core.config.settings.file_icons,
-            self.core.config.settings.file_icon_colors,
-        );
-        if system_clipboard != old.system_clipboard {
+        let settings = self.core.config.settings.clone();
+        let system_clipboard_changed = settings.system_clipboard != old.system_clipboard;
+        let vim_changed = settings.vim != old.vim;
+        let prediction_disabled = old.show_prediction && !settings.show_prediction;
+        let file_icons_changed = (old.file_icons, old.file_icon_colors)
+            != (settings.file_icons, settings.file_icon_colors);
+        let terminal_title_changed = settings.terminal_title != old.terminal_title;
+        let auto_reload_changed = settings.auto_reload != old.auto_reload;
+        let system_clipboard = settings.system_clipboard;
+        let vim = settings.vim;
+        let auto_reload = settings.auto_reload;
+
+        if system_clipboard_changed {
             self.core.set_system_clipboard_enabled(system_clipboard);
         }
-        let file_icons_changed = (old.file_icons, old.file_icon_colors) != file_icon_options;
-        let prompt_win = self
-            .ui
-            .win_mut(crate::app::PROMPT_WIN)
-            .expect("prompt window");
-        self.input.set_vim_enabled(prompt_win, vim);
-        self.transcript_win_mut().set_vim_enabled(vim);
+        if vim_changed {
+            let prompt_win = self
+                .ui
+                .win_mut(crate::app::PROMPT_WIN)
+                .expect("prompt window");
+            self.input.set_vim_enabled(prompt_win, vim);
+            self.transcript_win_mut().set_vim_enabled(vim);
+        }
+        if prediction_disabled {
+            self.invalidate_prompt_prediction();
+        }
         if file_icons_changed {
             self.sync_inline_options();
             self.sync_transcript_renderer_generation();
         }
+        if terminal_title_changed {
+            self.core
+                .signals
+                .publish_if_changed("settings_terminal_title", settings.terminal_title);
+        }
+        if auto_reload_changed {
+            self.set_auto_reload_enabled(auto_reload);
+        }
     }
 
-    /// Mutate resolved settings and propagate to input/screen. Live state
-    /// is authoritative; persistence lives in `init.lua`.
-    pub(super) fn update_settings<F: FnOnce(&mut smelt_core::config::ResolvedSettings)>(
-        &mut self,
-        f: F,
-    ) {
-        let old = self.core.config.settings.clone();
-        f(&mut self.core.config.settings);
-        self.apply_settings_effects(&old);
+    fn set_auto_reload_enabled(&mut self, enabled: bool) {
+        if enabled {
+            if self.auto_reload.is_none() && self.auto_reload_setup_rx.is_none() {
+                self.auto_reload_start_pending = true;
+            }
+            return;
+        }
+        self.auto_reload_start_pending = false;
+        self.auto_reload_setup_rx = None;
+        self.auto_reload_rx = None;
+        self.auto_reload = None;
     }
 
-    /// Replace all resolved settings at once, propagating to input/screen.
-    pub(crate) fn set_settings(&mut self, new: smelt_core::config::ResolvedSettings) {
+    pub(crate) fn restart_auto_reload_for_cwd(&mut self) {
+        if !self.core.config.settings.auto_reload {
+            return;
+        }
+        self.auto_reload_setup_rx = None;
+        self.auto_reload_rx = None;
+        self.auto_reload = None;
+        self.auto_reload_start_pending = true;
+    }
+
+    pub(crate) fn start_auto_reload_setup(&mut self) {
+        self.auto_reload_start_pending = false;
+        if !self.core.config.settings.auto_reload
+            || self.auto_reload.is_some()
+            || self.auto_reload_setup_rx.is_some()
+        {
+            return;
+        }
+        let cwd = self.cwd.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let paths = crate::auto_reload::WatchPaths::discover(std::path::Path::new(&cwd));
+            let _ = tx.send(crate::auto_reload::spawn(paths));
+        });
+        self.auto_reload_setup_rx = Some(rx);
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn set_settings_for_harness(&mut self, new: smelt_core::config::ResolvedSettings) {
         if self.core.config.settings == new {
             return;
         }
+        let old = std::mem::replace(&mut self.core.config.settings, new);
         self.core.config.revision = self.core.config.revision.wrapping_add(1);
         if self.core.startup_overrides.request_audit_env.is_none() {
             self.core.config.request_audit =
-                protocol::RequestAuditMode::parse(&new.request_audit).unwrap_or_default();
+                protocol::RequestAuditMode::parse(&self.core.config.settings.request_audit)
+                    .unwrap_or_default();
         }
-        self.update_settings(|slot| *slot = new);
+        self.apply_settings_effects(&old);
     }
 
     pub(crate) fn fast_mode(&self) -> bool {
@@ -759,7 +808,6 @@ impl TuiApp {
 mod tests {
     use super::*;
 
-    use crate::test_support::ProcessCwdGuard;
     use smelt_core::transcript_model::Block;
 
     fn slash<'a>(name: &'a str, arg: Option<&'a str>) -> ParsedCommand<'a> {
@@ -1254,13 +1302,14 @@ mod tests {
 
     #[tokio::test]
     async fn shell_escape_uses_cwd_captured_at_submission() {
-        let _guard = ProcessCwdGuard::capture();
+        let environment_guard = crate::app::test_harness::test_environment_guard();
         let shell_cwd = tempfile::TempDir::new().expect("shell cwd");
         let later_cwd = tempfile::TempDir::new().expect("later cwd");
         let shell_cwd = std::fs::canonicalize(shell_cwd.path()).expect("canonical shell cwd");
         let later_cwd = std::fs::canonicalize(later_cwd.path()).expect("canonical later cwd");
 
-        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .build_with_test_environment_guard(&environment_guard);
         app.app.cwd = shell_cwd.to_string_lossy().into_owned();
         let mut handle = app
             .app

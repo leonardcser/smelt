@@ -331,7 +331,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "enter_worktree",
-        "Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. Returns `{ name, branch, path, base, created }`.",
+        "Create or open a managed git worktree and request a coherent project-context transition. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. The transition updates Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots together. The returned `pending` field is true until the Lua callback returns and the event loop reaches a safe point; an active turn delays that point until idle. Returns `{ name, branch, path, base, created, pending }`.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let name: String = opts
@@ -360,7 +360,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 },
             )
             .map_err(mlua::Error::external)?;
-            crate::lua::with_app(|app| app.change_cwd(info.path.clone()))
+            let (_, pending) = crate::lua::with_app(|app| app.change_cwd(info.path.clone()))
                 .map_err(mlua::Error::external)?;
             let out = lua.create_table()?;
             out.set("name", info.name)?;
@@ -368,6 +368,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             out.set("path", info.path.display().to_string())?;
             out.set("base", info.base)?;
             out.set("created", info.created)?;
+            out.set("pending", pending)?;
             Ok(out)
         },
     )?;
@@ -400,14 +401,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "switch_cwd",
-        "Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.",
+        "Request a coherent project-context transition. Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots commit together. The returned `pending` field is true until the Lua callback returns and the event loop reaches a safe point; an active turn delays that point until idle. Returns `{ cwd, pending }`.",
         &["path"],
         |lua, path: String| -> LuaResult<mlua::Table> {
             let path = std::path::PathBuf::from(path.trim());
-            crate::lua::with_app(|app| app.change_cwd(path)).map_err(mlua::Error::external)?;
-            let cwd = crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default();
+            let (cwd, pending) =
+                crate::lua::with_app(|app| app.change_cwd(path)).map_err(mlua::Error::external)?;
             let out = lua.create_table()?;
             out.set("cwd", cwd)?;
+            out.set("pending", pending)?;
             Ok(out)
         },
     )?;

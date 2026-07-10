@@ -5,11 +5,12 @@ use protocol::{AgentMode, ToolEvaluation, ToolMetadata};
 use serde_json::Value;
 use smelt_provider::{FunctionSchema, ToolDefinition};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct McpDispatcher {
     manager: Arc<McpManager>,
-    permissions: Arc<crate::permissions::Permissions>,
+    permissions: crate::permissions::PermissionsHandle,
+    turn_permissions: Mutex<HashMap<u64, Arc<crate::permissions::Permissions>>>,
 }
 
 impl McpDispatcher {
@@ -22,11 +23,12 @@ impl McpDispatcher {
     /// immediately.
     pub fn new(
         manager: Arc<McpManager>,
-        permissions: Arc<crate::permissions::Permissions>,
+        permissions: crate::permissions::PermissionsHandle,
     ) -> Self {
         Self {
             manager,
             permissions,
+            turn_permissions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -35,6 +37,15 @@ impl McpDispatcher {
             .tool_defs()
             .into_iter()
             .find(|d| d.qualified_name() == name)
+    }
+
+    fn permissions_for_turn(&self, turn_id: u64) -> Arc<crate::permissions::Permissions> {
+        self.turn_permissions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&turn_id)
+            .cloned()
+            .unwrap_or_else(|| self.permissions.snapshot())
     }
 }
 
@@ -57,13 +68,31 @@ impl ToolDispatcher for McpDispatcher {
         self.def_for(name).is_some()
     }
 
-    fn is_visible(&self, name: &str, mode: AgentMode) -> bool {
+    fn begin_turn(&self, turn_id: u64) {
+        self.turn_permissions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(turn_id, self.permissions.snapshot());
+    }
+
+    fn end_turn(&self, turn_id: u64) {
+        self.turn_permissions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&turn_id);
+    }
+
+    fn is_visible(&self, turn_id: u64, name: &str, mode: AgentMode) -> bool {
         self.def_for(name).is_some()
-            && self.permissions.check_subcommand(mode, "mcp", name) != protocol::Decision::Deny
+            && self
+                .permissions_for_turn(turn_id)
+                .check_subcommand(mode, "mcp", name)
+                != protocol::Decision::Deny
     }
 
     fn evaluate_tool_call(
         &self,
+        turn_id: u64,
         name: &str,
         args: &HashMap<String, Value>,
         mode: AgentMode,
@@ -71,12 +100,13 @@ impl ToolDispatcher for McpDispatcher {
     ) -> Option<ToolEvaluation> {
         self.def_for(name)?;
         let summary = args_summary(args);
+        let current = self.permissions_for_turn(turn_id);
         let permissions;
         let active_permissions = if let Some(overrides) = permission_overrides {
-            permissions = self.permissions.with_overrides(overrides);
+            permissions = current.with_overrides(overrides);
             &permissions
         } else {
-            self.permissions.as_ref()
+            current.as_ref()
         };
         let outcome =
             active_permissions.evaluate_tool_with_approvals(mode, ToolOrigin::Mcp, name, args);
@@ -147,7 +177,7 @@ mod tests {
         })
     }
 
-    fn permissions_for_mcp(decision: Decision) -> Arc<crate::permissions::Permissions> {
+    fn permissions_for_mcp(decision: Decision) -> crate::permissions::Permissions {
         let mut raw = RawPerms::default();
         let rules = RawRuleSet {
             allow: (decision == Decision::Allow)
@@ -164,28 +194,41 @@ mod tests {
                 .collect(),
         };
         raw.default.patterns.insert("mcp".into(), rules);
-        Arc::new(crate::permissions::Permissions::from_raw(
-            &raw,
-            &ToolDefaults::default(),
-        ))
+        crate::permissions::Permissions::from_raw(&raw, &ToolDefaults::default())
     }
 
     #[test]
-    #[ignore = "hot reload refactor characterization"]
     fn dispatcher_observes_replaced_runtime_permissions() {
-        let mut live_permissions = permissions_for_mcp(Decision::Deny);
-        let dispatcher = McpDispatcher::new(manager_with_tool(), Arc::clone(&live_permissions));
+        let permissions =
+            crate::permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Deny));
+        let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
         let mode = AgentMode::normal();
-        assert!(!dispatcher.is_visible("demo_read", mode.clone()));
+        assert!(!dispatcher.is_visible(0, "demo_read", mode.clone()));
 
-        live_permissions = permissions_for_mcp(Decision::Allow);
+        let live_permissions = permissions.replace(permissions_for_mcp(Decision::Allow));
         assert_eq!(
             live_permissions.check_subcommand(mode.clone(), "mcp", "demo_read"),
             Decision::Allow
         );
         assert!(
-            dispatcher.is_visible("demo_read", mode),
+            dispatcher.is_visible(0, "demo_read", mode),
             "MCP permission evaluation must observe the replacement used by the live runtime"
         );
+    }
+
+    #[test]
+    fn dispatcher_pins_static_permissions_for_each_turn() {
+        let permissions =
+            crate::permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Allow));
+        let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
+        let mode = AgentMode::normal();
+        dispatcher.begin_turn(7);
+
+        permissions.replace(permissions_for_mcp(Decision::Deny));
+
+        assert!(dispatcher.is_visible(7, "demo_read", mode.clone()));
+        assert!(!dispatcher.is_visible(8, "demo_read", mode.clone()));
+        dispatcher.end_turn(7);
+        assert!(!dispatcher.is_visible(7, "demo_read", mode));
     }
 }

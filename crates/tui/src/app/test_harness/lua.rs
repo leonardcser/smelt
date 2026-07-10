@@ -34,8 +34,13 @@ impl TestApp {
     /// raises as mlua errors). Used by `lua_loop` to feed batched ops
     /// that reference each other via shared locals.
     pub fn run_lua(&mut self, snippet: &str) -> bool {
+        let succeeded = {
+            let _guard = crate::lua::install_app_ptr(&mut self.app);
+            self.app.lua.lua.load(snippet).exec().is_ok()
+        };
         let _guard = crate::lua::install_app_ptr(&mut self.app);
-        self.app.lua.lua.load(snippet).exec().is_ok()
+        self.app.try_perform_scheduled_runtime_reconcile();
+        succeeded
     }
 
     pub fn lua_int_global(&self, name: &str) -> Option<i64> {

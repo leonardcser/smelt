@@ -206,6 +206,8 @@ pub struct TuiApp {
     /// out of `self.agent` to satisfy borrowing. Lua callbacks can still
     /// observe the active turn through `active_agent_turn_id`.
     pub(crate) dispatching_turn_id: Option<u64>,
+    pub(crate) dispatching_turn_permissions:
+        Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
     /// `smelt.work.busy` token stack. Non-empty → prompt top-bar
     /// indicator animates with the top token's label.
     pub(crate) busy_stack: BusyStack,
@@ -226,6 +228,15 @@ pub struct TuiApp {
     /// the watcher is disabled (`settings.auto_reload = false`) or when
     /// `notify` failed to subscribe to any of the configured roots.
     pub(crate) auto_reload: Option<crate::auto_reload::AutoReloadHandle>,
+    pub(crate) auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    pub(crate) auto_reload_setup_rx: Option<AutoReloadSetupRx>,
+    pub(crate) auto_reload_start_pending: bool,
+    /// Latest requested cwd transition. It is committed only when no turn or
+    /// modal can observe a half-updated project and permission context.
+    pub(crate) pending_cwd_change: Option<crate::app::cwd::PendingCwdChange>,
+    /// Coalesced live desired-state writes waiting for the current Lua callback
+    /// to return before runtime effects are applied.
+    pub(crate) pending_runtime_reconcile: bool,
     /// Config reload requested from a busy context. Drained once the app is idle
     /// enough that wiping Lua callbacks cannot strand an active turn or modal.
     pub(crate) pending_lua_reload: bool,
@@ -296,11 +307,11 @@ pub enum AppEvent {
     ShutdownSignal,
 }
 
-type AutoReloadSetup = Option<(
+pub(crate) type AutoReloadSetup = Option<(
     crate::auto_reload::AutoReloadHandle,
     tokio::sync::mpsc::UnboundedReceiver<()>,
 )>;
-type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<AutoReloadSetup>;
+pub(crate) type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<AutoReloadSetup>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SuspendedNotification {
@@ -1245,7 +1256,7 @@ impl TuiApp {
         config: smelt_core::RuntimeState,
         startup_overrides: smelt_core::StartupOverrides,
         mut engine: EngineHandle,
-        permissions: Arc<smelt_core::permissions::Permissions>,
+        permissions: smelt_core::permissions::PermissionsHandle,
         shared_session: Arc<Mutex<Option<SharedSessionState>>>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
@@ -1404,6 +1415,7 @@ impl TuiApp {
         let working_clock = Arc::clone(&clock);
         let initial_agent_mode = runtime_state.mode.clone();
         let initial_reasoning_effort = runtime_state.reasoning_effort;
+        let auto_reload_start_pending = runtime_state.settings.auto_reload;
         let core = smelt_core::Core::new(
             runtime_state,
             startup_overrides,
@@ -1478,6 +1490,7 @@ impl TuiApp {
             applied_reasoning_effort: initial_reasoning_effort,
             cancel_generation: 0,
             dispatching_turn_id: None,
+            dispatching_turn_permissions: None,
             busy_stack: BusyStack::default(),
             api_base_normalization_warnings: HashSet::new(),
             startup_auth_error,
@@ -1492,6 +1505,11 @@ impl TuiApp {
             placeholders: HashMap::new(),
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
             auto_reload: None,
+            auto_reload_rx: None,
+            auto_reload_setup_rx: None,
+            auto_reload_start_pending,
+            pending_cwd_change: None,
+            pending_runtime_reconcile: false,
             pending_lua_reload: false,
             pending_lua_reload_refresh_agent_inputs: false,
             lua_reload_failure: None,
@@ -2598,9 +2616,6 @@ impl TuiApp {
             }
         }
 
-        let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
-        let mut auto_reload_setup_rx: Option<AutoReloadSetupRx> = None;
-        let mut auto_reload_start_pending = self.core.config.settings.auto_reload;
         let mut workspace_warmup_pending = true;
 
         let mut term_events = match crate::term_input::TerminalInput::spawn() {
@@ -2778,16 +2793,8 @@ impl TuiApp {
             }
 
             self.render_normal_after_startup_work(&mut workspace_warmup_pending);
-            if auto_reload_start_pending {
-                auto_reload_start_pending = false;
-                let cwd = self.cwd.clone();
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                tokio::task::spawn_blocking(move || {
-                    let paths =
-                        crate::auto_reload::WatchPaths::discover(std::path::Path::new(&cwd));
-                    let _ = tx.send(crate::auto_reload::spawn(paths));
-                });
-                auto_reload_setup_rx = Some(rx);
+            if self.auto_reload_start_pending {
+                self.start_auto_reload_setup();
             }
             let last_frame = self.core.clock.instant_now();
 
@@ -2943,20 +2950,22 @@ impl TuiApp {
                 }
 
                 setup = async {
-                    match auto_reload_setup_rx.as_mut() {
+                    match self.auto_reload_setup_rx.as_mut() {
                         Some(rx) => rx.await.ok(),
                         None => std::future::pending().await,
                     }
                 } => {
-                    auto_reload_setup_rx = None;
-                    if let Some(Some((handle, rx))) = setup {
-                        self.auto_reload = Some(handle);
-                        auto_reload_rx = Some(rx);
+                    self.auto_reload_setup_rx = None;
+                    if self.core.config.settings.auto_reload {
+                        if let Some(Some((handle, rx))) = setup {
+                            self.auto_reload = Some(handle);
+                            self.auto_reload_rx = Some(rx);
+                        }
                     }
                 }
 
                 Some(_) = async {
-                    match auto_reload_rx.as_mut() {
+                    match self.auto_reload_rx.as_mut() {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
@@ -2964,7 +2973,7 @@ impl TuiApp {
                     // Drain follow-up signals so an editor that produced
                     // a fresh burst right at the boundary doesn't queue
                     // a second reload tick we'd execute immediately.
-                    if let Some(rx) = auto_reload_rx.as_mut() {
+                    if let Some(rx) = self.auto_reload_rx.as_mut() {
                         while rx.try_recv().is_ok() {}
                     }
                     if self.prompt_input_is_busy() || self.ui.active_modal().is_some() {

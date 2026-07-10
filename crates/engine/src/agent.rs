@@ -62,6 +62,27 @@ fn mode_append_returns_to_base(append: &protocol::HistoryAppend) -> bool {
         .is_some_and(|mode| mode == base.as_str())
 }
 
+struct DispatcherTurnGuard<'a> {
+    dispatcher: &'a dyn ToolDispatcher,
+    turn_id: u64,
+}
+
+impl<'a> DispatcherTurnGuard<'a> {
+    fn new(dispatcher: &'a dyn ToolDispatcher, turn_id: u64) -> Self {
+        dispatcher.begin_turn(turn_id);
+        Self {
+            dispatcher,
+            turn_id,
+        }
+    }
+}
+
+impl Drop for DispatcherTurnGuard<'_> {
+    fn drop(&mut self) {
+        self.dispatcher.end_turn(self.turn_id);
+    }
+}
+
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
 pub(crate) async fn engine_task(
     mut config: EngineConfig,
@@ -138,6 +159,8 @@ pub(crate) async fn engine_task(
                                     config.skill_section.as_deref(),
                                 )
                             });
+                        let _dispatcher_turn =
+                            DispatcherTurnGuard::new(dispatcher.as_ref(), turn_id);
                         let mut turn = Turn {
                             provider,
                             dispatcher: &*dispatcher,
@@ -1398,8 +1421,11 @@ impl<'a> Turn<'a> {
                     .definitions()
                     .into_iter()
                     .filter(|d| {
-                        self.dispatcher
-                            .is_visible(d.function.name.as_str(), self.mode.clone())
+                        self.dispatcher.is_visible(
+                            self.turn_id,
+                            d.function.name.as_str(),
+                            self.mode.clone(),
+                        )
                     })
                     .collect();
                 // Plugin tools with `override_core` shadow the same-named core tool.
@@ -1854,6 +1880,7 @@ impl<'a> Turn<'a> {
             }
 
             let evaluation = match self.dispatcher.evaluate_tool_call(
+                self.turn_id,
                 &tc.function.name,
                 &args,
                 self.mode.clone(),

@@ -22,7 +22,7 @@ impl TestApp {
         self.app.agent = Some(crate::app::TurnState {
             turn_id,
             pending: Vec::new(),
-            permissions: self.app.core.permissions.clone(),
+            permissions: self.app.core.permissions.snapshot(),
             rewind_block_idx: None,
             assistant_output_started: false,
             _perf: smelt_perf::perf::begin("test_harness:turn"),
