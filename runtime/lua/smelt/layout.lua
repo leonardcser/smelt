@@ -32,16 +32,7 @@ smelt.ui.layout.set(function(state)
 
   local content
   if state.dialog then
-    content = smelt.ui.layout.vbox({
-      {
-        height = state.dialog_expanded and (state.dialog_transcript_rows or 5) or "fill",
-        smelt.ui.layout.leaf(smelt.win.TRANSCRIPT),
-      },
-      {
-        height = state.dialog_height or "fit",
-        state.dialog,
-      },
-    })
+    content = state.dialog
   else
     local aux_rows = 1
     -- Reserve the prompt bottom bar and the root statusline while deciding how

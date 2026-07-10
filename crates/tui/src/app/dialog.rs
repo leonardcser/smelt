@@ -103,19 +103,36 @@ impl TuiApp {
         self.ui.active_docked_surface().is_some()
     }
 
+    /// Build the canonical transcript-dialog stage placed by the root composer.
+    pub(crate) fn docked_dialog_stage_layout(
+        &mut self,
+        id: crate::smelt_edit::ContainerId,
+    ) -> Option<crate::smelt_edit::LayoutTree> {
+        let transcript_height = if self.ui.docked_surface(id)?.expanded() {
+            crate::smelt_edit::Constraint::Length(crate::app::DOCKED_DIALOG_TRANSCRIPT_ROWS)
+        } else {
+            crate::smelt_edit::Constraint::Fill
+        };
+        let dialog_height = self.ui.docked_surface_height(id)?;
+        let dialog = self.ui.docked_surface_layout(id)?;
+        Some(crate::smelt_edit::LayoutTree::vbox(vec![
+            (
+                transcript_height,
+                crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+            ),
+            (dialog_height, dialog),
+        ]))
+    }
+
     pub(crate) fn close_active_modal(&mut self) -> bool {
-        let Some(modal) = self.ui.active_modal() else {
+        let Some(owner) = self.ui.active_modal_owner() else {
             return false;
         };
-        if let Some(dialog) = self.ui.docked_surface_for_modal(modal) {
-            self.close_docked_dialog(dialog);
-            return true;
+        match owner {
+            crate::smelt_edit::ModalOwner::Docked(dialog) => self.close_docked_dialog(dialog),
+            crate::smelt_edit::ModalOwner::Overlay(overlay) => self.close_overlay(overlay),
         }
-        if let Some(overlay) = self.ui.modal_overlay(modal) {
-            self.close_overlay(overlay);
-            return true;
-        }
-        false
+        true
     }
 
     fn suspend_notification_for_dialog(&mut self) {

@@ -12,6 +12,24 @@ fn open_root_test_dialog(app: &mut TestApp) {
     ));
 }
 
+fn assert_safe_dialog_fallback(app: &TestApp) {
+    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_none());
+    let statusline = app
+        .app
+        .ui
+        .named_win("smelt.statusline")
+        .expect("statusline window");
+    let status_rect = app
+        .app
+        .ui
+        .split_rect(statusline)
+        .expect("fallback keeps statusline mounted");
+    assert_eq!(
+        status_rect.top + status_rect.height,
+        app.app.ui.terminal_size().1
+    );
+}
+
 #[test]
 fn root_dialog_replaces_composer_and_restores_prompt_state() {
     let mut app = TestApp::builder().build();
@@ -93,7 +111,7 @@ fn root_dialog_uses_safe_fallback_when_custom_composer_omits_it() {
 
     app.render_silent();
 
-    assert!(app.app.ui.split_rect(crate::app::PROMPT_WIN).is_none());
+    assert_safe_dialog_fallback(&app);
     let dialog = app.app.active_docked_dialog().expect("active dialog");
     let root = app
         .app
@@ -109,20 +127,58 @@ fn root_dialog_uses_safe_fallback_when_custom_composer_omits_it() {
         .copied()
         .expect("dialog root");
     assert!(app.app.ui.split_rect(root).is_some());
-    let statusline = app
-        .app
-        .ui
-        .named_win("smelt.statusline")
-        .expect("statusline window");
-    let status_rect = app
-        .app
-        .ui
-        .split_rect(statusline)
-        .expect("statusline remains mounted");
-    assert_eq!(
-        status_rect.top + status_rect.height,
-        app.app.ui.terminal_size().1
-    );
+}
+
+#[test]
+fn root_dialog_uses_safe_fallback_when_custom_composer_duplicates_it() {
+    let mut app = TestApp::builder().build();
+    open_root_test_dialog(&mut app);
+    assert!(app.run_lua(
+        r#"
+        smelt.ui.layout.set(function(state)
+          if not state.dialog then
+            return smelt.ui.layout.leaf(smelt.win.PROMPT)
+          end
+          return smelt.ui.layout.vbox({
+            { state.dialog, height = "fill" },
+            { state.dialog, height = "fill" },
+          })
+        end)
+        "#
+    ));
+
+    app.render_silent();
+
+    assert_safe_dialog_fallback(&app);
+}
+
+#[test]
+fn root_dialog_rejects_retained_stage_from_nested_dialog() {
+    let mut app = TestApp::builder().build();
+    open_root_test_dialog(&mut app);
+    assert!(app.run_lua(
+        r#"
+        local retained
+        smelt.ui.layout.set(function(state)
+          if not state.dialog then
+            return smelt.ui.layout.leaf(smelt.win.PROMPT)
+          end
+          if not retained then
+            retained = state.dialog
+            return state.dialog
+          end
+          return smelt.ui.layout.vbox({
+            { retained, height = "fill" },
+            { state.dialog, height = "fill" },
+          })
+        end)
+        "#
+    ));
+
+    open_root_test_dialog(&mut app);
+    app.render_silent();
+
+    assert_safe_dialog_fallback(&app);
 }
 
 #[test]
@@ -742,9 +798,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
             return smelt.ui.layout.leaf(smelt.win.PROMPT)
           end
           return smelt.ui.layout.vbox({
-            { smelt.ui.layout.leaf(smelt.win.TRANSCRIPT), height = "fill" },
-            { smelt.ui.layout.leaf(smelt.win.PROMPT), height = 1 },
-            { state.dialog, height = state.dialog_height },
+            { state.dialog, height = "fill" },
           })
         end)
         "#
@@ -758,13 +812,6 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("custom-composed dialog rect");
-    let prompt_bottom = app
-        .app
-        .ui
-        .split_rect(crate::app::PROMPT_WIN)
-        .expect("custom spacer rect")
-        .bottom();
-    assert_eq!(prompt_bottom, before.top);
     let target_top = before.top.saturating_sub(2);
 
     for kind in [

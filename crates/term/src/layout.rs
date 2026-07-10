@@ -265,19 +265,6 @@ impl LayoutTree {
         }
     }
 
-    /// Whether a stable host-owned container appears in this tree.
-    pub fn contains_container(&self, id: ContainerId) -> bool {
-        if self.chrome().container == Some(id) {
-            return true;
-        }
-        match self {
-            LayoutTree::Leaf { .. } => false,
-            LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
-                items.iter().any(|(_, child)| child.contains_container(id))
-            }
-        }
-    }
-
     /// All leaf `PaintId`s in depth-first declaration order.
     pub fn leaves_in_order(&self) -> Vec<PaintId> {
         let mut out = Vec::new();

@@ -63,7 +63,7 @@ pub use callback::{
 };
 use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
-pub use modal::ModalId;
+pub use modal::{ModalId, ModalOwner};
 use overlay::OverlayHitTarget;
 pub use overlay::{
     BodyDrag, ChromeAction, ChromeOwner, Decoration, DecorationId, DragConfig, HitTarget, Overlay,
@@ -180,7 +180,7 @@ pub struct Ui {
     /// Insertion order is the secondary z-order sort key; see [`Self::overlays_in_z_order`].
     overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
-    /// Modal focus scopes in opening order. The last entry owns keyboard input.
+    /// Modal focus scopes in opening order. Presentation order decides which owns input.
     modals: Vec<(ModalId, modal::Modal)>,
     next_modal_id: u32,
     /// Host-owned containers embedded in the root layout.
@@ -798,9 +798,9 @@ impl Ui {
         leaves: Vec<WinId>,
         config: DockedSurfaceConfig,
     ) -> (ContainerId, ModalId) {
-        let modal = self.modal_open(leaves, config.blocks_agent);
         let id = ContainerId(self.next_docked_surface_id);
         self.next_docked_surface_id = self.next_docked_surface_id.wrapping_add(1);
+        let modal = self.open_modal(leaves, config.blocks_agent, ModalOwner::Docked(id));
         self.docked_surfaces.push((
             id,
             DockedSurface {
@@ -827,12 +827,6 @@ impl Ui {
 
     pub fn active_docked_surface(&self) -> Option<ContainerId> {
         self.docked_surfaces.last().map(|(id, _)| *id)
-    }
-
-    pub fn docked_surface_for_modal(&self, modal: ModalId) -> Option<ContainerId> {
-        self.docked_surfaces
-            .iter()
-            .find_map(|(id, surface)| (surface.modal == modal).then_some(*id))
     }
 
     fn docked_surface_mut(&mut self, id: ContainerId) -> Option<&mut DockedSurface> {
@@ -908,31 +902,18 @@ impl Ui {
         Some(self.docked_surfaces.remove(index).1)
     }
 
-    /// Register a modal focus scope for windows mounted in the root layout.
-    pub fn modal_open(&mut self, leaves: Vec<WinId>, blocks_agent: bool) -> ModalId {
-        self.open_modal(leaves, blocks_agent, None)
-    }
-
-    fn open_modal(
-        &mut self,
-        leaves: Vec<WinId>,
-        blocks_agent: bool,
-        overlay: Option<OverlayId>,
-    ) -> ModalId {
+    fn open_modal(&mut self, leaves: Vec<WinId>, blocks_agent: bool, owner: ModalOwner) -> ModalId {
         let id = ModalId(self.next_modal_id);
         self.next_modal_id += 1;
-        let initial_focus = self.modal_focus_target(&leaves);
         self.modals.push((
             id,
             modal::Modal {
                 leaves,
                 blocks_agent,
-                overlay,
+                owner,
             },
         ));
-        if let Some(win) = initial_focus {
-            self.set_focus(win);
-        }
+        self.focus_active_modal();
         id
     }
 
@@ -970,8 +951,19 @@ impl Ui {
             .find_map(|(mid, modal)| (*mid == id).then_some(modal))
     }
 
+    /// Modal presentation currently above the others. Floating modal overlays
+    /// paint above root-docked modals and retain their normal overlay z-order;
+    /// root-docked modals fall back to opening order.
     pub fn active_modal(&self) -> Option<ModalId> {
-        self.modals.last().map(|(id, _)| *id)
+        self.overlays_in_z_order()
+            .into_iter()
+            .rev()
+            .find_map(|(overlay, _)| self.modal_for_overlay(overlay))
+            .or_else(|| {
+                self.modals.iter().rev().find_map(|(id, modal)| {
+                    matches!(modal.owner, ModalOwner::Docked(_)).then_some(*id)
+                })
+            })
     }
 
     pub fn focused_modal(&self) -> Option<ModalId> {
@@ -988,8 +980,10 @@ impl Ui {
             .is_some_and(|modal| modal.blocks_agent)
     }
 
-    pub fn modal_overlay(&self, id: ModalId) -> Option<OverlayId> {
-        self.modal(id).and_then(|modal| modal.overlay)
+    pub fn active_modal_owner(&self) -> Option<ModalOwner> {
+        self.active_modal()
+            .and_then(|id| self.modal(id))
+            .map(|modal| modal.owner)
     }
 
     pub fn modal_leaves(&self, id: ModalId) -> Option<&[WinId]> {
@@ -999,7 +993,7 @@ impl Ui {
     fn modal_for_overlay(&self, overlay: OverlayId) -> Option<ModalId> {
         self.modals
             .iter()
-            .find_map(|(id, modal)| (modal.overlay == Some(overlay)).then_some(*id))
+            .find_map(|(id, modal)| (modal.owner == ModalOwner::Overlay(overlay)).then_some(*id))
     }
 
     pub fn sync_overlay_modal(&mut self, overlay: OverlayId) {
@@ -1027,7 +1021,7 @@ impl Ui {
             }
             (true, None) => {
                 if !leaves.is_empty() {
-                    self.open_modal(leaves, blocks_agent, Some(overlay));
+                    self.open_modal(leaves, blocks_agent, ModalOwner::Overlay(overlay));
                 }
             }
             (false, Some(id)) => {
@@ -1035,6 +1029,7 @@ impl Ui {
             }
             (false, None) => {}
         }
+        self.focus_active_modal();
     }
 
     pub fn focus_active_modal(&mut self) -> bool {
@@ -1065,7 +1060,7 @@ impl Ui {
             .collect::<Vec<_>>();
         self.overlays.push((id, overlay));
         if modal && !leaves.is_empty() {
-            self.open_modal(leaves, blocks_agent, Some(id));
+            self.open_modal(leaves, blocks_agent, ModalOwner::Overlay(id));
         }
         id
     }
@@ -1105,16 +1100,19 @@ impl Ui {
                         || self.decoration_for_leaf(prior).is_some()
                     {
                         self.focus = Some(prior);
-                        return Some(removed);
+                        break;
                     }
                     if self.splits().contains_leaf(prior)
                         && self.wins.get(&prior).is_some_and(|w| w.accepts_focus())
                     {
                         self.focus = Some(prior);
-                        return Some(removed);
+                        break;
                     }
                 }
             }
+        }
+        if self.active_modal().is_some() {
+            self.focus_active_modal();
         }
         Some(removed)
     }
@@ -1258,9 +1256,10 @@ impl Ui {
     /// Overlay backing the active modal, if the modal is floating rather than
     /// mounted in the root layout.
     pub fn active_modal_overlay(&self) -> Option<OverlayId> {
-        self.active_modal()
-            .and_then(|id| self.modal(id))
-            .and_then(|modal| modal.overlay)
+        match self.active_modal_owner() {
+            Some(ModalOwner::Overlay(overlay)) => Some(overlay),
+            Some(ModalOwner::Docked(_)) | None => None,
+        }
     }
 
     /// Overlay whose layout contains the currently-focused window, if any.
@@ -2707,8 +2706,11 @@ impl Ui {
     /// Raise `id` above all other overlays' `z`. Called on any Down inside an overlay.
     fn raise_overlay_to_front(&mut self, id: OverlayId) {
         let max_z = self.overlays.iter().map(|(_, o)| o.z).max().unwrap_or(0);
-        if let Some((_, ov)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id) {
-            ov.z = max_z.saturating_add(1);
+        if let Some((_, overlay)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id) {
+            overlay.z = max_z.saturating_add(1);
+        }
+        if self.modal_for_overlay(id).is_some() {
+            self.focus_active_modal();
         }
     }
 
@@ -3076,7 +3078,7 @@ impl Ui {
         self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
         // Floating overlays retain their historical close-on-unhandled-dismiss
         // behavior. Root dialogs close through their Lua lifecycle callback.
-        if let Some(overlay) = modal.overlay {
+        if let ModalOwner::Overlay(overlay) = modal.owner {
             if self.modal_for_overlay(overlay).is_some() {
                 let _ = self.overlay_close(overlay);
             }
@@ -4366,15 +4368,59 @@ mod tests {
     }
 
     #[test]
-    fn active_modal_returns_topmost_modal() {
+    fn active_modal_overlay_follows_visual_z_order() {
         let mut ui = make_ui();
-        let _bg = ui.overlay_open(stub_overlay().with_z(100)); // higher z but non-modal
-        let m_low = ui.overlay_open(stub_overlay().with_z(10).modal(true));
-        let m_mid = ui.overlay_open(stub_overlay().with_z(50).modal(true));
-        assert_eq!(ui.active_modal_overlay(), Some(m_mid));
-        // Closing the topmost modal falls back to the next.
-        ui.overlay_close(m_mid);
-        assert_eq!(ui.active_modal_overlay(), Some(m_low));
+        let high_win = WinId(98);
+        let low_win = WinId(99);
+        make_split(&mut ui, high_win);
+        make_split(&mut ui, low_win);
+        let high = ui.overlay_open(
+            Overlay::new(LayoutTree::leaf(high_win), layout::Anchor::ScreenCenter)
+                .with_z(100)
+                .modal(true),
+        );
+        let low = ui.overlay_open(
+            Overlay::new(LayoutTree::leaf(low_win), layout::Anchor::ScreenCenter)
+                .with_z(10)
+                .modal(true),
+        );
+
+        assert_eq!(ui.active_modal_overlay(), Some(high));
+        assert_eq!(ui.focus(), Some(high_win));
+
+        ui.raise_overlay_to_front(low);
+        assert_eq!(ui.active_modal_overlay(), Some(low));
+        assert_eq!(ui.focus(), Some(low_win));
+
+        ui.overlay_close(low);
+        assert_eq!(ui.active_modal_overlay(), Some(high));
+        assert_eq!(ui.focus(), Some(high_win));
+    }
+
+    #[test]
+    fn modal_overlay_stays_active_above_later_docked_modal() {
+        let mut ui = make_ui();
+        let overlay = ui.overlay_open(stub_overlay().modal(true));
+        let (_, docked) = ui.docked_surface_open(
+            LayoutTree::leaf(WinId(100)),
+            vec![WinId(100)],
+            DockedSurfaceConfig {
+                height: Constraint::Length(1),
+                min_height: None,
+                max_height: None,
+                resize: ResizeConfig::none(),
+                fit_reserved_rows: 0,
+                blocks_agent: false,
+            },
+        );
+
+        assert_eq!(ui.active_modal_overlay(), Some(overlay));
+        ui.overlay_close(overlay);
+        assert_eq!(ui.active_modal(), Some(docked));
+        assert_eq!(
+            ui.active_modal_owner(),
+            Some(ModalOwner::Docked(ContainerId(1)))
+        );
     }
 
     #[test]

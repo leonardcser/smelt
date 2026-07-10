@@ -84,12 +84,12 @@ impl Natural for LuaMeasureNatural {
     }
 }
 
-/// A node in an overlay's layout tree. Built up in Lua via the layout
-/// constructors and consumed by `smelt.overlay.new`.
+/// A layout node built in Lua and resolved by the host for root layouts,
+/// dialogs, overlays, and decorations.
 #[derive(Clone)]
 pub(crate) enum LayoutNode {
-    /// Opaque host-owned container placed by the main layout composer.
-    Surface { id: crate::smelt_edit::ContainerId },
+    /// Opaque host-owned transcript-dialog stage placed by the main layout composer.
+    DialogStage { id: crate::smelt_edit::ContainerId },
     /// A window/paint id leaf. Resolution to `WinId` vs `PaintId` happens at
     /// `overlay.open` time via `resolve_leaf_id`.
     Leaf {
@@ -107,6 +107,26 @@ pub(crate) enum LayoutNode {
         chrome: NodeChrome,
         gap: u16,
     },
+}
+
+impl LayoutNode {
+    pub(crate) fn dialog_stage_counts(
+        &self,
+        active: Option<crate::smelt_edit::ContainerId>,
+    ) -> (usize, usize) {
+        match self {
+            Self::DialogStage { id } => (usize::from(active == Some(*id)), 1),
+            Self::Leaf { .. } => (0, 0),
+            Self::Container { items, .. } => {
+                items
+                    .iter()
+                    .fold((0, 0), |(active_count, total_count), item| {
+                        let (item_active, item_total) = item.node.dialog_stage_counts(active);
+                        (active_count + item_active, total_count + item_total)
+                    })
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -348,16 +368,15 @@ pub(crate) fn build_layout_tree(
     window_leaves: &mut Vec<crate::smelt_edit::WinId>,
 ) -> Result<(Constraint, LayoutTree), String> {
     match node {
-        LayoutNode::Surface { id } => {
-            let surface = app
+        LayoutNode::DialogStage { id } => {
+            let modal = app
                 .ui
                 .docked_surface(*id)
-                .ok_or_else(|| format!("layout references missing docked surface {}", id.0))?;
-            let modal = surface.modal();
+                .map(crate::smelt_edit::DockedSurface::modal)
+                .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?;
             let tree = app
-                .ui
-                .docked_surface_layout(*id)
-                .ok_or_else(|| format!("layout references missing docked surface {}", id.0))?;
+                .docked_dialog_stage_layout(*id)
+                .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?;
             if let Some(leaves) = app.ui.modal_leaves(modal) {
                 window_leaves.extend_from_slice(leaves);
             }

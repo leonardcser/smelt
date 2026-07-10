@@ -400,27 +400,8 @@ impl TuiApp {
         prompt_input_rows: u16,
     ) -> crate::smelt_edit::LayoutTree {
         let content = if let Some(id) = self.active_docked_dialog() {
-            let expanded = self.ui.docked_surface(id).map(|dialog| dialog.expanded());
-            let height = self.ui.docked_surface_height(id);
-            let dialog_tree = self.ui.docked_surface_layout(id);
-            match (expanded, height, dialog_tree) {
-                (Some(expanded), Some(height), Some(dialog_tree)) => {
-                    crate::smelt_edit::LayoutTree::vbox(vec![
-                        (
-                            if expanded {
-                                crate::smelt_edit::Constraint::Length(
-                                    crate::app::DOCKED_DIALOG_TRANSCRIPT_ROWS,
-                                )
-                            } else {
-                                crate::smelt_edit::Constraint::Fill
-                            },
-                            crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
-                        ),
-                        (height, dialog_tree),
-                    ])
-                }
-                _ => crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
-            }
+            self.docked_dialog_stage_layout(id)
+                .unwrap_or_else(|| crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN))
         } else {
             layout::seed_layout_tree(prompt_input_rows)
         };
@@ -441,20 +422,15 @@ impl TuiApp {
     /// `smelt.ui.layout.set(fn)`. Returns `None` when no composer is
     /// registered, the resolved function is missing/invalid, the
     /// callback errors, or the returned userdata isn't a `LuaUiLayout`.
-    /// The hardcoded fallback in `build_layout_tree` runs in any
-    /// `None` case so the screen stays usable when a plugin is buggy.
+    /// [`Self::fallback_main_layout`] runs in any `None` case so the screen
+    /// stays usable when a plugin is buggy.
     fn invoke_lua_layout_composer(
         &mut self,
         term_w: u16,
         term_h: u16,
         prompt_input_rows: u16,
     ) -> Option<crate::smelt_edit::LayoutTree> {
-        let dialog = if let Some(id) = self.active_docked_dialog() {
-            let expanded = self.ui.docked_surface(id)?.expanded();
-            Some((id, self.ui.docked_surface_height(id)?, expanded))
-        } else {
-            None
-        };
+        let dialog = self.active_docked_dialog();
         let lua = self.lua.lua();
         let shared = self.lua.shared();
         let composer_func: Option<mlua::Function> = {
@@ -467,19 +443,13 @@ impl TuiApp {
         let _ = state.set("term_w", term_w);
         let _ = state.set("term_h", term_h);
         let _ = state.set("prompt_input_rows", prompt_input_rows);
-        if let Some((id, height, expanded)) = dialog {
+        if let Some(id) = dialog {
             let layout = lua
                 .create_userdata(crate::lua::api::overlay_layout::LuaUiLayout(
-                    crate::lua::api::overlay_layout::LayoutNode::Surface { id },
+                    crate::lua::api::overlay_layout::LayoutNode::DialogStage { id },
                 ))
                 .ok()?;
             let _ = state.set("dialog", layout);
-            let _ = state.set("dialog_height", constraint_to_lua(lua, height).ok()?);
-            let _ = state.set("dialog_expanded", expanded);
-            let _ = state.set(
-                "dialog_transcript_rows",
-                crate::app::DOCKED_DIALOG_TRANSCRIPT_ROWS,
-            );
         }
         let result: mlua::Result<mlua::AnyUserData> = func.call((state,));
         let ud = match result {
@@ -495,22 +465,27 @@ impl TuiApp {
             .ok()?
             .0
             .clone();
-        let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
-        match crate::lua::api::overlay_layout::build_layout_tree(self, &node, &mut window_leaves) {
-            Ok((_constraint, tree)) => {
-                let Some(dialog) = dialog else {
-                    return Some(tree);
-                };
-                if tree.contains_container(dialog.0) {
-                    return Some(tree);
-                }
-
+        let (active_stage_count, total_stage_count) = node.dialog_stage_counts(dialog);
+        match dialog {
+            Some(_) if active_stage_count != 1 || total_stage_count != 1 => {
+                self.lua.record_error(format!(
+                    "smelt.ui.layout composer must include only the active dialog stage exactly once (found {active_stage_count} active, {total_stage_count} total); using the safe fallback layout"
+                ));
+                return None;
+            }
+            None if total_stage_count != 0 => {
                 self.lua.record_error(
-                    "smelt.ui.layout composer omitted the active dialog; using the safe fallback layout"
+                    "smelt.ui.layout composer included a dialog stage when no dialog is active; using the safe fallback layout"
                         .into(),
                 );
-                None
+                return None;
             }
+            Some(_) | None => {}
+        }
+
+        let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
+        match crate::lua::api::overlay_layout::build_layout_tree(self, &node, &mut window_leaves) {
+            Ok((_constraint, tree)) => Some(tree),
             Err(e) => {
                 self.lua
                     .record_error(format!("smelt.ui.layout composer tree: {e}"));
@@ -574,31 +549,6 @@ impl TuiApp {
                 }
             }
         }
-    }
-}
-
-fn constraint_to_lua(
-    lua: &mlua::Lua,
-    constraint: crate::smelt_edit::Constraint,
-) -> mlua::Result<mlua::Value> {
-    use crate::smelt_edit::Constraint;
-
-    match constraint {
-        Constraint::Length(value) => Ok(mlua::Value::Integer(value.into())),
-        Constraint::Percentage(value) => {
-            Ok(mlua::Value::String(lua.create_string(format!("{value}%"))?))
-        }
-        Constraint::Ratio(numerator, denominator) => Ok(mlua::Value::String(
-            lua.create_string(format!("ratio:{numerator}/{denominator}"))?,
-        )),
-        Constraint::Min(value) => Ok(mlua::Value::String(
-            lua.create_string(format!("min:{value}"))?,
-        )),
-        Constraint::Max(value) => Ok(mlua::Value::String(
-            lua.create_string(format!("max:{value}"))?,
-        )),
-        Constraint::Fill => Ok(mlua::Value::String(lua.create_string("fill")?)),
-        Constraint::Fit => Ok(mlua::Value::String(lua.create_string("fit")?)),
     }
 }
 
