@@ -10,7 +10,7 @@ pub fn state_dir() -> PathBuf {
     engine::state_dir()
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ProviderConfig {
     pub name: Option<String>,
     pub provider_type: Option<String>,
@@ -61,12 +61,33 @@ pub struct SettingDecl {
     /// Closed set of accepted values for `String` settings; `None`
     /// means free-form. Ignored for non-`String` kinds.
     pub choices: Option<&'static [&'static str]>,
+    /// Runtime work required when the resolved value changes.
+    pub effect: SettingEffect,
     /// Project the typed field to a polymorphic `SettingValue`.
     pub read: fn(&ResolvedSettings) -> SettingValue,
     /// Assign from a polymorphic `SettingValue`. Returns `false` on
     /// kind mismatch (the caller has already gated on kind, so this
     /// only fires for schema bugs).
     pub write: fn(&mut ResolvedSettings, &SettingValue) -> bool,
+}
+
+/// Runtime effect category for a resolved setting change. The settings macro
+/// has no fallback arm, so adding a setting without classifying it fails to
+/// compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingEffect {
+    Input,
+    Render,
+    Prediction,
+    FileIcons,
+    TerminalTitle,
+    Permissions,
+    AutoReload,
+    FutureRequests,
+    Compaction,
+    AutoContinue,
+    WebSearch,
+    Upgrade,
 }
 
 /// One declaration per setting; the macro emits the `ResolvedSettings`
@@ -87,11 +108,11 @@ macro_rules! settings {
             $(, choices: [$($choice:literal),* $(,)?])?
         );* $(;)?
     ) => {
-        /// Fully resolved settings. Lives on `AppConfig` so runtime
-        /// reads/writes hit the live struct; persistence is not a
+        /// Fully resolved settings. Lives on `RuntimeState` so runtime
+        /// reads hit one authoritative snapshot; persistence is not a
         /// concern of this type - config is `init.lua`, not a JSON
         /// registry.
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq)]
         pub struct ResolvedSettings {
             $(
                 $(#[doc = $doc])*
@@ -113,6 +134,7 @@ macro_rules! settings {
                 kind: SettingKind::$kind,
                 doc: concat!($($doc, " "),*),
                 choices: settings!(@choices $($($choice),*)?),
+                effect: settings!(@effect $key),
                 read: |s| settings!(@read $kind, s.$key),
                 write: |s, v| settings!(@write $kind, s.$key, v),
             },)*
@@ -138,6 +160,33 @@ macro_rules! settings {
     (@write String, $f:expr, $v:expr) => {
         if let SettingValue::String(t) = $v { $f = t.clone(); true } else { false }
     };
+    (@effect vim) => { SettingEffect::Input };
+    (@effect system_clipboard) => { SettingEffect::Input };
+    (@effect show_tps) => { SettingEffect::Render };
+    (@effect show_tokens) => { SettingEffect::Render };
+    (@effect show_cost) => { SettingEffect::Render };
+    (@effect show_slug) => { SettingEffect::Render };
+    (@effect show_tips) => { SettingEffect::Render };
+    (@effect show_prediction) => { SettingEffect::Prediction };
+    (@effect file_icons) => { SettingEffect::FileIcons };
+    (@effect file_icon_colors) => { SettingEffect::FileIcons };
+    (@effect terminal_title) => { SettingEffect::TerminalTitle };
+    (@effect restrict_to_workspace) => { SettingEffect::Permissions };
+    (@effect worktree_root) => { SettingEffect::Permissions };
+    (@effect auto_reload) => { SettingEffect::AutoReload };
+    (@effect redact_secrets) => { SettingEffect::FutureRequests };
+    (@effect fast_mode) => { SettingEffect::FutureRequests };
+    (@effect cache_ttl_long) => { SettingEffect::FutureRequests };
+    (@effect request_audit) => { SettingEffect::FutureRequests };
+    (@effect auto_compact) => { SettingEffect::Compaction };
+    (@effect compact_threshold) => { SettingEffect::Compaction };
+    (@effect compact_keep_recent_groups) => { SettingEffect::Compaction };
+    (@effect auto_continue) => { SettingEffect::AutoContinue };
+    (@effect web_search_provider) => { SettingEffect::WebSearch };
+    (@effect brave_search_api_key_env) => { SettingEffect::WebSearch };
+    (@effect autoupgrade) => { SettingEffect::Upgrade };
+    (@effect autoupgrade_channel) => { SettingEffect::Upgrade };
+    (@effect autoupgrade_interval) => { SettingEffect::Upgrade };
 }
 
 settings! {
@@ -228,6 +277,9 @@ impl ResolvedSettings {
     /// allowed-choice list.
     pub fn set(&mut self, key: &str, value: &SettingValue) -> Result<(), String> {
         let decl = setting_decl(key).ok_or_else(|| format!("unknown setting '{key}'"))?;
+        if matches!(value, SettingValue::Number(number) if !number.is_finite()) {
+            return Err(format!("setting '{key}' must be finite"));
+        }
         if value.kind() != decl.kind {
             return Err(format!(
                 "setting '{key}' expects {:?}, got {:?}",
@@ -256,7 +308,7 @@ impl ResolvedSettings {
 /// Startup defaults for new sessions, set from Lua via `smelt.defaults{...}`.
 /// Each field is the "no recent memory" fallback: the last-used pick
 /// (when `smelt.remember[k]` is on) and CLI flags both win.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DefaultsConfig {
     /// Starting model reference (`"provider/model"` or bare model name).
     pub model: Option<String>,
@@ -270,7 +322,7 @@ pub struct DefaultsConfig {
 /// flip any to `false` from init.lua via `smelt.remember.set({...})`
 /// to make that key always start from `smelt.defaults` regardless of
 /// what the user picked in the previous session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RememberConfig {
     pub model: bool,
     pub mode: bool,
@@ -287,7 +339,7 @@ impl Default for RememberConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
     pub settings: ResolvedSettings,
@@ -298,7 +350,7 @@ pub struct Config {
 }
 
 /// A resolved model entry combining provider connection info with model config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedModel {
     /// Display key: "provider_name/model_name"
     pub key: String,
@@ -689,5 +741,55 @@ mod tests {
         assert_eq!(resolved[0].api_base, "https://api.z.ai/api/coding/paas/v4");
         assert_eq!(resolved[1].key, "box/Qwen3.5-122B-A10B-Q4_0");
         assert_eq!(resolved[1].api_base, "https://llm.box.home.arpa");
+    }
+
+    #[test]
+    fn every_setting_has_the_expected_runtime_effect_classification() {
+        let classified: std::collections::HashMap<_, _> = SETTINGS
+            .iter()
+            .map(|setting| (setting.key, setting.effect))
+            .collect();
+        let expected = [
+            ("vim", SettingEffect::Input),
+            ("system_clipboard", SettingEffect::Input),
+            ("show_tps", SettingEffect::Render),
+            ("show_tokens", SettingEffect::Render),
+            ("show_cost", SettingEffect::Render),
+            ("show_slug", SettingEffect::Render),
+            ("show_tips", SettingEffect::Render),
+            ("show_prediction", SettingEffect::Prediction),
+            ("file_icons", SettingEffect::FileIcons),
+            ("file_icon_colors", SettingEffect::FileIcons),
+            ("terminal_title", SettingEffect::TerminalTitle),
+            ("restrict_to_workspace", SettingEffect::Permissions),
+            ("worktree_root", SettingEffect::Permissions),
+            ("auto_reload", SettingEffect::AutoReload),
+            ("redact_secrets", SettingEffect::FutureRequests),
+            ("cache_ttl_long", SettingEffect::FutureRequests),
+            ("request_audit", SettingEffect::FutureRequests),
+            ("auto_compact", SettingEffect::Compaction),
+            ("compact_threshold", SettingEffect::Compaction),
+            ("compact_keep_recent_groups", SettingEffect::Compaction),
+            ("auto_continue", SettingEffect::AutoContinue),
+            ("web_search_provider", SettingEffect::WebSearch),
+            ("brave_search_api_key_env", SettingEffect::WebSearch),
+            ("autoupgrade", SettingEffect::Upgrade),
+            ("autoupgrade_channel", SettingEffect::Upgrade),
+            ("autoupgrade_interval", SettingEffect::Upgrade),
+        ];
+
+        assert_eq!(classified.len(), expected.len());
+        for (key, effect) in expected {
+            assert_eq!(classified.get(key), Some(&effect), "{key}");
+        }
+    }
+
+    #[test]
+    fn numeric_settings_reject_non_finite_values() {
+        let mut settings = ResolvedSettings::default();
+        assert_eq!(
+            settings.set("compact_threshold", &SettingValue::Number(f64::NAN)),
+            Err("setting 'compact_threshold' must be finite".into())
+        );
     }
 }

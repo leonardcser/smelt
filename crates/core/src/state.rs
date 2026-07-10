@@ -16,8 +16,8 @@ pub struct Recent {
     pub mode: String,
     #[serde(default)]
     pub selected_model: Option<String>,
-    #[serde(default)]
-    pub reasoning_effort: ReasoningEffort,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 fn recent_path() -> PathBuf {
@@ -129,7 +129,7 @@ pub fn set_selected_model(key: String) {
 
 pub fn set_reasoning_effort(effort: ReasoningEffort) {
     update_recent(|s| {
-        s.reasoning_effort = effort;
+        s.reasoning_effort = Some(effort);
     });
 }
 
@@ -143,6 +143,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::test_util::isolate_xdg_state(dir.path());
         f()
+    }
+
+    #[test]
+    fn reasoning_memory_distinguishes_absent_from_explicit_off() {
+        let absent: Recent = serde_json::from_str("{}").unwrap();
+        let explicit: Recent = serde_json::from_str(r#"{"reasoning_effort":"off"}"#).unwrap();
+
+        assert_eq!(absent.reasoning_effort, None);
+        assert_eq!(explicit.reasoning_effort, Some(ReasoningEffort::Off));
     }
 
     #[test]

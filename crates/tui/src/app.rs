@@ -760,19 +760,19 @@ impl TuiApp {
     pub(crate) fn active_context_token_identity(
         &self,
     ) -> smelt_core::session::ContextTokenIdentity {
+        let active = self.core.config.active_model();
         smelt_core::session::ContextTokenIdentity {
-            model: self.core.config.model.clone(),
-            api_base: self.core.config.api_base.clone(),
-            provider_type: self.core.config.provider_type.clone(),
+            model: active.map(|model| model.model_name.clone()),
+            api_base: active.map(|model| model.api_base.clone()),
+            provider_type: active.map(|model| model.provider_type.clone()),
         }
     }
 
     pub(crate) fn active_provider_supports_mid_turn_reasoning_changes(&self) -> bool {
-        smelt_provider::ProviderKind::from_config_and_url(
-            &self.core.config.provider_type,
-            &self.core.config.api_base,
-        )
-        .supports_mid_turn_reasoning_changes()
+        self.core.config.active_model().is_some_and(|model| {
+            smelt_provider::ProviderKind::from_config_and_url(&model.provider_type, &model.api_base)
+                .supports_mid_turn_reasoning_changes()
+        })
     }
 
     pub(crate) fn reasoning_effort_pending(&self) -> bool {
@@ -1162,37 +1162,44 @@ impl TuiApp {
         });
     }
 
-    pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
+    pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) -> Result<(), QueuedInput> {
         self.clear_prompt_prediction();
-        match queued {
+        let retry = queued.clone();
+        let started = match queued {
             QueuedInput::Request(req) => {
                 let req = *req;
                 match req.turn_options {
                     QueuedTurnOptions::CustomCommand { overrides } => {
                         let text = req.content.text_content().into_owned();
-                        let turn = self.begin_command_request_turn(
+                        self.agent = self.begin_command_request_turn(
                             req.display,
                             text,
                             *overrides,
                             CommandTurnStart::Fresh,
                         );
-                        self.agent = Some(turn);
+                        self.agent.is_some()
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
-                        let turn = self.begin_agent_turn(&req.display, req.content);
-                        self.agent = Some(turn);
+                        self.agent = self.begin_agent_turn(&req.display, req.content);
+                        self.agent.is_some()
                     }
-                    QueuedTurnOptions::Default => {}
+                    QueuedTurnOptions::Default => true,
                 }
             }
             QueuedInput::Command { line, .. } => {
                 self.run_queued_command_line(&line);
+                true
             }
             QueuedInput::ProcessStatus(note) if !note.text().is_empty() => {
-                let turn = self.begin_process_status_turn(note);
-                self.agent = Some(turn);
+                self.agent = self.begin_process_status_turn(note);
+                self.agent.is_some()
             }
-            QueuedInput::ProcessStatus(_) => {}
+            QueuedInput::ProcessStatus(_) => true,
+        };
+        if started {
+            Ok(())
+        } else {
+            Err(retry)
         }
     }
 
@@ -1200,11 +1207,13 @@ impl TuiApp {
         if self.prompt_input_is_busy() || self.queued_inputs.is_empty() {
             return false;
         }
-        let Some(queued) = self.queued_inputs.pop_next_for_turn() else {
+        let Some((stage, queued)) = self.queued_inputs.pop_next_for_turn_with_stage() else {
             return false;
         };
         let was_animating = self.working.is_animating();
-        self.start_queued_input(queued);
+        if let Err(queued) = self.start_queued_input(queued) {
+            self.queued_inputs.push_front(stage, queued);
+        }
         if was_animating && self.agent.is_none() {
             self.working.finish(smelt_core::working::TurnOutcome::Done);
         }
@@ -1212,18 +1221,24 @@ impl TuiApp {
     }
 
     pub(crate) fn apply_context_window_update(&mut self, update: ContextWindowUpdate) {
+        let matches_active = self.core.config.active_model().is_some_and(|model| {
+            update.model == model.model_name
+                && update.api_base == model.api_base
+                && update.provider_type == model.provider_type
+        });
         if update.request_id == self.context_window_request_id
-            && update.model == self.core.config.model
-            && update.api_base == self.core.config.api_base
-            && update.provider_type == self.core.config.provider_type
+            && matches_active
+            && self.core.config.context_window != update.value
         {
+            self.core.config.revision = self.core.config.revision.wrapping_add(1);
             self.core.config.context_window = update.value;
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        config: smelt_core::AppConfig,
+        config: smelt_core::RuntimeState,
+        startup_overrides: smelt_core::StartupOverrides,
         mut engine: EngineHandle,
         permissions: Arc<smelt_core::permissions::Permissions>,
         shared_session: Arc<Mutex<Option<SharedSessionState>>>,
@@ -1253,7 +1268,7 @@ impl TuiApp {
         let cwd_worktree = cwd_context.worktree_name.unwrap_or_default();
         let cwd_managed_worktree = cwd_context.managed_worktree;
 
-        let app_config = config;
+        let runtime_state = config;
 
         let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
         let prompt_placeholder_display = Arc::new(Mutex::new(None));
@@ -1370,8 +1385,8 @@ impl TuiApp {
 
         let inline_options = smelt_core::content::highlight::InlineOptions {
             file_icons: smelt_core::content::file_icons::FileIconOptions::new(
-                app_config.settings.file_icons,
-                app_config.settings.file_icon_colors,
+                runtime_state.settings.file_icons,
+                runtime_state.settings.file_icon_colors,
                 ui.theme().is_light(),
                 Some(std::path::PathBuf::from(&cwd)),
             ),
@@ -1382,10 +1397,11 @@ impl TuiApp {
         resume_preview_cache.set_inline_options(inline_options);
 
         let working_clock = Arc::clone(&clock);
-        let initial_agent_mode = app_config.mode.clone();
-        let initial_reasoning_effort = app_config.reasoning_effort;
+        let initial_agent_mode = runtime_state.mode.clone();
+        let initial_reasoning_effort = runtime_state.reasoning_effort;
         let core = smelt_core::Core::new(
-            app_config,
+            runtime_state,
+            startup_overrides,
             engine,
             FrontendKind::Tui,
             permissions,
@@ -1507,7 +1523,10 @@ impl TuiApp {
             self.prompt_inputs.system_prompt_override.as_deref(),
             engine::SystemPromptBehavior::Interactive,
             engine::SystemPromptCapabilities::from_tool_calling(
-                self.core.config.model_config.tool_calling.unwrap_or(true),
+                self.core
+                    .config
+                    .active_model()
+                    .is_none_or(|model| model.config.tool_calling()),
             ),
             self.prompt_inputs.instructions.as_deref(),
             self.prompt_inputs.skill_section.as_deref(),
@@ -2236,13 +2255,15 @@ impl TuiApp {
     }
 
     pub(crate) fn warn_if_api_base_normalized(&mut self) {
-        let Some(hint) = smelt_provider::api_base_normalization_hint(&self.core.config.api_base)
-        else {
+        let Some(active) = self.core.config.active_model() else {
+            return;
+        };
+        let Some(hint) = smelt_provider::api_base_normalization_hint(&active.api_base) else {
             return;
         };
         let key = format!(
             "{}\n{}\n{}",
-            self.core.config.provider_type, hint.original, hint.normalized
+            active.provider_type, hint.original, hint.normalized
         );
         if !self.api_base_normalization_warnings.insert(key) {
             return;
@@ -2624,8 +2645,7 @@ impl TuiApp {
                 }
             } else {
                 let content = Content::text(msg.clone());
-                let turn = self.begin_agent_turn(&msg, content);
-                self.agent = Some(turn);
+                self.agent = self.begin_agent_turn(&msg, content);
             }
         }
 
@@ -3061,13 +3081,18 @@ mod tests {
         assert_eq!(TuiApp::worktree_display_path(&ctx), ".worktrees/test");
     }
 
+    fn set_active_model(app: &mut TuiApp, model: &str, api_base: &str, provider_type: &str) {
+        let active = app.core.config.active_model_mut().unwrap();
+        active.model_name = model.into();
+        active.api_base = api_base.into();
+        active.provider_type = provider_type.into();
+    }
+
     #[test]
     fn stale_context_window_update_does_not_overwrite_current_generation() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.context_window_request_id = 2;
-        app.app.core.config.model = "gpt-5.5".into();
-        app.app.core.config.api_base = "https://codex.example".into();
-        app.app.core.config.provider_type = "codex".into();
+        set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
         app.app.core.config.context_window = Some(272_000);
 
         app.app.apply_context_window_update(ContextWindowUpdate {
@@ -3085,9 +3110,12 @@ mod tests {
     fn current_context_window_update_applies_even_when_value_is_none() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.context_window_request_id = 2;
-        app.app.core.config.model = "Qwen/Qwen3.6-27B".into();
-        app.app.core.config.api_base = "https://openai-compatible.example".into();
-        app.app.core.config.provider_type = "openai-compatible".into();
+        set_active_model(
+            &mut app.app,
+            "Qwen/Qwen3.6-27B",
+            "https://openai-compatible.example",
+            "openai-compatible",
+        );
         app.app.core.config.context_window = Some(272_000);
 
         app.app.apply_context_window_update(ContextWindowUpdate {
@@ -3105,9 +3133,7 @@ mod tests {
     fn matching_request_id_with_stale_model_identity_does_not_apply() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.context_window_request_id = 2;
-        app.app.core.config.model = "gpt-5.5".into();
-        app.app.core.config.api_base = "https://codex.example".into();
-        app.app.core.config.provider_type = "codex".into();
+        set_active_model(&mut app.app, "gpt-5.5", "https://codex.example", "codex");
         app.app.core.config.context_window = Some(272_000);
 
         app.app.apply_context_window_update(ContextWindowUpdate {

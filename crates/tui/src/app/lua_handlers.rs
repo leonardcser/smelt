@@ -198,13 +198,57 @@ impl TuiApp {
     }
 
     fn reconcile_lua_runtime_config(&mut self) {
+        let desired = self.lua.to_config();
+        let available_models = desired.resolve_models();
         let modes = self.lua.mode_names();
-        if !modes.is_empty() {
-            if !self.core.config.cli_mode_cycle_override {
-                self.core.config.mode_cycle = modes.clone();
+        let selections = smelt_core::RuntimeSelections::default();
+        let resolved = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
+            config: &desired,
+            startup: &self.core.startup_overrides,
+            available_models: &available_models,
+            registered_modes: &modes,
+            selections: &selections,
+            previous: Some(&self.core.config),
+            headless: false,
+        });
+        match resolved {
+            Ok(mut next) if next != self.core.config => {
+                let old_settings = self.core.config.settings.clone();
+                let old_mode = self.core.config.mode.clone();
+                let old_reasoning = self.core.config.reasoning_effort;
+                let old_model = self.core.config.active_model().cloned();
+                next.revision = self.core.config.revision.wrapping_add(1);
+                self.core.config = next;
+                self.apply_settings_effects(&old_settings);
+                if self.core.config.mode != old_mode {
+                    self.core.signals.set_dyn(
+                        "agent_mode",
+                        std::rc::Rc::new(self.core.config.mode.as_str().to_string()),
+                    );
+                }
+                if self.core.config.reasoning_effort != old_reasoning {
+                    self.core.signals.set_dyn(
+                        "reasoning",
+                        std::rc::Rc::new(self.core.config.reasoning_effort.label().to_string()),
+                    );
+                }
+                if self.core.config.active_model() != old_model.as_ref() {
+                    self.core.signals.set_dyn(
+                        "model",
+                        std::rc::Rc::new(
+                            self.core
+                                .config
+                                .active_model()
+                                .map(|model| model.key.clone()),
+                        ),
+                    );
+                    self.refresh_context_window();
+                    self.warn_if_api_base_normalized();
+                }
             }
-            if !modes.contains(&self.core.config.mode) {
-                self.set_mode(protocol::AgentMode::normal(), false);
+            Ok(_) => {}
+            Err(error) => {
+                self.notify_error_sticky(format!("runtime config reconciliation failed: {error}"))
             }
         }
 

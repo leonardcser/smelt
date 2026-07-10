@@ -7,7 +7,6 @@ extern crate self as smelt_core;
 #[global_allocator]
 static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
-pub mod app_config;
 pub mod commands;
 pub mod config;
 pub mod confirms;
@@ -39,6 +38,7 @@ pub mod permissions;
 pub mod process;
 pub mod public_status;
 pub mod runtime;
+pub mod runtime_state;
 pub mod session;
 pub mod session_id;
 pub mod session_runtime;
@@ -73,13 +73,17 @@ pub mod theme {
     pub use smelt_buffer::theme::*;
 }
 
-pub use app_config::AppConfig;
 pub use clipboard::{Clipboard, NullSink, Sink};
 pub(crate) use clipboard::{Osc52Sink, SystemSink};
 pub use engine_client::EngineClient;
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
 pub use runtime::{Core, FrontendKind};
+pub use runtime_state::{
+    managed_model_selection_is_pending, resolve_runtime, ActiveModel, ModelAvailability,
+    ModelSelectionSource, ModelSelectionState, ModelUnavailableReason, ResolveError, RuntimeInputs,
+    RuntimeSelections, RuntimeState, StartupOverrides,
+};
 pub use session::{ContextCheckpoint, Session};
 pub use signals::Signals;
 pub use timers::Timers;

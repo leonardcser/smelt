@@ -35,7 +35,7 @@ pub struct AppStoryCtx {
 
 impl AppStoryCtx {
     pub fn new(name: &str) -> Self {
-        let app = TestApp::builder().build();
+        let app = TestApp::builder().without_model().build();
         let cwd = std::path::Path::new(app.cwd_str());
         let _ = std::fs::create_dir_all(cwd);
         let _ = std::env::set_current_dir(cwd);
@@ -64,6 +64,29 @@ impl AppStoryCtx {
     /// render in stories.
     pub fn set_context_window(&mut self, context_window: Option<u32>) {
         self.app.set_context_window(context_window);
+    }
+
+    /// Install a usable synthetic model for stories that exercise model-backed
+    /// APIs. Other stories intentionally retain the no-model baseline.
+    pub fn use_test_model(&mut self) {
+        let model = smelt_core::config::ResolvedModel {
+            key: "test/test-model".into(),
+            provider_name: "test".into(),
+            model_name: "test-model".into(),
+            api_base: "https://example.invalid/v1".into(),
+            api_key_env: String::new(),
+            provider_type: "openai-compatible".into(),
+            config: protocol::ModelConfig {
+                name: Some("test-model".into()),
+                ..Default::default()
+            },
+        };
+        self.app.app.core.config.available_models = vec![model.clone()];
+        self.app.app.core.config.model_selection = smelt_core::ModelSelectionState {
+            requested_key: Some(model.key.clone()),
+            requested_by: smelt_core::ModelSelectionSource::FirstAvailable,
+            active: Some(smelt_core::ActiveModel::from_resolved(&model)),
+        };
     }
 
     /// Begin an agent turn. Required before `engine(...)` events route

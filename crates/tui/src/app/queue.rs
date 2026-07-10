@@ -108,7 +108,26 @@ impl InputQueues {
     }
 
     pub(crate) fn pop_next_for_turn(&mut self) -> Option<QueuedInput> {
-        self.request.pop_front().or_else(|| self.turn.pop_front())
+        self.pop_next_for_turn_with_stage()
+            .map(|(_, queued)| queued)
+    }
+
+    pub(crate) fn pop_next_for_turn_with_stage(&mut self) -> Option<(QueueStage, QueuedInput)> {
+        self.request
+            .pop_front()
+            .map(|queued| (QueueStage::Request, queued))
+            .or_else(|| {
+                self.turn
+                    .pop_front()
+                    .map(|queued| (QueueStage::Turn, queued))
+            })
+    }
+
+    pub(crate) fn push_front(&mut self, stage: QueueStage, queued: QueuedInput) {
+        match stage {
+            QueueStage::Request => self.request.push_front(queued),
+            QueueStage::Turn => self.turn.push_front(queued),
+        }
     }
 
     pub(crate) fn drain_request_ack(&mut self, count: usize) -> Vec<QueuedInput> {

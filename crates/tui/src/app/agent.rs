@@ -106,8 +106,13 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
+    pub(crate) fn begin_agent_turn(
+        &mut self,
+        display: &str,
+        content: Content,
+    ) -> Option<TurnState> {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
+        let model_target = self.resolve_model_target()?;
         let content = self.expand_at_file_refs(content);
         let text = content.text_content();
         let submitted = match text.trim() {
@@ -118,7 +123,7 @@ impl TuiApp {
         if content.is_empty() {
             self.publish_turn_input(submitted);
             let history = self.model_history_source();
-            return self.dispatch_turn(content, history, None);
+            return Some(self.dispatch_turn(content, history, model_target, None));
         }
         let first_user_message = self
             .core
@@ -136,30 +141,16 @@ impl TuiApp {
         );
         let rewind_block_idx = self.user_turns().last().map(|(idx, _)| *idx);
         self.publish_turn_input(submitted);
-        self.dispatch_turn(content, history, rewind_block_idx)
+        Some(self.dispatch_turn(content, history, model_target, rewind_block_idx))
     }
 
     fn dispatch_turn(
         &mut self,
         content: Content,
         history: protocol::ModelHistorySource,
+        model_target: protocol::ModelTarget,
         rewind_block_idx: Option<usize>,
     ) -> TurnState {
-        let Some(api_key) = self.resolve_api_key() else {
-            {
-                self.working.finish(TurnOutcome::Done);
-            };
-            return TurnState {
-                turn_id: 0,
-                pending: Vec::new(),
-                permissions: self.core.permissions.clone(),
-                rewind_block_idx: None,
-                assistant_output_started: false,
-                _perf: smelt_perf::perf::begin("agent:turn"),
-            };
-        };
-
-        let model_target = self.core.config.model_target(api_key);
         let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(content, None),
@@ -235,7 +226,8 @@ impl TuiApp {
     pub(crate) fn begin_process_status_turn(
         &mut self,
         history_note: protocol::HistoryNote,
-    ) -> TurnState {
+    ) -> Option<TurnState> {
+        let model_target = self.resolve_model_target()?;
         self.invalidate_prompt_prediction();
         self.prepare_user_visible_turn();
         let block = crate::app::history::history_note_to_block(&self.lua, &history_note);
@@ -247,23 +239,8 @@ impl TuiApp {
             }
             self.model_history_source()
         };
-        let api_key = match self.resolve_api_key() {
-            Some(api_key) => api_key,
-            None => {
-                self.working.finish(TurnOutcome::Done);
-                return TurnState {
-                    turn_id: 0,
-                    pending: Vec::new(),
-                    permissions: self.core.permissions.clone(),
-                    rewind_block_idx: None,
-                    assistant_output_started: false,
-                    _perf: smelt_perf::perf::begin("agent:turn"),
-                };
-            }
-        };
-        let model_target = self.core.config.model_target(api_key);
         let request_config = self.core.config.request_runtime_config();
-        self.dispatch_prepared_turn(PreparedTurn {
+        Some(self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::note(history_note),
             history,
             model_target,
@@ -272,7 +249,7 @@ impl TuiApp {
             permission_overrides: None,
             permissions: self.core.permissions.clone(),
             rewind_block_idx: None,
-        })
+        }))
     }
 
     fn custom_command_parts(
@@ -299,7 +276,7 @@ impl TuiApp {
     pub(crate) fn begin_custom_command_turn(
         &mut self,
         cmd: smelt_core::custom_commands::CustomCommand,
-    ) -> TurnState {
+    ) -> Option<TurnState> {
         let (display, evaluated, overrides) = self.custom_command_parts(cmd);
         self.begin_command_request_turn(display, evaluated, overrides, CommandTurnStart::Fresh)
     }
@@ -307,7 +284,7 @@ impl TuiApp {
     pub(crate) fn begin_custom_command_continuation(
         &mut self,
         cmd: smelt_core::custom_commands::CustomCommand,
-    ) -> TurnState {
+    ) -> Option<TurnState> {
         let (display, evaluated, overrides) = self.custom_command_parts(cmd);
         self.begin_command_request_turn(
             display,
@@ -317,17 +294,47 @@ impl TuiApp {
         )
     }
 
+    fn resolve_command_model_target(
+        &mut self,
+        overrides: &smelt_core::custom_commands::CommandOverrides,
+    ) -> Option<protocol::ModelTarget> {
+        let target_model = overrides.model.as_deref();
+        let target_provider = overrides.provider.as_deref();
+        let resolved = match (target_model, target_provider) {
+            (Some(reference), provider) => smelt_core::config::resolve_model_ref_with_provider(
+                &self.core.config.available_models,
+                reference,
+                provider,
+            ),
+            (None, Some(provider)) => smelt_core::config::resolve_provider_ref(
+                &self.core.config.available_models,
+                provider,
+            ),
+            (None, None) => return self.resolve_model_target(),
+        };
+        let resolved = match resolved {
+            Ok(model) => model.clone(),
+            Err(error) => {
+                self.notify_error_sticky(error.to_string());
+                return None;
+            }
+        };
+        let api_key = self.resolve_api_key_for_env(&resolved.api_key_env)?;
+        Some(resolved.target(api_key))
+    }
+
     pub(crate) fn begin_command_request_turn(
         &mut self,
         display: String,
         evaluated: String,
         overrides: smelt_core::custom_commands::CommandOverrides,
         start: CommandTurnStart,
-    ) -> TurnState {
+    ) -> Option<TurnState> {
         let submitted = match evaluated.trim() {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
+        let mut model_target = self.resolve_command_model_target(&overrides)?;
         self.prepare_user_visible_turn();
 
         let history = if !evaluated.is_empty() {
@@ -358,51 +365,6 @@ impl TuiApp {
             None
         };
         self.publish_turn_input(submitted);
-
-        let mut model_target = {
-            let target_model = overrides.model.as_deref();
-            let target_provider = overrides.provider.as_deref();
-            let resolved = match (target_model, target_provider) {
-                (Some(reference), provider) => {
-                    match smelt_core::config::resolve_model_ref_with_provider(
-                        &self.core.config.available_models,
-                        reference,
-                        provider,
-                    ) {
-                        Ok(model) => Some(model.clone()),
-                        Err(err) => {
-                            self.notify_error_sticky(err.to_string());
-                            None
-                        }
-                    }
-                }
-                (None, Some(provider)) => {
-                    match smelt_core::config::resolve_provider_ref(
-                        &self.core.config.available_models,
-                        provider,
-                    ) {
-                        Ok(model) => Some(model.clone()),
-                        Err(err) => {
-                            self.notify_error_sticky(err.to_string());
-                            None
-                        }
-                    }
-                }
-                (None, None) => None,
-            };
-            match resolved {
-                Some(resolved) => {
-                    let api_key = self
-                        .resolve_api_key_for_env(&resolved.api_key_env)
-                        .unwrap_or_default();
-                    resolved.target(api_key)
-                }
-                None => {
-                    let api_key = self.resolve_api_key().unwrap_or_default();
-                    self.core.config.model_target(api_key)
-                }
-            }
-        };
 
         let reasoning = overrides
             .reasoning_effort
@@ -474,7 +436,7 @@ impl TuiApp {
         }
 
         let request_config = self.core.config.request_runtime_config();
-        self.dispatch_prepared_turn(PreparedTurn {
+        Some(self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
             history,
             model_target,
@@ -483,7 +445,7 @@ impl TuiApp {
             permission_overrides,
             permissions,
             rewind_block_idx,
-        })
+        }))
     }
 
     fn record_finished_turn_state(&mut self, ui_meta: protocol::TurnMeta) {
@@ -713,9 +675,27 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn resolve_api_key(&mut self) -> Option<String> {
-        let key_env = self.core.config.api_key_env.clone();
-        self.resolve_api_key_for_env(&key_env)
+    pub(crate) fn resolve_model_target(&mut self) -> Option<protocol::ModelTarget> {
+        let Some(active) = self.core.config.active_model().cloned() else {
+            self.notify_error_sticky(
+                "no model is available; configure a provider or wait for model refresh".into(),
+            );
+            return None;
+        };
+        if let smelt_core::ModelAvailability::Unavailable { .. } = active.availability {
+            self.notify_error_sticky(format!("model '{}' is unavailable", active.key));
+            return None;
+        }
+        let Some(api_key) = self.resolve_api_key_for_env(&active.api_key_env) else {
+            if let Some(current) = self.core.config.active_model_mut() {
+                current.availability = smelt_core::ModelAvailability::Unavailable {
+                    reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+                };
+                self.core.config.revision = self.core.config.revision.wrapping_add(1);
+            }
+            return None;
+        };
+        Some(active.target(api_key))
     }
 
     pub(crate) fn resolve_api_key_for_env(&mut self, key_env: &str) -> Option<String> {
@@ -738,7 +718,7 @@ impl TuiApp {
             self.queued_inputs
                 .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
         } else {
-            self.agent = Some(self.begin_process_status_turn(note));
+            self.agent = self.begin_process_status_turn(note);
         }
     }
 
@@ -1276,7 +1256,8 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("try again", Content::text("try again"));
+            .begin_agent_turn("try again", Content::text("try again"))
+            .expect("test app has a usable model");
         app.app.agent = Some(turn);
 
         assert!(app.app.notification_win().is_none());
@@ -1288,12 +1269,15 @@ mod tests {
         app.app.notify_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
-        let turn = app.app.begin_command_request_turn(
-            "continue".into(),
-            String::new(),
-            smelt_core::custom_commands::CommandOverrides::default(),
-            crate::app::CommandTurnStart::ContinueFromLast,
-        );
+        let turn = app
+            .app
+            .begin_command_request_turn(
+                "continue".into(),
+                String::new(),
+                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandTurnStart::ContinueFromLast,
+            )
+            .expect("test app has a usable model");
         app.app.agent = Some(turn);
 
         assert!(app.app.notification_win().is_none());
@@ -1305,7 +1289,8 @@ mod tests {
 
         let turn = app
             .app
-            .begin_agent_turn("first request", Content::text("first request"));
+            .begin_agent_turn("first request", Content::text("first request"))
+            .expect("test app has a usable model");
         app.app.agent = Some(turn);
 
         assert!(matches!(
@@ -1352,7 +1337,8 @@ mod tests {
         smelt_perf::perf::clear();
         let turn = app
             .app
-            .begin_agent_turn("new request", Content::text("new request"));
+            .begin_agent_turn("new request", Content::text("new request"))
+            .expect("test app has a usable model");
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
         app.app.agent = Some(turn);
@@ -1406,12 +1392,15 @@ mod tests {
     fn command_turn_metadata_snapshot_matches_committed_request() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        let turn = app.app.begin_command_request_turn(
-            "/fix".into(),
-            "fix it".into(),
-            smelt_core::custom_commands::CommandOverrides::default(),
-            crate::app::CommandTurnStart::Fresh,
-        );
+        let turn = app
+            .app
+            .begin_command_request_turn(
+                "/fix".into(),
+                "fix it".into(),
+                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandTurnStart::Fresh,
+            )
+            .expect("test app has a usable model");
         app.app.agent = Some(turn);
 
         assert_eq!(
@@ -1556,8 +1545,12 @@ mod tests {
         let note = protocol::HistoryNote::process_status("background process 77 exited");
         let text = note.text().to_string();
 
-        app.app
-            .start_queued_input(crate::app::QueuedInput::ProcessStatus(note));
+        assert!(
+            app.app
+                .start_queued_input(crate::app::QueuedInput::ProcessStatus(note))
+                .is_ok(),
+            "test app has a usable model"
+        );
 
         assert!(app.app.agent_is_running());
         assert_eq!(process_status_blocks(&app), vec![text]);

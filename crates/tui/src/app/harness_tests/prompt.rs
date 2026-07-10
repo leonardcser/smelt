@@ -38,8 +38,9 @@ fn slash_completion_tab_accepts_command_name() {
 #[test]
 fn fast_slash_command_updates_session_state_for_supported_model() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.provider_type = "codex".into();
-    app.app.core.config.model_config.supports_fast_mode = Some(true);
+    let model = app.app.core.config.active_model_mut().unwrap();
+    model.provider_type = "codex".into();
+    model.config.supports_fast_mode = Some(true);
 
     app.type_text("/fast on");
     app.press(KeyCode::Enter);
@@ -68,8 +69,9 @@ fn fast_slash_command_updates_session_state_for_supported_model() {
 #[test]
 fn fast_slash_command_enables_the_next_turn_payload() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.provider_type = "codex".into();
-    app.app.core.config.model_config.supports_fast_mode = Some(true);
+    let model = app.app.core.config.active_model_mut().unwrap();
+    model.provider_type = "codex".into();
+    model.config.supports_fast_mode = Some(true);
 
     app.type_text("/fast on");
     app.press(KeyCode::Enter);
@@ -93,8 +95,9 @@ fn fast_slash_command_enables_the_next_turn_payload() {
 #[test]
 fn fast_slash_command_rejects_unsupported_model() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.provider_type = "codex".into();
-    app.app.core.config.model_config.supports_fast_mode = Some(false);
+    let model = app.app.core.config.active_model_mut().unwrap();
+    model.provider_type = "codex".into();
+    model.config.supports_fast_mode = Some(false);
 
     app.type_text("/fast");
     app.press(KeyCode::Enter);
@@ -111,8 +114,9 @@ fn fast_slash_command_rejects_unsupported_model() {
 #[test]
 fn fast_slash_command_rejects_non_codex_provider() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.provider_type = "openai".into();
-    app.app.core.config.model_config.supports_fast_mode = Some(true);
+    let model = app.app.core.config.active_model_mut().unwrap();
+    model.provider_type = "openai".into();
+    model.config.supports_fast_mode = Some(true);
 
     app.type_text("/fast on");
     app.press(KeyCode::Enter);
@@ -129,7 +133,13 @@ fn fast_slash_command_rejects_non_codex_provider() {
 #[test]
 fn fast_mode_is_restored_per_loaded_session() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.model_config.supports_fast_mode = Some(true);
+    app.app
+        .core
+        .config
+        .active_model_mut()
+        .unwrap()
+        .config
+        .supports_fast_mode = Some(true);
 
     let mut enabled =
         smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
@@ -408,7 +418,10 @@ fn stale_prompt_prediction_response_after_custom_command_is_ignored() {
         body: "Run the focused test first".to_string(),
         overrides: smelt_core::custom_commands::CommandOverrides::default(),
     };
-    let turn = app.app.begin_custom_command_turn(cmd);
+    let turn = app
+        .app
+        .begin_custom_command_turn(cmd)
+        .expect("test app has a usable model");
     app.app.agent = Some(turn);
 
     respond_ask_with_text(&mut app, prediction_id, "Run cargo test");

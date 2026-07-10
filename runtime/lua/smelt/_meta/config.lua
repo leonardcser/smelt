@@ -8,11 +8,11 @@
 local config = {}
 
 --- Active API base URL.
----@type fun(): string
+---@type fun(): string?
 config.api_base = nil
 
 --- Name of the environment variable that supplies the API key for the active provider.
----@type fun(): string
+---@type fun(): string?
 config.api_key_env = nil
 
 --- Configured context-window size in tokens for the active model, or `nil` when not declared.
@@ -20,11 +20,11 @@ config.api_key_env = nil
 config.context_window = nil
 
 --- Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.
----@type fun(): table
+---@type fun(): table?
 config.model_config = nil
 
 --- Active provider type string, e.g. `"openai"`, `"anthropic"`, `"openai-compatible"`.
----@type fun(): string
+---@type fun(): string?
 config.provider_type = nil
 
 return config

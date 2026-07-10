@@ -910,18 +910,8 @@ async fn async_main() {
 
     let s = startup::resolve(&args, lua_cfg, &startup_http_client, &lua_modes).await;
     let startup::ResolvedStartup {
-        cfg,
-        available_models,
-        api_base,
-        api_key_env,
-        provider_type,
-        model,
-        model_config,
-        settings,
-        mode_override,
-        mode_cycle,
-        reasoning_effort,
-        reasoning_cycle,
+        runtime,
+        startup_overrides,
         mut startup_auth_error,
     } = s;
 
@@ -947,6 +937,12 @@ async fn async_main() {
         std::process::exit(1);
     }
 
+    if args.headless && runtime.active_model().is_none() {
+        eprintln!(
+            "error: no model is available from static configuration or managed-provider cache"
+        );
+        std::process::exit(1);
+    }
     if args.headless && startup_auth_error.is_some() {
         eprintln!(
             "error: {}",
@@ -1045,7 +1041,7 @@ async fn async_main() {
 
     let project_context = smelt_core::worktree::project_context(
         &cwd,
-        Some(std::path::Path::new(&settings.worktree_root)),
+        Some(std::path::Path::new(&runtime.settings.worktree_root)),
     );
     let mut permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
         &lua_permission_rules.unwrap_or_default(),
@@ -1054,7 +1050,7 @@ async fn async_main() {
     );
     let permission_roots = project_context.allowed_roots.clone();
     permissions.set_allowed_roots(project_context.active_root, project_context.allowed_roots);
-    permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
+    permissions.set_restrict_to_workspace(runtime.settings.restrict_to_workspace);
     permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
         tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
             .unwrap_or_default()
@@ -1070,8 +1066,6 @@ async fn async_main() {
             .load_workspace(ws_tools, ws_dirs);
     }
     let permissions = Arc::new(permissions);
-    let initial_api_base = api_base.clone();
-    let initial_provider_type = provider_type.clone();
 
     // Extra skill search roots (today the empty default; once a Lua API
     // for declaring them lands, plumb the resolved list through here).
@@ -1086,26 +1080,12 @@ async fn async_main() {
     // Always create the manager (even with no servers) so `/reload` can
     // add servers later through `smelt.mcp.register` and the dispatcher
     // sees them live without the engine having to restart.
-    let mcp_manager = smelt_core::mcp::McpManager::start(&cfg.mcp).await;
+    let mcp_manager = smelt_core::mcp::McpManager::start(&runtime.mcp).await;
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
         Box::new(smelt_core::mcp::dispatcher::McpDispatcher::new(
             Arc::clone(&mcp_manager),
             Arc::clone(&permissions),
         ));
-
-    let parse_request_audit = |value: &str| {
-        protocol::RequestAuditMode::parse(value).unwrap_or_else(|| {
-            eprintln!("warning: invalid request audit mode {value:?}, defaulting to summary");
-            protocol::RequestAuditMode::Summary
-        })
-    };
-    let request_audit_override = match std::env::var("SMELT_REQUEST_AUDIT") {
-        Ok(value) => Some(parse_request_audit(&value)),
-        Err(_) => {
-            parse_request_audit(&settings.request_audit);
-            None
-        }
-    };
 
     let engine_handle = engine::start(
         engine::EngineConfig {
@@ -1132,30 +1112,14 @@ async fn async_main() {
             OutputFormat::Text => smelt_core::OutputFormat::Text,
             OutputFormat::Json => smelt_core::OutputFormat::Json,
         };
-        let app_config = build_headless_config(
-            model,
-            initial_api_base,
-            api_key_env,
-            initial_provider_type,
-            available_models,
-            model_config.clone(),
-            args.model.is_some(),
-            args.api_base.is_some(),
-            args.api_key_env.is_some(),
-            args.mode_cycle.is_some(),
-            mode_override,
-            mode_cycle,
-            reasoning_effort,
-            reasoning_cycle,
-            settings,
-            request_audit_override,
-            cfg.remember.clone(),
-        );
         let capabilities = engine::SystemPromptCapabilities::from_tool_calling(
-            app_config.model_config.tool_calling.unwrap_or(true),
+            runtime
+                .active_model()
+                .is_none_or(|model| model.config.tool_calling()),
         );
         let mut core = smelt_core::Core::new(
-            app_config,
+            runtime,
+            startup_overrides,
             engine_handle,
             smelt_core::FrontendKind::Headless,
             Arc::clone(&permissions),
@@ -1188,27 +1152,6 @@ async fn async_main() {
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
-        let initial_mode = mode_override.unwrap_or_default();
-        let app_config = smelt_core::AppConfig {
-            model,
-            api_base: initial_api_base,
-            api_key_env,
-            provider_type: initial_provider_type,
-            available_models,
-            model_config,
-            cli_model_override: args.model.is_some(),
-            cli_api_base_override: args.api_base.is_some(),
-            cli_api_key_env_override: args.api_key_env.is_some(),
-            cli_mode_cycle_override: args.mode_cycle.is_some(),
-            mode: initial_mode,
-            mode_cycle,
-            reasoning_effort,
-            reasoning_cycle,
-            settings,
-            request_audit_override,
-            remember: cfg.remember.clone(),
-            context_window: None,
-        };
         let session_persistence = if args.ephemeral {
             match tui::app::SessionPersistence::ephemeral() {
                 Ok(persistence) => persistence,
@@ -1221,7 +1164,8 @@ async fn async_main() {
             tui::app::SessionPersistence::persistent()
         };
         let mut app = tui::app::TuiApp::new(
-            app_config,
+            runtime,
+            startup_overrides,
             engine_handle,
             Arc::clone(&permissions),
             shared_session,
@@ -1238,13 +1182,6 @@ async fn async_main() {
         app.core.skills = Some(Arc::clone(&skill_loader));
         app.core.mcp = Some(Arc::clone(&mcp_manager));
         app.prompt_inputs = prompt_inputs;
-        if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
-            app.core
-                .config
-                .mode_cycle
-                .push(app.core.config.mode.clone());
-        }
-
         redirect_stderr();
 
         println!();
@@ -1343,54 +1280,6 @@ fn parse_with_lua_flags(
     }
 
     (args, values)
-}
-
-/// Assemble the `AppConfig` for a headless frontend from resolved CLI and config inputs.
-#[allow(clippy::too_many_arguments)]
-fn build_headless_config(
-    model: String,
-    api_base: String,
-    api_key_env: String,
-    provider_type: String,
-    available_models: Vec<smelt_core::config::ResolvedModel>,
-    model_config: protocol::ModelConfig,
-    cli_model_override: bool,
-    cli_api_base_override: bool,
-    cli_api_key_env_override: bool,
-    cli_mode_cycle_override: bool,
-    mode_override: Option<protocol::AgentMode>,
-    mode_cycle: Vec<protocol::AgentMode>,
-    reasoning_effort: protocol::ReasoningEffort,
-    reasoning_cycle: Vec<protocol::ReasoningEffort>,
-    settings: smelt_core::config::ResolvedSettings,
-    request_audit_override: Option<protocol::RequestAuditMode>,
-    remember: smelt_core::config::RememberConfig,
-) -> smelt_core::AppConfig {
-    let mode = mode_override.unwrap_or_default();
-    let mut mode_cycle = mode_cycle;
-    if !mode_cycle.contains(&mode) {
-        mode_cycle.push(mode.clone());
-    }
-    smelt_core::AppConfig {
-        model,
-        api_base,
-        api_key_env,
-        provider_type,
-        available_models,
-        model_config,
-        cli_model_override,
-        cli_api_base_override,
-        cli_api_key_env_override,
-        cli_mode_cycle_override,
-        mode,
-        mode_cycle,
-        reasoning_effort,
-        reasoning_cycle,
-        settings,
-        request_audit_override,
-        remember,
-        context_window: None,
-    }
 }
 
 /// Redirect stderr to a log file to prevent stray output from corrupting the TUI display.

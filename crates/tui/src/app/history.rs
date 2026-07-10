@@ -908,20 +908,48 @@ impl TuiApp {
         self.publish_shared_session_state();
     }
 
-    /// Full `provider/model` key so resuming a session restores the correct provider/auth.
-    fn current_model_key(&self) -> String {
-        self.core
-            .config
-            .available_models
-            .iter()
-            .find(|m| {
-                m.model_name == self.core.config.model
-                    && m.api_base == self.core.config.api_base
-                    && m.api_key_env == self.core.config.api_key_env
-                    && m.provider_type == self.core.config.provider_type
-            })
-            .map(|m| m.key.clone())
-            .unwrap_or_else(|| self.core.config.model.clone())
+    /// Stable requested key so session restore preserves provider/auth identity,
+    /// including a selection that is pending managed-model refresh.
+    fn current_model_key(&self) -> Option<String> {
+        self.core.config.model_selection.requested_key.clone()
+    }
+
+    fn restore_session_model(&mut self, model_key: &str) {
+        let resolved_key =
+            smelt_core::config::resolve_model_ref(&self.core.config.available_models, model_key)
+                .ok()
+                .map(|resolved| resolved.key.clone());
+        if let Some(key) = resolved_key {
+            self.apply_model(&key, false);
+        } else if smelt_core::managed_model_selection_is_pending(
+            &self.core.config.providers,
+            &self.core.config.available_models,
+            model_key,
+        ) {
+            let selection = smelt_core::ModelSelectionState {
+                requested_key: Some(model_key.to_string()),
+                requested_by: smelt_core::ModelSelectionSource::Session,
+                active: None,
+            };
+            let selection_changed = self.core.config.model_selection != selection;
+            let context_changed = self.core.config.context_window.is_some();
+            if selection_changed || context_changed {
+                self.core.config.revision = self.core.config.revision.wrapping_add(1);
+            }
+            if selection_changed {
+                self.core.config.model_selection = selection;
+                self.core
+                    .signals
+                    .set_dyn("model", std::rc::Rc::new(Option::<String>::None));
+            }
+            if context_changed {
+                self.core.config.context_window = None;
+            }
+        } else {
+            self.notify_error_sticky(format!(
+                "session model '{model_key}' is no longer available"
+            ));
+        }
     }
 
     pub(crate) fn set_session_title(
@@ -1260,28 +1288,20 @@ impl TuiApp {
         let old_id = self.core.session.id.clone();
         self.flush_persist();
 
-        if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
-            self.set_mode(mode, false);
+        if self.core.startup_overrides.mode.is_none() {
+            if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
+                self.set_mode(mode, false);
+            }
         }
-        if let Some(effort) = loaded.reasoning_effort {
-            self.set_reasoning_effort(effort, false);
+        if self.core.startup_overrides.reasoning_effort.is_none() {
+            if let Some(effort) = loaded.reasoning_effort {
+                self.set_reasoning_effort(effort, false);
+            }
         }
         // Only restore model/API settings if not overridden by CLI.
-        if !self.core.config.cli_model_override
-            && !self.core.config.cli_api_base_override
-            && !self.core.config.cli_api_key_env_override
-        {
+        if !self.core.startup_overrides.fixes_model_selection() {
             if let Some(ref model_key) = loaded.model {
-                // Prefer exact key match; fall back to bare model name for older sessions.
-                let resolved_key = smelt_core::config::resolve_model_ref(
-                    &self.core.config.available_models,
-                    model_key,
-                )
-                .ok()
-                .map(|resolved| resolved.key.clone());
-                if let Some(key) = resolved_key {
-                    self.apply_model(&key, false);
-                }
+                self.restore_session_model(model_key);
             }
         }
 
@@ -1340,23 +1360,19 @@ impl TuiApp {
         let old_id = self.core.session.id.clone();
         self.flush_persist();
 
-        if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
-            self.set_mode(mode, false);
+        if self.core.startup_overrides.mode.is_none() {
+            if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
+                self.set_mode(mode, false);
+            }
         }
-        if !self.core.config.cli_model_override
-            && !self.core.config.cli_api_base_override
-            && !self.core.config.cli_api_key_env_override
-        {
+        if self.core.startup_overrides.reasoning_effort.is_none() {
+            if let Some(effort) = loaded.reasoning_effort {
+                self.set_reasoning_effort(effort, false);
+            }
+        }
+        if !self.core.startup_overrides.fixes_model_selection() {
             if let Some(ref model_key) = loaded.model {
-                let resolved_key = smelt_core::config::resolve_model_ref(
-                    &self.core.config.available_models,
-                    model_key,
-                )
-                .ok()
-                .map(|resolved| resolved.key.clone());
-                if let Some(key) = resolved_key {
-                    self.apply_model(&key, false);
-                }
+                self.restore_session_model(model_key);
             }
         }
 
@@ -2409,6 +2425,58 @@ mod checkpoint_tests {
     use super::*;
     use protocol::Content;
     use smelt_core::ContextCheckpoint;
+
+    #[test]
+    fn missing_session_model_key_is_retained_as_pending_selection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .core
+            .config
+            .providers
+            .push(smelt_core::config::ProviderConfig {
+                name: Some("managed".into()),
+                provider_type: Some("codex".into()),
+                api_base: Some("https://chatgpt.com/backend-api/codex".into()),
+                ..Default::default()
+            });
+        let revision = app.app.core.config.revision;
+        app.app.core.config.context_window = Some(128_000);
+
+        app.app.restore_session_model("managed/future-model");
+
+        assert_eq!(
+            app.app.core.config.model_selection.requested_key.as_deref(),
+            Some("managed/future-model")
+        );
+        assert_eq!(
+            app.app.core.config.model_selection.requested_by,
+            smelt_core::ModelSelectionSource::Session
+        );
+        assert!(app.app.core.config.active_model().is_none());
+        assert_eq!(app.app.core.config.context_window, None);
+        assert_eq!(app.app.core.config.revision, revision.wrapping_add(1));
+        assert!(app.run_lua(
+            r#"
+                assert(smelt.model.current() == nil)
+                local status = smelt.model.status()
+                assert(status.requested == "managed/future-model")
+                assert(status.availability == "pending")
+            "#,
+        ));
+    }
+
+    #[test]
+    fn missing_static_session_model_keeps_the_current_fallback() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let previous = app.app.core.config.model_selection.clone();
+        let revision = app.app.core.config.revision;
+
+        app.app.restore_session_model("removed/model");
+
+        assert_eq!(app.app.core.config.model_selection, previous);
+        assert_eq!(app.app.core.config.revision, revision);
+        assert!(app.app.notification_win().is_some());
+    }
 
     fn perf_value_max(label: &str) -> u64 {
         smelt_perf::perf::snapshot()
@@ -3899,9 +3967,9 @@ mod checkpoint_tests {
     fn app_rewind_marks_context_tokens_stale_for_different_model() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let old_identity = smelt_core::session::ContextTokenIdentity {
-            model: "old-model".into(),
-            api_base: "https://old.example".into(),
-            provider_type: "old-provider".into(),
+            model: Some("old-model".into()),
+            api_base: Some("https://old.example".into()),
+            provider_type: Some("old-provider".into()),
         };
         app.app.core.session.history = vec![user("a"), assistant("b")];
         app.app.core.session.context_tokens = Some(50);

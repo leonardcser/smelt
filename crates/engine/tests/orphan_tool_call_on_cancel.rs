@@ -69,8 +69,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     // ── Fake LLM server ────────────────────────────────────────────────
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let (stream_started_tx, stream_started_rx) = tokio::sync::oneshot::channel();
-
+    let (release_server, hold_server) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
         // Drain request headers.
@@ -89,17 +88,6 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
                 break;
             }
         }
-        // Best-effort body drain.
-        let _ = tokio::time::timeout(Duration::from_millis(20), async {
-            loop {
-                let mut b = [0u8; 4096];
-                if sock.read(&mut b).await.unwrap_or(0) == 0 {
-                    break;
-                }
-            }
-        })
-        .await;
-
         let body = canned_sse_response();
         let header = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -108,9 +96,9 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         let _ = sock.write_all(header.as_bytes()).await;
         let _ = sock.write_all(body.as_bytes()).await;
         let _ = sock.flush().await;
-        let _ = stream_started_tx.send(());
-        // Hold the socket so the engine doesn't see EOF on the next request.
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Keep the connection open until the assertion has observed the
+        // tool-use snapshot, without relying on scheduler timing.
+        let _ = hold_server.await;
     });
 
     // ── Engine ─────────────────────────────────────────────────────────
@@ -161,47 +149,46 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     let mut bad_snapshots: Vec<(&'static str, Vec<HistoryItem>, Vec<String>)> = Vec::new();
     let mut all_snapshots: Vec<(&'static str, Vec<HistoryItem>)> = Vec::new();
 
-    // Start the observation window when the response is available. Coverage
-    // instrumentation and parallel tests can delay the provider request.
-    tokio::time::timeout(Duration::from_secs(10), stream_started_rx)
-        .await
-        .expect("provider request timed out")
-        .expect("fake server closed before streaming");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        let recv = tokio::time::timeout(Duration::from_millis(300), handle.recv()).await;
-        match recv {
-            Ok(Some(EngineEvent::HistoryUpdated { update, .. })) => {
-                if let Some(orphans) = snapshot_has_orphan(&update.items) {
-                    bad_snapshots.push(("HistoryUpdated", update.items.clone(), orphans));
-                }
-                all_snapshots.push(("HistoryUpdated", update.items));
-            }
-            Ok(Some(EngineEvent::HistoryAppended { delta, .. })) => {
-                if let Some(orphans) = snapshot_has_orphan(&delta.items) {
-                    bad_snapshots.push(("HistoryAppended", delta.items.clone(), orphans));
-                }
-                all_snapshots.push(("HistoryAppended", delta.items));
-            }
-            Ok(Some(EngineEvent::TurnComplete { history, .. })) => {
-                if let Some(history) = history {
-                    if let Some(orphans) = snapshot_has_orphan(&history.items) {
-                        bad_snapshots.push(("TurnComplete", history.items.clone(), orphans));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::HistoryUpdated { update, .. }) => {
+                    if let Some(orphans) = snapshot_has_orphan(&update.items) {
+                        bad_snapshots.push(("HistoryUpdated", update.items.clone(), orphans));
                     }
-                    all_snapshots.push(("TurnComplete", history.items));
+                    all_snapshots.push(("HistoryUpdated", update.items));
                 }
+                Some(EngineEvent::HistoryAppended { delta, .. }) => {
+                    if let Some(orphans) = snapshot_has_orphan(&delta.items) {
+                        bad_snapshots.push(("HistoryAppended", delta.items.clone(), orphans));
+                    }
+                    all_snapshots.push(("HistoryAppended", delta.items));
+                }
+                Some(EngineEvent::TurnComplete { history, .. }) => {
+                    if let Some(history) = history {
+                        if let Some(orphans) = snapshot_has_orphan(&history.items) {
+                            bad_snapshots.push(("TurnComplete", history.items.clone(), orphans));
+                        }
+                        all_snapshots.push(("TurnComplete", history.items));
+                    }
+                }
+                Some(_) => {}
+                None => panic!("engine closed before publishing the tool-use snapshot"),
+            }
+            if all_snapshots.iter().any(|(_, history)| {
+                history.iter().any(|item| {
+                    matches!(item, HistoryItem::Assistant(turn) if turn.invocations.iter().any(|invocation| invocation.call_id == "web_fetch:36"))
+                })
+            }) {
                 break;
             }
-            Ok(Some(_)) => continue,
-            Ok(None) => break,
-            Err(_) => continue,
         }
-    }
+    })
+    .await
+    .expect("engine did not publish the tool-use snapshot");
 
-    server.abort();
+    let _ = release_server.send(());
+    server.await.unwrap();
 
     // Debug dump.
     eprintln!("── observed snapshots ──");

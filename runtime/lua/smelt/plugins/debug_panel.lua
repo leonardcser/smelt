@@ -105,9 +105,9 @@ local function compose_lines(win)
 	local work_state = smelt.signal.get("work_state") or "idle"
 	local compact = smelt.state.get("compact")
 
-	local pricing = smelt.model.pricing()
-	local mcfg = smelt.config.model_config()
-	local caps = smelt.model.capabilities()
+	local pricing = smelt.model.pricing() or { source = "none" }
+	local mcfg = smelt.config.model_config() or {}
+	local caps = smelt.model.capabilities() or {}
 
 	add_kv(lines, spans, "model", model, width)
 	add_kv(lines, spans, "provider", provider, width)

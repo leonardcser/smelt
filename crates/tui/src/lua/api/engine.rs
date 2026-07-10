@@ -422,8 +422,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                     return;
                 }
-                let turn = app.begin_custom_command_turn(cmd);
-                app.agent = Some(turn);
+                app.agent = app.begin_custom_command_turn(cmd);
             });
             Ok(())
         },
@@ -456,9 +455,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     body,
                     overrides: parsed,
                 };
-                let turn = app.begin_custom_command_continuation(cmd);
-                app.agent = Some(turn);
-                true
+                app.agent = app.begin_custom_command_continuation(cmd);
+                app.agent.is_some()
             }))
         },
     )?;
@@ -506,13 +504,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
-                crate::lua::with_app(|app| {
+                let dispatched = crate::lua::try_with_app(|app| {
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
                     }
-                    let target = model_ref
-                        .and_then(|r| resolve_model_for_ask(app, &r))
-                        .unwrap_or_else(|| active_model_target(app));
+                    let target = match model_ref.as_deref() {
+                        Some(reference) => resolve_model_for_ask(app, reference),
+                        None => active_model_target(app),
+                    };
+                    let Some(target) = target else {
+                        return false;
+                    };
                     let request_config = app.core.config.request_runtime_config();
                     let session_id = app.core.session.id.clone();
                     let session_dir = smelt_core::session::dir_for(&app.core.session);
@@ -530,8 +532,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         session_dir,
                         stream,
                         visible_retries,
-                    })
-                });
+                    });
+                    true
+                })
+                .unwrap_or(false);
+                if !dispatched {
+                    if let Ok(mut callbacks) = s.ask_callbacks.lock() {
+                        callbacks.remove(&id);
+                    }
+                    return Err(LuaError::external(
+                        "smelt.engine.ask: no usable model is available",
+                    ));
+                }
                 Ok(id)
             },
         )?;
@@ -573,7 +585,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
-                crate::lua::with_app(|app| {
+                let dispatched = crate::lua::try_with_app(|app| {
                     let system = app.assemble_system_prompt();
                     if messages.is_empty() {
                         messages = app.model_history_messages();
@@ -581,9 +593,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
                     }
-                    let target = model_ref
-                        .and_then(|r| resolve_model_for_ask(app, &r))
-                        .unwrap_or_else(|| active_model_target(app));
+                    let target = match model_ref.as_deref() {
+                        Some(reference) => resolve_model_for_ask(app, reference),
+                        None => active_model_target(app),
+                    };
+                    let Some(target) = target else {
+                        return false;
+                    };
                     let request_config = app.core.config.request_runtime_config();
                     let session_id = app.core.session.id.clone();
                     let session_dir = smelt_core::session::dir_for(&app.core.session);
@@ -604,8 +620,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         session_dir,
                         stream,
                         visible_retries,
-                    })
-                });
+                    });
+                    true
+                })
+                .unwrap_or(false);
+                if !dispatched {
+                    if let Ok(mut callbacks) = s.ask_callbacks.lock() {
+                        callbacks.remove(&id);
+                    }
+                    return Err(LuaError::external(
+                        "smelt.engine.ask_inherited: no usable model is available",
+                    ));
+                }
                 Ok(id)
             },
         )?;
@@ -650,13 +676,10 @@ fn resolve_model_for_ask(
                 return None;
             }
         };
-    let api_key = app
-        .resolve_api_key_for_env(&resolved.api_key_env)
-        .unwrap_or_default();
+    let api_key = app.resolve_api_key_for_env(&resolved.api_key_env)?;
     Some(resolved.target(api_key))
 }
 
-fn active_model_target(app: &mut crate::app::TuiApp) -> protocol::ModelTarget {
-    let api_key = app.resolve_api_key().unwrap_or_default();
-    app.core.config.model_target(api_key)
+fn active_model_target(app: &mut crate::app::TuiApp) -> Option<protocol::ModelTarget> {
+    app.resolve_model_target()
 }

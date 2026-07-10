@@ -1261,15 +1261,15 @@ Buffer handle constructor.
 
 Resolved application configuration introspection.
 
-- `smelt.config.api_base` :: `fun(): string`
+- `smelt.config.api_base` :: `fun(): string?`
   Active API base URL.
-- `smelt.config.api_key_env` :: `fun(): string`
+- `smelt.config.api_key_env` :: `fun(): string?`
   Name of the environment variable that supplies the API key for the active provider.
 - `smelt.config.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model, or `nil` when not declared.
-- `smelt.config.model_config` :: `fun(): table`
+- `smelt.config.model_config` :: `fun(): table?`
   Resolved model-level sampling, capability, and cost overrides as a table.
-- `smelt.config.provider_type` :: `fun(): string`
+- `smelt.config.provider_type` :: `fun(): string?`
   Active provider type string, e.g.
 
 #### `smelt.confirm`
@@ -1405,25 +1405,27 @@ Perf instrumentation toggle, clear, and snapshot.
 
 Model selector.
 
-- `smelt.model.capabilities` :: `fun(): table`
+- `smelt.model.capabilities` :: `fun(): table?`
   Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.
-- `smelt.model.current` :: `fun(): string`
-  Return the active model key.
-- `smelt.model.input_modalities` :: `fun(): table`
+- `smelt.model.current` :: `fun(): string?`
+  Return the active model key, or `nil` when no active model exists.
+- `smelt.model.input_modalities` :: `fun(): table?`
   Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`.
 - `smelt.model.list` :: `fun(): table`
   Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
 - `smelt.model.max_tokens` :: `fun(): integer?`
   Resolved maximum output tokens for the active model.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
-- `smelt.model.pricing` :: `fun(): table`
+- `smelt.model.pricing` :: `fun(): table?`
   Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`.
 - `smelt.model.set` :: `fun(name: string): nil`
   Switch the active model by key.
-- `smelt.model.supports_input` :: `fun(modality: string): boolean`
+- `smelt.model.status` :: `fun(): table`
+  Return `{ current, requested, availability, reason? }` for model selection.
+- `smelt.model.supports_input` :: `fun(modality: string): boolean?`
   Return whether the active model supports the named input modality, for example `image` or `pdf`.
-- `smelt.model.transport` :: `fun(): table`
-  Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.
+- `smelt.model.transport` :: `fun(): table?`
+  Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport.
 
 #### `smelt.notebook`
 

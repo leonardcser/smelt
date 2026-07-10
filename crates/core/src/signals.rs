@@ -315,7 +315,7 @@ impl Signals {
 pub(crate) struct SignalSeeds {
     pub(crate) vim_mode: String,
     pub(crate) agent_mode: String,
-    pub(crate) model: String,
+    pub(crate) model: Option<String>,
     pub(crate) reasoning: String,
     pub(crate) cwd: String,
     pub(crate) session_title: String,
@@ -603,6 +603,12 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         Ok(s) => mlua::Value::String(s),
         Err(_) => mlua::Value::Nil,
     });
+    signals.register_lua_projector::<Option<String>, _>(|value, lua| match value {
+        Some(value) => lua
+            .create_string(value.as_str())
+            .map_or(mlua::Value::Nil, mlua::Value::String),
+        None => mlua::Value::Nil,
+    });
     signals.register_lua_projector::<bool, _>(|b, _| mlua::Value::Boolean(*b));
     signals.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
     signals.register_lua_projector::<u64, _>(|n, _| mlua::Value::Integer(*n as i64));
@@ -860,7 +866,7 @@ mod tests {
         let signals = build_with_builtins(SignalSeeds {
             vim_mode: "insert".into(),
             agent_mode: "normal".into(),
-            model: "model".into(),
+            model: Some("model".into()),
             reasoning: "off".into(),
             cwd: "/tmp".into(),
             session_title: "session".into(),
@@ -1174,7 +1180,7 @@ mod tests {
         let signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
             agent_mode: "normal".into(),
-            model: "anthropic/claude-opus-4-7".into(),
+            model: Some("anthropic/claude-opus-4-7".into()),
             reasoning: "off".into(),
             cwd: "/tmp/work".into(),
             session_title: String::new(),
@@ -1296,7 +1302,7 @@ mod tests {
         let signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
             agent_mode: "normal".into(),
-            model: "m".into(),
+            model: Some("m".into()),
             reasoning: "off".into(),
             cwd: "/".into(),
             session_title: String::new(),
@@ -1437,7 +1443,7 @@ mod tests {
         let mut signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
             agent_mode: "normal".into(),
-            model: "m".into(),
+            model: Some("m".into()),
             reasoning: "off".into(),
             cwd: "/".into(),
             session_title: String::new(),

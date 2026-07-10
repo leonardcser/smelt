@@ -19,11 +19,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "provider_type",
         "Active provider type string, e.g. `\"openai\"`, `\"anthropic\"`, `\"openai-compatible\"`.",
         &[],
-        |_, ()| -> LuaResult<String> {
-            Ok(
-                crate::lua::try_with_app(|app| app.core.config.provider_type.clone())
-                    .unwrap_or_default(),
-            )
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.core
+                    .config
+                    .active_model()
+                    .map(|model| model.provider_type.clone())
+            })
+            .flatten())
         },
     )?;
 
@@ -31,11 +34,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "api_base",
         "Active API base URL.",
         &[],
-        |_, ()| -> LuaResult<String> {
-            Ok(
-                crate::lua::try_with_app(|app| app.core.config.api_base.clone())
-                    .unwrap_or_default(),
-            )
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.core
+                    .config
+                    .active_model()
+                    .map(|model| model.api_base.clone())
+            })
+            .flatten())
         },
     )?;
 
@@ -43,11 +49,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "api_key_env",
         "Name of the environment variable that supplies the API key for the active provider.",
         &[],
-        |_, ()| -> LuaResult<String> {
-            Ok(
-                crate::lua::try_with_app(|app| app.core.config.api_key_env.clone())
-                    .unwrap_or_default(),
-            )
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.core
+                    .config
+                    .active_model()
+                    .map(|model| model.api_key_env.clone())
+            })
+            .flatten())
         },
     )?;
 
@@ -55,9 +64,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "model_config",
         "Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let cfg = crate::lua::try_with_app(|app| app.core.config.model_config.clone())
-                .unwrap_or_default();
+        |lua, ()| -> LuaResult<Option<mlua::Table>> {
+            let Some(cfg) = crate::lua::try_with_app(|app| {
+                app.core
+                    .config
+                    .active_model()
+                    .map(|model| model.config.clone())
+            })
+            .flatten()
+            else {
+                return Ok(None);
+            };
             let t = lua.create_table()?;
             if let Some(v) = cfg.name {
                 t.set("name", v)?;
@@ -116,7 +133,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             if let Some(v) = cfg.cache_write_cost {
                 t.set("cache_write_cost", v)?;
             }
-            Ok(t)
+            Ok(Some(t))
         },
     )?;
 

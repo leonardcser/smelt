@@ -127,6 +127,7 @@ pub struct TestAppBuilder {
     mode_cycle: Option<Vec<AgentMode>>,
     init_lua: Option<std::path::PathBuf>,
     ephemeral: bool,
+    model_available: bool,
 }
 
 impl Default for TestAppBuilder {
@@ -137,6 +138,7 @@ impl Default for TestAppBuilder {
             mode_cycle: None,
             init_lua: None,
             ephemeral: false,
+            model_available: true,
         }
     }
 }
@@ -167,6 +169,11 @@ impl TestAppBuilder {
 
     pub fn with_ephemeral(mut self, ephemeral: bool) -> Self {
         self.ephemeral = ephemeral;
+        self
+    }
+
+    pub fn without_model(mut self) -> Self {
+        self.model_available = false;
         self
     }
 
@@ -207,27 +214,42 @@ impl TestAppBuilder {
                 AgentMode::parse("yolo").unwrap(),
             ]
         });
-
-        let config = smelt_core::AppConfig {
-            model: String::new(),
-            api_base: String::new(),
-            api_key_env: String::new(),
-            provider_type: String::new(),
-            available_models: Vec::new(),
-            model_config: protocol::ModelConfig::default(),
-            cli_model_override: false,
-            cli_api_base_override: false,
-            cli_api_key_env_override: false,
-            cli_mode_cycle_override: false,
-            mode: self.mode,
-            mode_cycle,
-            reasoning_effort: ReasoningEffort::Off,
-            reasoning_cycle: Vec::new(),
+        let providers = self
+            .model_available
+            .then(|| smelt_core::config::ProviderConfig {
+                name: Some("test".into()),
+                provider_type: Some("openai-compatible".into()),
+                api_base: Some("https://example.invalid/v1".into()),
+                api_key_env: Some(String::new()),
+                models: vec![protocol::ModelConfig {
+                    name: Some("test-model".into()),
+                    ..Default::default()
+                }],
+            })
+            .into_iter()
+            .collect();
+        let desired = smelt_core::config::Config {
+            providers,
             settings,
-            request_audit_override: None,
-            remember: smelt_core::config::RememberConfig::default(),
-            context_window: None,
+            ..Default::default()
         };
+        let available_models = desired.resolve_models();
+        let startup_overrides = smelt_core::StartupOverrides::default();
+        let selections = smelt_core::RuntimeSelections {
+            mode: Some(self.mode),
+            reasoning_effort: Some(ReasoningEffort::Off),
+            ..Default::default()
+        };
+        let config = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
+            config: &desired,
+            startup: &startup_overrides,
+            available_models: &available_models,
+            registered_modes: &mode_cycle,
+            selections: &selections,
+            previous: None,
+            headless: false,
+        })
+        .unwrap();
 
         let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
         let home = engine::paths::home_dir();
@@ -249,6 +271,7 @@ impl TestAppBuilder {
         };
         let mut app = TuiApp::new(
             config,
+            startup_overrides,
             engine,
             permissions,
             shared_session,

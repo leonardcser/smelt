@@ -293,8 +293,7 @@ impl TuiApp {
     ) {
         match outcome {
             InputOutcome::StartAgent => {
-                let turn = self.begin_agent_turn(display, content);
-                self.agent = Some(turn);
+                self.agent = self.begin_agent_turn(display, content);
             }
             InputOutcome::Exec(handle) => {
                 self.exec = Some(handle);
@@ -482,15 +481,40 @@ impl TuiApp {
         else {
             return;
         };
+        let mut active = smelt_core::ActiveModel::from_resolved(&resolved);
+        self.core
+            .startup_overrides
+            .apply_to_active_model(&mut active);
+        let api_key = self.resolve_api_key_for_env(&active.api_key_env);
+        if api_key.is_none() {
+            active.availability = smelt_core::ModelAvailability::Unavailable {
+                reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+            };
+        }
+        if self.core.config.active_model() == Some(&active)
+            && self.core.config.model_selection.requested_key.as_deref()
+                == Some(resolved.key.as_str())
+        {
+            return;
+        }
         if record && self.block_read_only_mutation("change read-only session settings") {
             return;
         }
-        let old = self.core.config.model.clone();
-        self.core.config.model = resolved.model_name.clone();
-        self.core.config.api_base = resolved.api_base.clone();
-        self.core.config.api_key_env = resolved.api_key_env.clone();
-        self.core.config.provider_type = resolved.provider_type.clone();
-        self.core.config.model_config = resolved.config.clone();
+        let old = self
+            .core
+            .config
+            .active_model()
+            .map(|model| model.key.clone());
+        self.core.config.revision = self.core.config.revision.wrapping_add(1);
+        self.core.config.model_selection = smelt_core::ModelSelectionState {
+            requested_key: Some(resolved.key.clone()),
+            requested_by: if record {
+                smelt_core::ModelSelectionSource::User
+            } else {
+                smelt_core::ModelSelectionSource::Session
+            },
+            active: Some(active),
+        };
         if record {
             self.update_session_persist_metadata();
         }
@@ -499,18 +523,25 @@ impl TuiApp {
         }
         self.warn_if_api_base_normalized();
         if self.agent.is_some() || self.dispatching_turn_id.is_some() {
-            let api_key = self.resolve_api_key().unwrap_or_default();
-            self.core.engine.send(UiCommand::SetTurnModel {
-                target: Box::new(self.core.config.model_target(api_key)),
-            });
+            if let Some(api_key) = api_key {
+                let target = self
+                    .core
+                    .config
+                    .active_model()
+                    .expect("model selection was just installed")
+                    .target(api_key);
+                self.core.engine.send(UiCommand::SetTurnModel {
+                    target: Box::new(target),
+                });
+            }
         }
         self.core.engine.send(UiCommand::SetFastMode {
             enabled: self.fast_mode_active(),
         });
-        if old != self.core.config.model {
+        if old.as_deref() != Some(resolved.key.as_str()) {
             self.core
                 .signals
-                .set_dyn("model", std::rc::Rc::new(self.core.config.model.clone()));
+                .set_dyn("model", std::rc::Rc::new(Some(resolved.key.clone())));
         }
         let identity = self.active_context_token_identity();
         if record {
@@ -542,13 +573,19 @@ impl TuiApp {
         let Some(client) = self.http_client.clone() else {
             return;
         };
+        let Some(active) = self.core.config.active_model().cloned() else {
+            self.core.config.context_window = None;
+            return;
+        };
         self.context_window_request_id = self.context_window_request_id.wrapping_add(1);
         let request_id = self.context_window_request_id;
-        let api_base = self.core.config.api_base.clone();
-        let api_key = self.resolve_api_key().unwrap_or_default();
-        let provider_type = self.core.config.provider_type.clone();
-        let model = self.core.config.model.clone();
-        let model_config = self.core.config.model_config.clone();
+        let api_base = active.api_base;
+        let Some(api_key) = self.resolve_api_key_for_env(&active.api_key_env) else {
+            return;
+        };
+        let provider_type = active.provider_type;
+        let model = active.model_name;
+        let model_config = active.config;
         let update_api_base = api_base.clone();
         let clock = std::sync::Arc::clone(&self.core.clock);
         tokio::spawn(async move {
@@ -566,39 +603,50 @@ impl TuiApp {
         });
     }
 
-    /// Mutate resolved settings and propagate to input/screen. Live state
-    /// is authoritative; persistence lives in `init.lua`.
-    pub(super) fn update_settings<F: FnOnce(&mut smelt_core::config::ResolvedSettings)>(
-        &mut self,
-        f: F,
-    ) {
-        let old_file_icon_options = (
+    pub(crate) fn apply_settings_effects(&mut self, old: &smelt_core::config::ResolvedSettings) {
+        let system_clipboard = self.core.config.settings.system_clipboard;
+        let vim = self.core.config.settings.vim;
+        let file_icon_options = (
             self.core.config.settings.file_icons,
             self.core.config.settings.file_icon_colors,
         );
-        let old_system_clipboard = self.core.config.settings.system_clipboard;
-        f(&mut self.core.config.settings);
-        let file_icons = self.core.config.settings.file_icons;
-        let file_icon_colors = self.core.config.settings.file_icon_colors;
-        let system_clipboard = self.core.config.settings.system_clipboard;
-        if system_clipboard != old_system_clipboard {
+        if system_clipboard != old.system_clipboard {
             self.core.set_system_clipboard_enabled(system_clipboard);
         }
-        let vim = self.core.config.settings.vim;
+        let file_icons_changed = (old.file_icons, old.file_icon_colors) != file_icon_options;
         let prompt_win = self
             .ui
             .win_mut(crate::app::PROMPT_WIN)
             .expect("prompt window");
         self.input.set_vim_enabled(prompt_win, vim);
         self.transcript_win_mut().set_vim_enabled(vim);
-        if old_file_icon_options != (file_icons, file_icon_colors) {
+        if file_icons_changed {
             self.sync_inline_options();
             self.sync_transcript_renderer_generation();
         }
     }
 
+    /// Mutate resolved settings and propagate to input/screen. Live state
+    /// is authoritative; persistence lives in `init.lua`.
+    pub(super) fn update_settings<F: FnOnce(&mut smelt_core::config::ResolvedSettings)>(
+        &mut self,
+        f: F,
+    ) {
+        let old = self.core.config.settings.clone();
+        f(&mut self.core.config.settings);
+        self.apply_settings_effects(&old);
+    }
+
     /// Replace all resolved settings at once, propagating to input/screen.
     pub(crate) fn set_settings(&mut self, new: smelt_core::config::ResolvedSettings) {
+        if self.core.config.settings == new {
+            return;
+        }
+        self.core.config.revision = self.core.config.revision.wrapping_add(1);
+        if self.core.startup_overrides.request_audit_env.is_none() {
+            self.core.config.request_audit =
+                protocol::RequestAuditMode::parse(&new.request_audit).unwrap_or_default();
+        }
         self.update_settings(|slot| *slot = new);
     }
 
@@ -610,7 +658,9 @@ impl TuiApp {
     }
 
     pub(crate) fn fast_mode_supported(&self) -> bool {
-        self.core.config.supports_fast_mode()
+        self.core.config.active_model().is_some_and(|model| {
+            model.provider_type == "codex" && model.config.supports_fast_mode == Some(true)
+        })
     }
 
     pub(crate) fn fast_mode_active(&self) -> bool {
@@ -641,6 +691,10 @@ impl TuiApp {
             return;
         }
         let old = self.core.config.mode.clone();
+        if old == mode {
+            return;
+        }
+        self.core.config.revision = self.core.config.revision.wrapping_add(1);
         self.core.config.mode = mode.clone();
         if record && self.core.config.remember.mode {
             state::set_mode(self.core.config.mode.clone());
@@ -675,9 +729,13 @@ impl TuiApp {
     /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort, record: bool) {
+        if self.core.config.reasoning_effort == effort {
+            return;
+        }
         if record && self.block_read_only_mutation("change read-only session reasoning effort") {
             return;
         }
+        self.core.config.revision = self.core.config.revision.wrapping_add(1);
         self.core.config.reasoning_effort = effort;
         if record {
             self.update_session_persist_metadata();
@@ -742,6 +800,20 @@ mod tests {
         app.app.core.config.mode = AgentMode::parse("normal").unwrap();
         app.app.core.session.mode = Some("normal".into());
         app
+    }
+
+    fn set_active_model(
+        app: &mut crate::app::TuiApp,
+        model: &str,
+        api_base: &str,
+        api_key_env: &str,
+        provider_type: &str,
+    ) {
+        let active = app.core.config.active_model_mut().unwrap();
+        active.model_name = model.into();
+        active.api_base = api_base.into();
+        active.api_key_env = api_key_env.into();
+        active.provider_type = provider_type.into();
     }
 
     fn user(text: &str) -> protocol::HistoryItem {
@@ -891,10 +963,13 @@ mod tests {
     #[test]
     fn switching_back_to_context_token_identity_clears_stale_marker() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.config.model = "old-model".into();
-        app.app.core.config.api_base = "https://old.example".into();
-        app.app.core.config.api_key_env = "OLD_KEY".into();
-        app.app.core.config.provider_type = "openai".into();
+        set_active_model(
+            &mut app.app,
+            "old-model",
+            "https://old.example",
+            "OLD_KEY",
+            "openai",
+        );
         app.app.core.config.available_models = vec![
             smelt_core::config::ResolvedModel {
                 key: "new/new-model".into(),
@@ -940,10 +1015,13 @@ mod tests {
     #[test]
     fn apply_model_clears_context_baseline_when_provider_identity_changes() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.config.model = "same-model".into();
-        app.app.core.config.api_base = "https://old.example".into();
-        app.app.core.config.api_key_env = "OLD_KEY".into();
-        app.app.core.config.provider_type = "openai".into();
+        set_active_model(
+            &mut app.app,
+            "same-model",
+            "https://old.example",
+            "OLD_KEY",
+            "openai",
+        );
         app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
             key: "new/same-model".into(),
             provider_name: "new".into(),

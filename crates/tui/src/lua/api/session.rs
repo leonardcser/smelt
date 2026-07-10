@@ -460,9 +460,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .core
                     .session
                     .display_context_tokens_stale(&app.active_context_token_identity());
-                out.set("model", app.core.config.model.as_str())?;
-                out.set("provider", app.core.config.provider_type.as_str())?;
-                out.set("api_base", app.core.config.api_base.as_str())?;
+                let active = app.core.config.active_model();
+                out.set("model", active.map(|model| model.key.as_str()))?;
+                out.set(
+                    "provider",
+                    active.map(|model| model.provider_type.as_str()),
+                )?;
+                out.set("api_base", active.map(|model| model.api_base.as_str()))?;
                 out.set("cost", app.core.session.session_cost_usd)?;
 
                 let pending_reasoning = app.reasoning_effort_pending();
@@ -541,9 +545,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 out.set("updated_at_ms", session.updated_at_ms)?;
                 out.set("cwd", app.cwd.as_str())?;
                 out.set("session_cwd", session.cwd.as_deref())?;
-                out.set("model", app.core.config.model.as_str())?;
-                out.set("provider", app.core.config.provider_type.as_str())?;
-                out.set("api_base", app.core.config.api_base.as_str())?;
+                let active = app.core.config.active_model();
+                out.set("model", active.map(|model| model.key.as_str()))?;
+                out.set(
+                    "provider",
+                    active.map(|model| model.provider_type.as_str()),
+                )?;
+                out.set("api_base", active.map(|model| model.api_base.as_str()))?;
                 out.set("mode", app.core.config.mode.as_str())?;
                 out.set("reasoning", app.core.config.reasoning_effort.label())?;
                 out.set("context_tokens", session.display_context_tokens())?;

@@ -11,7 +11,7 @@ Resolved application configuration introspection. All fields are read-only snaps
 ## `smelt.config.api_base`
 
 ```lua
-fun(): string
+fun(): string?
 ```
 
 Active API base URL.
@@ -19,7 +19,7 @@ Active API base URL.
 ## `smelt.config.api_key_env`
 
 ```lua
-fun(): string
+fun(): string?
 ```
 
 Name of the environment variable that supplies the API key for the active provider.
@@ -35,7 +35,7 @@ Configured context-window size in tokens for the active model, or `nil` when not
 ## `smelt.config.model_config`
 
 ```lua
-fun(): table
+fun(): table?
 ```
 
 Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.
@@ -43,7 +43,7 @@ Resolved model-level sampling, capability, and cost overrides as a table. Fields
 ## `smelt.config.provider_type`
 
 ```lua
-fun(): string
+fun(): string?
 ```
 
 Active provider type string, e.g. `"openai"`, `"anthropic"`, `"openai-compatible"`.

@@ -185,7 +185,13 @@ fn system_prompt_override_replaces_tui_prompt() {
 #[test]
 fn system_prompt_omits_tool_guidance_when_tool_calling_disabled() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.model_config.tool_calling = Some(false);
+    app.app
+        .core
+        .config
+        .active_model_mut()
+        .unwrap()
+        .config
+        .tool_calling = Some(false);
 
     let prompt = app.app.assemble_system_prompt();
 

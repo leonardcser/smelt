@@ -294,7 +294,11 @@ impl TuiApp {
                         .as_millis() as u64,
                     prompt_tokens: usage.prompt_tokens.unwrap_or(0),
                     completion_tokens: usage.completion_tokens.unwrap_or(0),
-                    model: self.core.config.model.clone(),
+                    model: self
+                        .core
+                        .config
+                        .active_model()
+                        .map_or_else(|| "unknown".into(), |model| model.model_name.clone()),
                     cost_usd,
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_write_tokens: usage.cache_write_tokens,

@@ -50,7 +50,7 @@ impl TestApp {
             body: "fuzz custom body".to_string(),
             overrides: smelt_core::custom_commands::CommandOverrides::default(),
         };
-        let turn = self.app.begin_custom_command_turn(cmd);
+        let turn = self.app.begin_custom_command_turn(cmd)?;
         self.app.agent = Some(turn);
         self.drain_cmd();
         self.actions.iter().rev().find_map(|a| match a {

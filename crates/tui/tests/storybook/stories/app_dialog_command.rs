@@ -117,6 +117,7 @@ app_story!(rewind_dialog, |ctx| {
 
 app_story!(btw_dialog_with_answer, |ctx| {
     ctx.set_viewport(70, 16);
+    ctx.use_test_model();
     // /btw spawns a coroutine that calls `smelt.engine.ask` and then
     // `smelt.dialog.open`. With no real engine task, the ask sits
     // pending. We harvest the pending ask id from `ask_callbacks` and
@@ -147,6 +148,7 @@ app_story!(btw_dialog_with_answer, |ctx| {
 
 app_story!(btw_dialog_streaming_answer, |ctx| {
     ctx.set_viewport(70, 22);
+    ctx.use_test_model();
     // EngineAskDelta -> Lua on_delta -> smelt.transcript.stream -> dialog buffer.
     ctx.push_user_turn("how do I render a buffer?");
     ctx.push_assistant_text("Call `buf:lines(...)` or set `buf:source(text)`.");
@@ -184,6 +186,7 @@ app_story!(btw_dialog_streaming_answer, |ctx| {
 
 app_story!(btw_dialog_streams_table_in_tiny_deltas, |ctx| {
     ctx.set_viewport(70, 18);
+    ctx.use_test_model();
     ctx.push_user_turn("show table output");
     ctx.push_assistant_text("Tables should stream without raw delimiter frames.");
     ctx.run_command("btw show a tiny table");

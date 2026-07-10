@@ -8,15 +8,15 @@
 local model = {}
 
 --- Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.
----@type fun(): table
+---@type fun(): table?
 model.capabilities = nil
 
---- Return the active model key.
----@type fun(): string
+--- Return the active model key, or `nil` when no active model exists.
+---@type fun(): string?
 model.current = nil
 
 --- Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.
----@type fun(): table
+---@type fun(): table?
 model.input_modalities = nil
 
 --- Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
@@ -31,19 +31,23 @@ model.max_tokens = nil
 model.preferred = nil
 
 --- Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `"config override"`, `"models.dev"`, or `"none"`. Prices are USD per 1M tokens.
----@type fun(): table
+---@type fun(): table?
 model.pricing = nil
 
---- Switch the active model by key.
+--- Switch the active model by key. Errors when the name cannot be resolved.
 ---@type fun(name: string): nil
 model.set = nil
 
+--- Return `{ current, requested, availability, reason? }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings.
+---@type fun(): table
+model.status = nil
+
 --- Return whether the active model supports the named input modality, for example `image` or `pdf`.
----@type fun(modality: string): boolean
+---@type fun(modality: string): boolean?
 model.supports_input = nil
 
---- Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.
----@type fun(): table
+--- Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport. `api_key_env` is the environment variable name, never its value.
+---@type fun(): table?
 model.transport = nil
 
 return model

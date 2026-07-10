@@ -11,7 +11,7 @@ Model selector. `smelt.model.current()` reads the active model key, `smelt.model
 ## `smelt.model.capabilities`
 
 ```lua
-fun(): table
+fun(): table?
 ```
 
 Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.
@@ -19,15 +19,15 @@ Resolved capabilities for the active model/provider as `{ input_modalities, supp
 ## `smelt.model.current`
 
 ```lua
-fun(): string
+fun(): string?
 ```
 
-Return the active model key.
+Return the active model key, or `nil` when no active model exists.
 
 ## `smelt.model.input_modalities`
 
 ```lua
-fun(): table
+fun(): table?
 ```
 
 Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.
@@ -59,7 +59,7 @@ fun(name: any, value: any): any
 ## `smelt.model.pricing`
 
 ```lua
-fun(): table
+fun(): table?
 ```
 
 Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `"config override"`, `"models.dev"`, or `"none"`. Prices are USD per 1M tokens.
@@ -70,12 +70,20 @@ Resolved pricing for the active model as `{ input, output, cache_read, cache_wri
 fun(name: string): nil
 ```
 
-Switch the active model by key.
+Switch the active model by key. Errors when the name cannot be resolved.
+
+## `smelt.model.status`
+
+```lua
+fun(): table
+```
+
+Return `{ current, requested, availability, reason? }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings.
 
 ## `smelt.model.supports_input`
 
 ```lua
-fun(modality: string): boolean
+fun(modality: string): boolean?
 ```
 
 Return whether the active model supports the named input modality, for example `image` or `pdf`.
@@ -83,8 +91,8 @@ Return whether the active model supports the named input modality, for example `
 ## `smelt.model.transport`
 
 ```lua
-fun(): table
+fun(): table?
 ```
 
-Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.
+Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport. `api_key_env` is the environment variable name, never its value.
 

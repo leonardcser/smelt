@@ -12,10 +12,143 @@ fn builds_a_fresh_test_app() {
 }
 
 #[test]
+fn no_model_state_is_explicit_and_blocks_dispatch() {
+    let mut app = TestApp::builder().with_vim(false).without_model().build();
+    let initial_history_len = app.app.core.session.history.len();
+
+    assert!(app.run_lua(
+        r#"
+            assert(smelt.model.current() == nil)
+            local status = smelt.model.status()
+            assert(status.current == nil)
+            assert(status.requested == nil)
+            assert(status.availability == "none")
+            assert(smelt.signal.get("model") == nil)
+            assert(smelt.config.provider_type() == nil)
+            assert(smelt.config.api_base() == nil)
+            assert(smelt.config.api_key_env() == nil)
+            assert(smelt.config.model_config() == nil)
+            assert(smelt.model.transport() == nil)
+            assert(smelt.model.capabilities() == nil)
+        "#,
+    ));
+
+    app.press(KeyCode::F(3));
+    assert!(app.render_to_frame().text().contains("debug"));
+    app.press(KeyCode::Esc);
+
+    app.type_text("hello without a model");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(app.state().prompt_text, "hello without a model");
+    assert!(!app.state().agent_running);
+    assert_eq!(app.app.core.session.history.len(), initial_history_len);
+    assert!(app.app.notification_win().is_some());
+    assert!(app.actions().iter().all(|action| {
+        !matches!(
+            action,
+            Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+        )
+    }));
+}
+
+#[test]
+fn queued_input_is_retained_until_a_model_is_usable() {
+    let mut app = TestApp::builder().without_model().build();
+    app.push_queued_message("wait for a model".into());
+
+    assert!(app.app.start_next_queued_input_if_idle());
+
+    assert_eq!(app.state().queued_inputs, vec!["wait for a model"]);
+    assert!(!app.state().agent_running);
+    assert!(app.actions().iter().all(|action| {
+        !matches!(
+            action,
+            Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+        )
+    }));
+}
+
+#[test]
+fn unavailable_model_is_reported_and_blocks_dispatch() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.active_model_mut().unwrap().availability =
+        smelt_core::ModelAvailability::Unavailable {
+            reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+        };
+
+    assert!(app.run_lua(
+        r#"
+            assert(smelt.model.current() == "test/test-model")
+            local status = smelt.model.status()
+            assert(status.current == "test/test-model")
+            assert(status.requested == "test/test-model")
+            assert(status.availability == "unavailable")
+            assert(status.reason == "missing_credentials")
+        "#,
+    ));
+
+    app.type_text("do not dispatch");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(app.state().prompt_text, "do not dispatch");
+    assert!(!app.state().agent_running);
+    assert!(app.actions().iter().all(|action| {
+        !matches!(
+            action,
+            Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+        )
+    }));
+}
+
+#[test]
+fn model_switch_marks_missing_credentials_unavailable() {
+    let mut app = TestApp::builder().build();
+    app.app
+        .core
+        .config
+        .available_models
+        .push(smelt_core::config::ResolvedModel {
+            key: "missing/credentials".into(),
+            provider_name: "missing".into(),
+            model_name: "credentials".into(),
+            api_base: "https://example.invalid/v1".into(),
+            api_key_env: "SMELT_TEST_INTENTIONALLY_MISSING_MODEL_KEY_7F31A9".into(),
+            provider_type: "openai-compatible".into(),
+            config: protocol::ModelConfig::default(),
+        });
+
+    app.app.apply_model("missing/credentials", true);
+
+    assert!(matches!(
+        app.app
+            .core
+            .config
+            .active_model()
+            .map(|model| &model.availability),
+        Some(smelt_core::ModelAvailability::Unavailable {
+            reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+        })
+    ));
+    assert!(app.run_lua(
+        r#"
+        local status = smelt.model.status()
+        assert(status.current == "missing/credentials")
+        assert(status.availability == "unavailable")
+        assert(status.reason == "missing_credentials")
+        "#,
+    ));
+}
+
+#[test]
 fn api_base_endpoint_warning_is_persistent_and_deduped() {
     let mut app = TestApp::builder().build();
-    app.app.core.config.provider_type = "openai-compatible".into();
-    app.app.core.config.api_base = "https://api.cerebras.ai/v1/chat/completions".into();
+    let active = app.app.core.config.active_model_mut().unwrap();
+    active.provider_type = "openai-compatible".into();
+    active.api_base = "https://api.cerebras.ai/v1/chat/completions".into();
 
     app.app.warn_if_api_base_normalized();
     app.app.warn_if_api_base_normalized();
@@ -177,19 +310,23 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
 #[test]
 fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
-    app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
-        key: "other/switched".into(),
-        provider_name: "other".into(),
-        model_name: "switched".into(),
-        api_base: "https://switch.example/v1".into(),
-        api_key_env: String::new(),
-        provider_type: "anthropic".into(),
-        config: protocol::ModelConfig {
-            context_window: Some(200_000),
-            tool_calling: Some(false),
-            ..Default::default()
-        },
-    }];
+    app.app
+        .core
+        .config
+        .available_models
+        .push(smelt_core::config::ResolvedModel {
+            key: "other/switched".into(),
+            provider_name: "other".into(),
+            model_name: "switched".into(),
+            api_base: "https://switch.example/v1".into(),
+            api_key_env: String::new(),
+            provider_type: "anthropic".into(),
+            config: protocol::ModelConfig {
+                context_window: Some(200_000),
+                tool_calling: Some(false),
+                ..Default::default()
+            },
+        });
     let _ = app.drain_engine_sends();
 
     app.app.apply_model("other/switched", false);
@@ -198,6 +335,8 @@ fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
         .into_iter()
         .all(|cmd| !matches!(cmd, protocol::UiCommand::SetTurnModel { .. })));
 
+    app.app.apply_model("test/test-model", false);
+    let _ = app.drain_engine_sends();
     app.start_turn(1);
     app.app.apply_model("other/switched", false);
     let command = app
@@ -220,8 +359,9 @@ fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
 #[test]
 fn custom_command_override_dispatches_its_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
-    app.app.core.config.provider_type = "openai".into();
-    app.app.core.config.model_config = protocol::ModelConfig {
+    let active = app.app.core.config.active_model_mut().unwrap();
+    active.provider_type = "openai".into();
+    active.config = protocol::ModelConfig {
         input_cost: Some(99.0),
         ..Default::default()
     };
@@ -243,16 +383,19 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
     }];
     let _ = app.drain_engine_sends();
 
-    let turn = app.app.begin_command_request_turn(
-        "custom".into(),
-        "body".into(),
-        smelt_core::custom_commands::CommandOverrides {
-            model: Some("other/target-model".into()),
-            temperature: Some(0.8),
-            ..Default::default()
-        },
-        crate::app::CommandTurnStart::Fresh,
-    );
+    let turn = app
+        .app
+        .begin_command_request_turn(
+            "custom".into(),
+            "body".into(),
+            smelt_core::custom_commands::CommandOverrides {
+                model: Some("other/target-model".into()),
+                temperature: Some(0.8),
+                ..Default::default()
+            },
+            crate::app::CommandTurnStart::Fresh,
+        )
+        .expect("custom command target resolves");
     app.app.agent = Some(turn);
 
     let payload = app
@@ -290,17 +433,18 @@ fn custom_command_turn_includes_registered_lua_tools() {
 #[test]
 fn engine_ask_probe_dispatches_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
-    app.app.core.config.model = "ask-model".into();
-    app.app.core.config.api_base = "https://ask.example/v1".into();
-    app.app.core.config.provider_type = "openai-compatible".into();
-    app.app.core.config.model_config = protocol::ModelConfig {
+    let active = app.app.core.config.active_model_mut().unwrap();
+    active.model_name = "ask-model".into();
+    active.api_base = "https://ask.example/v1".into();
+    active.provider_type = "openai-compatible".into();
+    active.config = protocol::ModelConfig {
         max_tokens: Some(1234),
         supports_reasoning: Some(true),
         ..Default::default()
     };
     app.app.core.config.settings.cache_ttl_long = true;
     app.app.core.config.settings.request_audit = "off".into();
-    app.app.core.config.request_audit_override = Some(protocol::RequestAuditMode::Full);
+    app.app.core.config.request_audit = protocol::RequestAuditMode::Full;
     let _ = app.drain_engine_sends();
 
     app.start_engine_ask_probe("summarize this");

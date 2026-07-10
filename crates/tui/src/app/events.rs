@@ -204,8 +204,7 @@ impl TuiApp {
                 false
             }
             EventOutcome::ContinueTurn => {
-                let turn = self.begin_agent_turn("", protocol::Content::text(""));
-                self.agent = Some(turn);
+                self.agent = self.begin_agent_turn("", protocol::Content::text(""));
                 false
             }
             EventOutcome::Exec(handle) => {
@@ -242,12 +241,31 @@ impl TuiApp {
                             } else {
                                 self.process_input(&text)
                             };
-                            self.commit_prompt_submission(edit.take().expect("submit edit"));
-                            self.apply_input_outcome(outcome, content, &display);
+                            let accepted = match outcome {
+                                InputOutcome::StartAgent => {
+                                    match self.begin_agent_turn(&display, content) {
+                                        Some(turn) => {
+                                            self.commit_prompt_submission(
+                                                edit.take().expect("submit edit"),
+                                            );
+                                            self.agent = Some(turn);
+                                            true
+                                        }
+                                        None => false,
+                                    }
+                                }
+                                outcome => {
+                                    self.commit_prompt_submission(
+                                        edit.take().expect("submit edit"),
+                                    );
+                                    self.apply_input_outcome(outcome, content, &display);
+                                    true
+                                }
+                            };
                             if self.pending_quit {
                                 return true;
                             }
-                            true
+                            accepted
                         } else {
                             let outcome = self.handle_empty_submit();
                             return self.apply_event_outcome(outcome);
@@ -797,9 +815,7 @@ impl TuiApp {
         }
 
         if !self.queued_inputs.is_empty() {
-            if let Some(queued) = self.queued_inputs.pop_next_for_turn() {
-                self.start_queued_input(queued);
-            }
+            self.start_next_queued_input_if_idle();
             return EventOutcome::Noop;
         }
 
@@ -832,7 +848,9 @@ impl TuiApp {
         self.discard_turn(crate::app::TurnEnd::Cancelled);
         self.queued_inputs = remaining;
         if let Some(queued) = next {
-            self.start_queued_input(queued);
+            if let Err(queued) = self.start_queued_input(queued) {
+                self.queued_inputs.push_front(QueueStage::Turn, queued);
+            }
         }
     }
 

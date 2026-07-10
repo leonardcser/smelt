@@ -77,7 +77,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.list`](list.md) - 1 function(s)
 - [`smelt.metrics`](metrics.md) - 1 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) - 5 function(s)
-- [`smelt.model`](model.md) - 10 function(s)
+- [`smelt.model`](model.md) - 11 function(s)
 - [`smelt.notebook`](notebook.md) - 7 function(s) - 1 internal function(s)
 - [`smelt.notify`](notify.md) - 4 function(s)
 - [`smelt.overlay`](overlay.md) - 1 function(s)

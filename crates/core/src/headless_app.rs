@@ -50,8 +50,14 @@ impl HeadlessApp {
         }
     }
 
-    fn api_key(&self) -> String {
-        std::env::var(&self.core.config.api_key_env).unwrap_or_default()
+    fn model_target(&self) -> Option<protocol::ModelTarget> {
+        let active = self.core.config.active_model()?;
+        let api_key = if active.api_key_env.is_empty() {
+            String::new()
+        } else {
+            std::env::var(&active.api_key_env).unwrap_or_default()
+        };
+        Some(active.target(api_key))
     }
 
     fn approves_permission(
@@ -349,6 +355,17 @@ impl HeadlessApp {
         )));
 
         let tools = self.tool_defs();
+        let Some(model_target) = self.model_target() else {
+            eprintln!("error: no model is available for headless dispatch");
+            return;
+        };
+        let fast_mode = model_target.provider_type == "codex"
+            && model_target.config.supports_fast_mode == Some(true)
+            && self
+                .core
+                .session
+                .fast_mode
+                .unwrap_or(self.core.config.settings.fast_mode);
 
         self.core
             .engine
@@ -356,15 +373,10 @@ impl HeadlessApp {
                 turn_id,
                 input: protocol::StartTurnInput::user(Content::text(content), None),
                 mode: self.core.config.mode.clone(),
-                model_target: self.core.config.model_target(self.api_key()),
+                model_target,
                 request_config: self.core.config.request_runtime_config(),
                 reasoning_effort: self.core.config.reasoning_effort,
-                fast_mode: self.core.config.supports_fast_mode()
-                    && self
-                        .core
-                        .session
-                        .fast_mode
-                        .unwrap_or(self.core.config.settings.fast_mode),
+                fast_mode,
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.core.session.id.clone(),
                 session_dir: crate::session::dir_for(&self.core.session),
@@ -530,33 +542,34 @@ impl HeadlessApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config, permissions, AppConfig, FrontendKind};
-    use protocol::{AgentMode, ReasoningEffort};
+    use crate::{config, permissions, FrontendKind, RuntimeState, StartupOverrides};
 
-    fn app_config(tool_calling: bool) -> AppConfig {
-        AppConfig {
-            model: "test-model".into(),
-            api_base: "http://example.invalid".into(),
-            api_key_env: "SMELT_TEST_KEY".into(),
-            provider_type: "openai".into(),
-            available_models: Vec::new(),
-            model_config: protocol::ModelConfig {
-                tool_calling: Some(tool_calling),
-                ..protocol::ModelConfig::default()
-            },
-            cli_model_override: false,
-            cli_api_base_override: false,
-            cli_api_key_env_override: false,
-            cli_mode_cycle_override: false,
-            mode: AgentMode::normal(),
-            mode_cycle: vec![AgentMode::normal()],
-            reasoning_effort: ReasoningEffort::Off,
-            reasoning_cycle: vec![ReasoningEffort::Off],
-            settings: config::ResolvedSettings::default(),
-            request_audit_override: None,
-            remember: config::RememberConfig::default(),
-            context_window: None,
-        }
+    fn runtime_state(tool_calling: bool) -> RuntimeState {
+        let config = config::Config {
+            providers: vec![config::ProviderConfig {
+                name: Some("test".into()),
+                provider_type: Some("openai".into()),
+                api_base: Some("http://example.invalid".into()),
+                api_key_env: Some("SMELT_TEST_KEY".into()),
+                models: vec![protocol::ModelConfig {
+                    name: Some("test-model".into()),
+                    tool_calling: Some(tool_calling),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let models = config.resolve_models();
+        crate::resolve_runtime(crate::RuntimeInputs {
+            config: &config,
+            startup: &StartupOverrides::default(),
+            available_models: &models,
+            registered_modes: &[],
+            selections: &crate::RuntimeSelections::default(),
+            previous: None,
+            headless: true,
+        })
+        .unwrap()
     }
 
     fn lua_with_probe_tools() -> crate::lua::LuaRuntime {
@@ -595,7 +608,8 @@ mod tests {
         let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
         let env = Arc::new(engine::env::RuntimeEnv::snapshot());
         let core = Core::new(
-            app_config(tool_calling),
+            runtime_state(tool_calling),
+            StartupOverrides::default(),
             engine,
             FrontendKind::Headless,
             Arc::new(permissions::Permissions::load()),
@@ -621,13 +635,15 @@ mod tests {
         let (engine, mut cmd_rx, event_tx) = engine::EngineHandle::for_test();
         let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
         let env = Arc::new(engine::env::RuntimeEnv::snapshot());
-        let mut config = app_config(false);
-        config.api_key_env.clear();
-        config.model_config.max_tokens = Some(3210);
+        let mut config = runtime_state(false);
+        let active = config.active_model_mut().unwrap();
+        active.api_key_env.clear();
+        active.config.max_tokens = Some(3210);
         config.settings.redact_secrets = true;
         config.settings.cache_ttl_long = true;
         let core = Core::new(
             config,
+            StartupOverrides::default(),
             engine,
             FrontendKind::Headless,
             Arc::new(permissions::Permissions::load()),

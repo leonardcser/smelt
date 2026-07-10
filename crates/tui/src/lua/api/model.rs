@@ -6,18 +6,13 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
-fn resolved_input_modalities(app: &crate::app::TuiApp) -> Vec<String> {
-    let mut values = app
-        .core
-        .config
-        .model_config
-        .input_modalities
-        .clone()
-        .unwrap_or_default();
+fn resolved_input_modalities(app: &crate::app::TuiApp) -> Option<Vec<String>> {
+    let active = app.core.config.active_model()?;
+    let mut values = active.config.input_modalities.clone().unwrap_or_default();
     if let Some(catalog) = smelt_provider::catalog::input_modalities(
-        &app.core.config.provider_type,
-        &app.core.config.api_base,
-        &app.core.config.model,
+        &active.provider_type,
+        &active.api_base,
+        &active.model_name,
     ) {
         values.extend(catalog);
     }
@@ -26,7 +21,7 @@ fn resolved_input_modalities(app: &crate::app::TuiApp) -> Vec<String> {
     }
     values.sort();
     values.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    values
+    Some(values)
 }
 
 fn modalities_table(lua: &Lua, values: &[String]) -> LuaResult<mlua::Table> {
@@ -86,31 +81,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "pricing",
         "Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`. `source` is one of `\"config override\"`, `\"models.dev\"`, or `\"none\"`. Prices are USD per 1M tokens.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let resolved = crate::lua::try_with_app(|app| {
-                smelt_provider::resolve_pricing(
-                    &app.core.config.model,
-                    &app.core.config.provider_type,
-                    &app.core.config.api_base,
-                    &app.core.config.model_config,
-                )
+        |lua, ()| -> LuaResult<Option<mlua::Table>> {
+            let Some(resolved) = crate::lua::try_with_app(|app| {
+                app.core.config.active_model().map(|model| {
+                    smelt_provider::resolve_pricing(
+                        &model.model_name,
+                        &model.provider_type,
+                        &model.api_base,
+                        &model.config,
+                    )
+                })
             })
-            .unwrap_or(smelt_provider::ResolvedPricing {
-                pricing: smelt_provider::ModelPricing {
-                    input: 0.0,
-                    output: 0.0,
-                    cache_read: 0.0,
-                    cache_write: 0.0,
-                },
-                source: smelt_provider::PricingSource::None,
-            });
+            .flatten()
+            else {
+                return Ok(None);
+            };
             let t = lua.create_table()?;
             t.set("input", resolved.pricing.input)?;
             t.set("output", resolved.pricing.output)?;
             t.set("cache_read", resolved.pricing.cache_read)?;
             t.set("cache_write", resolved.pricing.cache_write)?;
             t.set("source", resolved.source.label())?;
-            Ok(t)
+            Ok(Some(t))
         },
     )?;
 
@@ -120,18 +112,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
             Ok(crate::lua::try_with_app(|app| {
-                // Config override wins.
-                if let Some(override_) = app.core.config.model_config.max_tokens {
-                    return Some(override_);
-                }
-                // Fall back to models.dev catalog.
-                smelt_provider::catalog::output_tokens(
-                    &app.core.config.provider_type,
-                    &app.core.config.api_base,
-                    &app.core.config.model,
-                )
+                let active = app.core.config.active_model()?;
+                active.config.max_tokens.or_else(|| {
+                    smelt_provider::catalog::output_tokens(
+                        &active.provider_type,
+                        &active.api_base,
+                        &active.model_name,
+                    )
+                })
             })
-            .unwrap_or_default())
+            .flatten())
         },
     )?;
 
@@ -139,11 +129,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "input_modalities",
         "Resolved input modalities for the active model as an array such as `{ \"text\", \"image\", \"pdf\" }`. Config/provider metadata wins, models.dev fills missing data, and unknown models default to text only.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let values = crate::lua::try_with_app(|app| resolved_input_modalities(app))
-                .unwrap_or_else(|| vec!["text".to_string()]);
-            let out = modalities_table(lua, &values)?;
-            Ok(out)
+        |lua, ()| -> LuaResult<Option<mlua::Table>> {
+            let Some(values) =
+                crate::lua::try_with_app(|app| resolved_input_modalities(app)).flatten()
+            else {
+                return Ok(None);
+            };
+            Ok(Some(modalities_table(lua, &values)?))
         },
     )?;
 
@@ -151,32 +143,39 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "supports_input",
         "Return whether the active model supports the named input modality, for example `image` or `pdf`.",
         &["modality"],
-        |_, modality: String| -> LuaResult<bool> {
+        |_, modality: String| -> LuaResult<Option<bool>> {
             let want = modality.to_ascii_lowercase();
             Ok(crate::lua::try_with_app(|app| {
-                resolved_input_modalities(app)
-                    .iter()
-                    .any(|value| value.eq_ignore_ascii_case(&want))
+                resolved_input_modalities(app).map(|modalities| {
+                    modalities
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(&want))
+                })
             })
-            .unwrap_or(want == "text"))
+            .flatten())
         },
     )?;
 
     m.fn_(
         "transport",
-        "Return `{ provider_type, api_base, multimodal_tool_results }` for the active model transport.",
+        "Return `{ provider_type, api_base, api_key_env, multimodal_tool_results }` for the active model transport. `api_key_env` is the environment variable name, never its value.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let (provider_type, api_base) = crate::lua::try_with_app(|app| {
-                (app.core.config.provider_type.clone(), app.core.config.api_base.clone())
+        |lua, ()| -> LuaResult<Option<mlua::Table>> {
+            let Some(active) = crate::lua::try_with_app(|app| {
+                app.core.config.active_model().cloned()
             })
-            .unwrap_or_default();
-            let multimodal_tool_results = supports_multimodal_tool_results(&provider_type);
+            .flatten()
+            else {
+                return Ok(None);
+            };
+            let multimodal_tool_results =
+                supports_multimodal_tool_results(&active.provider_type);
             let out = lua.create_table()?;
-            out.set("provider_type", provider_type)?;
-            out.set("api_base", api_base)?;
+            out.set("provider_type", active.provider_type)?;
+            out.set("api_base", active.api_base)?;
+            out.set("api_key_env", active.api_key_env)?;
             out.set("multimodal_tool_results", multimodal_tool_results)?;
-            Ok(out)
+            Ok(Some(out))
         },
     )?;
 
@@ -184,49 +183,51 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "capabilities",
         "Resolved capabilities for the active model/provider as `{ input_modalities, supports_image, supports_pdf, supports_video, supports_reasoning, tool_calling, max_tokens, context_window, transport = { ... }, sources = { ... } }`.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let data = crate::lua::try_with_app(|app| {
-                let modalities = resolved_input_modalities(app);
-                let provider_type = app.core.config.provider_type.clone();
-                let api_base = app.core.config.api_base.clone();
-                let model = app.core.config.model.clone();
-                let catalog = smelt_provider::catalog::lookup(&provider_type, &api_base, &model);
-                let max_tokens = app
-                    .core
+        |lua, ()| -> LuaResult<Option<mlua::Table>> {
+            let Some(data) = crate::lua::try_with_app(|app| {
+                let active = app.core.config.active_model()?;
+                let modalities = resolved_input_modalities(app)?;
+                let catalog = smelt_provider::catalog::lookup(
+                    &active.provider_type,
+                    &active.api_base,
+                    &active.model_name,
+                );
+                let max_tokens = active
                     .config
-                    .model_config
                     .max_tokens
                     .or_else(|| catalog.as_ref().and_then(|entry| entry.output_tokens));
-                let context_window = app
-                    .core
+                let context_window = active
                     .config
-                    .model_config
                     .context_window
                     .or(app.core.config.context_window)
                     .or_else(|| catalog.as_ref().and_then(|entry| entry.context_window));
-                let supports_reasoning = app
-                    .core
+                let supports_reasoning = active
                     .config
-                    .model_config
                     .supports_reasoning
                     .or_else(|| catalog.as_ref().and_then(|entry| entry.supports_reasoning));
-                (
+                Some((
                     modalities,
-                    provider_type,
-                    api_base,
-                    model,
+                    active.provider_type.clone(),
+                    active.api_base.clone(),
+                    active.api_key_env.clone(),
+                    active.model_name.clone(),
                     max_tokens,
                     context_window,
                     supports_reasoning,
-                    app.core.config.model_config.tool_calling.unwrap_or(true),
-                    app.core.config.model_config.input_modalities.is_some(),
+                    active.config.tool_calling(),
+                    active.config.input_modalities.is_some(),
                     catalog.and_then(|entry| entry.input_modalities).is_some(),
-                )
-            });
+                ))
+            })
+            .flatten()
+            else {
+                return Ok(None);
+            };
             let (
                 modalities,
                 provider_type,
                 api_base,
+                api_key_env,
                 model,
                 max_tokens,
                 context_window,
@@ -234,20 +235,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 tool_calling,
                 has_config_modalities,
                 has_catalog_modalities,
-            ) = data.unwrap_or_else(|| {
-                (
-                    vec!["text".to_string()],
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    None,
-                    None,
-                    None,
-                    true,
-                    false,
-                    false,
-                )
-            });
+            ) = data;
 
             let t = lua.create_table()?;
             t.set("model", model)?;
@@ -274,6 +262,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let multimodal_tool_results = supports_multimodal_tool_results(&provider_type);
             transport.set("provider_type", provider_type)?;
             transport.set("api_base", api_base)?;
+            transport.set("api_key_env", api_key_env)?;
             transport.set("multimodal_tool_results", multimodal_tool_results)?;
             transport.set("image_tool_results", multimodal_tool_results)?;
             transport.set("pdf_tool_results", multimodal_tool_results)?;
@@ -315,25 +304,74 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 },
             )?;
             t.set("sources", sources)?;
-            Ok(t)
+            Ok(Some(t))
         },
     )?;
 
     m.fn_(
         "current",
-        "Return the active model key.",
+        "Return the active model key, or `nil` when no active model exists.",
         &[],
-        |_, ()| -> LuaResult<String> {
-            Ok(crate::lua::try_with_app(|app| app.core.config.model.clone()).unwrap_or_default())
+        |_, ()| -> LuaResult<Option<String>> {
+            Ok(crate::lua::try_with_app(|app| {
+                app.core
+                    .config
+                    .active_model()
+                    .map(|model| model.key.clone())
+            })
+            .flatten())
+        },
+    )?;
+    m.fn_(
+        "status",
+        "Return `{ current, requested, availability, reason? }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let out = lua.create_table()?;
+            if let Some((current, requested, availability, reason)) =
+                crate::lua::try_with_app(|app| {
+                    let selection = &app.core.config.model_selection;
+                    let current = selection.active.as_ref().map(|model| model.key.clone());
+                    let requested = selection.requested_key.clone();
+                    let (availability, reason) =
+                        match selection.active.as_ref().map(|model| &model.availability) {
+                            Some(smelt_core::ModelAvailability::Available) => ("available", None),
+                            Some(smelt_core::ModelAvailability::StaleCatalog) => {
+                                ("stale_catalog", None)
+                            }
+                            Some(smelt_core::ModelAvailability::Unavailable { reason }) => {
+                                ("unavailable", Some(reason.status_reason()))
+                            }
+                            None if requested.is_some() => ("pending", None),
+                            None => ("none", None),
+                        };
+                    (current, requested, availability, reason)
+                })
+            {
+                out.set("current", current)?;
+                out.set("requested", requested)?;
+                out.set("availability", availability)?;
+                out.set("reason", reason)?;
+            } else {
+                out.set("availability", "none")?;
+            }
+            Ok(out)
         },
     )?;
     m.fn_(
         "set",
-        "Switch the active model by key.",
+        "Switch the active model by key. Errors when the name cannot be resolved.",
         &["name"],
         |_, name: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.apply_model(&name, true));
-            Ok(())
+            crate::lua::try_with_app(|app| {
+                let key =
+                    smelt_core::config::resolve_model_ref(&app.core.config.available_models, &name)
+                        .map(|model| model.key.clone())
+                        .map_err(LuaError::external)?;
+                app.apply_model(&key, true);
+                Ok(())
+            })
+            .ok_or_else(|| LuaError::external("smelt.model.set: app not initialized"))?
         },
     )?;
     Ok(())

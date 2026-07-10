@@ -1,8 +1,8 @@
 //! Headless-safe runtime core shared by `TuiApp` and `HeadlessApp`.
 
 use super::{
-    app_config::AppConfig, confirms::Confirms, engine_client::EngineClient, signals,
-    signals::Signals, timers::Timers, NullSink, Osc52Sink, SystemSink,
+    confirms::Confirms, engine_client::EngineClient, runtime_state::RuntimeState, signals,
+    signals::Signals, timers::Timers, NullSink, Osc52Sink, StartupOverrides, SystemSink,
 };
 use crate::process::ProcessRegistry;
 use crate::session::Session;
@@ -32,7 +32,8 @@ impl FrontendKind {
 }
 
 pub struct Core {
-    pub config: AppConfig,
+    pub config: RuntimeState,
+    pub startup_overrides: StartupOverrides,
     pub session: Session,
     pub confirms: Confirms,
     pub clipboard: crate::Clipboard,
@@ -62,7 +63,8 @@ pub struct Core {
 
 impl Core {
     pub fn new(
-        config: AppConfig,
+        config: RuntimeState,
+        startup_overrides: StartupOverrides,
         engine: EngineHandle,
         frontend: FrontendKind,
         permissions: Arc<crate::permissions::Permissions>,
@@ -73,7 +75,7 @@ impl Core {
         let signals = signals::build_with_builtins(signals::SignalSeeds {
             vim_mode: "Insert".to_string(),
             agent_mode: config.mode.as_str().to_string(),
-            model: config.model.clone(),
+            model: config.active_model().map(|model| model.key.clone()),
             reasoning: config.reasoning_effort.label().to_string(),
             cwd,
             session_title: String::new(),
@@ -89,6 +91,7 @@ impl Core {
         session.fast_mode = Some(config.settings.fast_mode);
         Self {
             config,
+            startup_overrides,
             session,
             confirms,
             clipboard,

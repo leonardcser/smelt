@@ -52,7 +52,6 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
 }
 
 #[test]
-#[ignore = "hot reload refactor characterization"]
 fn provider_reload_rebuilds_the_running_model_catalog() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
@@ -83,6 +82,63 @@ fn provider_reload_rebuilds_the_running_model_catalog() {
         Some(1),
         "committed provider declarations must immediately reach the model picker"
     );
+}
+
+#[test]
+fn setting_write_updates_desired_state_before_live_effects() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        smelt.settings.show_slug = false
+        assert(smelt.settings.show_slug == false)
+        "#,
+    ));
+
+    assert!(!app.app.core.config.settings.show_slug);
+    assert!(!app.app.lua.to_config().settings.show_slug);
+}
+
+#[test]
+fn setting_write_reads_desired_value_while_preserving_startup_precedence() {
+    let mut app = TestApp::builder().build();
+    app.app.core.startup_overrides.settings.insert(
+        "show_slug".into(),
+        smelt_core::config::SettingValue::Bool(true),
+    );
+    app.app.core.config.settings.show_slug = true;
+
+    assert!(app.run_lua(
+        r#"
+        smelt.settings.show_slug = false
+        assert(smelt.settings.show_slug == false)
+        local paired
+        for key, value in pairs(smelt.settings) do
+          if key == "show_slug" then paired = value end
+        end
+        assert(paired == false)
+        "#,
+    ));
+
+    assert!(app.app.core.config.settings.show_slug);
+    assert!(!app.app.lua.to_config().settings.show_slug);
+}
+
+#[test]
+fn table_settings_are_owned_only_by_lua_state() {
+    let mut app = TestApp::builder().build();
+    let runtime_before = app.app.core.config.clone();
+
+    assert!(app.run_lua(
+        r#"
+        smelt.settings.notifications.turn_end = true
+        smelt.settings.transcript.view.custom = "lua-owned"
+        assert(smelt.settings.notifications.turn_end == true)
+        assert(smelt.settings.transcript.view.custom == "lua-owned")
+        "#,
+    ));
+
+    assert_eq!(app.app.core.config, runtime_before);
 }
 
 #[test]

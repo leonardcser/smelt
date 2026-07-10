@@ -459,7 +459,7 @@ pub(crate) struct RuntimeSessionMetadata {
     pub(crate) updated_at_ms: u64,
     pub(crate) mode: String,
     pub(crate) reasoning_effort: ReasoningEffort,
-    pub(crate) model: String,
+    pub(crate) model: Option<String>,
     pub(crate) fast_mode: bool,
 }
 
@@ -642,7 +642,7 @@ pub(crate) enum SessionMutation {
         updated_at_ms: u64,
         mode: String,
         reasoning_effort: ReasoningEffort,
-        model: String,
+        model: Option<String>,
         fast_mode: bool,
     },
     SetFastMode {
@@ -1444,7 +1444,7 @@ impl SessionDocument {
                 session.updated_at_ms = updated_at_ms;
                 session.mode = Some(mode);
                 session.reasoning_effort = Some(reasoning_effort);
-                session.model = Some(model);
+                session.model = model;
                 session.fast_mode = Some(fast_mode);
                 MutationResult {
                     session_dirty: true,
@@ -2045,7 +2045,7 @@ mod tests {
                 updated_at_ms: 20,
                 mode: "agent".into(),
                 reasoning_effort: ReasoningEffort::Low,
-                model: "model-a".into(),
+                model: Some("model-a".into()),
                 fast_mode: false,
             },
             RuntimeRequestHistoryAppendSave {
@@ -2059,9 +2059,9 @@ mod tests {
 
     fn token_identity() -> ContextTokenIdentity {
         ContextTokenIdentity {
-            model: "model-a".into(),
-            api_base: "https://api.example.test".into(),
-            provider_type: "openai".into(),
+            model: Some("model-a".into()),
+            api_base: Some("https://api.example.test".into()),
+            provider_type: Some("openai".into()),
         }
     }
 
@@ -2220,7 +2220,7 @@ mod tests {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.record_context_tokens(100, token_identity());
         let mut new_identity = token_identity();
-        new_identity.model = "model-b".into();
+        new_identity.model = Some("model-b".into());
 
         let result = apply_session(
             &mut session,
@@ -2398,7 +2398,7 @@ mod tests {
                 updated_at_ms: 42,
                 mode: "agent".into(),
                 reasoning_effort: ReasoningEffort::High,
-                model: "provider/model".into(),
+                model: Some("provider/model".into()),
                 fast_mode: true,
             },
         );

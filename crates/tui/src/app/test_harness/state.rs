@@ -44,7 +44,8 @@ impl TestApp {
     pub fn start_submitted_turn(&mut self, text: &str) {
         let turn = self
             .app
-            .begin_agent_turn(text, protocol::Content::text(text));
+            .begin_agent_turn(text, protocol::Content::text(text))
+            .expect("test app has a usable model");
         self.app.agent = Some(turn);
     }
 

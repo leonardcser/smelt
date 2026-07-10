@@ -132,60 +132,9 @@ where
 
 /// Fully resolved startup parameters, produced by [`resolve`] before the engine starts.
 pub struct ResolvedStartup {
-    pub cfg: smelt_core::config::Config,
-    pub available_models: Vec<smelt_core::config::ResolvedModel>,
-    pub api_base: String,
-    pub api_key_env: String,
-    pub provider_type: String,
-    pub model: String,
-    pub model_config: smelt_core::config::ModelConfig,
-    pub settings: smelt_core::config::ResolvedSettings,
-    pub mode_override: Option<AgentMode>,
-    pub mode_cycle: Vec<AgentMode>,
-    pub reasoning_effort: ReasoningEffort,
-    pub reasoning_cycle: Vec<ReasoningEffort>,
+    pub runtime: smelt_core::RuntimeState,
+    pub startup_overrides: smelt_core::StartupOverrides,
     pub startup_auth_error: Option<String>,
-}
-
-/// Resolve the active model. Priority: CLI `--model` > recent
-/// `selected_model` (when `smelt.remember.model` is on) >
-/// `smelt.defaults{model=...}` in init.lua > first in config. Returns
-/// `None` when the CLI model is absent from resolved models and
-/// `--api-base` is also set.
-fn resolve_model_reference(
-    args: &Args,
-    cfg: &smelt_core::config::Config,
-    available_models: &[smelt_core::config::ResolvedModel],
-    recent: &smelt_core::state::Recent,
-) -> Option<smelt_core::config::ResolvedModel> {
-    let pick = |reference: &str, allow_not_found: bool| match smelt_core::config::resolve_model_ref(
-        available_models,
-        reference,
-    ) {
-        Ok(model) => Some(model.clone()),
-        Err(smelt_core::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
-        Err(err) => {
-            eprintln!("error: {err}");
-            std::process::exit(1);
-        }
-    };
-
-    if let Some(ref cli_model) = args.model {
-        pick(cli_model, args.api_base.is_some())
-    } else if let Some(picked) = cfg
-        .remember
-        .model
-        .then_some(recent.selected_model.as_deref())
-        .flatten()
-        .and_then(|key| smelt_core::config::resolve_model_ref(available_models, key).ok())
-        .cloned()
-    {
-        Some(picked)
-    } else if let Some(default) = cfg.defaults.model.as_deref() {
-        pick(default, false)
-    } else {
-        available_models.first().cloned()
-    }
 }
 
 fn has_managed_provider(
@@ -280,10 +229,10 @@ async fn inject_managed_provider_models_with_refresh<F, Fut>(
     });
 }
 
-/// Resolve all startup configuration: Lua registries, `--set` overrides, model lists, API keys, and defaults.
+/// Resolve all startup configuration through the shared pure runtime resolver.
 ///
-/// `http_client` is reused for Codex / Copilot auth refresh tasks so they don't each
-/// rebuild a fresh rustls config + webpki-roots parse.
+/// `http_client` is reused for managed-provider cache/refresh work so startup
+/// does not rebuild a rustls client for each provider.
 pub async fn resolve(
     args: &Args,
     cfg: smelt_core::config::Config,
@@ -291,7 +240,9 @@ pub async fn resolve(
     registered_modes: &[AgentMode],
 ) -> ResolvedStartup {
     let mut cfg = cfg;
+    cfg.inject_oauth_providers();
 
+    let mut settings = std::collections::HashMap::new();
     for pair in &args.set {
         let Some((key, value)) = pair.split_once('=') else {
             eprintln!("error: --set requires KEY=VALUE format, got '{pair}'");
@@ -307,8 +258,10 @@ pub async fn resolve(
                 }
             },
             Some(smelt_core::config::SettingKind::Number) => match value.parse::<f64>() {
-                Ok(n) => smelt_core::config::SettingValue::Number(n),
-                Err(_) => {
+                Ok(number) if number.is_finite() => {
+                    smelt_core::config::SettingValue::Number(number)
+                }
+                _ => {
                     eprintln!("error: --set {pair}: invalid number '{value}' for {key}");
                     std::process::exit(1);
                 }
@@ -321,17 +274,75 @@ pub async fn resolve(
                 std::process::exit(1);
             }
         };
-        if let Err(e) = cfg.settings.set(key, &parsed) {
-            eprintln!("error: --set {pair}: {e}");
+        let mut validation = cfg.settings.clone();
+        if let Err(error) = validation.set(key, &parsed) {
+            eprintln!("error: --set {pair}: {error}");
             std::process::exit(1);
         }
+        settings.insert(key.to_string(), parsed);
     }
 
-    cfg.inject_oauth_providers();
+    let parse_mode = |value: &str| {
+        AgentMode::parse(value)
+            .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
+            .unwrap_or_else(|| {
+                eprintln!("warning: invalid or unregistered mode '{value}', defaulting to normal");
+                AgentMode::normal()
+            })
+    };
+    let mode = args.mode.as_deref().map(parse_mode);
+    let mode_cycle = args.mode_cycle.as_deref().and_then(|items| {
+        let modes = AgentMode::parse_list(items)
+            .into_iter()
+            .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
+            .collect::<Vec<_>>();
+        (!modes.is_empty()).then_some(modes)
+    });
+    let reasoning_effort = args.reasoning_effort.as_deref().map(|value| {
+        ReasoningEffort::parse(value).unwrap_or_else(|| {
+            eprintln!("warning: invalid reasoning effort '{value}', defaulting to off");
+            ReasoningEffort::Off
+        })
+    });
+    let reasoning_cycle = args
+        .reasoning_cycle
+        .as_deref()
+        .map(ReasoningEffort::parse_list)
+        .filter(|cycle| !cycle.is_empty());
+    let request_audit_env = std::env::var("SMELT_REQUEST_AUDIT").ok().map(|value| {
+        protocol::RequestAuditMode::parse(&value).unwrap_or_else(|| {
+            eprintln!("warning: invalid request audit mode {value:?}, defaulting to summary");
+            protocol::RequestAuditMode::Summary
+        })
+    });
+    let startup_overrides = smelt_core::StartupOverrides {
+        model: args.model.clone(),
+        api_base: args.api_base.clone(),
+        api_key_env: args.api_key_env.clone(),
+        provider_type: args.r#type.clone(),
+        mode,
+        mode_cycle,
+        reasoning_effort,
+        reasoning_cycle,
+        model_config: protocol::ModelConfigOverrides {
+            temperature: args.temperature,
+            top_p: args.top_p,
+            top_k: args.top_k,
+            tool_calling: args.no_tool_calling.then_some(false),
+            ..Default::default()
+        },
+        settings,
+        request_audit_env,
+    };
 
     let recent = smelt_core::state::Recent::load();
+    let selections = smelt_core::RuntimeSelections {
+        model: recent.selected_model.clone(),
+        model_source: smelt_core::ModelSelectionSource::Remembered,
+        mode: recent.mode(),
+        reasoning_effort: recent.reasoning_effort,
+    };
     let mut available_models = cfg.resolve_models();
-
     inject_managed_provider_models(
         &cfg,
         &mut available_models,
@@ -345,7 +356,7 @@ pub async fn resolve(
         &mut available_models,
         engine::auth::AuthProvider::Copilot,
         http_client,
-        true,
+        false,
     )
     .await;
     inject_managed_provider_models(
@@ -353,167 +364,44 @@ pub async fn resolve(
         &mut available_models,
         engine::auth::AuthProvider::KimiCode,
         http_client,
-        true,
+        false,
     )
     .await;
 
-    let mut startup_auth_error: Option<String> = None;
+    let mut runtime = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
+        config: &cfg,
+        startup: &startup_overrides,
+        available_models: &available_models,
+        registered_modes,
+        selections: &selections,
+        previous: None,
+        headless: args.headless,
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    });
 
-    let (api_base, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = resolve_model_reference(args, &cfg, &available_models, &recent);
-
-        if let Some(r) = resolved {
-            let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
-            let key_env = args
-                .api_key_env
-                .clone()
-                .unwrap_or_else(|| r.api_key_env.clone());
-            let provider_kind =
-                smelt_provider::ProviderKind::from_config_and_url(&r.provider_type, &base);
-            if provider_kind != smelt_provider::ProviderKind::KimiCode {
-                if let Err(err) = validate_api_key(&key_env) {
-                    startup_auth_error = Some(err);
-                }
-            }
-            (
-                base,
-                key_env,
-                r.provider_type.clone(),
-                r.model_name.clone(),
-                r.config.clone(),
-            )
-        } else if let Some(base) = args.api_base.clone() {
-            let key_env = args.api_key_env.clone().unwrap_or_default();
-            let provider_kind = smelt_provider::ProviderKind::detect_from_url(&base);
-            if provider_kind != smelt_provider::ProviderKind::KimiCode {
-                if let Err(err) = validate_api_key(&key_env) {
-                    startup_auth_error = Some(err);
-                }
-            }
-            let Some(model) = args.model.clone() else {
-                eprintln!("error: --model is required when using --api-base without a config file");
-                std::process::exit(1);
+    let startup_auth_error = runtime.active_model().and_then(|model| {
+        let provider_kind = smelt_provider::ProviderKind::from_config_and_url(
+            &model.provider_type,
+            &model.api_base,
+        );
+        (provider_kind != smelt_provider::ProviderKind::KimiCode)
+            .then(|| validate_api_key(&model.api_key_env).err())
+            .flatten()
+    });
+    if startup_auth_error.is_some() {
+        if let Some(active) = runtime.active_model_mut() {
+            active.availability = smelt_core::ModelAvailability::Unavailable {
+                reason: smelt_core::ModelUnavailableReason::MissingCredentials,
             };
-            (
-                base.clone(),
-                key_env,
-                provider_kind.as_config_str().to_string(),
-                model,
-                smelt_core::config::ModelConfig::default(),
-            )
-        } else {
-            eprintln!(
-                "error: no providers with models registered.\n\
-                 Add `smelt.provider.register{{...}}` calls to your init.lua, or use --api-base and --model."
-            );
-            std::process::exit(1);
         }
-    };
-
-    if let Some(ref t) = args.r#type {
-        provider_type = t.clone();
-    } else if args.api_base.is_some() {
-        provider_type = smelt_provider::ProviderKind::detect_from_url(&api_base)
-            .as_config_str()
-            .to_string();
-    }
-
-    if let Some(v) = args.temperature {
-        model_config.temperature = Some(v);
-    }
-    if let Some(v) = args.top_p {
-        model_config.top_p = Some(v);
-    }
-    if let Some(v) = args.top_k {
-        model_config.top_k = Some(v);
-    }
-    if args.no_tool_calling {
-        model_config.tool_calling = Some(false);
-    }
-
-    let parse_mode = |s: &str| {
-        AgentMode::parse(s)
-            .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
-            .unwrap_or_else(|| {
-                eprintln!("warning: invalid or unregistered mode '{s}', defaulting to normal");
-                AgentMode::normal()
-            })
-    };
-    let mode_override = if let Some(s) = args.mode.as_deref() {
-        Some(parse_mode(s))
-    } else if cfg.remember.mode {
-        recent
-            .mode()
-            .or_else(|| cfg.defaults.mode.as_deref().map(parse_mode))
-    } else {
-        cfg.defaults.mode.as_deref().map(parse_mode)
-    };
-
-    let mode_cycle = args
-        .mode_cycle
-        .as_deref()
-        .map(|items| {
-            AgentMode::parse_list(items)
-                .into_iter()
-                .filter(|mode| registered_modes.is_empty() || registered_modes.contains(mode))
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            if registered_modes.is_empty() {
-                AgentMode::default_cycle()
-            } else {
-                registered_modes.to_vec()
-            }
-        });
-
-    let default_effort = cfg
-        .defaults
-        .reasoning_effort
-        .as_deref()
-        .and_then(ReasoningEffort::parse);
-    let reasoning_effort = if let Some(cli) = args
-        .reasoning_effort
-        .as_deref()
-        .and_then(ReasoningEffort::parse)
-    {
-        cli
-    } else if cfg.remember.reasoning_effort && recent.reasoning_effort != ReasoningEffort::Off {
-        recent.reasoning_effort
-    } else {
-        default_effort.unwrap_or(ReasoningEffort::Off)
-    };
-
-    let provider_kind =
-        smelt_provider::ProviderKind::from_config_and_url(&provider_type, &api_base);
-    let mut reasoning_cycle = args
-        .reasoning_cycle
-        .as_deref()
-        .map(ReasoningEffort::parse_list)
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| provider_kind.default_reasoning_cycle().to_vec());
-    if !reasoning_cycle.contains(&reasoning_effort) {
-        reasoning_cycle.push(reasoning_effort);
-    }
-
-    let mut settings = cfg.settings.clone();
-    if args.headless {
-        settings.auto_compact = true;
     }
 
     ResolvedStartup {
-        cfg,
-        available_models,
-        api_base,
-        api_key_env,
-        provider_type,
-        model,
-        model_config,
-        settings,
-        mode_override,
-        mode_cycle,
-        reasoning_effort,
-        reasoning_cycle,
+        runtime,
+        startup_overrides,
         startup_auth_error,
     }
 }

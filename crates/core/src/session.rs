@@ -50,9 +50,9 @@ impl From<&ContextCheckpoint> for ContextSnapshotKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextTokenIdentity {
-    pub model: String,
-    pub api_base: String,
-    pub provider_type: String,
+    pub model: Option<String>,
+    pub api_base: Option<String>,
+    pub provider_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2695,9 +2695,9 @@ mod tests {
 
     fn test_context_identity() -> ContextTokenIdentity {
         ContextTokenIdentity {
-            model: "test-model".into(),
-            api_base: "https://test.example".into(),
-            provider_type: "test-provider".into(),
+            model: Some("test-model".into()),
+            api_base: Some("https://test.example".into()),
+            provider_type: Some("test-provider".into()),
         }
     }
 
