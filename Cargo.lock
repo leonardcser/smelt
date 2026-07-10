@@ -2551,6 +2551,7 @@ dependencies = [
  "smelt-perf",
  "smelt-protocol",
  "smelt-provider",
+ "smelt-store",
  "smelt-tui",
  "tempfile",
  "tokio",

@@ -139,6 +139,8 @@ enum Commands {
     Export(ExportArgs),
     /// Start the local session/request inspector web UI
     Inspect(InspectArgs),
+    /// Inspect and maintain session storage
+    Session(SessionArgs),
     /// Print public runtime status for running smelt processes
     Status(StatusArgs),
     /// Upgrade smelt from GitHub releases or main
@@ -178,6 +180,72 @@ struct ExportJsonlArgs {
     /// Output file path. Defaults to stdout.
     #[arg(long, short)]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct SessionArgs {
+    #[command(subcommand)]
+    command: SessionCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum SessionCommand {
+    /// Check schema, integrity, references, indexes, and storage sizes without changing data
+    Doctor(SessionDoctorArgs),
+    /// Copy a transactionally consistent session database to a new file
+    Backup(SessionBackupArgs),
+    /// Rebuild disposable meta.json and content.txt caches under exclusive ownership
+    RebuildDerived(SessionTargetArgs),
+    /// Delete objects unreachable from history and request audits
+    Gc(SessionTargetArgs),
+    /// Compact free database pages under exclusive ownership
+    Vacuum(SessionTargetArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct SessionDoctorArgs {
+    /// Session id or unique prefix to inspect
+    #[arg(required_unless_present = "all")]
+    session: Option<String>,
+    /// Inspect every visible session
+    #[arg(long, conflicts_with = "session")]
+    all: bool,
+    /// Print machine-readable JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct SessionTargetArgs {
+    /// Session id or unique prefix
+    session: String,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct SessionBackupArgs {
+    /// Session id or unique prefix
+    session: String,
+    /// New backup database path; existing files are never overwritten
+    output: PathBuf,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionDoctorOutput {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<smelt_store::DoctorReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionBackupManifest {
+    format_version: u32,
+    session_id: String,
+    schema_version: i32,
+    created_at_ms: u64,
+    database_file: String,
+    stats: smelt_store::StorageStats,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -426,6 +494,230 @@ where
     }
 }
 
+fn backup_manifest_path(database: &std::path::Path) -> PathBuf {
+    let mut name = database
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("session.db"))
+        .to_os_string();
+    name.push(".manifest.json");
+    database.with_file_name(name)
+}
+
+fn write_backup_manifest(
+    path: &std::path::Path,
+    manifest: &SessionBackupManifest,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|err| err.to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+    use std::io::Write;
+    let result = file
+        .write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|err| format!("failed to write {}: {err}", path.display()));
+    drop(file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn resolve_session_target(reference: &str) -> Result<(String, PathBuf), String> {
+    let id = smelt_core::session::resolve_prefix(reference).map_err(|err| err.to_string())?;
+    let dir = smelt_core::session::session_dir(&id);
+    Ok((id.into_string(), dir))
+}
+
+fn doctor_session(reference: &str) -> SessionDoctorOutput {
+    let (session_id, dir) = match resolve_session_target(reference) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return SessionDoctorOutput {
+                session_id: reference.to_string(),
+                report: None,
+                error: Some(error),
+            };
+        }
+    };
+    match smelt_store::SessionReader::open_existing(&dir).and_then(|reader| reader.doctor_report())
+    {
+        Ok(report) => SessionDoctorOutput {
+            session_id,
+            report: Some(report),
+            error: None,
+        },
+        Err(err) => SessionDoctorOutput {
+            session_id,
+            report: None,
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn print_doctor_output(output: &SessionDoctorOutput) {
+    println!("session: {}", output.session_id);
+    if let Some(error) = &output.error {
+        println!("status: unavailable");
+        println!("error: {error}");
+        return;
+    }
+    let report = output.report.as_ref().expect("doctor result or error");
+    println!(
+        "status: {}",
+        if report.healthy {
+            "healthy"
+        } else {
+            "degraded"
+        }
+    );
+    println!("schema_version: {}", report.schema_version);
+    println!("database_bytes: {}", report.stats.database_bytes);
+    println!("wal_bytes: {}", report.stats.wal_bytes);
+    println!("history_rows: {}", report.stats.history_rows);
+    println!("descriptor_rows: {}", report.stats.descriptor_rows);
+    println!("object_rows: {}", report.stats.object_rows);
+    println!("object_raw_bytes: {}", report.stats.object_raw_bytes);
+    println!("object_stored_bytes: {}", report.stats.object_stored_bytes);
+    println!("request_rows: {}", report.stats.request_rows);
+    for issue in &report.issues {
+        println!("issue: {issue}");
+    }
+}
+
+fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
+    let outputs = if args.all {
+        smelt_core::session::list_session_entries_result()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .map(|entry| doctor_session(&entry.id))
+            .collect::<Vec<_>>()
+    } else {
+        vec![doctor_session(
+            args.session.as_deref().expect("required by clap"),
+        )]
+    };
+    if args.json {
+        print_status_json(&outputs)?;
+    } else {
+        for (index, output) in outputs.iter().enumerate() {
+            if index != 0 {
+                println!();
+            }
+            print_doctor_output(output);
+        }
+    }
+    Ok(outputs.iter().all(|output| {
+        output.error.is_none() && output.report.as_ref().is_some_and(|report| report.healthy)
+    }))
+}
+
+fn with_session_maintenance<T>(
+    reference: &str,
+    action: impl FnOnce(&smelt_store::SessionMaintenance, &std::path::Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let (session_id, dir) = resolve_session_target(reference)?;
+    let maintenance = smelt_store::SessionMaintenance::open(&dir, session_id)
+        .map_err(|err| format!("failed to acquire session maintenance ownership: {err}"))?;
+    let result = action(&maintenance, &dir);
+    let release = maintenance
+        .release()
+        .map_err(|err| format!("failed to release session maintenance ownership: {err}"));
+    match (result, release) {
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
+fn run_session_command(args: SessionArgs) {
+    let result = match args.command {
+        SessionCommand::Doctor(args) => run_session_doctor(args).and_then(|healthy| {
+            if healthy {
+                Ok(())
+            } else {
+                Err("one or more sessions are unavailable or degraded".into())
+            }
+        }),
+        SessionCommand::Backup(args) => {
+            let manifest_path = backup_manifest_path(&args.output);
+            let result = resolve_session_target(&args.session).and_then(|(session_id, dir)| {
+                let reader = smelt_store::SessionReader::open_existing(dir)
+                    .map_err(|err| format!("failed to open session: {err}"))?;
+                reader
+                    .backup_to(&args.output)
+                    .map_err(|err| format!("failed to back up session: {err}"))?;
+                let finalize = (|| {
+                    let backup = smelt_store::SessionReader::open_database(&args.output)
+                        .map_err(|err| format!("failed to verify backup: {err}"))?;
+                    let manifest = SessionBackupManifest {
+                        format_version: 1,
+                        session_id,
+                        schema_version: backup
+                            .schema_version()
+                            .map_err(|err| format!("failed to inspect backup schema: {err}"))?,
+                        created_at_ms: smelt_core::session::now_ms(),
+                        database_file: args
+                            .output
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        stats: backup
+                            .storage_stats()
+                            .map_err(|err| format!("failed to inspect backup sizes: {err}"))?,
+                    };
+                    write_backup_manifest(&manifest_path, &manifest)
+                })();
+                if finalize.is_err() {
+                    let _ = std::fs::remove_file(&args.output);
+                }
+                finalize
+            });
+            if result.is_ok() {
+                println!("backup: {}", args.output.display());
+                println!("manifest: {}", manifest_path.display());
+            }
+            result
+        }
+        SessionCommand::RebuildDerived(args) => {
+            with_session_maintenance(&args.session, |maintenance, dir| {
+                maintenance
+                    .rebuild_search_index()
+                    .map_err(|err| format!("failed to rebuild search index: {err}"))?;
+                smelt_core::session::refresh_derived_files(dir)
+                    .map_err(|err| format!("failed to rebuild derived files: {err}"))?;
+                Ok(())
+            })
+        }
+        SessionCommand::Gc(args) => with_session_maintenance(&args.session, |maintenance, _| {
+            let deleted = maintenance
+                .garbage_collect_objects()
+                .map_err(|err| format!("failed to collect session objects: {err}"))?;
+            println!("deleted_objects: {deleted}");
+            Ok(())
+        }),
+        SessionCommand::Vacuum(args) => {
+            with_session_maintenance(&args.session, |maintenance, _| {
+                maintenance
+                    .vacuum()
+                    .map_err(|err| format!("failed to vacuum session: {err}"))
+            })
+        }
+    };
+    if let Err(err) = result {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
 fn maybe_run_fast_status_command() -> bool {
     let mut args = std::env::args_os();
     let Some(program) = args.next() else {
@@ -549,6 +841,10 @@ async fn async_main() {
             }
             Commands::Inspect(inspect_args) => {
                 run_inspect_command(inspect_args).await;
+                return;
+            }
+            Commands::Session(session_args) => {
+                run_session_command(session_args);
                 return;
             }
             Commands::Status(status_args) => {

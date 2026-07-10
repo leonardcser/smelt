@@ -6,8 +6,13 @@
 //! fork, shutdown).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
+
+const MAX_PENDING_FULL_AUDIT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_AUDIT_SUMMARY_TEXT_BYTES: usize = 512;
 
 pub(crate) struct PersistRequest {
     pub(crate) command: smelt_store::SessionCommit,
@@ -17,12 +22,19 @@ pub(crate) struct PersistRequestAudit {
     pub(crate) session_id: String,
     pub(crate) entry: protocol::request_log::RequestLogEntry,
     pub(crate) payload_mode: smelt_store::RequestAuditPayloadMode,
+    pub(crate) payload_capture_skipped_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PersistRequestAuditFailure {
     pub(crate) session_id: String,
     pub(crate) message: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PersistRequestAuditPayloadSkipped {
+    pub(crate) session_id: String,
+    pub(crate) estimated_bytes: usize,
 }
 
 pub(crate) type PersistSaveKind = smelt_core::session_save::SessionSaveKind;
@@ -43,6 +55,7 @@ pub(crate) enum SessionBackendEvent {
     },
     Failed(PersistFailure),
     RequestAuditFailed(PersistRequestAuditFailure),
+    RequestAuditPayloadSkipped(PersistRequestAuditPayloadSkipped),
 }
 
 enum SessionBackendCommand {
@@ -56,9 +69,89 @@ enum SessionBackendCommand {
     Release(Sender<Result<(), String>>),
 }
 
+impl SessionBackendCommand {
+    fn estimated_payload_bytes(&self) -> usize {
+        match self {
+            Self::CommitSession(req) => serialized_size(&req.command),
+            Self::AppendRequestAudit(req) => serialized_size(&req.entry),
+            Self::OpenOwned(..) | Self::Flush(_) | Self::Release(_) => 0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized payload size overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_size(value: &impl serde::Serialize) -> usize {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(&mut writer, value).map_or(0, |()| writer.bytes)
+}
+
+struct QueuedCommand {
+    command: SessionBackendCommand,
+    estimated_payload_bytes: usize,
+    reserved_full_audit_bytes: usize,
+}
+
+fn reserve_bytes(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(bytes).filter(|next| *next <= limit)
+        })
+        .is_ok()
+}
+
+fn compact_request_audit(req: &mut PersistRequestAudit, raw_payload_bytes: usize) {
+    let raw_body_size = serialized_size(&req.entry.body) as u64;
+    req.entry.body = serde_json::Value::Null;
+    if let Some(response) = &mut req.entry.response {
+        response.content = response
+            .content
+            .take()
+            .map(|text| audit_summary_text(&text));
+        response.reasoning = response
+            .reasoning
+            .take()
+            .map(|text| audit_summary_text(&text));
+        response.tool_calls = None;
+        response.raw = None;
+    }
+    if let Some(error) = &mut req.entry.error {
+        error.message = audit_summary_text(&error.message);
+        error.body = None;
+    }
+    req.payload_mode = smelt_store::RequestAuditPayloadMode::Summary {
+        raw_body_size: Some(raw_body_size),
+    };
+    req.payload_capture_skipped_bytes = Some(raw_payload_bytes);
+}
+
+fn audit_summary_text(text: &str) -> String {
+    smelt_buffer::text::slice(text, 0..MAX_AUDIT_SUMMARY_TEXT_BYTES).to_string()
+}
+
 pub(crate) struct Persister {
-    tx: Option<Sender<SessionBackendCommand>>,
+    tx: Option<Sender<QueuedCommand>>,
     reports: Receiver<SessionBackendEvent>,
+    queued_commands: Arc<AtomicUsize>,
+    queued_payload_bytes: Arc<AtomicUsize>,
+    pending_full_audit_bytes: Arc<AtomicUsize>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -66,53 +159,133 @@ impl Persister {
     pub(crate) fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
         let (report_tx, reports) = mpsc::channel();
+        let queued_commands = Arc::new(AtomicUsize::new(0));
+        let queued_payload_bytes = Arc::new(AtomicUsize::new(0));
+        let pending_full_audit_bytes = Arc::new(AtomicUsize::new(0));
+        let worker_queue = Arc::clone(&queued_commands);
+        let worker_payload_bytes = Arc::clone(&queued_payload_bytes);
+        let worker_full_audit_bytes = Arc::clone(&pending_full_audit_bytes);
         let handle = thread::Builder::new()
             .name("smelt-persist".into())
-            .spawn(move || worker_loop(rx, report_tx))
+            .spawn(move || {
+                worker_loop(
+                    rx,
+                    report_tx,
+                    worker_queue,
+                    worker_payload_bytes,
+                    worker_full_audit_bytes,
+                )
+            })
             .expect("spawn persist worker");
         Self {
             tx: Some(tx),
             reports,
+            queued_commands,
+            queued_payload_bytes,
+            pending_full_audit_bytes,
             handle: Some(handle),
         }
+    }
+
+    fn enqueue(
+        &self,
+        command: SessionBackendCommand,
+        reserved_full_audit_bytes: usize,
+    ) -> Result<(), ()> {
+        let Some(tx) = &self.tx else {
+            return Err(());
+        };
+        let estimated_payload_bytes = if smelt_perf::perf::enabled() {
+            command.estimated_payload_bytes()
+        } else {
+            0
+        };
+        let depth = self.queued_commands.fetch_add(1, Ordering::AcqRel) + 1;
+        let payload_bytes = self
+            .queued_payload_bytes
+            .fetch_add(estimated_payload_bytes, Ordering::AcqRel)
+            .saturating_add(estimated_payload_bytes);
+        smelt_perf::perf::record_value("persist:queue:depth", depth as u64);
+        smelt_perf::perf::record_value(
+            "persist:queue:command_payload_bytes",
+            estimated_payload_bytes as u64,
+        );
+        smelt_perf::perf::record_value("persist:queue:payload_bytes", payload_bytes as u64);
+        if tx
+            .send(QueuedCommand {
+                command,
+                estimated_payload_bytes,
+                reserved_full_audit_bytes,
+            })
+            .is_err()
+        {
+            self.queued_commands.fetch_sub(1, Ordering::AcqRel);
+            self.queued_payload_bytes
+                .fetch_sub(estimated_payload_bytes, Ordering::AcqRel);
+            self.pending_full_audit_bytes
+                .fetch_sub(reserved_full_audit_bytes, Ordering::AcqRel);
+            return Err(());
+        }
+        Ok(())
     }
 
     pub(crate) fn open_owned(&self, session_id: &str) -> Result<(), String> {
         let session_id = smelt_core::session_id::SessionId::parse(session_id)
             .map_err(|err| format!("invalid session id: {err}"))?;
-        let Some(tx) = &self.tx else {
-            return Err("persistence worker is closed".into());
-        };
         let (reply_tx, reply_rx) = mpsc::channel();
-        tx.send(SessionBackendCommand::OpenOwned(session_id, reply_tx))
-            .map_err(|_| "persistence worker is closed".to_string())?;
+        self.enqueue(SessionBackendCommand::OpenOwned(session_id, reply_tx), 0)
+            .map_err(|()| "persistence worker is closed".to_string())?;
         reply_rx
             .recv()
             .map_err(|_| "persistence worker stopped during open".to_string())?
     }
 
     pub(crate) fn release(&self) -> Result<(), String> {
-        let Some(tx) = &self.tx else {
+        if self.tx.is_none() {
             return Ok(());
-        };
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
-        tx.send(SessionBackendCommand::Release(reply_tx))
-            .map_err(|_| "persistence worker is closed".to_string())?;
+        self.enqueue(SessionBackendCommand::Release(reply_tx), 0)
+            .map_err(|()| "persistence worker is closed".to_string())?;
         reply_rx
             .recv()
             .map_err(|_| "persistence worker stopped during release".to_string())?
     }
 
     pub(crate) fn save(&self, req: PersistRequest) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(SessionBackendCommand::CommitSession(Box::new(req)));
-        }
+        let _ = self.enqueue(SessionBackendCommand::CommitSession(Box::new(req)), 0);
     }
 
-    pub(crate) fn append_request_audit(&self, req: PersistRequestAudit) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(SessionBackendCommand::AppendRequestAudit(Box::new(req)));
+    pub(crate) fn append_request_audit(&self, mut req: PersistRequestAudit) {
+        if self.tx.is_none() {
+            return;
         }
+        req.entry.system_prompt = None;
+        req.entry.messages = None;
+        req.entry.tools = None;
+        let estimated_bytes = serialized_size(&req.entry);
+        let mut reserved_full_audit_bytes = 0;
+        let mut payload_capture_skipped = false;
+        if req.payload_mode == smelt_store::RequestAuditPayloadMode::Full {
+            if reserve_bytes(
+                &self.pending_full_audit_bytes,
+                estimated_bytes,
+                MAX_PENDING_FULL_AUDIT_BYTES,
+            ) {
+                reserved_full_audit_bytes = estimated_bytes;
+            } else {
+                compact_request_audit(&mut req, estimated_bytes);
+                payload_capture_skipped = true;
+                smelt_perf::perf::record_value("persist:queue:audit_payload_skipped", 1);
+            }
+        }
+        if payload_capture_skipped {
+            req.payload_capture_skipped_bytes = Some(estimated_bytes);
+        }
+        let _ = self.enqueue(
+            SessionBackendCommand::AppendRequestAudit(Box::new(req)),
+            reserved_full_audit_bytes,
+        );
     }
 
     pub(crate) fn drain_reports(&self) -> Vec<SessionBackendEvent> {
@@ -125,12 +298,14 @@ impl Persister {
 
     /// Block until all queued saves are written. No-op if the worker has exited.
     pub(crate) fn flush(&self) {
-        let Some(tx) = &self.tx else { return };
-        if self.handle.as_ref().is_some_and(|h| h.is_finished()) {
+        if self.tx.is_none() || self.handle.as_ref().is_some_and(|h| h.is_finished()) {
             return;
         }
         let (done_tx, done_rx) = mpsc::channel();
-        if tx.send(SessionBackendCommand::Flush(done_tx)).is_ok() {
+        if self
+            .enqueue(SessionBackendCommand::Flush(done_tx), 0)
+            .is_ok()
+        {
             let _ = done_rx.recv();
         }
     }
@@ -314,11 +489,29 @@ impl SessionBackend {
     }
 }
 
-fn worker_loop(rx: Receiver<SessionBackendCommand>, reports: Sender<SessionBackendEvent>) {
+fn worker_loop(
+    rx: Receiver<QueuedCommand>,
+    reports: Sender<SessionBackendEvent>,
+    queued_commands: Arc<AtomicUsize>,
+    queued_payload_bytes: Arc<AtomicUsize>,
+    pending_full_audit_bytes: Arc<AtomicUsize>,
+) {
     smelt_core::session::cleanup_abandoned_session_artifacts();
     let mut backend = SessionBackend::new();
-    while let Ok(cmd) = rx.recv() {
-        match cmd {
+    while let Ok(queued) = rx.recv() {
+        let depth = queued_commands
+            .fetch_sub(1, Ordering::AcqRel)
+            .saturating_sub(1);
+        let payload_bytes = queued_payload_bytes
+            .fetch_sub(queued.estimated_payload_bytes, Ordering::AcqRel)
+            .saturating_sub(queued.estimated_payload_bytes);
+        smelt_perf::perf::record_value("persist:queue:remaining", depth as u64);
+        smelt_perf::perf::record_value(
+            "persist:queue:remaining_payload_bytes",
+            payload_bytes as u64,
+        );
+        let reserved_full_audit_bytes = queued.reserved_full_audit_bytes;
+        match queued.command {
             SessionBackendCommand::OpenOwned(session_id, reply) => {
                 let _ = reply.send(backend.open_owned(session_id));
             }
@@ -352,6 +545,13 @@ fn worker_loop(rx: Receiver<SessionBackendCommand>, reports: Sender<SessionBacke
                 let _ = done.send(backend.release());
             }
         }
+        let full_audit_bytes = pending_full_audit_bytes
+            .fetch_sub(reserved_full_audit_bytes, Ordering::AcqRel)
+            .saturating_sub(reserved_full_audit_bytes);
+        smelt_perf::perf::record_value(
+            "persist:queue:remaining_full_audit_bytes",
+            full_audit_bytes as u64,
+        );
     }
     let _ = backend.release();
 }
@@ -386,13 +586,25 @@ fn report_request_audit_result(
     req: &PersistRequestAudit,
     reports: &Sender<SessionBackendEvent>,
 ) {
-    if let Err(message) = result {
-        let _ = reports.send(SessionBackendEvent::RequestAuditFailed(
-            PersistRequestAuditFailure {
-                session_id: req.session_id.clone(),
-                message,
-            },
-        ));
+    match result {
+        Err(message) => {
+            let _ = reports.send(SessionBackendEvent::RequestAuditFailed(
+                PersistRequestAuditFailure {
+                    session_id: req.session_id.clone(),
+                    message,
+                },
+            ));
+        }
+        Ok(_) => {
+            if let Some(estimated_bytes) = req.payload_capture_skipped_bytes {
+                let _ = reports.send(SessionBackendEvent::RequestAuditPayloadSkipped(
+                    PersistRequestAuditPayloadSkipped {
+                        session_id: req.session_id.clone(),
+                        estimated_bytes,
+                    },
+                ));
+            }
+        }
     }
 }
 
@@ -662,6 +874,78 @@ mod tests {
         }
     }
 
+    fn request_audit(body: serde_json::Value) -> PersistRequestAudit {
+        PersistRequestAudit {
+            session_id: SESSION_ID.into(),
+            payload_mode: smelt_store::RequestAuditPayloadMode::Full,
+            payload_capture_skipped_bytes: None,
+            entry: protocol::request_log::RequestLogEntry {
+                request_id: 42,
+                kind: "turn".into(),
+                turn_id: Some(42),
+                ask_id: None,
+                history_len: Some(1),
+                timestamp_ms: 1000,
+                provider_kind: "openai".into(),
+                api_base: "https://api.example.test".into(),
+                model: "model-a".into(),
+                url: "https://api.example.test/v1/chat/completions".into(),
+                http_status: Some(200),
+                body,
+                prompt_cache_key: None,
+                stream: true,
+                system_prompt: None,
+                messages: None,
+                tools: None,
+                response: None,
+                usage: None,
+                cost_usd: None,
+                tokens_per_sec: None,
+                elapsed_ms: Some(250),
+                attempt: 1,
+                error: None,
+                background: false,
+            },
+        }
+    }
+
+    #[test]
+    fn queue_payload_estimate_accounts_for_serialized_commit_data() {
+        let mut command = commit(SESSION_ID, 0);
+        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::text(
+            "a queued payload",
+        ))];
+        let expected = serde_json::to_vec(&command).unwrap().len();
+        let queued = SessionBackendCommand::CommitSession(Box::new(PersistRequest { command }));
+
+        assert_eq!(queued.estimated_payload_bytes(), expected);
+    }
+
+    #[test]
+    fn full_audit_budget_overflow_compacts_payload_without_losing_body_size() {
+        let counter = AtomicUsize::new(0);
+        assert!(reserve_bytes(&counter, 10, 16));
+        assert!(!reserve_bytes(&counter, 7, 16));
+        assert_eq!(counter.load(Ordering::Acquire), 10);
+
+        let body = serde_json::json!({"prompt": "x".repeat(1024)});
+        let raw_body_size = serialized_size(&body);
+        let mut req = request_audit(body);
+        let full_size = serialized_size(&req.entry);
+
+        compact_request_audit(&mut req, full_size);
+
+        assert_eq!(req.entry.body, serde_json::Value::Null);
+        assert_eq!(req.payload_capture_skipped_bytes, Some(full_size));
+        assert_eq!(
+            req.payload_mode,
+            smelt_store::RequestAuditPayloadMode::Summary {
+                raw_body_size: Some(raw_body_size as u64),
+            }
+        );
+        assert!(serialized_size(&req.entry) < full_size);
+    }
+
     #[test]
     fn failed_commit_does_not_publish_attachment_or_session_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -840,7 +1124,8 @@ mod tests {
         ));
         persister.append_request_audit(PersistRequestAudit {
             session_id: SESSION_ID.into(),
-            payload_mode: smelt_store::RequestAuditPayloadMode::Summary,
+            payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
+            payload_capture_skipped_bytes: None,
             entry: protocol::request_log::RequestLogEntry {
                 request_id: 42,
                 kind: "turn".into(),

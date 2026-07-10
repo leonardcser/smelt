@@ -2193,6 +2193,12 @@ impl TuiApp {
                         err.session_id, err.message
                     ));
                 }
+                crate::persist::SessionBackendEvent::RequestAuditPayloadSkipped(skipped) => {
+                    self.notify_warn(format!(
+                        "request audit payload capture skipped for session {}: queued payload was {} bytes",
+                        skipped.session_id, skipped.estimated_bytes
+                    ));
+                }
             }
         }
     }

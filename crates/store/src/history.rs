@@ -863,22 +863,11 @@ fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<bool> {
     })?;
     let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
 
-    let temp_count = checked_i64(rows.len() as u64, "descriptor_temp_count")?;
-    let temp_base = stats
-        .min_descriptor_idx
-        .min(0)
-        .checked_sub(temp_count)
-        .and_then(|value| value.checked_sub(1))
-        .ok_or_else(|| StoreError::Integrity("descriptor repair temp index overflow".into()))?;
-    for (idx, (block_idx, _)) in rows.iter().enumerate() {
-        let temp_idx = temp_base
-            .checked_sub(checked_i64(idx as u64, "descriptor_temp_idx")?)
-            .ok_or_else(|| StoreError::Integrity("descriptor repair temp index overflow".into()))?;
-        conn.execute(
-            "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
-            params![temp_idx, block_idx],
-        )?;
-    }
+    conn.execute(
+        "UPDATE transcript_blocks SET descriptor_idx = NULL
+         WHERE descriptor_json IS NOT NULL",
+        [],
+    )?;
     for (idx, (block_idx, _)) in rows.iter().enumerate() {
         conn.execute(
             "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
@@ -1466,7 +1455,7 @@ fn search_transcript_candidate_batch(
     Ok(out)
 }
 
-fn fts5_phrase_query(query: &str) -> String {
+pub(crate) fn fts5_phrase_query(query: &str) -> String {
     let mut out = String::with_capacity(query.len() + 2);
     out.push('"');
     for ch in query.chars() {

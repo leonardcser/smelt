@@ -48,11 +48,35 @@ impl Default for OpenOptions {
 }
 
 const LAST_SESSION_COMMIT_KEY: &str = "last_session_commit";
+const JOURNAL_SIZE_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
+const WAL_AUTOCHECKPOINT_PAGES: u64 = 1_000;
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PersistedSessionCommit {
     fingerprint: String,
     receipt: SaveReceipt,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct StorageStats {
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+    pub history_rows: u64,
+    pub descriptor_rows: u64,
+    pub object_rows: u64,
+    pub object_raw_bytes: u64,
+    pub object_stored_bytes: u64,
+    pub request_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct DoctorReport {
+    pub schema_version: i32,
+    pub healthy: bool,
+    pub issues: Vec<String>,
+    pub stats: StorageStats,
 }
 
 #[derive(Debug)]
@@ -160,6 +184,260 @@ impl SessionDb {
 
     pub fn schema_version(&self) -> Result<i32> {
         self.user_version()
+    }
+
+    pub fn storage_stats(&self) -> Result<StorageStats> {
+        let database_bytes = file_size(&self.path)?;
+        let wal_bytes = file_size(&sqlite_companion_path(&self.path, "-wal"))?;
+        let shm_bytes = file_size(&sqlite_companion_path(&self.path, "-shm"))?;
+        let history_rows =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM history_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let descriptor_rows = self.conn.query_row(
+            "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let (object_rows, object_raw_bytes, object_stored_bytes) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(raw_size), 0), COALESCE(SUM(stored_size), 0)
+             FROM objects",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let request_rows =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM request_attempts", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let history_rows = nonnegative_sql_value(history_rows, "history_rows")?;
+        let descriptor_rows = nonnegative_sql_value(descriptor_rows, "descriptor_rows")?;
+        let object_rows = nonnegative_sql_value(object_rows, "object_rows")?;
+        let object_raw_bytes = nonnegative_sql_value(object_raw_bytes, "object_raw_bytes")?;
+        let object_stored_bytes =
+            nonnegative_sql_value(object_stored_bytes, "object_stored_bytes")?;
+        let request_rows = nonnegative_sql_value(request_rows, "request_rows")?;
+        Ok(StorageStats {
+            database_bytes,
+            wal_bytes,
+            shm_bytes,
+            history_rows,
+            descriptor_rows,
+            object_rows,
+            object_raw_bytes,
+            object_stored_bytes,
+            request_rows,
+        })
+    }
+
+    pub fn doctor_report(&self) -> Result<DoctorReport> {
+        let mut issues = Vec::new();
+        let mut quick_check = self.conn.prepare("PRAGMA quick_check")?;
+        let quick_check = quick_check
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for result in quick_check {
+            if result != "ok" {
+                issues.push(format!("quick_check: {result}"));
+            }
+        }
+        let foreign_key_violations =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let foreign_key_violations =
+            nonnegative_sql_value(foreign_key_violations, "foreign_key_violations")?;
+        if foreign_key_violations != 0 {
+            issues.push(format!(
+                "foreign_key_check found {foreign_key_violations} violation(s)"
+            ));
+        }
+        let (history_count, history_min, history_max) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(idx), MAX(idx) FROM history_items",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+        let history_count = nonnegative_sql_value(history_count, "history_count")?;
+        if history_count != 0
+            && (history_min != Some(0) || history_max != Some(history_count as i64 - 1))
+        {
+            issues.push("history indices are not dense from zero".into());
+        }
+        match meta::session_state(&self.conn)? {
+            Some(state) if state.history_len != history_count => issues.push(format!(
+                "session state history_len {} does not match {history_count} history row(s)",
+                state.history_len
+            )),
+            None if history_count != 0 => {
+                issues.push("history rows exist without session state".into());
+            }
+            Some(_) | None => {}
+        }
+        let (descriptor_count, descriptor_min, descriptor_max) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(descriptor_idx), MAX(descriptor_idx)
+             FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+        let descriptor_count = nonnegative_sql_value(descriptor_count, "descriptor_count")?;
+        if descriptor_count != 0
+            && (descriptor_min != Some(0) || descriptor_max != Some(descriptor_count as i64 - 1))
+        {
+            issues.push("transcript descriptor indices are not dense from zero".into());
+        }
+        for reference in self.missing_object_references()? {
+            issues.push(format!("missing object {reference}"));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash FROM objects ORDER BY hash")?;
+        let hashes = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for hash in hashes {
+            if let Err(err) = object::object(&self.conn, &hash) {
+                issues.push(format!("object {hash}: {err}"));
+            }
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT block_idx, indexed_text FROM transcript_search
+             WHERE length(indexed_text) >= 3 ORDER BY block_idx",
+        )?;
+        let search_rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (block_idx, indexed_text) in search_rows {
+            let probe = indexed_text.chars().take(3).collect::<String>();
+            let query = history::fts5_phrase_query(&probe);
+            match self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM transcript_search_fts
+                    WHERE rowid = ?1 AND indexed_text MATCH ?2
+                 )",
+                rusqlite::params![block_idx, query],
+                |row| row.get::<_, bool>(0),
+            ) {
+                Ok(true) => {}
+                Ok(false) => issues.push(format!(
+                    "transcript search index is missing block {block_idx}"
+                )),
+                Err(err) => {
+                    issues.push(format!("transcript search index check failed: {err}"));
+                    break;
+                }
+            }
+        }
+        let stats = self.storage_stats()?;
+        Ok(DoctorReport {
+            schema_version: self.schema_version()?,
+            healthy: issues.is_empty(),
+            issues,
+            stats,
+        })
+    }
+
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<()> {
+        let destination = destination.as_ref();
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(destination)?;
+        secure_file(destination)?;
+        drop(file);
+
+        let result = (|| {
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+            let mut destination_db = Connection::open_with_flags(destination, flags)?;
+            let backup = rusqlite::backup::Backup::new(&self.conn, &mut destination_db)?;
+            backup.run_to_completion(128, std::time::Duration::from_millis(10), None)?;
+            drop(backup);
+            let check: String =
+                destination_db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if check != "ok" {
+                return Err(StoreError::Integrity(format!(
+                    "backup quick_check failed: {check}"
+                )));
+            }
+            drop(destination_db);
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(destination)?
+                .sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(destination);
+        }
+        result
+    }
+
+    pub(crate) fn close_hygiene(&self) -> Result<bool> {
+        let optimize = self.conn.execute_batch("PRAGMA optimize");
+        let zero_timeout = self.conn.busy_timeout(std::time::Duration::ZERO);
+        let checkpoint = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            });
+        let restore = self.conn.busy_timeout(BUSY_TIMEOUT);
+        restore?;
+        zero_timeout?;
+        let (busy, log_frames, checkpointed_frames) = checkpoint?;
+        let busy = nonnegative_sql_value(busy, "checkpoint_busy")?;
+        let log_frames = nonnegative_sql_value(log_frames, "checkpoint_log_frames")?;
+        let checkpointed_frames =
+            nonnegative_sql_value(checkpointed_frames, "checkpointed_frames")?;
+        smelt_perf::perf::record_value("store:wal:checkpoint_busy", busy);
+        smelt_perf::perf::record_value("store:wal:log_frames", log_frames);
+        smelt_perf::perf::record_value("store:wal:checkpointed_frames", checkpointed_frames);
+        self.record_storage_telemetry()?;
+        optimize?;
+        Ok(busy == 0)
+    }
+
+    fn record_storage_telemetry(&self) -> Result<()> {
+        let stats = self.storage_stats()?;
+        smelt_perf::perf::record_value("store:size:database_bytes", stats.database_bytes);
+        smelt_perf::perf::record_value("store:size:wal_bytes", stats.wal_bytes);
+        smelt_perf::perf::record_value("store:size:shm_bytes", stats.shm_bytes);
+        smelt_perf::perf::record_value("store:size:history_rows", stats.history_rows);
+        smelt_perf::perf::record_value("store:size:descriptor_rows", stats.descriptor_rows);
+        smelt_perf::perf::record_value("store:size:object_rows", stats.object_rows);
+        smelt_perf::perf::record_value("store:size:object_raw_bytes", stats.object_raw_bytes);
+        smelt_perf::perf::record_value("store:size:object_stored_bytes", stats.object_stored_bytes);
+        smelt_perf::perf::record_value("store:size:request_rows", stats.request_rows);
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -313,6 +591,17 @@ impl SessionDb {
         self.immediate_transaction(|conn| {
             meta::verify_writer_owner(conn, token)?;
             object::delete_unreachable_objects(conn)
+        })
+    }
+
+    pub(crate) fn rebuild_search_index_owned(&self, token: &str) -> Result<()> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            conn.execute(
+                "INSERT INTO transcript_search_fts(transcript_search_fts) VALUES('rebuild')",
+                [],
+            )?;
+            Ok(())
         })
     }
 
@@ -1398,6 +1687,25 @@ fn secure_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn nonnegative_sql_value(value: i64, field: &str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| StoreError::Integrity(format!("{field} is negative: {value}")))
+}
+
+fn file_size(path: &Path) -> Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn sqlite_companion_path(path: &Path, suffix: &str) -> PathBuf {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.with_extension(suffix.trim_start_matches('-'));
+    };
+    path.with_file_name(format!("{name}{suffix}"))
+}
+
 fn secure_sqlite_files(path: &Path) -> Result<()> {
     reject_symlink(path)?;
     secure_file(path)?;
@@ -1419,10 +1727,12 @@ fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
          PRAGMA temp_store = MEMORY;",
     )?;
     match mode {
-        OpenMode::ReadWrite => conn.execute_batch(
+        OpenMode::ReadWrite => conn.execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;",
-        )?,
+             PRAGMA synchronous = FULL;
+             PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT_BYTES};
+             PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES};"
+        ))?,
         OpenMode::ReadOnly => conn.execute_batch("PRAGMA query_only = ON;")?,
     }
     Ok(())
@@ -1451,6 +1761,138 @@ mod tests {
         let db = SessionDb::open_read_only(&path).unwrap();
         assert_eq!(db.schema_version().unwrap(), schema::SCHEMA_VERSION);
         db.quick_check().unwrap();
+    }
+
+    #[test]
+    fn writable_open_configures_durable_bounded_wal_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+
+        assert_eq!(
+            db.connection()
+                .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.connection()
+                .query_row("PRAGMA journal_size_limit", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            JOURNAL_SIZE_LIMIT_BYTES as i64
+        );
+        assert_eq!(
+            db.connection()
+                .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            WAL_AUTOCHECKPOINT_PAGES as i64
+        );
+    }
+
+    #[test]
+    fn online_backup_is_consistent_private_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("session.db");
+        let backup_path = dir.path().join("backup.db");
+        let db = SessionDb::open(&source_path).unwrap();
+        db.upsert_session_state(&test_session_state("backup", 0))
+            .unwrap();
+
+        db.backup_to(&backup_path).unwrap();
+        assert!(db.backup_to(&backup_path).is_err());
+        let backup = SessionDb::open_read_only(&backup_path).unwrap();
+        assert_eq!(backup.session_state().unwrap().unwrap().id, "backup");
+        assert!(backup.doctor_report().unwrap().healthy);
+        assert!(backup.storage_stats().unwrap().database_bytes > 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_reports_session_state_history_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.upsert_session_state(&test_session_state("doctor", 1))
+            .unwrap();
+
+        let report = db.doctor_report().unwrap();
+
+        assert!(!report.healthy);
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("history_len 1 does not match 0 history row")));
+    }
+
+    #[test]
+    fn doctor_detects_missing_fts_postings_and_rebuild_restores_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.connection()
+            .execute_batch(
+                "INSERT INTO transcript_blocks (
+                    block_idx, descriptor_idx, kind, content_hash, estimated_text_bytes,
+                    descriptor_json
+                 ) VALUES (0, 0, 'user', 'content', 5, '{}');
+                 INSERT INTO transcript_search (block_idx, indexed_text) VALUES (0, 'hello');
+                 INSERT INTO transcript_search_fts(
+                    transcript_search_fts, rowid, indexed_text
+                 ) VALUES ('delete', 0, 'hello');",
+            )
+            .unwrap();
+
+        let report = db.doctor_report().unwrap();
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("search index is missing block 0")));
+
+        db.connection()
+            .execute(
+                "INSERT INTO transcript_search_fts(transcript_search_fts) VALUES('rebuild')",
+                [],
+            )
+            .unwrap();
+        assert!(db.doctor_report().unwrap().healthy);
+    }
+
+    #[test]
+    fn close_checkpoint_is_best_effort_while_a_reader_holds_a_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let writer = SessionDb::open(&path).unwrap();
+        writer
+            .connection()
+            .execute(
+                "INSERT INTO store_meta (key, value) VALUES ('first', '1')",
+                [],
+            )
+            .unwrap();
+        let reader = SessionDb::open_read_only(&path).unwrap();
+        reader.connection().execute_batch("BEGIN").unwrap();
+        reader
+            .connection()
+            .query_row("SELECT COUNT(*) FROM store_meta", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        writer
+            .connection()
+            .execute(
+                "INSERT INTO store_meta (key, value) VALUES ('second', '2')",
+                [],
+            )
+            .unwrap();
+
+        assert!(!writer.close_hygiene().unwrap());
+        reader.connection().execute_batch("COMMIT").unwrap();
+        assert!(writer.close_hygiene().unwrap());
+        assert_eq!(file_size(&sqlite_companion_path(&path, "-wal")).unwrap(), 0);
     }
 
     #[cfg(unix)]
@@ -3947,7 +4389,7 @@ mod tests {
         };
 
         let id = db
-            .append_request_attempt(&entry, RequestAuditPayloadMode::Summary)
+            .append_request_attempt(&entry, RequestAuditPayloadMode::SUMMARY)
             .unwrap();
         let attempts = db
             .query_request_attempts(&RequestAuditQuery::default())

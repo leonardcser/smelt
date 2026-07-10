@@ -19,6 +19,7 @@ pub use compression::{
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use db::SessionDb;
+pub use db::{DoctorReport, StorageStats};
 pub use error::{Result, StoreError};
 pub use history::{
     TranscriptBlockMetadataRecord, TranscriptDescriptorHydration, TranscriptDescriptorIndex,

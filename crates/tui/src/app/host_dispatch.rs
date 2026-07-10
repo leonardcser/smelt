@@ -144,6 +144,7 @@ impl TuiApp {
                             session_id: self.core.session.id.clone(),
                             entry: *entry,
                             payload_mode,
+                            payload_capture_skipped_bytes: None,
                         });
                 }
             }

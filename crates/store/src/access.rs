@@ -54,6 +54,18 @@ impl SessionReader {
         self.db.schema_version()
     }
 
+    pub fn storage_stats(&self) -> Result<crate::StorageStats> {
+        self.db.storage_stats()
+    }
+
+    pub fn doctor_report(&self) -> Result<crate::DoctorReport> {
+        self.db.doctor_report()
+    }
+
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<()> {
+        self.db.backup_to(destination)
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.db.meta(key)
     }
@@ -574,7 +586,16 @@ impl OwnedSessionWriter {
         let token = self.token.as_deref().expect("owned writer token");
         self.db.release_writer_owner(token)?;
         self.token = None;
+        self.finish_close_hygiene();
         Ok(())
+    }
+
+    fn finish_close_hygiene(&self) {
+        match self.db.close_hygiene() {
+            Ok(true) => smelt_perf::perf::record_value("store:close:hygiene_complete", 1),
+            Ok(false) => smelt_perf::perf::record_value("store:close:hygiene_deferred", 1),
+            Err(_) => smelt_perf::perf::record_value("store:close:hygiene_failed", 1),
+        }
     }
 
     fn token(&self) -> &str {
@@ -585,7 +606,9 @@ impl OwnedSessionWriter {
 impl Drop for OwnedSessionWriter {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
-            let _ = self.db.release_writer_owner(&token);
+            if self.db.release_writer_owner(&token).is_ok() {
+                self.finish_close_hygiene();
+            }
         }
     }
 }
@@ -713,6 +736,12 @@ impl SessionMaintenance {
         self.writer
             .db
             .garbage_collect_objects_owned(self.writer.token())
+    }
+
+    pub fn rebuild_search_index(&self) -> Result<()> {
+        self.writer
+            .db
+            .rebuild_search_index_owned(self.writer.token())
     }
 
     pub fn vacuum(&self) -> Result<()> {
@@ -1310,7 +1339,7 @@ mod tests {
         };
 
         assert!(matches!(
-            writer.append_request_attempt(&entry, RequestAuditPayloadMode::Summary),
+            writer.append_request_attempt(&entry, RequestAuditPayloadMode::SUMMARY),
             Err(StoreError::OwnershipLost)
         ));
 

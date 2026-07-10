@@ -9,8 +9,14 @@ use crate::object::{self, checked_i64};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestAuditPayloadMode {
-    Summary,
+    Summary { raw_body_size: Option<u64> },
     Full,
+}
+
+impl RequestAuditPayloadMode {
+    pub const SUMMARY: Self = Self::Summary {
+        raw_body_size: None,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,21 +217,29 @@ fn insert_request_record(
     compression: ObjectCompression,
     payload_mode: RequestAuditPayloadMode,
 ) -> Result<i64> {
-    let raw_body_size = record
-        .body
-        .as_ref()
-        .map(json_size)
-        .transpose()?
-        .unwrap_or_default();
+    let raw_body_size = match payload_mode {
+        RequestAuditPayloadMode::Summary {
+            raw_body_size: Some(raw_body_size),
+        } => raw_body_size,
+        RequestAuditPayloadMode::Summary {
+            raw_body_size: None,
+        }
+        | RequestAuditPayloadMode::Full => record
+            .body
+            .as_ref()
+            .map(json_size)
+            .transpose()?
+            .unwrap_or_default(),
+    };
     let raw_body_size = checked_i64(raw_body_size, "raw_body_size")?;
     let body_hash = match payload_mode {
-        RequestAuditPayloadMode::Summary => None,
+        RequestAuditPayloadMode::Summary { .. } => None,
         RequestAuditPayloadMode::Full => {
             put_request_body_manifest(conn, record.body.as_ref(), compression)?
         }
     };
     let response_hash = match payload_mode {
-        RequestAuditPayloadMode::Summary => None,
+        RequestAuditPayloadMode::Summary { .. } => None,
         RequestAuditPayloadMode::Full => put_json_object(
             conn,
             record.response.as_ref(),
@@ -234,7 +248,7 @@ fn insert_request_record(
         )?,
     };
     let error_hash = match payload_mode {
-        RequestAuditPayloadMode::Summary => None,
+        RequestAuditPayloadMode::Summary { .. } => None,
         RequestAuditPayloadMode::Full => {
             put_json_object(conn, record.error.as_ref(), "request_error", compression)?
         }

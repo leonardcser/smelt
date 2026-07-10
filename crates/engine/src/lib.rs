@@ -237,7 +237,7 @@ impl RequestAuditMode {
     fn payload_mode(self) -> Option<smelt_store::RequestAuditPayloadMode> {
         match self {
             Self::Off => None,
-            Self::Summary => Some(smelt_store::RequestAuditPayloadMode::Summary),
+            Self::Summary => Some(smelt_store::RequestAuditPayloadMode::SUMMARY),
             Self::Full => Some(smelt_store::RequestAuditPayloadMode::Full),
         }
     }
