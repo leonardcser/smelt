@@ -322,30 +322,58 @@ impl TuiApp {
         }
     }
 
-    /// Load a saved session by id, refresh screen, and scroll to bottom. Silent no-op on miss.
+    /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        let store_backed = smelt_core::session::load_store_header(id);
-        if let Some((header, store_ref)) = store_backed {
-            let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
+        let (header, store_ref) = match smelt_core::session::load_store_header_result(id) {
+            Ok(Some(store)) => store,
+            Ok(None) => {
+                self.notify_error_sticky(format!("session {id:?} has no stored state"));
+                return;
+            }
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to load session: {err}"));
+                return;
+            }
+        };
+        let (transcript, persisted_descriptor_len) =
+            match crate::app::history::load_transcript_tail_from_sqlite_dir(
                 store_ref.session_dir.clone(),
                 self.last_width,
                 self.last_height,
-            )
-            .unwrap_or_else(|| {
-                crate::app::transcript::LoadedTranscript::empty_store(store_ref.session_dir.clone())
-            });
-            let document = crate::app::session_document::SessionDocument::from_store(
-                header,
-                store_ref,
-                transcript,
-                self.core.env.pid(),
-                self.core.env.cwd(),
-            );
-            let document = document.into_store_backed();
-            self.load_store_backed_session(document);
-            self.finish_transcript_turn();
-            self.transcript_win_mut().follow_tail();
+            ) {
+                Some(transcript) => (transcript, None),
+                None => match crate::app::history::materialize_full_transcript_read_only_result(
+                    &self.lua, id,
+                ) {
+                    Ok(Some((transcript, descriptor_len))) => (transcript, Some(descriptor_len)),
+                    Ok(None) => {
+                        self.notify_error_sticky(format!(
+                            "session {id:?} has no readable transcript state"
+                        ));
+                        return;
+                    }
+                    Err(err) => {
+                        self.notify_error_sticky(format!(
+                            "failed to load session transcript: {err}"
+                        ));
+                        return;
+                    }
+                },
+            };
+        let document = crate::app::session_document::SessionDocument::from_store(
+            header,
+            store_ref,
+            transcript,
+            self.core.env.pid(),
+            self.core.env.cwd(),
+        );
+        let mut document = document.into_store_backed();
+        if let Some(descriptor_len) = persisted_descriptor_len {
+            document = document.with_persisted_descriptor_len(descriptor_len);
         }
+        self.load_store_backed_session(document);
+        self.finish_transcript_turn();
+        self.transcript_win_mut().follow_tail();
     }
 
     /// Resolve a Confirm dialog. Cancels the active turn when the choice requires it.

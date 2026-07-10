@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 603
 expression: frame.text()
 ---
 
@@ -8,7 +7,7 @@ expression: frame.text()
      ┌ sessions ─────────────────────────────────────────────────┐
      │                                                           │
      │                                                           │
-     │                                                           │
+     │              Unavailable - missing database               │
      │    1.4M 5d   spike: notebook preview                      │
      │   85.6K 1d   first pass at the resume picker              │
      │    1.0M 7h   ├─ fix prompt keybindings                    │

@@ -11,15 +11,13 @@ fn searchable_transcript_app() -> TestApp {
     app
 }
 
-fn sparse_display_only_search_app(
-    session_id: &str,
-    guard: &std::sync::MutexGuard<'static, ()>,
-) -> TestApp {
+fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) -> TestApp {
     let mut app = TestApp::builder()
         .with_vim(true)
         .build_with_test_home_guard(guard);
     app.app.handle_resize(80, 16);
-    let session_dir = smelt_core::session::dir_for_id(session_id);
+    let session_id = app.app.core.session.id.clone();
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
     std::fs::create_dir_all(&session_dir).unwrap();
     let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
     let records = (0..200)
@@ -40,12 +38,12 @@ fn sparse_display_only_search_app(
         .expect("display-only transcript tail");
     let mut session =
         smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-    session.id = session_id.to_string();
+    session.id = session_id.clone();
     app.app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             session,
             loaded,
-            crate::app::history::live_session_for_test(session_id.to_string(), 200, None),
+            crate::app::history::live_session_for_test(session_id, 200, None),
         ),
     );
     app.app.app_focus = AppFocus::Content;
@@ -130,7 +128,7 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
 #[test]
 fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
     let guard = test_home_guard();
-    let mut app = sparse_display_only_search_app("sparse-search-forward", &guard);
+    let mut app = sparse_display_only_search_app(&guard);
     app.type_char('G');
 
     app.type_char('/');
@@ -188,7 +186,7 @@ fn transcript_search_repeat_reaches_unloaded_sparse_matches() {
 #[test]
 fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
     let guard = test_home_guard();
-    let mut app = sparse_display_only_search_app("sparse-search-backward", &guard);
+    let mut app = sparse_display_only_search_app(&guard);
     app.type_char('G');
 
     app.type_char('/');
@@ -235,7 +233,7 @@ fn transcript_search_reverse_repeat_reaches_unloaded_sparse_matches() {
 #[test]
 fn transcript_search_reverse_repeat_returns_to_cached_sparse_match() {
     let guard = test_home_guard();
-    let mut app = sparse_display_only_search_app("sparse-search-cached-reverse", &guard);
+    let mut app = sparse_display_only_search_app(&guard);
     app.type_char('g');
     app.type_char('g');
 

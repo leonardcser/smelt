@@ -76,12 +76,13 @@ pub(crate) fn live_session_for_test(
     smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
 }
 
-/// Every TUI full-history load must use one of these reasons. Normal resume,
-/// render, save, Lua lightweight APIs, rewind, and fork paths must stay
-/// store-backed and must not add variants here.
+/// Every TUI full-history load must use one of these reasons. Healthy resume,
+/// render, save, Lua lightweight APIs, rewind, and fork paths stay store-backed.
+/// Read-only fallback is reserved for stores without a usable descriptor projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FullSessionMaterializationReason {
     InspectSessionDetail,
+    ReadOnlyTranscriptFallback,
     #[cfg(test)]
     TestSavedSessionAssertion,
 }
@@ -92,6 +93,9 @@ impl FullSessionMaterializationReason {
             FullSessionMaterializationReason::InspectSessionDetail => {
                 "inspect:session:detail_load_full"
             }
+            FullSessionMaterializationReason::ReadOnlyTranscriptFallback => {
+                "session:transcript:read_only_full_fallback"
+            }
             #[cfg(test)]
             FullSessionMaterializationReason::TestSavedSessionAssertion => {
                 "test:session:load_full_assertion"
@@ -100,27 +104,82 @@ impl FullSessionMaterializationReason {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn materialize_full_session(
     id: &str,
     reason: FullSessionMaterializationReason,
 ) -> Option<session::Session> {
+    materialize_full_session_result(id, reason).ok().flatten()
+}
+
+pub(crate) fn materialize_full_session_result(
+    id: &str,
+    reason: FullSessionMaterializationReason,
+) -> session::SessionStoreResult<Option<session::Session>> {
     smelt_perf::perf::record_value("session:full_materialized", 1);
     smelt_perf::perf::record_value(reason.counter(), 1);
-    session::load_full(id)
+    session::load_full_result(id)
+}
+
+pub(crate) fn materialize_full_transcript_read_only(
+    lua: &crate::lua::LuaRuntime,
+    id: &str,
+) -> Option<(crate::app::transcript::LoadedTranscript, usize)> {
+    materialize_full_transcript_read_only_result(lua, id)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn materialize_full_transcript_read_only_result(
+    lua: &crate::lua::LuaRuntime,
+    id: &str,
+) -> session::SessionStoreResult<Option<(crate::app::transcript::LoadedTranscript, usize)>> {
+    let resolved = session::resolve_session_dir_for_read_result(id)?;
+    let db_path = resolved.dir.join("session.db");
+    let db = smelt_store::SessionDb::open_read_only(&db_path)
+        .map_err(|err| smelt_core::session_store::store_error("open", &db_path, err))?;
+    let descriptor_count = db.transcript_descriptor_count().map_err(|err| {
+        smelt_core::session_store::store_error("read transcript descriptor count", &db_path, err)
+    })?;
+    let Some(session) = materialize_full_session_result(
+        id,
+        FullSessionMaterializationReason::ReadOnlyTranscriptFallback,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        crate::app::transcript::LoadedTranscript::full(build_transcript_from_session(
+            lua, &session,
+        )),
+        descriptor_count,
+    )))
 }
 
 fn copy_blob_dir(source: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    if !source.is_dir() {
-        return Ok(());
+    let source_metadata = match std::fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing non-directory attachment source {}",
+                source.display()
+            ),
+        ));
     }
-    std::fs::create_dir_all(dest)?;
+    smelt_core::session::create_private_dir_all(dest)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
-        let dest_path = dest.join(entry.file_name());
-        if file_type.is_file() {
-            std::fs::copy(entry.path(), dest_path)?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
         }
+        let contents = std::fs::read(entry.path())?;
+        smelt_core::session::write_private_file(&dest.join(entry.file_name()), &contents)?;
     }
     Ok(())
 }
@@ -216,53 +275,11 @@ pub(crate) fn load_transcript_tail_from_sqlite_dir(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    if let Some(loaded) = crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
-        session_dir.clone(),
-        width,
-        viewport_rows,
-    ) {
-        return Some(loaded);
-    }
-    backfill_descriptorless_transcript_tail(&session_dir, viewport_rows)?;
     crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
         session_dir,
         width,
         viewport_rows,
     )
-}
-
-fn backfill_descriptorless_transcript_tail(
-    session_dir: &std::path::Path,
-    viewport_rows: u16,
-) -> Option<()> {
-    let _perf = smelt_perf::perf::begin("transcript:resume_tail:backfill_descriptorless");
-    let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
-    if db.transcript_descriptor_count().ok()? != 0 {
-        return None;
-    }
-    let target_blocks = usize::from(viewport_rows.max(1).saturating_mul(4).max(80));
-    let metadata = db.read_transcript_block_metadata_tail(target_blocks).ok()?;
-    let first_history_row = metadata.iter().find(|row| row.history_idx.is_some())?;
-    let last_history_idx = metadata.iter().filter_map(|row| row.history_idx).max()? as usize;
-    let first_history_idx = first_history_row.history_idx? as usize;
-    let first_block_idx = first_history_row.block_idx;
-    drop(db);
-
-    let written = session::backfill_transcript_descriptor_records_from_history_range(
-        session_dir,
-        first_history_idx..last_history_idx.saturating_add(1),
-        0,
-        first_block_idx,
-    )
-    .ok()?;
-    smelt_perf::perf::record_value(
-        "transcript:resume_tail:descriptorless_backfilled",
-        written as u64,
-    );
-    if written == 0 {
-        return None;
-    }
-    Some(())
 }
 
 #[cfg(test)]
@@ -1301,6 +1318,7 @@ impl TuiApp {
             session: loaded,
             transcript,
             live_session,
+            persisted_descriptor_len,
         } = document;
         if self.agent.is_some() {
             self.cancel_agent();
@@ -1367,6 +1385,7 @@ impl TuiApp {
             live_session,
             !self.session_access.is_read_only(),
             history_len,
+            persisted_descriptor_len,
         );
         self.publish_shared_session_state();
         self.core
@@ -2419,10 +2438,9 @@ mod checkpoint_tests {
         }
     }
 
-    fn large_saved_session_app(id: &str, history_len: usize) -> crate::app::test_harness::TestApp {
+    fn large_saved_session_app(history_len: usize) -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        session.id = id.to_string();
         session.first_user_message = Some("old user 0".into());
         session.history = (0..history_len)
             .map(|idx| {
@@ -2536,8 +2554,8 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn descriptorless_store_resume_backfills_bounded_tail_without_full_load() {
-        let mut app = large_saved_session_app("descriptorless-store-resume", 256);
+    fn descriptorless_store_resume_falls_back_without_repairing() {
+        let mut app = large_saved_session_app(256);
         let id = app.app.core.session.id.clone();
         let session_dir = session::dir_for_id(&id);
         let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
@@ -2562,28 +2580,28 @@ mod checkpoint_tests {
         assert_eq!(app.app.session_history_len(), 256);
         assert!(app.app.session_document.live_session.is_some());
         assert!(app.app.core.session.history.is_empty());
-        assert_no_full_store_reads();
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-        let descriptor_count = db.transcript_descriptor_count().unwrap();
-        assert!(
-            (1..256).contains(&descriptor_count),
-            "resume should backfill a bounded descriptor tail, got {descriptor_count}"
-        );
+        assert!(app.app.transcript_total_rows() > 0);
         assert_eq!(
-            app.app
-                .session_document
-                .transcript
-                .descriptor_total_count()
-                .expect("descriptor total"),
-            descriptor_count
+            perf_value_max("session:transcript:read_only_full_fallback"),
+            1
         );
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        drop(db);
+
+        app.app
+            .session_append_history(user("repair descriptors on owned save"));
+        app.app.save_session();
+        app.app.flush_persist();
+
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 256);
     }
 
     #[test]
     fn display_only_request_append_preserves_persisted_history_prefix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        session.id = "display-only-request-append".into();
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
@@ -2660,7 +2678,6 @@ mod checkpoint_tests {
     fn normal_request_append_preserves_persisted_history_prefix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        session.id = "normal-request-append".into();
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 
@@ -2714,7 +2731,7 @@ mod checkpoint_tests {
     #[test]
     fn normal_request_append_persists_only_dirty_suffix_rows() {
         const OLD_HISTORY_LEN: usize = 256;
-        let mut app = large_saved_session_app("normal-request-dirty-suffix-gate", OLD_HISTORY_LEN);
+        let mut app = large_saved_session_app(OLD_HISTORY_LEN);
 
         app.app.restore_screen();
 
@@ -2755,7 +2772,7 @@ mod checkpoint_tests {
         assert_no_full_store_reads();
 
         let db = smelt_store::SessionDb::open_read_only(
-            session::dir_for_id("normal-request-dirty-suffix-gate").join("session.db"),
+            session::dir_for_id(&app.app.core.session.id).join("session.db"),
         )
         .expect("open session db");
         let descriptors = db
@@ -2770,7 +2787,7 @@ mod checkpoint_tests {
 
     #[test]
     fn live_session_checkpoint_uses_store_history_coordinates() {
-        let mut app = large_saved_session_app("live-checkpoint-store-coordinates", 32);
+        let mut app = large_saved_session_app(32);
         let id = app.app.core.session.id.clone();
         app.app.load_session_by_id(&id);
         assert!(app.app.session_document.live_session.is_some());
@@ -2810,7 +2827,7 @@ mod checkpoint_tests {
     #[test]
     fn live_session_save_persists_only_dirty_suffix_rows() {
         const OLD_HISTORY_LEN: usize = 256;
-        let mut app = large_saved_session_app("live-save-dirty-suffix-gate", OLD_HISTORY_LEN);
+        let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         let id = app.app.core.session.id.clone();
         app.app.load_session_by_id(&id);
         assert!(app.app.session_document.live_session.is_some());
@@ -2844,7 +2861,8 @@ mod checkpoint_tests {
 
     #[test]
     fn normal_preview_and_open_avoid_compat_full_load_fallbacks() {
-        let mut app = large_saved_session_app("normal-preview-open-compat-gate", 256);
+        let mut app = large_saved_session_app(256);
+        let id = app.app.core.session.id.clone();
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -2853,11 +2871,17 @@ mod checkpoint_tests {
             app.app
                 .lua
                 .lua
+                .globals()
+                .set("session_id", id.clone())
+                .expect("set session id");
+            app.app
+                .lua
+                .lua
                 .load(
                     r#"
                     local buf = smelt.buf.new({})
                     local out = smelt.session.render_preview_into(
-                        "normal-preview-open-compat-gate",
+                        session_id,
                         { buf = buf, width = 80, height = 12 }
                     )
                     assert(out ~= nil and out.total_rows > 0)
@@ -2866,8 +2890,7 @@ mod checkpoint_tests {
                 .exec()
                 .expect("render sparse session preview");
         }
-        app.app
-            .load_session_by_id("normal-preview-open-compat-gate");
+        app.app.load_session_by_id(&id);
         smelt_perf::perf::set_enabled(false);
 
         assert_no_full_store_reads();
@@ -2875,9 +2898,8 @@ mod checkpoint_tests {
 
     #[test]
     fn history_only_session_preview_and_open_fall_back_to_full_rebuild() {
-        let id = "history-only-preview-open-fallback";
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        session::delete(id);
 
         let mut saved = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         saved.id = id.into();
@@ -2899,7 +2921,7 @@ mod checkpoint_tests {
                     r#"
                     local buf = smelt.buf.new({})
                     local out = smelt.session.render_preview_into(
-                        "history-only-preview-open-fallback",
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                         { buf = buf, width = 80, height = 12 }
                     )
                     assert(out ~= nil, "preview returned nil")
@@ -2922,13 +2944,13 @@ mod checkpoint_tests {
             "opened transcript did not render saved history: {rows:?}"
         );
 
-        session::delete(id);
+        session::delete(id).expect("delete history-only fixture");
     }
 
     #[test]
     fn history_updated_save_persists_only_dirty_suffix_rows() {
         const OLD_HISTORY_LEN: usize = 256;
-        let mut app = large_saved_session_app("history-updated-dirty-suffix-gate", OLD_HISTORY_LEN);
+        let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         app.app
@@ -2949,7 +2971,7 @@ mod checkpoint_tests {
 
     #[test]
     fn no_op_save_does_not_enqueue_history_or_descriptor_work() {
-        let mut app = large_saved_session_app("normal-save-noop-gate", 256);
+        let mut app = large_saved_session_app(256);
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -2973,7 +2995,6 @@ mod checkpoint_tests {
     #[test]
     fn normal_request_append_persists_touched_metadata_suffix() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.session.id = "normal-request-metadata".into();
         let id = app.app.core.session.id.clone();
         app.app.commit_request_history_item_with_first_user(
             user("new user"),
@@ -3004,7 +3025,6 @@ mod checkpoint_tests {
     fn rewind_to_start_persists_empty_history_and_descriptor_delete() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        session.id = "rewind-empty-delete".into();
         session.first_user_message = Some("old user".into());
         session.history = vec![user("old user"), assistant("old assistant")];
 

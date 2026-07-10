@@ -254,41 +254,47 @@ app_story!(resume_dialog, |ctx| {
     ctx.run_lua(&format!("os.time = function() return {now_s} end"));
 
     let cwd = ctx.app_cwd().to_string();
+    let root_old = "1111111111111111111111111111111111111111111111111111111111111111";
+    let root_forked = "2222222222222222222222222222222222222222222222222222222222222222";
+    let fork_a = "3333333333333333333333333333333333333333333333333333333333333333";
+    let fork_b = "4444444444444444444444444444444444444444444444444444444444444444";
+    let nested = "5555555555555555555555555555555555555555555555555555555555555555";
+    let unavailable = "6666666666666666666666666666666666666666666666666666666666666666";
     let entries = [
         (
-            "sess-root-old",
+            root_old,
             "spike: notebook preview",
             now_ms - 5 * 86400 * 1000,
             1_500_000,
             None::<&str>,
         ),
         (
-            "sess-root-forked",
+            root_forked,
             "first pass at the resume picker",
             now_ms - 26 * 3600 * 1000,
             87_654,
             None,
         ),
         (
-            "sess-fork-a",
+            fork_a,
             "fix prompt keybindings",
             now_ms - 7 * 3600 * 1000,
             1_037_000,
-            Some("sess-root-forked"),
+            Some(root_forked),
         ),
         (
-            "sess-fork-b",
+            fork_b,
             "wire up the diff renderer",
             now_ms - 2 * 3600 * 1000,
             4_096,
-            Some("sess-root-forked"),
+            Some(root_forked),
         ),
         (
-            "sess-nested",
+            nested,
             "investigate parser regression",
             now_ms - 5 * 60 * 1000,
             12_345u64,
-            Some("sess-fork-b"),
+            Some(fork_b),
         ),
     ];
     for (id, title, ts, bytes, parent_id) in entries {
@@ -314,6 +320,11 @@ app_story!(resume_dialog, |ctx| {
         };
         ctx.write_session_meta(&meta);
     }
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .expect("storybook state home");
+    std::fs::create_dir_all(state_home.join("smelt").join("sessions").join(unavailable))
+        .expect("create unavailable session fixture");
     ctx.run_command("resume");
     ctx.assert_snapshot();
 });

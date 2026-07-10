@@ -169,6 +169,36 @@ fn shutdown_retries_after_transient_session_directory_failure() {
 }
 
 #[test]
+fn lua_delete_returns_actionable_error_for_malicious_id() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let target = engine::state_dir().join("must-not-delete");
+    std::fs::create_dir_all(&target).unwrap();
+    app.app
+        .lua
+        .lua
+        .globals()
+        .set("DELETE_TARGET", target.to_string_lossy().as_ref())
+        .unwrap();
+
+    let (ok, message) = {
+        let _app_guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load(
+                "local ok, err = pcall(function() smelt.session.delete(DELETE_TARGET) end); return ok, tostring(err)",
+            )
+            .eval::<(bool, String)>()
+            .unwrap()
+    };
+
+    assert!(!ok);
+    assert!(message.contains("invalid session id"), "{message}");
+    assert!(target.exists());
+}
+
+#[test]
 fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -519,7 +549,7 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
 }
 
 #[test]
-fn store_backed_resume_repairs_checkpoint_that_points_past_retained_history() {
+fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -562,7 +592,7 @@ fn store_backed_resume_repairs_checkpoint_that_points_past_retained_history() {
         .session
         .checkpoint
         .as_ref()
-        .expect("checkpoint repaired on sparse resume");
+        .expect("checkpoint tolerated on sparse resume");
     assert_eq!(checkpoint.first_live_index, 0);
 
     let history = resumed.app.model_history();
@@ -581,14 +611,14 @@ fn store_backed_resume_repairs_checkpoint_that_points_past_retained_history() {
             if step.content.as_ref().is_some_and(|content| content.text_content() == "recent reply")
     ));
 
-    let repaired = smelt_store::SessionDb::open_read_only(&db_path)
+    let persisted = smelt_store::SessionDb::open_read_only(&db_path)
         .unwrap()
         .session_state()
         .unwrap()
         .unwrap()
         .checkpoint_json
         .unwrap();
-    assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
+    assert_eq!(persisted["first_live_index"].as_u64(), Some(177));
 }
 
 #[test]

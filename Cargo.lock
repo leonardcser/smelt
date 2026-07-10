@@ -2687,6 +2687,7 @@ name = "smelt-store"
 version = "0.5.0-alpha.8"
 dependencies = [
  "hostname",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

@@ -429,15 +429,19 @@ async fn list_sessions() -> (&'static str, &'static str, String) {
 async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
     let id = id.to_string();
     let session = match tokio::task::spawn_blocking(move || {
-        crate::app::history::materialize_full_session(
+        crate::app::history::materialize_full_session_result(
             &id,
             crate::app::history::FullSessionMaterializationReason::InspectSessionDetail,
         )
     })
     .await
     {
-        Ok(s) => s,
-        Err(e) => return server_error(&e.to_string()),
+        Ok(Ok(session)) => session,
+        Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
+            return not_found();
+        }
+        Ok(Err(err)) => return server_error(&err.to_string()),
+        Err(err) => return server_error(&err.to_string()),
     };
     match session {
         Some(session) => match serde_json::to_string(&session) {
@@ -451,8 +455,12 @@ async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
 async fn session_summary(id: &str) -> (&'static str, &'static str, String) {
     let id = id.to_string();
     let summary = match tokio::task::spawn_blocking(move || build_session_summary(&id)).await {
-        Ok(s) => s,
-        Err(e) => return server_error(&e.to_string()),
+        Ok(Ok(summary)) => summary,
+        Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
+            return not_found();
+        }
+        Ok(Err(err)) => return server_error(&err.to_string()),
+        Err(err) => return server_error(&err.to_string()),
     };
     match summary {
         Some(summary) => match serde_json::to_string(&summary) {
@@ -476,7 +484,13 @@ async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
 }
 
 fn session_requests_json(id: &str) -> std::result::Result<String, String> {
-    let dir = session_dir(id);
+    let dir = match session_dir(id) {
+        Ok(dir) => dir,
+        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
+            return Ok("[]".to_string());
+        }
+        Err(err) => return Err(err.to_string()),
+    };
     if let Err(err) = smelt_core::session::ensure_session_db_read_only(&dir) {
         if matches!(
             err,
@@ -521,7 +535,11 @@ fn request_payload_json(id: &str, request_id: &str) -> std::result::Result<Optio
     let attempt_id = request_id
         .parse::<i64>()
         .map_err(|err| format!("invalid request id: {err}"))?;
-    let dir = session_dir(id);
+    let dir = match session_dir(id) {
+        Ok(dir) => dir,
+        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
     if let Err(err) = smelt_core::session::ensure_session_db_read_only(&dir) {
         if matches!(
             err,
@@ -612,16 +630,12 @@ fn remove_null_json_fields(value: &mut serde_json::Value) {
     }
 }
 
-fn session_dir(id: &str) -> PathBuf {
-    engine::state_dir().join("sessions").join(id)
+fn session_dir(id: &str) -> Result<PathBuf, smelt_core::session::SessionStoreError> {
+    smelt_core::session::resolve_prefix(id).map(|id| smelt_core::session::session_dir(&id))
 }
 
 pub fn is_safe_session_ref(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    smelt_core::session_id::SessionPrefix::parse(id).is_ok()
 }
 
 fn list_session_items() -> Vec<SessionListItem> {
@@ -640,17 +654,19 @@ fn list_session_items() -> Vec<SessionListItem> {
         .collect()
 }
 
-fn build_session_summary(id: &str) -> Option<SessionSummary> {
-    let meta = smelt_core::session::list_sessions()
-        .into_iter()
-        .find(|meta| meta.id == id || meta.id.starts_with(id))?;
+fn build_session_summary(
+    id: &str,
+) -> smelt_core::session::SessionStoreResult<Option<SessionSummary>> {
+    let Some(meta) = smelt_core::session::load_meta_result(id)? else {
+        return Ok(None);
+    };
     let (project, path_group) = project_labels(meta.cwd.as_deref());
-    Some(SessionSummary {
+    Ok(Some(SessionSummary {
         id: meta.id.clone(),
         project,
         path_group,
         request_stats: request_stats_for_session(&meta.id),
-    })
+    }))
 }
 
 fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
@@ -673,7 +689,10 @@ fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
 }
 
 fn request_stats_for_session(id: &str) -> RequestStats {
-    let db_path = session_dir(id).join("session.db");
+    let Ok(session_dir) = session_dir(id) else {
+        return RequestStats::default();
+    };
+    let db_path = session_dir.join("session.db");
     smelt_store::SessionDb::open_read_only(&db_path)
         .and_then(|db| db.request_audit_stats())
         .unwrap_or_default()

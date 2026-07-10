@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 pub type AttachmentId = u64;
@@ -133,14 +134,13 @@ impl AttachmentStore {
         if blobs.is_empty() {
             return HashMap::new();
         }
-        let _ = fs::create_dir_all(blob_dir);
+        create_private_dir_all(blob_dir);
         let mut url_to_blob = HashMap::with_capacity(blobs.len());
         for (filename, data_url) in blobs {
             let blob_path = blob_dir.join(&filename);
-            if !blob_path.exists() {
-                let _ = fs::write(&blob_path, data_url.as_bytes());
+            if write_private_blob(&blob_path, data_url.as_bytes()).is_ok() {
+                url_to_blob.insert(data_url, format!("blob:{filename}"));
             }
-            url_to_blob.insert(data_url, format!("blob:{filename}"));
         }
         url_to_blob
     }
@@ -148,10 +148,22 @@ impl AttachmentStore {
     /// Read blob files, returning a `blob:<filename>` → data URL map.
     pub fn load_blobs(blob_dir: &Path) -> HashMap<String, String> {
         let mut blob_to_url = HashMap::new();
+        let Ok(metadata) = fs::symlink_metadata(blob_dir) else {
+            return blob_to_url;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return blob_to_url;
+        }
         let Ok(entries) = fs::read_dir(blob_dir) else {
             return blob_to_url;
         };
         for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -162,6 +174,94 @@ impl AttachmentStore {
         }
         blob_to_url
     }
+}
+
+fn create_private_dir_all(path: &Path) {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return;
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    let _ = builder.create(path);
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return;
+    }
+    set_private_dir_permissions(path);
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) {}
+
+fn write_private_blob(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let metadata = fs::symlink_metadata(parent)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing non-directory attachment path {}",
+                    parent.display()
+                ),
+            ));
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => return secure_existing_blob(path, metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            set_private_file_permissions(&file)?;
+            file.write_all(contents)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            secure_existing_blob(path, metadata)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn secure_existing_blob(path: &Path, metadata: fs::Metadata) -> std::io::Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing non-regular attachment blob {}", path.display()),
+        ));
+    }
+    let file = fs::OpenOptions::new().read(true).open(path)?;
+    set_private_file_permissions(&file)
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(file: &fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_file: &fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn mime_to_ext(data_url: &str) -> &str {
@@ -327,6 +427,45 @@ mod tests {
         let _ = store.save_blobs(tmp.path());
         let on_disk = std::fs::read(&blob_path).unwrap();
         assert_eq!(on_disk, b"sentinel-content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_blobs_rejects_existing_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let mut store = AttachmentStore::new();
+        let data_url = "data:image/png;base64,AAA";
+        store.insert_image("a.png".into(), data_url.into());
+        let filename = store.image_blobs().pop().unwrap().0;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, b"sentinel").unwrap();
+        symlink(&target, tmp.path().join(filename)).unwrap();
+
+        let saved = store.save_blobs(tmp.path());
+
+        assert!(saved.is_empty());
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_blobs_ignores_symlinked_directory_and_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "data:image/png;base64,SECRET").unwrap();
+        let linked_dir = root.path().join("linked");
+        symlink(&outside, &linked_dir).unwrap();
+        assert!(AttachmentStore::load_blobs(&linked_dir).is_empty());
+
+        let blobs = root.path().join("blobs");
+        std::fs::create_dir(&blobs).unwrap();
+        symlink(outside.join("secret"), blobs.join("linked-file")).unwrap();
+        assert!(AttachmentStore::load_blobs(&blobs).is_empty());
     }
 
     #[test]

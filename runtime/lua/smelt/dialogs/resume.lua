@@ -7,10 +7,10 @@
 -- Matching is two-tier:
 --   * Title + first-user-message: fuzzy match (`smelt.fuzzy`), instant - runs
 --     against cheap meta loaded up front.
---   * Full message text: substring match against the per-session `content.txt`
---     sidecar, loaded in parallel on the first non-empty query and cached for
---     the dialog lifetime. Opening the dialog stays instant; the first
---     keystroke pays the IO cost once.
+--   * Full message text: substring match against canonical SQLite search text,
+--     loaded in parallel on the first non-empty query and cached for the dialog
+--     lifetime. Opening the dialog stays instant; the first keystroke pays the
+--     IO cost once.
 
 local NS_STATE = smelt.ns("smelt.resume.state")
 
@@ -72,8 +72,30 @@ end
 local LEADING, SIZE_COL, TIME_COL, GAP = 1, SIZE_WIDTH, 4, 1
 local PREVIEW_MIN_TERM_WIDTH = 100
 
+local UNAVAILABLE_LABELS = {
+  missing_database = "missing database",
+  symlink_not_allowed = "unsafe symlink",
+  unsupported_schema = "unsupported schema",
+  corrupt = "corrupt session",
+  io = "I/O error",
+  sqlite = "database error",
+}
+
+local function unavailable_reason(entry)
+  return UNAVAILABLE_LABELS[entry.error_kind] or "storage error"
+end
+
 local function make_render(now_ms)
   return function(entry)
+    local prefix = entry.tree_prefix or ""
+    if entry.available == false then
+      local meta = string.rep(" ", LEADING + SIZE_COL + GAP + TIME_COL + GAP)
+      return {
+        text = meta .. prefix .. "Unavailable - " .. unavailable_reason(entry),
+        marks = { { col = 0, opts = { end_col = #meta + #prefix, dim = true } } },
+      }
+    end
+
     local size_str = format_size(entry.size_bytes)
     local ts = (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms
     local meta = string.format(
@@ -84,7 +106,6 @@ local function make_render(now_ms)
       time_ago(ts, now_ms),
       string.rep(" ", GAP)
     )
-    local prefix = entry.tree_prefix or ""
     local marks = { { col = 0, opts = { end_col = #meta, dim = true } } }
     if prefix ~= "" then
       marks[#marks + 1] = {
@@ -143,7 +164,11 @@ smelt.cmd.register("resume", function()
     -- these per refilter; rebuilding per call would re-concatenate strings.
     local title_hays = {}
     for _, e in ipairs(entries) do
-      title_hays[e.id] = display_title(e) .. " " .. (e.subtitle or "")
+      title_hays[e.id] = table.concat({
+        display_title(e),
+        e.subtitle or "",
+        e.error or "",
+      }, " ")
     end
 
     -- Lowercased content blobs, lazy-loaded in parallel on the first non-empty
@@ -153,7 +178,9 @@ smelt.cmd.register("resume", function()
     local function ensure_texts()
       if texts ~= nil then return end
       local ids = {}
-      for _, e in ipairs(entries) do table.insert(ids, e.id) end
+      for _, e in ipairs(entries) do
+        if e.available ~= false then table.insert(ids, e.id) end
+      end
       local raw = smelt.session.texts(ids)
       local lowered = {}
       for k, v in pairs(raw) do lowered[k] = v:lower() end
@@ -161,7 +188,7 @@ smelt.cmd.register("resume", function()
     end
 
     local function entry_matches(entry)
-      if workspace_only and entry.cwd ~= current_cwd then return false end
+      if entry.available ~= false and workspace_only and entry.cwd ~= current_cwd then return false end
       if query == "" then return true end
       if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
         return true
@@ -251,6 +278,18 @@ smelt.cmd.register("resume", function()
         preview_buf:lines({ "  (no session selected)" })
         return
       end
+      if e.available == false then
+        active_preview_key = nil
+        preview_buf:lines({
+          "  Session unavailable: " .. unavailable_reason(e),
+          "",
+          "  " .. (e.error or "No storage details are available."),
+          "",
+          "  Press Alt-D to remove this session.",
+        })
+        preview_leaf:scroll(0)
+        return
+      end
       local width, height = preview_size()
       local key = table.concat({
         e.id,
@@ -310,7 +349,12 @@ smelt.cmd.register("resume", function()
 
     local function submit()
       local e = list:selected()
-      if e then close(e) end
+      if not e then return end
+      if e.available == false then
+        smelt.notify.error(e.error or "session unavailable")
+        return
+      end
+      close(e)
     end
 
     update_state_label(input_buf, workspace_only)

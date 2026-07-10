@@ -101,9 +101,8 @@ fn events_emit_does_not_replace_signal_value() {
 #[test]
 fn display_only_resume_sets_resume_hint_state() {
     let mut app = TestApp::builder().build();
-    let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-    session.id = "display-session".into();
+    let session = smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    let session_id = session.id.clone();
     let mut transcript = smelt_core::content::transcript::Transcript::new();
     transcript.push(smelt_core::transcript_model::Block::Text {
         content: "restored transcript".into(),
@@ -113,7 +112,7 @@ fn display_only_resume_sets_resume_hint_state() {
         crate::app::session_document::StoreBackedSessionDocument::new(
             session,
             crate::app::transcript::LoadedTranscript::full(transcript),
-            crate::app::history::live_session_for_test("full-session".into(), 0, None),
+            crate::app::history::live_session_for_test(session_id.clone(), 0, None),
         ),
     );
 
@@ -124,11 +123,11 @@ fn display_only_resume_sets_resume_hint_state() {
             .live_session
             .as_ref()
             .map(|live| live.id()),
-        Some("full-session")
+        Some(session_id.as_str())
     );
     assert!(app.app.has_resume_hint_messages());
     let shutdown = app.app.shutdown_context();
-    assert_eq!(shutdown.session_id, "display-session");
+    assert_eq!(shutdown.session_id, session_id);
     assert!(shutdown.has_messages);
     let state = app
         .app
@@ -137,7 +136,7 @@ fn display_only_resume_sets_resume_hint_state() {
         .unwrap()
         .clone()
         .expect("shared session state");
-    assert_eq!(state.id, "display-session");
+    assert_eq!(state.id, session_id);
     assert!(state.has_messages);
 }
 

@@ -793,28 +793,40 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "list",
-        "List persisted SQLite sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.",
+        "List persisted SQLite sessions other than the current one. Available rows carry `id`, `available = true`, metadata fields, and `size_bytes` when known. Unavailable rows carry `id`, `available = false`, `error_kind`, and `error`.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let current_id =
                 crate::lua::try_with_core(|core| core.session.id.clone()).unwrap_or_default();
-            let sessions = smelt_core::session::list_sessions();
+            let sessions = smelt_core::session::list_session_entries_result()
+                .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
             let out = lua.create_table()?;
             let mut idx = 1;
-            for meta in sessions {
-                if meta.id == current_id {
+            for entry in sessions {
+                if entry.id == current_id {
                     continue;
                 }
                 let row = lua.create_table()?;
-                row.set("id", meta.id)?;
-                row.set("title", meta.title.unwrap_or_default())?;
-                row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
-                row.set("cwd", meta.cwd.unwrap_or_default())?;
-                row.set("parent_id", meta.parent_id.unwrap_or_default())?;
-                row.set("updated_at_ms", meta.updated_at_ms)?;
-                row.set("created_at_ms", meta.created_at_ms)?;
-                if let Some(size) = meta.text_bytes {
-                    row.set("size_bytes", size)?;
+                row.set("id", entry.id)?;
+                match entry.status {
+                    smelt_core::session::SessionListStatus::Available(meta) => {
+                        let meta = *meta;
+                        row.set("available", true)?;
+                        row.set("title", meta.title.unwrap_or_default())?;
+                        row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
+                        row.set("cwd", meta.cwd.unwrap_or_default())?;
+                        row.set("parent_id", meta.parent_id.unwrap_or_default())?;
+                        row.set("updated_at_ms", meta.updated_at_ms)?;
+                        row.set("created_at_ms", meta.created_at_ms)?;
+                        if let Some(size) = meta.text_bytes {
+                            row.set("size_bytes", size)?;
+                        }
+                    }
+                    smelt_core::session::SessionListStatus::Unavailable(err) => {
+                        row.set("available", false)?;
+                        row.set("error_kind", err.code())?;
+                        row.set("error", err.to_string())?;
+                    }
                 }
                 out.set(idx, row)?;
                 idx += 1;
@@ -833,7 +845,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "text",
-        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text, refreshing the `content.txt` sidecar when needed.",
+        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
         &["id"],
         |_, id: String| -> LuaResult<Option<String>> {
             Ok(smelt_core::session::load_search_blob(&id))
@@ -890,7 +902,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 if cached_view.is_none() {
                     let cache_key = cache_key_hint.clone().unwrap_or_else(|| id.clone());
                     cached_key = Some(cache_key.clone());
-                    if let Some(transcript) = crate::app::history::load_transcript_tail_from_sqlite_id(&id, width, height) {
+                    let transcript =
+                        crate::app::history::load_transcript_tail_from_sqlite_id(&id, width, height)
+                            .or_else(|| {
+                                crate::app::history::materialize_full_transcript_read_only(
+                                    &app.lua, &id,
+                                )
+                                .map(|(transcript, _)| transcript)
+                            });
+                    if let Some(transcript) = transcript {
                         let mut view = crate::app::transcript::TranscriptDocument::from_loaded_transcript(transcript);
                         view.set_inline_options(app.inline_options());
                         cached_view = Some(view);
@@ -938,11 +958,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["id"],
         |_, id: String| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                if id != app.core.session.id {
-                    smelt_core::session::delete(&id);
+                let target = smelt_core::session::resolve_prefix(&id)
+                    .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
+                if target.as_str() == app.core.session.id {
+                    return Err(mlua::Error::RuntimeError(
+                        "cannot delete the active session".into(),
+                    ));
                 }
-            });
-            Ok(())
+                smelt_core::session::delete(target.as_str())
+                    .map_err(|err| mlua::Error::RuntimeError(err.to_string()))
+            })
         },
     )?;
     m.fn_(

@@ -308,7 +308,6 @@ fn loading_session_restores_persisted_cwd() {
     let _ = app.drain_engine_sends();
 
     let mut session = smelt_core::session::Session::new(app.app.core.env.pid(), target.clone());
-    session.id = "resumed-cwd-session".into();
     session
         .history
         .push(protocol::HistoryItem::user(protocol::Content::text(
@@ -336,20 +335,16 @@ fn loading_session_restores_persisted_cwd() {
     let display_target =
         std::fs::canonicalize(display_target_dir.path()).expect("canonical display-only cwd");
     let display_expected = display_target.to_string_lossy().into_owned();
-    let mut display_session =
+    let display_session =
         smelt_core::session::Session::new(app.app.core.env.pid(), display_target.clone());
-    display_session.id = "display-only-cwd-session".into();
+    let display_session_id = display_session.id.clone();
     let transcript = smelt_core::content::transcript::Transcript::new();
 
     app.app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             display_session,
             crate::app::transcript::LoadedTranscript::full(transcript),
-            crate::app::history::live_session_for_test(
-                "full-display-only-cwd-session".into(),
-                0,
-                None,
-            ),
+            crate::app::history::live_session_for_test(display_session_id.clone(), 0, None),
         ),
     );
 
@@ -365,7 +360,7 @@ fn loading_session_restores_persisted_cwd() {
             .live_session
             .as_ref()
             .map(|live| live.id()),
-        Some("full-display-only-cwd-session")
+        Some(display_session_id.as_str())
     );
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
@@ -379,9 +374,8 @@ fn loading_session_restores_persisted_cwd() {
     drop(missing_dir);
     let fallback = app.app.cwd.clone();
     let fallback_path = app.app.core.env.cwd();
-    let mut missing_session =
+    let missing_session =
         smelt_core::session::Session::new(app.app.core.env.pid(), missing_path.clone());
-    missing_session.id = "missing-cwd-session".into();
 
     app.app.load_session(missing_session);
 

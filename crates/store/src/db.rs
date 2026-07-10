@@ -79,9 +79,7 @@ impl SessionDb {
         });
         let path = path.as_ref().to_path_buf();
         if matches!(options.mode, OpenMode::ReadWrite) {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+            prepare_writable_path(&path)?;
         }
 
         let flags = match options.mode {
@@ -89,12 +87,15 @@ impl SessionDb {
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
             }
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
-        };
+        } | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let mut conn = Connection::open_with_flags(&path, flags)?;
         apply_pragmas(&conn, options.mode)?;
 
         match options.mode {
-            OpenMode::ReadWrite => schema::migrate(&mut conn, &options.app_version)?,
+            OpenMode::ReadWrite => {
+                schema::migrate(&mut conn, &options.app_version)?;
+                secure_sqlite_files(&path)?;
+            }
             OpenMode::ReadOnly => schema::validate_read_only_schema(&conn)?,
         }
 
@@ -1147,6 +1148,98 @@ fn descriptor_kind_matches_history_item(kind: &str, item: &protocol::HistoryItem
     )
 }
 
+fn prepare_writable_path(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Err(StoreError::Integrity(
+            "session database path has no parent".into(),
+        ));
+    };
+    reject_symlink(parent)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(parent)?;
+    reject_symlink(parent)?;
+    reject_symlink(path)?;
+    create_private_file(path)?;
+    secure_directory(parent)?;
+    secure_sqlite_files(path)?;
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing symlinked storage path {}", path.display()),
+            )))
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn create_private_file(path: &Path) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => reject_symlink(path),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(unix)]
+fn secure_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if path.exists() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn secure_sqlite_files(path: &Path) -> Result<()> {
+    reject_symlink(path)?;
+    secure_file(path)?;
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    for suffix in ["-wal", "-shm"] {
+        let companion = path.with_file_name(format!("{name}{suffix}"));
+        reject_symlink(&companion)?;
+        secure_file(&companion)?;
+    }
+    Ok(())
+}
+
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -1187,6 +1280,69 @@ mod tests {
         assert_eq!(db.mode(), OpenMode::ReadOnly);
         assert_eq!(db.schema_version().unwrap(), schema::SCHEMA_VERSION);
         db.quick_check().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_open_uses_private_directory_and_database_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        let path = session_dir.join("session.db");
+        let db = SessionDb::open(&path).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO store_meta (key, value) VALUES ('mode', 'check')",
+                [],
+            )
+            .unwrap();
+        drop(db);
+
+        assert_eq!(
+            fs::metadata(&session_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        for suffix in ["-wal", "-shm"] {
+            let companion = path.with_file_name(format!("session.db{suffix}"));
+            if companion.exists() {
+                assert_eq!(
+                    fs::metadata(companion).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_open_rejects_symlinked_session_paths() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let linked_dir = root.path().join("linked");
+        symlink(&target, &linked_dir).unwrap();
+        assert!(SessionDb::open(linked_dir.join("session.db")).is_err());
+
+        let real_dir = root.path().join("real");
+        fs::create_dir_all(&real_dir).unwrap();
+        let target_db = target.join("target.db");
+        fs::write(&target_db, []).unwrap();
+        symlink(&target_db, real_dir.join("session.db")).unwrap();
+        assert!(SessionDb::open(real_dir.join("session.db")).is_err());
+
+        let companion_dir = root.path().join("companion");
+        fs::create_dir_all(&companion_dir).unwrap();
+        let companion_target = target.join("target-wal");
+        fs::write(&companion_target, []).unwrap();
+        symlink(&companion_target, companion_dir.join("session.db-wal")).unwrap();
+        assert!(SessionDb::open(companion_dir.join("session.db")).is_err());
     }
 
     #[test]

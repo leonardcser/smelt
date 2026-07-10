@@ -1274,7 +1274,7 @@ fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: 
 fn seed_resume_bench_sessions(count: usize) {
     let base_time = 1_700_000_000_000u64;
     for i in 0..count {
-        let id = format!("resume-bench-{i:04}");
+        let id = format!("{i:064x}");
         seed_resume_bench_session(id, base_time + i as u64, 128, "/resume-bench-other");
     }
 }
@@ -1665,17 +1665,14 @@ fn hot_path_history_len() -> usize {
         .unwrap_or(1024)
 }
 
-fn hot_path_session_id(label: &str) -> String {
+fn hot_path_session_id(_label: &str) -> String {
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!(
-        "transcript-hot-path-{label}-{}-{counter}-{nanos}",
-        std::process::id()
-    )
+    format!("{nanos:032x}{:016x}{counter:016x}", std::process::id())
 }
 
 fn hot_path_user(text: &str) -> protocol::HistoryItem {

@@ -6850,7 +6850,7 @@ mod tests {
             "display-only resume did not observe the descriptor-backed fixture size"
         );
 
-        smelt_core::session::delete(&session_id);
+        smelt_core::session::delete(&session_id).expect("delete resume benchmark session");
         smelt_perf::perf::set_enabled(false);
         eprintln!(
             "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes={} generated_bytes={} descriptors={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3}",

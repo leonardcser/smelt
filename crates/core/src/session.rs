@@ -186,7 +186,7 @@ const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
 
 pub use crate::session_store::{
     ensure_session_db_read_only, ensure_session_db_writable, export_history_jsonl,
-    export_requests_jsonl, SessionStoreError,
+    export_requests_jsonl, SessionStoreError, SessionStoreResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,6 +472,18 @@ pub struct SessionMeta {
     /// Populated in `meta.json` so the resume dialog avoids loading session history.
     #[serde(default)]
     pub text_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionListEntry {
+    pub id: String,
+    pub status: SessionListStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionListStatus {
+    Available(Box<SessionMeta>),
+    Unavailable(SessionStoreError),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1025,8 +1037,16 @@ pub fn dir_for(session: &Session) -> PathBuf {
     dir_for_id(&session.id)
 }
 
+/// Resolve a path for an in-memory session whose ID must satisfy the persisted ID invariant.
+/// User-provided IDs and prefixes must go through [`resolve_prefix`] first.
 pub fn dir_for_id(id: &str) -> PathBuf {
-    sessions_dir().join(id)
+    let id = crate::session_id::SessionId::parse(id)
+        .unwrap_or_else(|err| panic!("invalid in-memory session id {id:?}: {err}"));
+    session_dir(&id)
+}
+
+pub fn session_dir(id: &crate::session_id::SessionId) -> PathBuf {
+    sessions_dir().join(id.as_str())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1056,8 +1076,13 @@ pub struct SessionHeader {
 
 pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     let session_dir = dir_for(session);
-    let _ = fs::create_dir_all(&session_dir);
+    if create_private_dir_all(&session_dir).is_err() {
+        return;
+    }
     let blob_dir = session_dir.join("blobs");
+    if create_private_dir_all(&blob_dir).is_err() {
+        return;
+    }
     let url_to_blob = store.save_blobs(&blob_dir);
     save_with_blobs(session, &url_to_blob);
 }
@@ -1084,7 +1109,7 @@ pub fn save_with_blobs_result_with_history_start(
 ) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
     let session_dir = dir_for(session);
-    fs::create_dir_all(&session_dir)?;
+    create_private_dir_all(&session_dir)?;
 
     let session_out = if url_to_blob.is_empty() {
         std::borrow::Cow::Borrowed(session)
@@ -1329,14 +1354,111 @@ fn snapshot_values_from<T: Serialize>(
     Ok(values)
 }
 
-/// Write `contents` to `path` atomically via a tmp file + rename.
+fn reject_filesystem_symlink(path: &Path) -> std::io::Result<()> {
+    let state_root = engine::state_dir();
+    let inspect_state_ancestors = path.starts_with(&state_root);
+    for candidate in path.ancestors() {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("refusing symlinked storage path {}", candidate.display()),
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        if !inspect_state_ancestors || candidate == state_root {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn create_private_dir(path: &Path, recursive: bool) -> std::io::Result<()> {
+    reject_filesystem_symlink(path)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(recursive);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(err) if !recursive && err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    reject_filesystem_symlink(path)?;
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "storage directory path is not a directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+pub fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    let state_root = engine::state_dir();
+    let Ok(relative) = path.strip_prefix(&state_root) else {
+        return create_private_dir(path, true);
+    };
+
+    create_private_dir(&state_root, true)?;
+    let mut current = state_root;
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid storage directory path: {}", path.display()),
+            ));
+        };
+        current.push(component);
+        create_private_dir(&current, false)?;
+    }
+    Ok(())
+}
+
+pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        reject_filesystem_symlink(parent)?;
+    }
+    reject_filesystem_symlink(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    std::io::Write::write_all(&mut file, contents)
+}
+
+/// Write `contents` to `path` atomically via a private temporary file + rename.
 pub fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
     let Some(dir) = path.parent() else { return };
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return;
     };
     let tmp = dir.join(format!("{name}.{ts}.tmp"));
-    if fs::write(&tmp, contents).is_ok() {
+    if write_private_file(&tmp, contents).is_ok() {
         let _ = fs::rename(&tmp, path);
     }
 }
@@ -1346,78 +1468,118 @@ pub fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
 /// This materializes all history rows and should stay out of normal resume,
 /// preview, render, search, save, and provider-dispatch hot paths.
 pub fn load_full(id_or_prefix: &str) -> Option<Session> {
+    load_full_result(id_or_prefix).ok().flatten()
+}
+
+pub fn load_full_result(id_or_prefix: &str) -> SessionStoreResult<Option<Session>> {
     let _perf = smelt_perf::perf::begin("session:load_full");
     let id = {
         let _perf = smelt_perf::perf::begin("session:load_full:resolve");
         resolve_prefix(id_or_prefix)?
     };
-    load_full_exact(&id)
+    load_session_files_result(&session_dir(&id))
 }
 
 pub fn load_full_for_resume(id_or_prefix: &str) -> Option<LoadedSession> {
+    load_full_for_resume_result(id_or_prefix).ok().flatten()
+}
+
+pub fn load_full_for_resume_result(
+    id_or_prefix: &str,
+) -> SessionStoreResult<Option<LoadedSession>> {
     let _perf = smelt_perf::perf::begin("session:load_full_for_resume");
     let id = {
         let _perf = smelt_perf::perf::begin("session:load_full:resolve");
         resolve_prefix(id_or_prefix)?
     };
-    load_session_files_for_resume(&sessions_dir().join(id))
+    load_session_files_for_resume_result(&session_dir(&id))
 }
 
 pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
+    load_meta_result(id_or_prefix).ok().flatten()
+}
+
+pub fn load_meta_result(id_or_prefix: &str) -> SessionStoreResult<Option<SessionMeta>> {
     let _perf = smelt_perf::perf::begin("session:load_meta");
-    load_meta_for_prepared_dir(prepare_session_dir_for_read(id_or_prefix)?)
+    let dir = prepare_session_dir_for_read_result(id_or_prefix)?;
+    load_meta_for_dir_result(dir, MetaLoadMode::Full)
 }
 
 pub fn resolve_session_dir_for_read(id_or_prefix: &str) -> Option<ResolvedSessionDir> {
+    resolve_session_dir_for_read_result(id_or_prefix).ok()
+}
+
+pub fn resolve_session_dir_for_read_result(
+    id_or_prefix: &str,
+) -> SessionStoreResult<ResolvedSessionDir> {
     let id = resolve_prefix(id_or_prefix)?;
-    let dir = dir_for_id(&id);
-    let kind = session_dir_kind(&dir)?;
-    Some(ResolvedSessionDir { id, dir, kind })
+    let dir = session_dir(&id);
+    crate::session_store::reject_symlink(&dir, "read")?;
+    crate::session_store::reject_symlink(&dir.join("session.db"), "read")?;
+    let kind = session_dir_kind(&dir)
+        .ok_or_else(|| SessionStoreError::MissingDatabase { id: id.to_string() })?;
+    Ok(ResolvedSessionDir {
+        id: id.into_string(),
+        dir,
+        kind,
+    })
 }
 
 pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
-    let resolved = resolve_session_dir_for_read(id_or_prefix)?;
-    if writer_lease_conflict_for_session_dir(&resolved.dir).is_some() {
-        return Some(resolved.dir);
-    }
-    if let Err(err) = crate::session_store::ensure_session_db_read_only(&resolved.dir) {
-        log_session_open_error(&resolved.dir, &err);
-        return None;
-    }
-    Some(resolved.dir)
+    prepare_session_dir_for_read_result(id_or_prefix).ok()
+}
+
+pub fn prepare_session_dir_for_read_result(id_or_prefix: &str) -> SessionStoreResult<PathBuf> {
+    let resolved = resolve_session_dir_for_read_result(id_or_prefix)?;
+    crate::session_store::ensure_session_db_read_only(&resolved.dir)?;
+    Ok(resolved.dir)
 }
 
 pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionStoreRef)> {
-    let resolved = resolve_session_dir_for_read(id_or_prefix)?;
-    load_store_header_for_dir(resolved.dir)
+    load_store_header_result(id_or_prefix).ok().flatten()
+}
+
+pub fn load_store_header_result(
+    id_or_prefix: &str,
+) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
+    let resolved = resolve_session_dir_for_read_result(id_or_prefix)?;
+    load_store_header_for_dir_result(resolved.dir)
 }
 
 pub fn load_store_header_for_dir(session_dir: PathBuf) -> Option<(SessionHeader, SessionStoreRef)> {
+    load_store_header_for_dir_result(session_dir).ok().flatten()
+}
+
+pub fn load_store_header_for_dir_result(
+    session_dir: PathBuf,
+) -> SessionStoreResult<Option<(SessionHeader, SessionStoreRef)>> {
+    crate::session_store::reject_symlink(&session_dir, "read")?;
     let db_path = session_dir.join("session.db");
-    // COMPAT(transcript-descriptor-history-link-mismatch): repair broken
-    // descriptor/history links before sparse resume builds its tail window.
-    // COMPAT(session-checkpoint-live-index-past-history): repair impossible
-    // checkpoint live starts before constructing store-backed model history.
-    if let Ok(db) = smelt_store::SessionDb::open(&db_path) {
-        let _ = db.repair_mismatched_transcript_descriptor_history_links();
-        let _ = db.repair_checkpoint_first_live_index_past_history();
-    }
-    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
-    let state = db.session_state().ok()??;
-    let meta = load_meta_from_db(&session_dir)?;
+    crate::session_store::reject_symlink(&db_path, "read")?;
+    let db = smelt_store::SessionDb::open_read_only(&db_path)
+        .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
+    let Some(state) = db
+        .session_state()
+        .map_err(|err| crate::session_store::store_error("read session state", &db_path, err))?
+    else {
+        return Ok(None);
+    };
+    let Some(meta) = load_meta_from_db_result(&session_dir)? else {
+        return Ok(None);
+    };
     let history_len = state.history_len as usize;
     let header = SessionHeader {
         meta,
         history_len,
         revision: state.revision,
     };
-    Some((
+    Ok(Some((
         header,
         SessionStoreRef {
             session_dir,
             db_path,
         },
-    ))
+    )))
 }
 
 fn session_dir_kind(dir: &Path) -> Option<SessionDirKind> {
@@ -1427,20 +1589,22 @@ fn session_dir_kind(dir: &Path) -> Option<SessionDirKind> {
 }
 
 pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
-    load_meta_for_dir(dir, MetaLoadMode::Full)
+    load_meta_for_dir_result(dir, MetaLoadMode::Full)
+        .ok()
+        .flatten()
 }
 
-fn load_full_exact(id: &str) -> Option<Session> {
-    let _perf = smelt_perf::perf::begin("session:load_full:exact");
-    load_session_files(&sessions_dir().join(id))
-}
-
+#[cfg(test)]
 fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
-    if let Err(err) = crate::session_store::ensure_session_db_read_only(dir_path) {
-        log_session_open_error(dir_path, &err);
-        return None;
-    }
-    load_db_session(dir_path).and_then(|session| internalize_session_blobs(dir_path, session))
+    load_session_files_result(dir_path).ok().flatten()
+}
+
+fn load_session_files_result(dir_path: &std::path::Path) -> SessionStoreResult<Option<Session>> {
+    crate::session_store::ensure_session_db_read_only(dir_path)?;
+    let Some(session) = load_db_session_result(dir_path)? else {
+        return Ok(None);
+    };
+    Ok(internalize_session_blobs(dir_path, session))
 }
 
 fn writer_lease_conflict_for_session_dir(dir_path: &Path) -> Option<SessionAccessDecision> {
@@ -1476,32 +1640,18 @@ pub fn claim_access_for_session_dir(dir_path: &Path) -> SessionAccessDecision {
     }
 }
 
-fn load_session_files_for_resume(dir_path: &std::path::Path) -> Option<LoadedSession> {
-    if let Some(access) = writer_lease_conflict_for_session_dir(dir_path) {
-        let session = load_db_session(dir_path)
-            .and_then(|session| internalize_session_blobs(dir_path, session))?;
-        return Some(LoadedSession { session, access });
-    }
-
-    if let Err(err) = crate::session_store::ensure_session_db_writable(dir_path) {
-        log_session_open_error(dir_path, &err);
-        return None;
-    }
-    let access = claim_access_for_session_dir(dir_path);
-    let session = load_db_session(dir_path)
-        .and_then(|session| internalize_session_blobs(dir_path, session))?;
-    Some(LoadedSession { session, access })
-}
-
-fn log_session_open_error(dir_path: &std::path::Path, err: &SessionStoreError) {
-    engine::log::entry(
-        engine::log::Level::Warn,
-        "session_open_failed",
-        &serde_json::json!({
-            "session_dir": dir_path.display().to_string(),
-            "error": err.to_string(),
-        }),
-    );
+fn load_session_files_for_resume_result(
+    dir_path: &std::path::Path,
+) -> SessionStoreResult<Option<LoadedSession>> {
+    crate::session_store::reject_symlink(dir_path, "resume")?;
+    crate::session_store::reject_symlink(&dir_path.join("session.db"), "resume")?;
+    let access = writer_lease_conflict_for_session_dir(dir_path)
+        .unwrap_or_else(|| claim_access_for_session_dir(dir_path));
+    let Some(session) = load_db_session_result(dir_path)? else {
+        return Ok(None);
+    };
+    Ok(internalize_session_blobs(dir_path, session)
+        .map(|session| LoadedSession { session, access }))
 }
 
 fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -> Option<Session> {
@@ -1520,25 +1670,54 @@ fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -
     Some(session)
 }
 
-fn load_db_session(dir_path: &std::path::Path) -> Option<Session> {
+fn load_db_session_result(dir_path: &std::path::Path) -> SessionStoreResult<Option<Session>> {
     let db_path = dir_path.join("session.db");
     if !db_path.is_file() {
-        return None;
+        return Ok(None);
     }
-    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
-    let mut snapshot = db.load_full_session_snapshot().ok()??;
+    let db = smelt_store::SessionDb::open_read_only(&db_path)
+        .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
+    let Some(mut snapshot) = db
+        .load_full_session_snapshot()
+        .map_err(|err| crate::session_store::store_error("load session", &db_path, err))?
+    else {
+        return Ok(None);
+    };
+    let expected_id = dir_path.file_name().and_then(|name| name.to_str());
+    if expected_id != Some(snapshot.state.id.as_str()) {
+        return Err(SessionStoreError::Corrupt {
+            context: format!(
+                "session id {:?} does not match directory {:?}",
+                snapshot.state.id, expected_id
+            ),
+        });
+    }
     let history = std::mem::take(&mut snapshot.history);
-    Some(session_from_store_snapshot(snapshot, history))
+    session_from_store_snapshot(snapshot, history).map(Some)
 }
 
 fn session_from_store_snapshot(
     snapshot: smelt_store::SessionSnapshot,
     history: Vec<HistoryItem>,
-) -> Session {
+) -> SessionStoreResult<Session> {
     let state = snapshot.state;
-    let turn_metas = snapshots_from_values(snapshot.turn_metas).unwrap_or_default();
-    let metadata_snapshots = snapshots_from_values(snapshot.metadata_snapshots).unwrap_or_default();
-    let context_snapshots = snapshots_from_values(snapshot.context_snapshots).unwrap_or_default();
+    crate::session_id::SessionId::parse(&state.id).map_err(|err| SessionStoreError::Corrupt {
+        context: format!("invalid persisted session id: {err}"),
+    })?;
+    let turn_metas =
+        snapshots_from_values(snapshot.turn_metas).map_err(|err| SessionStoreError::Corrupt {
+            context: format!("invalid turn metadata: {err}"),
+        })?;
+    let metadata_snapshots = snapshots_from_values(snapshot.metadata_snapshots).map_err(|err| {
+        SessionStoreError::Corrupt {
+            context: format!("invalid metadata snapshot: {err}"),
+        }
+    })?;
+    let context_snapshots = snapshots_from_values(snapshot.context_snapshots).map_err(|err| {
+        SessionStoreError::Corrupt {
+            context: format!("invalid accounting snapshot: {err}"),
+        }
+    })?;
     let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
     let session_usage = context_state.session_usage.clone();
     let context_token_identity = context_state.context_token_identity;
@@ -1549,7 +1728,7 @@ fn session_from_store_snapshot(
     let context_tokens = state
         .context_tokens
         .and_then(|tokens| u32::try_from(tokens).ok());
-    Session {
+    Ok(Session {
         id: state.id,
         title: state.title,
         slug: state.slug,
@@ -1582,19 +1761,15 @@ fn session_from_store_snapshot(
         context_snapshots,
         session_cost_usd: state.session_cost_usd,
         session_usage,
-    }
+    })
 }
 
 fn snapshots_from_values<T: for<'de> Deserialize<'de>>(
     rows: Vec<(u64, Value)>,
-) -> Option<HistorySnapshots<T>> {
+) -> Result<HistorySnapshots<T>, serde_json::Error> {
     rows.into_iter()
-        .map(|(idx, value)| {
-            serde_json::from_value(value)
-                .ok()
-                .map(|value| (idx as usize, value))
-        })
-        .collect::<Option<Vec<_>>>()
+        .map(|(idx, value)| serde_json::from_value(value).map(|value| (idx as usize, value)))
+        .collect::<Result<Vec<_>, _>>()
         .map(HistorySnapshots::from_vec)
 }
 
@@ -1835,163 +2010,187 @@ fn transcript_descriptor_record(
     crate::transcript_model::transcript_descriptor_row(descriptor_idx, &record)
 }
 
-/// Returns `None` when no match or prefix is ambiguous.
-pub(crate) fn resolve_prefix(prefix: &str) -> Option<String> {
-    let dir = sessions_dir();
-
-    if dir.join(prefix).join("session.db").is_file() {
-        return Some(prefix.to_string());
-    }
-
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return None;
+pub fn resolve_prefix(prefix: &str) -> SessionStoreResult<crate::session_id::SessionId> {
+    let prefix = crate::session_id::SessionPrefix::parse(prefix).map_err(|err| {
+        SessionStoreError::InvalidSessionId {
+            value: prefix.to_string(),
+            message: err.to_string(),
+        }
+    })?;
+    let root = sessions_dir();
+    crate::session_store::reject_symlink(&root, "resolve")?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SessionStoreError::SessionNotFound {
+                id: prefix.as_str().to_string(),
+            });
+        }
+        Err(err) => {
+            return Err(SessionStoreError::Io {
+                operation: "list sessions in",
+                path: root.display().to_string(),
+                message: err.to_string(),
+            });
+        }
     };
     let mut matches = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || !path.join("session.db").is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
+    for entry in entries {
+        let entry = entry.map_err(|err| SessionStoreError::Io {
+            operation: "read session entry in",
+            path: root.display().to_string(),
+            message: err.to_string(),
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name_str.starts_with(prefix) {
-            matches.push(name_str.to_string());
+        let Ok(id) = crate::session_id::SessionId::parse(&name) else {
+            continue;
+        };
+        if !id.as_str().starts_with(prefix.as_str()) {
+            continue;
         }
+        matches.push(id);
     }
-    if matches.len() == 1 {
-        Some(matches.into_iter().next().unwrap())
-    } else {
-        None
+    match matches.len() {
+        0 => Err(SessionStoreError::SessionNotFound {
+            id: prefix.as_str().to_string(),
+        }),
+        1 => Ok(matches.pop().expect("one session match")),
+        count => Err(SessionStoreError::AmbiguousPrefix {
+            prefix: prefix.as_str().to_string(),
+            matches: count,
+        }),
     }
 }
 
-pub fn delete(id: &str) {
-    let session_dir = sessions_dir().join(id);
-    if session_dir.is_dir() {
-        let _ = fs::remove_dir_all(&session_dir);
+pub fn delete(id_or_prefix: &str) -> SessionStoreResult<()> {
+    let id = resolve_prefix(id_or_prefix)?;
+    let root = sessions_dir();
+    let session_dir = session_dir(&id);
+    debug_assert_eq!(session_dir.parent(), Some(root.as_path()));
+    if session_dir.parent() != Some(root.as_path()) {
+        return Err(SessionStoreError::Io {
+            operation: "confine session path beneath",
+            path: root.display().to_string(),
+            message: "resolved session path escaped its root".into(),
+        });
     }
+    crate::session_store::reject_symlink(&session_dir, "delete")?;
+    crate::session_store::reject_symlink(&session_dir.join("session.db"), "delete")?;
+    if let Some(SessionAccessDecision::ReadOnly { reason }) =
+        writer_lease_conflict_for_session_dir(&session_dir)
+    {
+        return Err(SessionStoreError::ReadOnlyOwnerConflict { owner: reason });
+    }
+    fs::remove_dir_all(&session_dir).map_err(|err| SessionStoreError::Io {
+        operation: "delete session",
+        path: session_dir.display().to_string(),
+        message: err.to_string(),
+    })
 }
 
 pub fn list_sessions() -> Vec<SessionMeta> {
-    let _perf = smelt_perf::perf::begin("session:list");
-    let dir = sessions_dir();
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-
-    let paths: Vec<PathBuf> = entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            p.is_dir().then_some(p)
+    list_session_entries()
+        .into_iter()
+        .filter_map(|entry| match entry.status {
+            SessionListStatus::Available(meta) => Some(*meta),
+            SessionListStatus::Unavailable(_) => None,
         })
-        .collect();
-    let mut out = crate::utils::parallel_filter_map(paths, |path| {
-        load_meta_for_dir(path, MetaLoadMode::List)
+        .collect()
+}
+
+pub fn list_session_entries() -> Vec<SessionListEntry> {
+    list_session_entries_result().unwrap_or_default()
+}
+
+pub fn list_session_entries_result() -> SessionStoreResult<Vec<SessionListEntry>> {
+    let _perf = smelt_perf::perf::begin("session:list");
+    let root = sessions_dir();
+    crate::session_store::reject_symlink(&root, "list")?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(SessionStoreError::Io {
+                operation: "list sessions in",
+                path: root.display().to_string(),
+                message: err.to_string(),
+            });
+        }
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| SessionStoreError::Io {
+            operation: "read session entry in",
+            path: root.display().to_string(),
+            message: err.to_string(),
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(id) = crate::session_id::SessionId::parse(&name) else {
+            continue;
+        };
+        let path = session_dir(&id);
+        candidates.push((id.into_string(), path));
+    }
+    let mut out = crate::utils::parallel_filter_map(candidates, |(id, path)| {
+        let status = match load_meta_for_dir_result(path, MetaLoadMode::List) {
+            Ok(Some(meta)) => SessionListStatus::Available(Box::new(meta)),
+            Ok(None) => SessionListStatus::Unavailable(SessionStoreError::MissingDatabase {
+                id: id.clone(),
+            }),
+            Err(err) => SessionListStatus::Unavailable(err),
+        };
+        Some(SessionListEntry { id, status })
     });
-    out.sort_by_key(|b| std::cmp::Reverse(session_updated_at(b)));
-    out
+    out.sort_by_key(|entry| {
+        let updated_at = match &entry.status {
+            SessionListStatus::Available(meta) => session_updated_at(meta),
+            SessionListStatus::Unavailable(_) => 0,
+        };
+        std::cmp::Reverse(updated_at)
+    });
+    Ok(out)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MetaLoadMode {
-    /// Listing path. Prefer sidecars for speed, but regenerate from SQLite when missing.
+    /// Listing path. Prefer sidecars for speed, but fall back to SQLite when missing.
     List,
     /// Exact load path. Fill fields required to resume display-only sessions.
     Full,
 }
 
-fn load_meta_for_dir(path: PathBuf, mode: MetaLoadMode) -> Option<SessionMeta> {
-    if !path.join("session.db").is_file() {
-        return None;
-    }
-    let meta = if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
-        load_meta_sidecar(&path, &contents, mode)
-    } else {
-        None
-    };
-    if let Some(meta) = meta {
-        return Some(meta);
-    }
-    let meta = load_meta_from_db(&path)?;
-    write_meta(&path, &meta);
-    Some(meta)
-}
-
-fn load_meta_sidecar(path: &Path, contents: &str, mode: MetaLoadMode) -> Option<SessionMeta> {
-    let mut meta = serde_json::from_str::<SessionMeta>(contents).ok()?;
-    if mode == MetaLoadMode::List {
-        return Some(meta);
-    }
-
-    let sidecar_fields = serde_json::from_str::<Value>(contents)
-        .ok()
-        .and_then(|value| value.as_object().cloned());
-    let checkpoint_field_present = sidecar_fields
-        .as_ref()
-        .is_some_and(|object| object.contains_key("checkpoint"));
-    let token_identity_fields_present = sidecar_fields.as_ref().is_some_and(|object| {
-        object.contains_key("context_token_identity")
-            && object.contains_key("display_context_token_identity")
-    });
-    if meta.text_bytes.is_none() {
-        backfill_text_bytes(path, &mut meta);
-    }
-    if enrich_meta_from_db(
-        path,
-        &mut meta,
-        checkpoint_field_present,
-        token_identity_fields_present,
-    ) {
-        write_meta(path, &meta);
-    }
-    Some(meta)
-}
-
-fn enrich_meta_from_db(
-    path: &Path,
-    meta: &mut SessionMeta,
-    checkpoint_field_present: bool,
-    token_identity_fields_present: bool,
-) -> bool {
-    if meta.history_len.is_some() && checkpoint_field_present && token_identity_fields_present {
-        return false;
-    }
+fn load_meta_for_dir_result(
+    path: PathBuf,
+    mode: MetaLoadMode,
+) -> SessionStoreResult<Option<SessionMeta>> {
+    crate::session_store::reject_symlink(&path, "read")?;
     let db_path = path.join("session.db");
-    let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
-        return false;
-    };
-    let Ok(Some(state)) = db.session_state() else {
-        return false;
-    };
-    let mut changed = false;
-    if meta.history_len.is_none() {
-        meta.history_len = Some(state.history_len as usize);
-        changed = true;
+    crate::session_store::reject_symlink(&db_path, "read")?;
+    if !db_path.is_file() {
+        return Ok(None);
     }
-    if !checkpoint_field_present {
-        meta.checkpoint = checkpoint_from_json(state.checkpoint_json, state.history_len as usize);
-        changed = true;
+    if mode == MetaLoadMode::List {
+        let sidecar_path = path.join("meta.json");
+        let sidecar_is_regular = fs::symlink_metadata(&sidecar_path)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        if sidecar_is_regular {
+            if let Ok(contents) = fs::read_to_string(sidecar_path) {
+                if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
+                    let directory_id = path.file_name().and_then(|name| name.to_str());
+                    if directory_id == Some(meta.id.as_str())
+                        && crate::session_id::SessionId::parse(&meta.id).is_ok()
+                    {
+                        return Ok(Some(meta));
+                    }
+                }
+            }
+        }
     }
-    let context_state = context_snapshot_state_from_json(state.accounting_json);
-    let context_token_identity = context_state.context_token_identity;
-    let display_context_token_identity = context_state
-        .display_context_token_identity
-        .or_else(|| context_token_identity.clone());
-    if !token_identity_fields_present {
-        changed = true;
-    }
-    if meta.context_token_identity.is_none() && context_token_identity.is_some() {
-        meta.context_token_identity = context_token_identity;
-        changed = true;
-    }
-    if meta.display_context_token_identity.is_none() && display_context_token_identity.is_some() {
-        meta.display_context_token_identity = display_context_token_identity;
-        changed = true;
-    }
-    changed
+    load_meta_from_db_result(&path)
 }
 
 pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
@@ -2010,21 +2209,46 @@ pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
         return Ok(false);
     };
     let json = serde_json::to_vec_pretty(&meta).map_err(|err| err.to_string())?;
-    fs::write(dir_path.join("meta.json"), json).map_err(|err| err.to_string())?;
+    write_private_file(&dir_path.join("meta.json"), &json).map_err(|err| err.to_string())?;
     Ok(true)
 }
 
 fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
+    load_meta_from_db_result(path).ok().flatten()
+}
+
+fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMeta>> {
     let db_path = path.join("session.db");
     if !db_path.is_file() {
-        return None;
+        return Ok(None);
     }
-    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
-    let state = db.session_state().ok()??;
-    let text_bytes = Some(db.history_text_bytes().ok()?);
+    let db = smelt_store::SessionDb::open_read_only(&db_path)
+        .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
+    let Some(state) = db
+        .session_state()
+        .map_err(|err| crate::session_store::store_error("read session metadata", &db_path, err))?
+    else {
+        return Ok(None);
+    };
+    crate::session_id::SessionId::parse(&state.id).map_err(|err| SessionStoreError::Corrupt {
+        context: format!("invalid persisted session id: {err}"),
+    })?;
+    let expected_id = path.file_name().and_then(|name| name.to_str());
+    if expected_id != Some(state.id.as_str()) {
+        return Err(SessionStoreError::Corrupt {
+            context: format!(
+                "session id {:?} does not match directory {:?}",
+                state.id, expected_id
+            ),
+        });
+    }
+    let text_bytes =
+        Some(db.history_text_bytes().map_err(|err| {
+            crate::session_store::store_error("read history size", &db_path, err)
+        })?);
     let retained_history_len = db
         .history_item_count()
-        .ok()?
+        .map_err(|err| crate::session_store::store_error("read history length", &db_path, err))?
         .min(state.history_len as usize);
     let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), retained_history_len);
     let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
@@ -2032,7 +2256,7 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
     let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
-    Some(SessionMeta {
+    Ok(Some(SessionMeta {
         id: state.id,
         title: state.title,
         slug: state.slug,
@@ -2057,60 +2281,32 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
         history_len: Some(state.history_len as usize),
         checkpoint,
         text_bytes,
-    })
+    }))
 }
 
-fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
-    let Ok(db) = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")) else {
-        return;
-    };
-    let Ok(bytes) = db.history_text_bytes() else {
-        return;
-    };
-    meta.text_bytes = Some(bytes);
-    write_meta(session_dir, meta);
+/// Read searchable text from canonical SQLite without refreshing derived files.
+pub fn load_search_blob(id_or_prefix: &str) -> Option<String> {
+    load_search_blob_result(id_or_prefix).ok().flatten()
 }
 
-/// Read the searchable text blob for `id`.
-///
-/// COMPAT(session-search-sidecar-missing): reads canonical SQLite search text,
-/// then falls back to `content.txt` for sessions that predate generated caches.
-pub fn load_search_blob(id: &str) -> Option<String> {
+pub fn load_search_blob_result(id_or_prefix: &str) -> SessionStoreResult<Option<String>> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
-    let session_dir = sessions_dir().join(id);
-    if let Ok(db) = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")) {
-        if let Ok(blob) = db.search_blob() {
-            atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
-            return Some(blob);
-        }
-    }
-    if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
-        return Some(contents);
-    }
-    if let Err(err) = crate::session_store::ensure_session_db_read_only(&session_dir) {
-        log_session_open_error(&session_dir, &err);
-        return None;
-    }
-    if let Ok(db) = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")) {
-        if let Ok(blob) = db.search_blob() {
-            atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
-            return Some(blob);
-        }
-    }
-    None
+    let id = resolve_prefix(id_or_prefix)?;
+    let session_dir = session_dir(&id);
+    crate::session_store::ensure_session_db_read_only(&session_dir)?;
+    let db_path = session_dir.join("session.db");
+    let db = smelt_store::SessionDb::open_read_only(&db_path)
+        .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
+    db.search_blob()
+        .map(Some)
+        .map_err(|err| crate::session_store::store_error("read search text", &db_path, err))
 }
 
 /// Parallel batch read of search blobs. Returns `(id, blob)` pairs; missing
-/// sessions are silently dropped. Output order is not stable.
+/// or unavailable sessions are omitted. Output order is not stable.
 pub fn load_search_blobs(ids: Vec<String>) -> Vec<(String, String)> {
     let _perf = smelt_perf::perf::begin("session:load_search_blobs");
-    crate::utils::parallel_filter_map(ids, |id| load_search_blob(&id).map(|b| (id, b)))
-}
-
-fn write_meta(session_dir: &std::path::Path, meta: &SessionMeta) {
-    if let Ok(json) = serde_json::to_string(meta) {
-        atomic_write(&session_dir.join("meta.json"), json.as_bytes(), now_ms());
-    }
+    crate::utils::parallel_filter_map(ids, |id| load_search_blob(&id).map(|blob| (id, blob)))
 }
 
 /// Walk every image-url part in a history item's content, applying `swap`.
@@ -2187,6 +2383,13 @@ fn new_session_id(now_ms: u64, pid: u32) -> String {
 mod tests {
     use super::*;
 
+    const TEST_SESSION_ID: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn numbered_session_id(value: u64) -> String {
+        format!("{value:064x}")
+    }
+
     #[test]
     fn session_id_is_full_sha256_hex() {
         let id = new_session_id(123456789, 4242);
@@ -2222,47 +2425,93 @@ mod tests {
     }
 
     #[test]
-    fn delete_currently_accepts_absolute_and_parent_traversal_paths() {
+    fn delete_rejects_untrusted_paths_and_malformed_ids() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         let sessions = sessions_dir();
         fs::create_dir_all(&sessions).expect("create sessions dir");
-
         let absolute_target = state.path().join("absolute-target");
         fs::create_dir_all(&absolute_target).expect("create absolute target");
-        fs::write(absolute_target.join("sentinel"), "keep").expect("write absolute sentinel");
-        delete(absolute_target.to_str().expect("utf-8 temp path"));
-        assert!(
-            !absolute_target.exists(),
-            "an unchecked absolute id currently escapes the sessions root"
-        );
-
         let parent_target = sessions.parent().unwrap().join("parent-target");
         fs::create_dir_all(&parent_target).expect("create parent target");
-        fs::write(parent_target.join("sentinel"), "keep").expect("write parent sentinel");
-        delete("../parent-target");
-        assert!(
-            !parent_target.exists(),
-            "an unchecked parent id currently escapes the sessions root"
-        );
+
+        let absolute = absolute_target.to_str().expect("utf-8 temp path");
+        for invalid in [absolute, "../parent-target", "a/b", "", "ABCD", "xyz1"] {
+            assert!(
+                matches!(
+                    delete(invalid),
+                    Err(SessionStoreError::InvalidSessionId { .. })
+                ),
+                "unexpected delete result for {invalid:?}"
+            );
+        }
+        assert!(absolute_target.exists());
+        assert!(parent_target.exists());
     }
 
     #[test]
-    fn delete_currently_removes_valid_exact_id_but_not_its_unique_prefix() {
+    fn delete_accepts_valid_exact_id_and_unique_prefix_but_rejects_ambiguity() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let first = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let second = "0123ffff89abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for id in [first, second] {
+            let dir = sessions_dir().join(id);
+            fs::create_dir_all(&dir).expect("create valid session dir");
+            fs::write(dir.join("session.db"), "fixture").expect("write fixture database");
+        }
+
+        assert!(matches!(
+            delete("0123"),
+            Err(SessionStoreError::AmbiguousPrefix { matches: 2, .. })
+        ));
+        delete("01234567").expect("delete unique prefix");
+        assert!(!sessions_dir().join(first).exists());
+        delete(second).expect("delete exact id");
+        assert!(!sessions_dir().join(second).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_rejects_symlinked_session_directory() {
+        use std::os::unix::fs::symlink;
+
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let dir = sessions_dir().join(id);
-        fs::create_dir_all(&dir).expect("create valid session dir");
-        fs::write(dir.join("session.db"), "fixture").expect("write fixture database");
+        let target = state.path().join("outside-target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("session.db"), "fixture").unwrap();
+        fs::create_dir_all(sessions_dir()).unwrap();
+        symlink(&target, sessions_dir().join(id)).unwrap();
 
-        delete("01234567");
-        assert!(
-            dir.exists(),
-            "delete currently does not resolve unique prefixes"
-        );
-        delete(id);
-        assert!(!dir.exists(), "valid exact ids are deleted");
+        assert!(matches!(
+            delete(id),
+            Err(SessionStoreError::SymlinkNotAllowed { .. })
+        ));
+        assert!(target.join("session.db").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_resolution_rejects_symlinked_sessions_root() {
+        use std::os::unix::fs::symlink;
+
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let target_root = state.path().join("outside-sessions");
+        let target_session = target_root.join(id);
+        fs::create_dir_all(&target_session).unwrap();
+        fs::write(target_session.join("session.db"), "fixture").unwrap();
+        fs::create_dir_all(engine::state_dir()).unwrap();
+        symlink(&target_root, sessions_dir()).unwrap();
+
+        assert!(matches!(
+            resolve_prefix(id),
+            Err(SessionStoreError::SymlinkNotAllowed { .. })
+        ));
+        assert!(target_session.join("session.db").exists());
     }
 
     use protocol::{AssistantStep, Content, ContentPart, HistoryItem, ToolInvocation, ToolOutcome};
@@ -2338,15 +2587,17 @@ mod tests {
     }
 
     #[test]
-    fn load_store_header_for_dir_repairs_mismatched_transcript_descriptor_history_links() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    fn load_store_header_for_dir_does_not_repair_transcript_links() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let dir = root.path().join(TEST_SESSION_ID);
+        fs::create_dir(&dir).expect("create session dir");
         let mut s = fixture_session();
-        s.id = "repair-mismatched-descriptor-history-link".into();
+        s.id = TEST_SESSION_ID.into();
         s.history
             .push(HistoryItem::note(protocol::HistoryNote::context(
                 "cwd changed",
             )));
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
         db.replace_transcript_descriptor_records_for_repair(&[
@@ -2373,14 +2624,14 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let (_header, _store_ref) = load_store_header_for_dir(dir.path().to_path_buf())
-            .expect("store header loads after repair");
+        let (_header, _store_ref) =
+            load_store_header_for_dir(dir.clone()).expect("store header loads without repair");
 
-        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+        let db = smelt_store::SessionDb::open_read_only(dir.join("session.db")).unwrap();
         let rows = db.read_all_transcript_descriptor_records().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].history_idx, None);
-        assert_eq!(rows[0].origin_json, None);
+        assert_eq!(rows[0].history_idx, Some(0));
+        assert!(rows[0].origin_json.is_some());
     }
 
     #[test]
@@ -2396,12 +2647,14 @@ mod tests {
     }
 
     #[test]
-    fn load_store_header_for_dir_repairs_checkpoint_first_live_index_past_history() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    fn load_store_header_tolerates_checkpoint_without_repairing_database() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let dir = root.path().join(TEST_SESSION_ID);
+        fs::create_dir(&dir).expect("create session dir");
         let mut s = fixture_session();
-        s.id = "repair-checkpoint-live-index".into();
+        s.id = TEST_SESSION_ID.into();
         s.history = vec![user_item("old prompt"), assistant_text_item("recent reply")];
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
         let checkpoint = serde_json::json!({
@@ -2418,8 +2671,8 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let (header, store_ref) = load_store_header_for_dir(dir.path().to_path_buf())
-            .expect("store header loads after repair");
+        let (header, store_ref) =
+            load_store_header_for_dir(dir.clone()).expect("store header loads without repair");
 
         assert_eq!(header.history_len, 2);
         assert_eq!(
@@ -2450,26 +2703,26 @@ mod tests {
             }
         }
 
-        let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
-        let repaired = db
+        let db = smelt_store::SessionDb::open_read_only(dir.join("session.db")).unwrap();
+        let persisted = db
             .session_state()
             .unwrap()
             .unwrap()
             .checkpoint_json
             .unwrap();
-        assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
+        assert_eq!(persisted["first_live_index"].as_u64(), Some(177));
     }
 
     #[test]
-    fn list_sessions_uses_sidecar_metadata_and_regenerates_missing_cache() {
+    fn list_sessions_falls_back_to_sqlite_without_regenerating_cache() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
         let mut ids = Vec::new();
         for i in 0..3 {
             let mut s = fixture_session();
-            s.id = format!("stale-meta-{i}");
+            s.id = numbered_session_id(i + 1);
             s.title = Some(format!("stale meta {i}"));
-            s.updated_at_ms = 1_700_000_000_000 + i as u64;
+            s.updated_at_ms = 1_700_000_000_000 + i;
             s.history.push(user_item(&format!("prompt {i}")));
             save(&s, &crate::attachment::AttachmentStore::new());
 
@@ -2516,7 +2769,10 @@ mod tests {
         assert!(missing_sidecar_meta
             .text_bytes
             .is_some_and(|bytes| bytes > 0));
-        assert!(dir_for_id(&ids[2]).join("meta.json").is_file());
+        assert!(
+            !dir_for_id(&ids[2]).join("meta.json").exists(),
+            "ordinary listing must not regenerate a missing derived cache"
+        );
         let read_only_count = snapshot
             .durations
             .iter()
@@ -2555,6 +2811,179 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_reads_do_not_regenerate_sidecars_or_modify_database() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let mut session = fixture_session();
+        session.id = TEST_SESSION_ID.into();
+        session.history.push(user_item("read only"));
+        save(&session, &crate::attachment::AttachmentStore::new());
+        let dir = dir_for(&session);
+        let db_path = dir.join("session.db");
+        fs::remove_file(dir.join("meta.json")).unwrap();
+        fs::remove_file(dir.join("content.txt")).unwrap();
+        let modified = fs::metadata(&db_path).unwrap().modified().unwrap();
+
+        assert!(load_store_header(&session.id).is_some());
+        assert!(load_meta(&session.id).is_some());
+        assert!(load_search_blob(&session.id).is_some_and(|text| text.contains("read only")));
+        assert_eq!(list_sessions().len(), 1);
+
+        assert!(!dir.join("meta.json").exists());
+        assert!(!dir.join("content.txt").exists());
+        assert_eq!(
+            fs::metadata(&db_path).unwrap().modified().unwrap(),
+            modified
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_session_state_and_derived_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let mut session = fixture_session();
+        session.id = TEST_SESSION_ID.into();
+        session.history.push(user_item("private"));
+        save(&session, &crate::attachment::AttachmentStore::new());
+        let session_dir = dir_for(&session);
+        for dir in [engine::state_dir(), sessions_dir(), session_dir.clone()] {
+            assert_eq!(
+                fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        for file in ["session.db", "meta.json", "content.txt"] {
+            assert_eq!(
+                fs::metadata(session_dir.join(file))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "unexpected mode for {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_session_entries_keeps_corrupt_session_visible() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let mut healthy = fixture_session();
+        healthy.id = numbered_session_id(20);
+        healthy.history.push(user_item("healthy"));
+        save(&healthy, &crate::attachment::AttachmentStore::new());
+        let corrupt_id = numbered_session_id(21);
+        let corrupt_dir = sessions_dir().join(&corrupt_id);
+        fs::create_dir_all(&corrupt_dir).unwrap();
+        fs::write(corrupt_dir.join("session.db"), b"not sqlite").unwrap();
+        let missing_db_id = numbered_session_id(22);
+        fs::create_dir_all(sessions_dir().join(&missing_db_id)).unwrap();
+
+        let entries = list_session_entries();
+
+        assert!(entries.iter().any(|entry| {
+            entry.id == healthy.id && matches!(entry.status, SessionListStatus::Available(_))
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.id == corrupt_id && matches!(entry.status, SessionListStatus::Unavailable(_))
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.id == missing_db_id
+                && matches!(
+                    entry.status,
+                    SessionListStatus::Unavailable(SessionStoreError::MissingDatabase { .. })
+                )
+        }));
+    }
+
+    #[test]
+    fn exact_load_preserves_invalid_missing_and_unsupported_errors() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        assert!(matches!(
+            load_meta_result("../escape"),
+            Err(SessionStoreError::InvalidSessionId { .. })
+        ));
+        assert!(matches!(
+            load_meta_result("abcd"),
+            Err(SessionStoreError::SessionNotFound { .. })
+        ));
+        let missing_db_id = numbered_session_id(29);
+        fs::create_dir_all(sessions_dir().join(&missing_db_id)).unwrap();
+        assert!(matches!(
+            load_meta_result(&missing_db_id),
+            Err(SessionStoreError::MissingDatabase { .. })
+        ));
+
+        let id = numbered_session_id(30);
+        let dir = sessions_dir().join(&id);
+        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
+        db.connection()
+            .execute_batch("PRAGMA user_version = 999")
+            .unwrap();
+        drop(db);
+        assert!(matches!(
+            load_meta_result(&id),
+            Err(SessionStoreError::UnsupportedSchema { found: 999, .. })
+        ));
+    }
+
+    #[test]
+    fn session_listing_preserves_root_io_errors() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        create_private_dir_all(&engine::state_dir()).unwrap();
+        fs::write(sessions_dir(), "not a directory").unwrap();
+
+        assert!(matches!(
+            list_session_entries_result(),
+            Err(SessionStoreError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn persisted_session_id_must_match_directory_id() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let directory_id = numbered_session_id(31);
+        let persisted_id = numbered_session_id(32);
+        let dir = sessions_dir().join(&directory_id);
+        let mut session = fixture_session();
+        session.id = persisted_id;
+        session.history.push(user_item("mismatched id"));
+        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
+        db.save_session_snapshot_for_import(&store_snapshot_from_session(&session, 0).unwrap())
+            .unwrap();
+        drop(db);
+
+        assert!(matches!(
+            load_full_result(&directory_id),
+            Err(SessionStoreError::Corrupt { .. })
+        ));
+        assert!(list_session_entries().iter().any(|entry| {
+            entry.id == directory_id
+                && matches!(
+                    entry.status,
+                    SessionListStatus::Unavailable(SessionStoreError::Corrupt { .. })
+                )
+        }));
+
+        fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({ "id": directory_id }).to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_meta_result(&directory_id),
+            Err(SessionStoreError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
     fn resolve_session_dir_for_read_ignores_directories_without_database() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
@@ -2564,18 +2993,18 @@ mod tests {
         fs::write(stale_dir.join("session.json"), "{}").expect("write stale marker");
 
         let mut session = fixture_session();
-        session.id = "store-header-resolve".into();
+        session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("hello"));
         save(&session, &crate::attachment::AttachmentStore::new());
 
-        assert!(resolve_session_dir_for_read("legacy-res").is_none());
+        assert!(resolve_session_dir_for_read("abcd").is_none());
         assert!(!stale_dir.join("session.db").exists());
 
-        let store = resolve_session_dir_for_read("store-header").expect("resolve store prefix");
+        let store = resolve_session_dir_for_read("01234567").expect("resolve store prefix");
         assert_eq!(store.id, session.id);
         assert_eq!(store.kind, SessionDirKind::Store);
 
-        let (header, store_ref) = load_store_header("store-header").expect("load store header");
+        let (header, store_ref) = load_store_header("01234567").expect("load store header");
         assert_eq!(header.meta.id, session.id);
         assert_eq!(header.history_len, 1);
         assert_eq!(header.meta.history_len, Some(1));
@@ -2596,10 +3025,10 @@ mod tests {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let id = "legacy-prepare-no-db";
-        let dir = stale_session_dir_without_db(id);
+        let id = numbered_session_id(100);
+        let dir = stale_session_dir_without_db(&id);
 
-        assert!(prepare_session_dir_for_read(id).is_none());
+        assert!(prepare_session_dir_for_read(&id).is_none());
         assert!(!dir.join("session.db").exists());
     }
 
@@ -2608,10 +3037,10 @@ mod tests {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let id = "legacy-meta-no-db";
-        let dir = stale_session_dir_without_db(id);
+        let id = numbered_session_id(101);
+        let dir = stale_session_dir_without_db(&id);
 
-        assert!(load_meta(id).is_none());
+        assert!(load_meta(&id).is_none());
         assert!(!dir.join("session.db").exists());
     }
 
@@ -2620,8 +3049,8 @@ mod tests {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let id = "legacy-list-no-db";
-        let dir = stale_session_dir_without_db(id);
+        let id = numbered_session_id(102);
+        let dir = stale_session_dir_without_db(&id);
 
         assert!(list_sessions().is_empty());
         assert!(!dir.join("session.db").exists());
@@ -2632,31 +3061,33 @@ mod tests {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let id = "legacy-search-no-db";
-        let dir = stale_session_dir_without_db(id);
+        let id = numbered_session_id(103);
+        let dir = stale_session_dir_without_db(&id);
 
-        assert!(load_search_blob(id).is_none());
+        assert!(load_search_blob(&id).is_none());
         assert!(!dir.join("session.db").exists());
     }
 
     #[test]
-    fn load_search_blob_uses_content_sidecar_without_database() {
+    fn load_search_blob_does_not_trust_sidecar_without_database() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
-        let id = "legacy-search-sidecar";
-        let dir = stale_session_dir_without_db(id);
+        let id = numbered_session_id(104);
+        let dir = stale_session_dir_without_db(&id);
         fs::write(dir.join("content.txt"), "cached search text").expect("write search sidecar");
 
-        assert_eq!(load_search_blob(id).as_deref(), Some("cached search text"));
+        assert!(load_search_blob(&id).is_none());
         assert!(!dir.join("session.db").exists());
     }
 
     #[test]
     fn db_session_loads_without_history_jsonl() {
-        let dir = tempfile::tempdir().expect("temp dir");
+        let root = tempfile::tempdir().expect("temp dir");
+        let dir = root.path().join(TEST_SESSION_ID);
+        fs::create_dir(&dir).expect("create session dir");
         let mut s = fixture_session();
-        s.id = "db-session".into();
+        s.id = TEST_SESSION_ID.into();
         s.title = Some("DB".into());
         s.first_user_message = Some("hello sqlite".into());
         s.reasoning_effort = Some(ReasoningEffort::High);
@@ -2664,12 +3095,12 @@ mod tests {
         s.session_cost_usd = 1.5;
         s.history.push(user_item("hello sqlite"));
         s.record_context_tokens(42, test_context_identity());
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
 
-        let loaded = load_session_files(dir.path()).expect("load db session");
-        assert_eq!(loaded.id, "db-session");
+        let loaded = load_session_files(&dir).expect("load db session");
+        assert_eq!(loaded.id, TEST_SESSION_ID);
         assert_eq!(loaded.title.as_deref(), Some("DB"));
         assert_eq!(loaded.first_user_message.as_deref(), Some("hello sqlite"));
         assert_eq!(loaded.reasoning_effort, Some(ReasoningEffort::High));
@@ -2678,7 +3109,7 @@ mod tests {
         assert_eq!(loaded.display_context_tokens, Some(42));
         assert_eq!(loaded.session_cost_usd, 1.5);
         assert_eq!(loaded.history.len(), 1);
-        assert!(!dir.path().join("history.jsonl").exists());
+        assert!(!dir.join("history.jsonl").exists());
     }
 
     #[test]

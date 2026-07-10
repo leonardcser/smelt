@@ -112,13 +112,20 @@ impl TuiSessionDocument {
         live_session: LiveSession,
         writable: bool,
         history_len: usize,
+        persisted_descriptor_len: Option<usize>,
     ) {
         let revision = live_session.header.revision;
         self.live_session = Some(live_session);
         self.transcript.replace_loaded_transcript(transcript);
-        let descriptor_len = durable_descriptor_len_for_transcript(&self.transcript);
+        let descriptor_len = persisted_descriptor_len
+            .unwrap_or_else(|| durable_descriptor_len_for_transcript(&self.transcript));
         self.persist
             .install_loaded_store_session(writable, history_len, descriptor_len, revision);
+        if persisted_descriptor_len.is_some() {
+            // The read-only compatibility fallback built a complete in-memory
+            // transcript. Defer descriptor repair until the next owned save.
+            self.persist.descriptors_persisted = false;
+        }
     }
 
     #[cfg(test)]
@@ -398,6 +405,7 @@ pub(crate) struct StoreBackedSessionDocument {
     pub(crate) session: Session,
     pub(crate) transcript: crate::app::transcript::LoadedTranscript,
     pub(crate) live_session: smelt_core::session_runtime::LiveSession,
+    pub(crate) persisted_descriptor_len: Option<usize>,
 }
 
 struct SessionDescriptorSavePlan {
@@ -811,7 +819,13 @@ impl StoreBackedSessionDocument {
             session,
             transcript,
             live_session,
+            persisted_descriptor_len: None,
         }
+    }
+
+    pub(crate) fn with_persisted_descriptor_len(mut self, descriptor_len: usize) -> Self {
+        self.persisted_descriptor_len = Some(descriptor_len);
+        self
     }
 }
 

@@ -320,7 +320,7 @@ fn write(
         .map_or(0, |descriptors| descriptors.records.len() as u64);
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
 
-    std::fs::create_dir_all(&req.session_dir)
+    smelt_core::session::create_private_dir_all(&req.session_dir)
         .map_err(|err| persist_write_error(format!("create session directory: {err}")))?;
     let blob_dir = req.session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs).map_err(persist_write_error)?;
@@ -358,7 +358,7 @@ fn write_request_audit(
     db_cache: &mut PersistDbCache,
 ) -> Result<i64, String> {
     let _perf = smelt_perf::perf::begin("persist:request_audit");
-    std::fs::create_dir_all(&req.session_dir)
+    smelt_core::session::create_private_dir_all(&req.session_dir)
         .map_err(|err| format!("create session directory: {err}"))?;
     let db_path = req.session_dir.join("session.db");
     let db = db_cache
@@ -377,13 +377,12 @@ fn write_blobs(
     if blobs.is_empty() {
         return Ok(url_to_blob);
     }
-    std::fs::create_dir_all(blob_dir).map_err(|err| format!("create blob directory: {err}"))?;
+    smelt_core::session::create_private_dir_all(blob_dir)
+        .map_err(|err| format!("create blob directory: {err}"))?;
     for b in blobs {
         let path: PathBuf = blob_dir.join(&b.filename);
-        if !path.exists() {
-            std::fs::write(&path, b.data_url.as_bytes())
-                .map_err(|err| format!("write blob {}: {err}", b.filename))?;
-        }
+        smelt_core::session::write_private_file(&path, b.data_url.as_bytes())
+            .map_err(|err| format!("write blob {}: {err}", b.filename))?;
         url_to_blob.insert(b.data_url.clone(), format!("blob:{}", b.filename));
     }
     Ok(url_to_blob)

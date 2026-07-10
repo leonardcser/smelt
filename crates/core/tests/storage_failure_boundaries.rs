@@ -22,11 +22,39 @@ fn storage_owner_probe() {
 }
 
 #[test]
-fn repair_needed_resume_currently_mutates_while_another_process_owns_session() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = dir.path().join("session.db");
+fn delete_refuses_session_owned_by_another_process() {
+    let state = tempfile::tempdir().expect("state dir");
+    std::env::set_var("XDG_STATE_HOME", state.path());
+    let id = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let session_dir = smelt_core::session::dir_for_id(id);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let db_path = session_dir.join("session.db");
+    drop(smelt_store::SessionDb::open(&db_path).expect("create database"));
+    let ready = state.path().join("delete-owner.ready");
+    let release = state.path().join("delete-owner.release");
+    let mut owner = spawn_owner(&db_path, &ready, &release);
+    wait_for(&ready);
+
+    let err = smelt_core::session::delete(id).expect_err("active owner prevents deletion");
+
+    assert!(matches!(
+        err,
+        smelt_core::session::SessionStoreError::ReadOnlyOwnerConflict { .. }
+    ));
+    assert!(session_dir.exists());
+    touch(&release);
+    assert!(owner.wait().unwrap().success());
+}
+
+#[test]
+fn repair_needed_read_does_not_mutate_while_another_process_owns_session() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let session_dir = root.path().join(id);
+    std::fs::create_dir(&session_dir).expect("create session dir");
+    let db_path = session_dir.join("session.db");
     let mut session = smelt_core::session::Session::new(1, PathBuf::from("/tmp"));
-    session.id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
+    session.id = id.into();
     session.history = vec![
         protocol::HistoryItem::user(protocol::Content::text("old prompt")),
         protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
@@ -54,13 +82,13 @@ fn repair_needed_resume_currently_mutates_while_another_process_owns_session() {
         .expect("corrupt checkpoint boundary");
     drop(db);
 
-    let ready = dir.path().join("owner.ready");
-    let release = dir.path().join("owner.release");
+    let ready = root.path().join("owner.ready");
+    let release = root.path().join("owner.release");
     let mut owner = spawn_owner(&db_path, &ready, &release);
     wait_for(&ready);
 
-    let (header, _) = smelt_core::session::load_store_header_for_dir(dir.path().to_path_buf())
-        .expect("resume header loads");
+    let (header, _) =
+        smelt_core::session::load_store_header_for_dir(session_dir).expect("resume header loads");
     assert_eq!(
         header
             .meta
@@ -69,14 +97,14 @@ fn repair_needed_resume_currently_mutates_while_another_process_owns_session() {
             .map(|checkpoint| checkpoint.first_live_index),
         Some(0)
     );
-    let repaired = smelt_store::SessionDb::open_read_only(&db_path)
-        .expect("open repaired database")
+    let persisted = smelt_store::SessionDb::open_read_only(&db_path)
+        .expect("open database after read")
         .session_state()
-        .expect("read repaired state")
+        .expect("read persisted state")
         .expect("session state")
         .checkpoint_json
         .expect("checkpoint");
-    assert_eq!(repaired["first_live_index"].as_u64(), Some(0));
+    assert_eq!(persisted["first_live_index"].as_u64(), Some(177));
 
     touch(&release);
     let status = owner.wait().expect("wait for owner process");

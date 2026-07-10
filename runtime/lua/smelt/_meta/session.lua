@@ -75,7 +75,7 @@ session.id = nil
 ---@type fun(): table
 session.info = nil
 
---- List persisted SQLite sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.
+--- List persisted SQLite sessions other than the current one. Available rows carry `id`, `available = true`, metadata fields, and `size_bytes` when known. Unavailable rows carry `id`, `available = false`, `error_kind`, and `error`.
 ---@type fun(): table
 session.list = nil
 
@@ -119,7 +119,7 @@ session.switch_cwd = nil
 ---@type fun(): string
 session.system = nil
 
---- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text, refreshing the `content.txt` sidecar when needed.
+--- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
 ---@type fun(id: string): string?
 session.text = nil
 

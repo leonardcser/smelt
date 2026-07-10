@@ -229,7 +229,10 @@ fn inspect_url(base_url: &str, session: Option<&str>) -> Result<String, String> 
         return Ok(base_url.to_string());
     };
     if !tui::inspect_server::is_safe_session_ref(session) {
-        return Err("session must contain only ASCII letters, digits, '-' or '_'".to_string());
+        return Err(
+            "session must be a lowercase hexadecimal ID or prefix of at least 4 characters"
+                .to_string(),
+        );
     }
     Ok(format!("{base_url}?session={session}"))
 }
@@ -399,8 +402,22 @@ where
     F: FnOnce(&str, &mut dyn std::io::Write) -> Result<(), String>,
 {
     if let Some(path) = args.output {
-        let mut file = std::fs::File::create(&path)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(&path)
             .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| format!("failed to secure {}: {err}", path.display()))?;
+        }
         export(&args.session, &mut file)
     } else {
         let stdout = std::io::stdout();

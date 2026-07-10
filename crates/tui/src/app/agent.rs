@@ -1247,11 +1247,10 @@ mod tests {
         }
     }
 
-    fn large_saved_session_app(id: &str, history_len: usize) -> crate::app::test_harness::TestApp {
+    fn large_saved_session_app(history_len: usize) -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session =
             smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        session.id = id.to_string();
         session.first_user_message = Some("old user 0".into());
         session.history = (0..history_len)
             .map(|idx| {
@@ -1353,7 +1352,7 @@ mod tests {
     #[test]
     fn request_start_dispatches_store_history_without_full_reads() {
         const BASE_HISTORY_LEN: usize = 128;
-        let mut app = large_saved_session_app("request-store-history", BASE_HISTORY_LEN);
+        let mut app = large_saved_session_app(BASE_HISTORY_LEN);
         let old_history_len = app.app.core.session.history.len();
         assert!(old_history_len >= BASE_HISTORY_LEN);
 
