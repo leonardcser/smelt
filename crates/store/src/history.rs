@@ -10,6 +10,7 @@ use crate::object::{self, checked_i64, sha256_hex};
 use rusqlite::types::Value as SqlValue;
 
 pub(crate) const METADATA_OBJECT_MIN_BYTES: usize = 4 * 1024;
+pub(crate) const LARGE_REWIND_GC_MIN_ROWS: usize = 128;
 pub(crate) const OBJECT_REF_KEY: &str = "$smelt_object_ref";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,10 +228,15 @@ pub(crate) fn repair_mismatched_transcript_descriptor_history_links(
     let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     let mut block_indices = Vec::new();
     for (block_idx, kind, history_json) in rows {
-        let matches_history = history_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<HistoryItem>(json).ok())
-            .is_some_and(|item| descriptor_kind_matches_history_item(&kind, &item));
+        let matches_history = if let Some(history_json) = history_json {
+            let mut value: Value = serde_json::from_str(&history_json)?;
+            rehydrate_object_refs(conn, &mut value)?;
+            serde_json::from_value::<HistoryItem>(value)
+                .ok()
+                .is_some_and(|item| descriptor_kind_matches_history_item(&kind, &item))
+        } else {
+            false
+        };
         if !matches_history {
             block_indices.push(block_idx);
         }
@@ -284,6 +290,9 @@ pub(crate) fn replace_history_suffix(
     for (block_idx, (offset, item)) in (first_block_idx..).zip(items.iter().enumerate()) {
         write_history_item_at_block(conn, start_idx + offset, block_idx, item, compression)?;
     }
+    if history_deleted.saturating_sub(items.len()) >= LARGE_REWIND_GC_MIN_ROWS {
+        object::delete_unreachable_objects(conn)?;
+    }
     perf::record_value("store:history:db_rows_deleted", history_deleted as u64);
     perf::record_value(
         "store:history:transcript_rows_detached",
@@ -295,16 +304,21 @@ pub(crate) fn replace_history_suffix(
 
 pub(crate) fn read_history_items(conn: &Connection) -> Result<Vec<HistoryItem>> {
     let _perf = perf::begin("store:history:read_all");
-    let mut stmt = conn.prepare("SELECT json FROM history_items ORDER BY idx")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn.prepare("SELECT idx, kind, json, hash FROM history_items ORDER BY idx")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
     let mut out = Vec::new();
     let mut json_bytes = 0u64;
     for row in rows {
-        let json = row?;
+        let (idx, kind, json, hash) = row?;
         json_bytes = json_bytes.saturating_add(json.len() as u64);
-        let mut value: Value = serde_json::from_str(&json)?;
-        rehydrate_object_refs(conn, &mut value)?;
-        out.push(serde_json::from_value(value)?);
+        out.push(decode_history_row(conn, idx, &kind, &json, &hash)?);
     }
     perf::record_value("store:history:rows_read", out.len() as u64);
     perf::record_value("store:history:read_all_rows", out.len() as u64);
@@ -325,22 +339,210 @@ pub(crate) fn read_history_items_range(
     }
     let start = checked_i64(range.start as u64, "start_idx")?;
     let end = checked_i64(range.end as u64, "end_idx")?;
-    let mut stmt =
-        conn.prepare("SELECT json FROM history_items WHERE idx >= ?1 AND idx < ?2 ORDER BY idx")?;
-    let rows = stmt.query_map(params![start, end], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn.prepare(
+        "SELECT idx, kind, json, hash
+         FROM history_items
+         WHERE idx >= ?1 AND idx < ?2
+         ORDER BY idx",
+    )?;
+    let rows = stmt.query_map(params![start, end], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
     let mut out = Vec::new();
     let mut json_bytes = 0u64;
     for row in rows {
-        let json = row?;
+        let (idx, kind, json, hash) = row?;
         json_bytes = json_bytes.saturating_add(json.len() as u64);
-        let mut value: Value = serde_json::from_str(&json)?;
-        rehydrate_object_refs(conn, &mut value)?;
-        out.push(serde_json::from_value(value)?);
+        out.push(decode_history_row(conn, idx, &kind, &json, &hash)?);
     }
     perf::record_value("store:history:rows_read", out.len() as u64);
     perf::record_value("store:history:read_range_rows", out.len() as u64);
     perf::record_value("store:history:json_bytes_read", json_bytes);
     Ok(out)
+}
+
+fn decode_history_row(
+    conn: &Connection,
+    idx: i64,
+    stored_kind: &str,
+    json: &str,
+    stored_hash: &str,
+) -> Result<HistoryItem> {
+    let actual_hash = sha256_hex(json.as_bytes());
+    if actual_hash != stored_hash {
+        return Err(StoreError::Integrity(format!(
+            "history row {idx} hash mismatch: stored {stored_hash}, actual {actual_hash}"
+        )));
+    }
+    let mut value: Value = serde_json::from_str(json)?;
+    let actual_kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if actual_kind != stored_kind {
+        return Err(StoreError::Integrity(format!(
+            "history row {idx} kind mismatch: stored {stored_kind:?}, decoded {actual_kind:?}"
+        )));
+    }
+    rehydrate_object_refs(conn, &mut value)?;
+    serde_json::from_value(value).map_err(Into::into)
+}
+
+pub(crate) fn legacy_attachment_references(
+    conn: &Connection,
+    history_end: usize,
+) -> Result<Vec<String>> {
+    let history_end = checked_i64(history_end as u64, "history_end")?;
+    let mut stmt = conn.prepare("SELECT json FROM history_items WHERE idx < ?1 ORDER BY idx")?;
+    let rows = stmt.query_map([history_end], |row| row.get::<_, String>(0))?;
+    let mut references = std::collections::BTreeSet::new();
+    for row in rows {
+        let value: Value = serde_json::from_str(&row?)?;
+        collect_legacy_attachment_references(&value, &mut references);
+    }
+    Ok(references.into_iter().collect())
+}
+
+fn collect_legacy_attachment_references(
+    value: &Value,
+    references: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image_url") {
+                if let Some(reference) = map
+                    .get("image_url")
+                    .and_then(Value::as_object)
+                    .and_then(|image| image.get("url"))
+                    .and_then(Value::as_str)
+                    .filter(|reference| reference.starts_with("blob:"))
+                {
+                    references.insert(reference.to_string());
+                }
+            }
+            for child in map.values() {
+                collect_legacy_attachment_references(child, references);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_legacy_attachment_references(child, references);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn import_legacy_attachments(
+    conn: &Connection,
+    attachments: &std::collections::BTreeMap<String, String>,
+    compression: ObjectCompression,
+) -> Result<usize> {
+    if attachments.is_empty() {
+        return Ok(0);
+    }
+    let mut stmt = conn.prepare("SELECT idx, json FROM history_items ORDER BY idx")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut imported = 0usize;
+    for (idx, json) in rows {
+        let mut value: Value = serde_json::from_str(&json)?;
+        let mut refs = Vec::new();
+        let changed =
+            import_legacy_attachment_values(conn, &mut value, attachments, compression, &mut refs)?;
+        if !changed {
+            continue;
+        }
+        let json = serde_json::to_string(&value)?;
+        let hash = sha256_hex(json.as_bytes());
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let search_text = collect_text(&value, 64 * 1024);
+        conn.execute(
+            "UPDATE history_items SET kind = ?1, json = ?2, hash = ?3, search_text = ?4
+             WHERE idx = ?5",
+            params![kind, json, hash, search_text, idx],
+        )?;
+        for (hash, role) in refs {
+            conn.execute(
+                "INSERT OR IGNORE INTO history_object_refs (history_idx, object_hash, role)
+                 VALUES (?1, ?2, ?3)",
+                params![idx, hash, role],
+            )?;
+        }
+        conn.execute(
+            "UPDATE transcript_blocks
+             SET content_hash = ?1, estimated_text_bytes = ?2, preview_text = ?3
+             WHERE history_idx = ?4",
+            params![
+                hash,
+                checked_i64(search_text.len() as u64, "estimated_text_bytes")?,
+                preview(&search_text, 512),
+                idx
+            ],
+        )?;
+        conn.execute(
+            "UPDATE transcript_search SET indexed_text = ?1 WHERE history_idx = ?2",
+            params![search_text, idx],
+        )?;
+        imported = imported.saturating_add(1);
+    }
+    Ok(imported)
+}
+
+fn import_legacy_attachment_values(
+    conn: &Connection,
+    value: &mut Value,
+    attachments: &std::collections::BTreeMap<String, String>,
+    compression: ObjectCompression,
+    refs: &mut Vec<(String, &'static str)>,
+) -> Result<bool> {
+    let mut changed = false;
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image_url") {
+                let url = map
+                    .get_mut("image_url")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|image| image.get_mut("url"));
+                if let Some(url @ Value::String(_)) = url {
+                    let reference = url.as_str().expect("matched legacy image URL string");
+                    if let Some(data_url) = attachments.get(reference) {
+                        let object = object::put_object(
+                            conn,
+                            "attachment_image",
+                            data_url.as_bytes(),
+                            compression,
+                        )?;
+                        refs.push((object.hash().to_string(), "attachment_image"));
+                        *url = object_ref_json(object.hash(), data_url.len() as u64);
+                        changed = true;
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                changed |=
+                    import_legacy_attachment_values(conn, child, attachments, compression, refs)?;
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                changed |=
+                    import_legacy_attachment_values(conn, child, attachments, compression, refs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(changed)
 }
 
 pub(crate) fn history_item_count(conn: &Connection) -> Result<usize> {
@@ -1307,6 +1509,7 @@ fn normalized_history_value(
 ) -> Result<NormalizedHistoryItem> {
     let mut value = serde_json::to_value(item)?;
     let mut refs = Vec::new();
+    normalize_attachments(conn, &mut value, compression, &mut refs)?;
     normalize_metadata(conn, &mut value, compression, &mut refs)?;
     let json = serde_json::to_string(&value)?;
     let hash = sha256_hex(json.as_bytes());
@@ -1355,6 +1558,50 @@ fn insert_normalized_history_item(
         &item.search_text,
         &item.hash,
     )
+}
+
+fn normalize_attachments(
+    conn: Option<&Connection>,
+    value: &mut Value,
+    compression: ObjectCompression,
+    refs: &mut Vec<(String, &'static str)>,
+) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image_url") {
+                let url = map
+                    .get_mut("image_url")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|image| image.get_mut("url"));
+                if let Some(url @ Value::String(_)) = url {
+                    let data_url = url.as_str().expect("matched image URL string");
+                    if data_url.starts_with("data:image/") {
+                        let bytes = data_url.as_bytes();
+                        let hash = if let Some(conn) = conn {
+                            let object =
+                                object::put_object(conn, "attachment_image", bytes, compression)?;
+                            refs.push((object.hash().to_string(), "attachment_image"));
+                            object.hash().to_string()
+                        } else {
+                            sha256_hex(bytes)
+                        };
+                        *url = object_ref_json(&hash, bytes.len() as u64);
+                        return Ok(());
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                normalize_attachments(conn, child, compression, refs)?;
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                normalize_attachments(conn, child, compression, refs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn normalize_metadata(
@@ -1516,14 +1763,37 @@ fn find_string_key(value: &Value, key: &str) -> Option<String> {
 pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Result<()> {
     match value {
         Value::Object(map) => {
-            if let Some(hash) = map
-                .get(OBJECT_REF_KEY)
-                .and_then(|value| value.get("hash"))
-                .and_then(Value::as_str)
-            {
-                if let Some(bytes) = object::object_bytes_by_hash(conn, hash)? {
-                    *value = serde_json::from_slice(&bytes)?;
+            if let Some(reference) = map.get(OBJECT_REF_KEY) {
+                let hash = reference
+                    .get("hash")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| StoreError::Integrity("object reference has no hash".into()))?;
+                let declared_size = reference
+                    .get("raw_size")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        StoreError::Integrity("object reference has invalid raw_size".into())
+                    })?;
+                if declared_size > object::MAX_OBJECT_RAW_SIZE {
+                    return Err(StoreError::ObjectTooLarge {
+                        size: declared_size,
+                        max: object::MAX_OBJECT_RAW_SIZE,
+                    });
                 }
+                let bytes = object::object_bytes_by_hash(conn, hash)?.ok_or_else(|| {
+                    StoreError::MissingObject {
+                        reference: hash.to_string(),
+                    }
+                })?;
+                if bytes.len() as u64 != declared_size {
+                    return Err(StoreError::Integrity(format!(
+                        "object reference {hash} declares {declared_size} bytes but contains {}",
+                        bytes.len()
+                    )));
+                }
+                *value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                });
                 return Ok(());
             }
             for child in map.values_mut() {
@@ -1543,6 +1813,51 @@ pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_reads_verify_hash_kind_and_required_objects() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let item = HistoryItem::user(protocol::Content::with_images(
+            "attached".into(),
+            vec![("attachment.png".into(), "data:image/png;base64,AAAA".into())],
+        ));
+        replace_history_suffix(
+            &conn,
+            0,
+            std::slice::from_ref(&item),
+            ObjectCompression::none(),
+        )
+        .unwrap();
+
+        conn.execute("UPDATE history_items SET hash = 'bad' WHERE idx = 0", [])
+            .unwrap();
+        assert!(matches!(
+            read_history_items_range(&conn, 0..1),
+            Err(StoreError::Integrity(message)) if message.contains("hash mismatch")
+        ));
+        let normalized = normalized_history_value(&item, ObjectCompression::none(), None).unwrap();
+        conn.execute(
+            "UPDATE history_items SET hash = ?1, kind = 'wrong' WHERE idx = 0",
+            [normalized.hash],
+        )
+        .unwrap();
+        assert!(matches!(
+            read_history_items_range(&conn, 0..1),
+            Err(StoreError::Integrity(message)) if message.contains("kind mismatch")
+        ));
+        conn.execute(
+            "UPDATE history_items SET kind = ?1 WHERE idx = 0",
+            [normalized.kind],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF; DELETE FROM objects;")
+            .unwrap();
+        assert!(matches!(
+            read_history_items_range(&conn, 0..1),
+            Err(StoreError::MissingObject { .. })
+        ));
+    }
 
     #[test]
     fn transcript_search_candidate_plan_uses_fts_index() {

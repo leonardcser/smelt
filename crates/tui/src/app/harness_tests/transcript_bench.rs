@@ -1267,7 +1267,7 @@ fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: 
         ));
         turn += 1;
     }
-    smelt_core::session::save(&session, &smelt_core::attachment::AttachmentStore::new());
+    smelt_core::session::save(&session);
     remove_resume_meta(&id);
 }
 
@@ -1739,7 +1739,6 @@ fn assert_no_full_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operatio
         "store:transcript:descriptors_full_loaded",
         "transcript:build_from_session:history_items",
         "transcript:render_plan:fingerprint",
-        "persist:write:blobs",
     ] {
         let value = perf_value_max(snapshot, metric);
         assert_eq!(

@@ -335,6 +335,7 @@ impl TuiApp {
                 return;
             }
         };
+        let degraded_warnings = header.degraded_warnings.clone();
         let (transcript, persisted_descriptor_len) =
             match crate::app::history::load_transcript_tail_from_sqlite_dir(
                 store_ref.session_dir.clone(),
@@ -372,6 +373,12 @@ impl TuiApp {
             document = document.with_persisted_descriptor_len(descriptor_len);
         }
         self.load_store_backed_session(document);
+        if !degraded_warnings.is_empty() {
+            self.notify_error_sticky(format!(
+                "session loaded with unavailable attachments: {}",
+                degraded_warnings.join("; ")
+            ));
+        }
         self.finish_transcript_turn();
         self.transcript_win_mut().follow_tail();
     }

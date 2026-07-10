@@ -5,6 +5,8 @@ use smelt_perf::perf;
 use crate::compression::{accepts_compressed_size, ObjectCompression};
 use crate::error::{Result, StoreError};
 
+pub const MAX_OBJECT_RAW_SIZE: u64 = 64 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectCodec {
     None,
@@ -74,6 +76,7 @@ pub(crate) fn put_object(
     compression: ObjectCompression,
 ) -> Result<StoredObject> {
     let _perf = perf::begin("store:object:put");
+    enforce_object_size(bytes.len() as u64)?;
     let hash = sha256_hex(bytes);
     if let Some(meta) = object_meta(conn, &hash)? {
         return Ok(StoredObject {
@@ -110,48 +113,18 @@ pub(crate) fn put_object(
 }
 
 pub(crate) fn object(conn: &Connection, hash: &str) -> Result<Option<StoredObject>> {
-    let Some((meta, stored_bytes)) = object_row(conn, hash)? else {
+    let Some(meta) = object_meta(conn, hash)? else {
         return Ok(None);
     };
-    let bytes = decode_and_verify_object(&meta, &stored_bytes)?;
+    let bytes = object_bytes(conn, &meta)?;
     Ok(Some(StoredObject { meta, bytes }))
 }
 
 pub(crate) fn object_bytes_by_hash(conn: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {
-    let Some((meta, stored_bytes)) = object_row(conn, hash)? else {
+    let Some(meta) = object_meta(conn, hash)? else {
         return Ok(None);
     };
-    decode_and_verify_object(&meta, &stored_bytes).map(Some)
-}
-
-fn object_row(conn: &Connection, hash: &str) -> Result<Option<(ObjectMeta, Vec<u8>)>> {
-    conn.query_row(
-        "SELECT hash, kind, codec, raw_size, stored_size, bytes
-         FROM objects
-         WHERE hash = ?1",
-        [hash],
-        |row| {
-            let codec: String = row.get(2)?;
-            let raw_size: i64 = row.get(3)?;
-            let stored_size: i64 = row.get(4)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                codec,
-                raw_size,
-                stored_size,
-                row.get::<_, Vec<u8>>(5)?,
-            ))
-        },
-    )
-    .optional()?
-    .map(|(hash, kind, codec, raw_size, stored_size, bytes)| {
-        Ok((
-            object_meta_from_parts(hash, kind, codec, raw_size, stored_size)?,
-            bytes,
-        ))
-    })
-    .transpose()
+    object_bytes(conn, &meta).map(Some)
 }
 
 fn object_meta_from_parts(
@@ -172,7 +145,7 @@ fn object_meta_from_parts(
 
 pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<ObjectMeta>> {
     conn.query_row(
-        "SELECT hash, kind, codec, raw_size, stored_size
+        "SELECT hash, kind, codec, raw_size, stored_size, length(bytes)
          FROM objects
          WHERE hash = ?1",
         [hash],
@@ -186,13 +159,27 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
                 codec,
                 raw_size,
                 stored_size,
+                row.get::<_, i64>(5)?,
             ))
         },
     )
     .optional()?
-    .map(|(hash, kind, codec, raw_size, stored_size)| {
-        object_meta_from_parts(hash, kind, codec, raw_size, stored_size)
-    })
+    .map(
+        |(hash, kind, codec, raw_size, stored_size, actual_stored_size)| {
+            let meta = object_meta_from_parts(hash, kind, codec, raw_size, stored_size)?;
+            enforce_object_size(meta.raw_size)?;
+            enforce_object_size(meta.stored_size)?;
+            let actual_stored_size = nonnegative_u64(actual_stored_size, "length(bytes)")?;
+            enforce_object_size(actual_stored_size)?;
+            if actual_stored_size != meta.stored_size {
+                return Err(StoreError::Integrity(format!(
+                    "object {} stored_size is {}, but payload length is {actual_stored_size}",
+                    meta.hash, meta.stored_size
+                )));
+            }
+            Ok(meta)
+        },
+    )
     .transpose()
 }
 
@@ -207,6 +194,15 @@ pub(crate) fn object_bytes(conn: &Connection, meta: &ObjectMeta) -> Result<Vec<u
 
 fn decode_and_verify_object(meta: &ObjectMeta, stored_bytes: &[u8]) -> Result<Vec<u8>> {
     let _perf = perf::begin("store:object:hydrate_bytes");
+    enforce_object_size(meta.raw_size)?;
+    enforce_object_size(meta.stored_size)?;
+    enforce_object_size(stored_bytes.len() as u64)?;
+    if stored_bytes.len() as u64 != meta.stored_size {
+        return Err(StoreError::Integrity(format!(
+            "object {} stored payload changed size during hydration",
+            meta.hash
+        )));
+    }
     let bytes = decode_object(meta.codec, stored_bytes, meta.raw_size)?;
     let decoded_hash = sha256_hex(&bytes);
     if decoded_hash != meta.hash {
@@ -219,6 +215,27 @@ fn decode_and_verify_object(meta: &ObjectMeta, stored_bytes: &[u8]) -> Result<Ve
     perf::record_value("store:object:bytes_hydrated", bytes.len() as u64);
     perf::record_value("store:object:bytes_read", stored_bytes.len() as u64);
     Ok(bytes)
+}
+
+pub(crate) fn delete_unreachable_objects(conn: &Connection) -> Result<usize> {
+    let deleted = conn.execute(
+        "DELETE FROM objects
+         WHERE NOT EXISTS (
+             SELECT 1 FROM history_object_refs WHERE object_hash = objects.hash
+         )
+           AND NOT EXISTS (
+             SELECT 1 FROM request_object_refs WHERE object_hash = objects.hash
+         )
+           AND NOT EXISTS (
+             SELECT 1 FROM request_attempts
+             WHERE body_hash = objects.hash
+                OR response_hash = objects.hash
+                OR error_hash = objects.hash
+         )",
+        [],
+    )?;
+    perf::record_value("store:object:gc_rows_deleted", deleted as u64);
+    Ok(deleted)
 }
 
 pub(crate) fn checked_i64(value: u64, field: &str) -> Result<i64> {
@@ -252,16 +269,81 @@ fn encode_object(bytes: &[u8], compression: ObjectCompression) -> Result<(Object
 }
 
 fn decode_object(codec: ObjectCodec, bytes: &[u8], raw_size: u64) -> Result<Vec<u8>> {
-    match codec {
-        ObjectCodec::None => Ok(bytes.to_vec()),
-        ObjectCodec::Zstd => {
-            let size = usize::try_from(raw_size)
-                .map_err(|_| StoreError::Integrity("raw_size overflows usize".into()))?;
-            Ok(zstd::bulk::decompress(bytes, size)?)
+    enforce_object_size(raw_size)?;
+    let expected_size = usize::try_from(raw_size)
+        .map_err(|_| StoreError::Integrity("raw_size overflows usize".into()))?;
+    let decoded = match codec {
+        ObjectCodec::None => {
+            if bytes.len() != expected_size {
+                return Err(StoreError::Integrity(format!(
+                    "uncompressed object size {} does not match raw_size {raw_size}",
+                    bytes.len()
+                )));
+            }
+            bytes.to_vec()
         }
+        ObjectCodec::Zstd => zstd::bulk::decompress(bytes, expected_size)?,
+    };
+    if decoded.len() != expected_size {
+        return Err(StoreError::Integrity(format!(
+            "decoded object size {} does not match raw_size {raw_size}",
+            decoded.len()
+        )));
     }
+    Ok(decoded)
+}
+
+fn enforce_object_size(size: u64) -> Result<()> {
+    if size > MAX_OBJECT_RAW_SIZE {
+        return Err(StoreError::ObjectTooLarge {
+            size,
+            max: MAX_OBJECT_RAW_SIZE,
+        });
+    }
+    Ok(())
 }
 
 fn nonnegative_u64(value: i64, field: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| StoreError::Integrity(format!("{field} is negative")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_object_metadata_is_rejected_before_payload_hydration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        conn.execute(
+            "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
+             VALUES (?1, 'attachment_image', 'none', ?2, 1, x'00')",
+            ("a".repeat(64), (MAX_OBJECT_RAW_SIZE + 1) as i64),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            object_meta(&conn, &"a".repeat(64)),
+            Err(StoreError::ObjectTooLarge { size, max })
+                if size == MAX_OBJECT_RAW_SIZE + 1 && max == MAX_OBJECT_RAW_SIZE
+        ));
+    }
+
+    #[test]
+    fn inconsistent_uncompressed_object_size_is_rejected() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let hash = sha256_hex(b"payload");
+        conn.execute(
+            "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
+             VALUES (?1, 'test', 'none', 99, 7, ?2)",
+            (&hash, b"payload".as_slice()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            object(&conn, &hash),
+            Err(StoreError::Integrity(_))
+        ));
+    }
 }

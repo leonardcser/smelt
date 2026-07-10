@@ -42,7 +42,6 @@ pub struct SessionSaveState {
     pub descriptor_dirty_from: Option<usize>,
     pub history_len: usize,
     pub durable_history_len: usize,
-    pub blobs_pending: bool,
     pub supports_metadata_only: bool,
 }
 
@@ -627,7 +626,6 @@ impl SessionPersistState {
         generation: DocumentGeneration,
         descriptor_dirty_from: Option<usize>,
         history_len: usize,
-        blobs_pending: bool,
         supports_metadata_only: bool,
     ) -> SessionSaveState {
         SessionSaveState {
@@ -639,7 +637,6 @@ impl SessionPersistState {
             descriptor_dirty_from,
             history_len,
             durable_history_len: self.durable.store_history_len,
-            blobs_pending,
             supports_metadata_only,
         }
     }
@@ -774,7 +771,6 @@ pub fn plan_session_save(state: SessionSaveState) -> SessionSavePlan {
         && !state.session_dirty
         && !state.store_ready
         && state.descriptor_dirty_from.is_none()
-        && !state.blobs_pending
     {
         return SessionSavePlan::Skip(SessionSaveSkipReason::EmptyUnstored);
     }
@@ -783,7 +779,6 @@ pub fn plan_session_save(state: SessionSaveState) -> SessionSavePlan {
         && state.dirty_history_from.is_none()
         && state.descriptors_persisted
         && state.descriptor_dirty_from.is_none()
-        && !state.blobs_pending
     {
         return SessionSavePlan::Skip(SessionSaveSkipReason::Unchanged);
     }
@@ -794,7 +789,6 @@ pub fn plan_session_save(state: SessionSaveState) -> SessionSavePlan {
         && state.session_dirty
         && no_history_work
         && no_descriptor_work
-        && !state.blobs_pending
         && state.durable_history_len == state.history_len
     {
         return SessionSavePlan::MetadataOnly {
@@ -806,7 +800,6 @@ pub fn plan_session_save(state: SessionSaveState) -> SessionSavePlan {
         && state.session_dirty
         && no_history_work
         && no_descriptor_work
-        && !state.blobs_pending
     {
         Some(0)
     } else {
@@ -821,7 +814,6 @@ pub fn plan_session_save(state: SessionSaveState) -> SessionSavePlan {
         bounded_history_save_start(dirty_history_from, state.history_len, durable_history_len);
     if state.descriptors_persisted
         && state.descriptor_dirty_from.is_none()
-        && !state.blobs_pending
         && dirty_history_from.is_none()
         && !state.session_dirty
     {
@@ -892,7 +884,6 @@ mod tests {
             descriptor_dirty_from: None,
             history_len: 3,
             durable_history_len: 3,
-            blobs_pending: false,
             supports_metadata_only: true,
         });
 
@@ -1023,7 +1014,6 @@ mod tests {
             descriptor_dirty_from: None,
             history_len: 12,
             durable_history_len: 4,
-            blobs_pending: false,
             supports_metadata_only: true,
         });
 

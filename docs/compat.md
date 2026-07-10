@@ -12,6 +12,18 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/core/src/session.rs`: session listing/search blob fallbacks
 
+## legacy-attachment-blobs
+
+- Remove after: sessions written before attachment objects no longer need to be
+  opened by supported versions
+- Why: hydrate verified `blob:<hash>.<ext>` image references from the private
+  `blobs/` directory while new saves store exact data URLs transactionally in
+  SQLite objects
+- Code:
+  - `crates/store/src/access.rs`: bounded, hash-verified compatibility hydration
+- Tests:
+  - `legacy_attachment_blobs_remain_readable_and_missing_blobs_are_explicit`
+
 ## transcript-descriptor-history-link-mismatch
 
 - Remove after: sessions saved by early sparse transcript append builds no longer

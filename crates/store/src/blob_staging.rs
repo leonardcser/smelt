@@ -1,13 +1,18 @@
 use std::fs;
+#[cfg(test)]
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::path::Component;
 
 use crate::{Result, StoreError};
 
 pub(crate) const BLOB_STAGING_DIR: &str = ".blob-staging";
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionBlob {
+pub(crate) struct SessionBlob {
     pub filename: String,
     pub bytes: Vec<u8>,
 }
@@ -47,6 +52,7 @@ impl StagedBlobSet {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn stage_session_blobs(
     session_dir: &Path,
     fingerprint: &str,
@@ -127,6 +133,7 @@ fn staging_fingerprint(name: &std::ffi::OsStr) -> Option<String> {
     (valid_hex(fingerprint) && valid_hex(token)).then(|| fingerprint.to_string())
 }
 
+#[cfg(test)]
 fn validate_blob_filename(filename: &str) -> Result<()> {
     let path = Path::new(filename);
     let mut components = path.components();
@@ -158,6 +165,7 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn write_private_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);

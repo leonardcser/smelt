@@ -167,12 +167,11 @@ impl TuiSessionDocument {
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-        blobs_pending: bool,
     ) -> Result<PreparedSessionSave, String> {
         if self.live_session.is_some() {
-            return self.prepare_live_save(session, metadata, blobs_pending);
+            return self.prepare_live_save(session, metadata);
         }
-        self.prepare_full_save(session, metadata, blobs_pending)
+        self.prepare_full_save(session, metadata)
     }
 
     pub(crate) fn prepare_request_history_append_save(
@@ -208,11 +207,7 @@ impl TuiSessionDocument {
                 session,
                 history: SessionHistoryRef::StoreBacked(live_session),
                 transcript: &self.transcript,
-                state: self.persist.live_save_state(
-                    &self.transcript,
-                    live_session,
-                    request.blobs_pending,
-                ),
+                state: self.persist.live_save_state(&self.transcript, live_session),
             };
             return SessionDocument::prepare_save_from_input(input);
         }
@@ -220,11 +215,9 @@ impl TuiSessionDocument {
             session,
             history: SessionHistoryRef::Materialized(&session.history),
             transcript: &self.transcript,
-            state: self.persist.full_save_state(
-                &self.transcript,
-                session.history.len(),
-                request.blobs_pending,
-            ),
+            state: self
+                .persist
+                .full_save_state(&self.transcript, session.history.len()),
         };
         SessionDocument::prepare_save_from_input(input)
     }
@@ -233,17 +226,14 @@ impl TuiSessionDocument {
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-        blobs_pending: bool,
     ) -> Result<PreparedSessionSave, String> {
         let preflight = SessionSaveInput {
             session,
             history: SessionHistoryRef::Materialized(&session.history),
             transcript: &self.transcript,
-            state: self.persist.full_save_state(
-                &self.transcript,
-                session.history.len(),
-                blobs_pending,
-            ),
+            state: self
+                .persist
+                .full_save_state(&self.transcript, session.history.len()),
         };
         if let SessionSavePlan::Skip(reason) = SessionDocument::select_save_plan(preflight) {
             return Ok(PreparedSessionSave::Skip(reason));
@@ -253,11 +243,9 @@ impl TuiSessionDocument {
             session,
             history: SessionHistoryRef::Materialized(&session.history),
             transcript: &self.transcript,
-            state: self.persist.full_save_state(
-                &self.transcript,
-                session.history.len(),
-                blobs_pending,
-            ),
+            state: self
+                .persist
+                .full_save_state(&self.transcript, session.history.len()),
         };
         SessionDocument::prepare_save_from_input(input)
     }
@@ -266,18 +254,15 @@ impl TuiSessionDocument {
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-        blobs_pending: bool,
     ) -> Result<PreparedSessionSave, String> {
         let Some(live_session) = self.live_session.as_ref() else {
-            return self.prepare_full_save(session, metadata, blobs_pending);
+            return self.prepare_full_save(session, metadata);
         };
         let preflight = SessionSaveInput {
             session,
             history: SessionHistoryRef::StoreBacked(live_session),
             transcript: &self.transcript,
-            state: self
-                .persist
-                .live_save_state(&self.transcript, live_session, blobs_pending),
+            state: self.persist.live_save_state(&self.transcript, live_session),
         };
         if let SessionSavePlan::Skip(reason) = SessionDocument::select_save_plan(preflight) {
             return Ok(PreparedSessionSave::Skip(reason));
@@ -291,9 +276,7 @@ impl TuiSessionDocument {
             session,
             history: SessionHistoryRef::StoreBacked(live_session),
             transcript: &self.transcript,
-            state: self
-                .persist
-                .live_save_state(&self.transcript, live_session, blobs_pending),
+            state: self.persist.live_save_state(&self.transcript, live_session),
         };
         SessionDocument::prepare_save_from_input(input)
     }
@@ -486,7 +469,6 @@ pub(crate) struct RuntimeRequestHistoryAppendSave<'a> {
     pub(crate) descriptor_order_start: usize,
     pub(crate) item: &'a HistoryItem,
     pub(crate) include_side_tables: bool,
-    pub(crate) blobs_pending: bool,
 }
 
 trait SessionPersistStateTuiExt {
@@ -495,13 +477,11 @@ trait SessionPersistStateTuiExt {
         &self,
         transcript: &TranscriptDocument,
         history_len: usize,
-        blobs_pending: bool,
     ) -> SessionSaveState;
     fn live_save_state(
         &self,
         transcript: &TranscriptDocument,
         live_session: &LiveSession,
-        blobs_pending: bool,
     ) -> SessionSaveState;
 }
 
@@ -514,13 +494,11 @@ impl SessionPersistStateTuiExt for SessionPersistState {
         &self,
         transcript: &TranscriptDocument,
         history_len: usize,
-        blobs_pending: bool,
     ) -> SessionSaveState {
         self.save_state(
             self.current_generation(transcript),
             transcript.history().descriptor_dirty_from(),
             history_len,
-            blobs_pending,
             true,
         )
     }
@@ -529,13 +507,11 @@ impl SessionPersistStateTuiExt for SessionPersistState {
         &self,
         transcript: &TranscriptDocument,
         live_session: &LiveSession,
-        blobs_pending: bool,
     ) -> SessionSaveState {
         self.save_state(
             self.current_generation(transcript),
             transcript.history().descriptor_dirty_from(),
             live_session.history_len(),
-            blobs_pending,
             false,
         )
     }
@@ -2077,7 +2053,6 @@ mod tests {
                 descriptor_order_start,
                 item: &item,
                 include_side_tables: true,
-                blobs_pending: false,
             },
         )
     }
@@ -2122,6 +2097,7 @@ mod tests {
             meta,
             history_len,
             revision: 0,
+            degraded_warnings: Vec::new(),
         };
         LiveSession::from_parts(header, std::path::PathBuf::new(), None)
     }
@@ -3233,7 +3209,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: session.history.len(),
-                blobs_pending: false,
                 supports_metadata_only: true,
             },
         });
@@ -3260,7 +3235,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 0,
-                blobs_pending: false,
                 supports_metadata_only: true,
             },
         });
@@ -3298,7 +3272,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 2,
-                blobs_pending: false,
                 supports_metadata_only: true,
             },
         });
@@ -3334,7 +3307,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 5,
-                blobs_pending: false,
                 supports_metadata_only: true,
             },
         });
@@ -3394,7 +3366,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: session.history.len(),
-                blobs_pending: false,
                 supports_metadata_only: true,
             },
         })
@@ -3561,7 +3532,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: session.history.len(),
                 durable_history_len: 1,
-                blobs_pending: false,
                 supports_metadata_only: true,
             },
         })
@@ -3603,7 +3573,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: 2,
                 durable_history_len: 2,
-                blobs_pending: false,
                 supports_metadata_only: false,
             },
         });
@@ -3648,7 +3617,7 @@ mod tests {
             session: &session,
             history: SessionHistoryRef::StoreBacked(&live_session),
             transcript: &transcript,
-            state: persist.live_save_state(&transcript, &live_session, false),
+            state: persist.live_save_state(&transcript, &live_session),
         });
 
         assert!(matches!(
@@ -3680,7 +3649,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: 3,
                 durable_history_len: 3,
-                blobs_pending: false,
                 supports_metadata_only: false,
             },
         });
@@ -3705,6 +3673,7 @@ mod tests {
             meta,
             history_len: 0,
             revision: 0,
+            degraded_warnings: Vec::new(),
         };
         let mut live_session = LiveSession::from_parts(header, std::path::PathBuf::new(), None);
         live_session.append_history(HistoryItem::user(Content::text("live")));
@@ -3723,7 +3692,6 @@ mod tests {
                 descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
                 history_len: live_session.history_len(),
                 durable_history_len: 0,
-                blobs_pending: false,
                 supports_metadata_only: false,
             },
         })

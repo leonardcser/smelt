@@ -34,6 +34,13 @@ pub enum SessionStoreError {
         found: i32,
         supported: i32,
     },
+    MissingObject {
+        reference: String,
+    },
+    ObjectTooLarge {
+        size: u64,
+        max: u64,
+    },
     Corrupt {
         context: String,
     },
@@ -55,6 +62,8 @@ impl SessionStoreError {
             Self::ReadOnlyOwnerConflict { .. } => "read_only_owner_conflict",
             Self::Io { .. } => "io",
             Self::UnsupportedSchema { .. } => "unsupported_schema",
+            Self::MissingObject { .. } => "missing_object",
+            Self::ObjectTooLarge { .. } => "object_too_large",
             Self::Corrupt { .. } => "corrupt",
             Self::Sqlite { .. } => "sqlite",
         }
@@ -91,6 +100,13 @@ impl fmt::Display for SessionStoreError {
             Self::UnsupportedSchema { found, supported } => write!(
                 f,
                 "unsupported session schema version {found}; this build supports {supported}"
+            ),
+            Self::MissingObject { reference } => {
+                write!(f, "session attachment or object is missing: {reference}")
+            }
+            Self::ObjectTooLarge { size, max } => write!(
+                f,
+                "session attachment or object is too large: {size} bytes exceeds {max}"
             ),
             Self::Corrupt { context } => write!(f, "corrupt session: {context}"),
             Self::Sqlite {
@@ -133,6 +149,12 @@ pub fn store_error(
         smelt_store::StoreError::OwnershipLost => SessionStoreError::ReadOnlyOwnerConflict {
             owner: "writer ownership was lost".into(),
         },
+        smelt_store::StoreError::MissingObject { reference } => {
+            SessionStoreError::MissingObject { reference }
+        }
+        smelt_store::StoreError::ObjectTooLarge { size, max } => {
+            SessionStoreError::ObjectTooLarge { size, max }
+        }
         smelt_store::StoreError::Integrity(message) => SessionStoreError::Corrupt {
             context: format!("{operation} {}: {message}", path.display()),
         },

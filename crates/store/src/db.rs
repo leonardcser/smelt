@@ -240,6 +240,23 @@ impl SessionDb {
         object::object_bytes(&self.conn, &meta).map(Some)
     }
 
+    pub fn missing_object_references(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT refs.object_hash
+             FROM (
+                 SELECT object_hash FROM history_object_refs
+                 UNION ALL
+                 SELECT object_hash FROM request_object_refs
+             ) refs
+             LEFT JOIN objects ON objects.hash = refs.object_hash
+             WHERE objects.hash IS NULL
+             ORDER BY refs.object_hash",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn export_history_jsonl(&self, out: impl Write) -> Result<()> {
         jsonl_export::export_history_jsonl(&self.conn, out)
     }
@@ -279,6 +296,30 @@ impl SessionDb {
                 payload_mode,
             )
         })
+    }
+
+    pub(crate) fn import_legacy_attachments_owned(
+        &self,
+        token: &str,
+        attachments: &std::collections::BTreeMap<String, String>,
+    ) -> Result<usize> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            history::import_legacy_attachments(conn, attachments, self.object_compression)
+        })
+    }
+
+    pub(crate) fn garbage_collect_objects_owned(&self, token: &str) -> Result<usize> {
+        self.immediate_transaction(|conn| {
+            meta::verify_writer_owner(conn, token)?;
+            object::delete_unreachable_objects(conn)
+        })
+    }
+
+    pub(crate) fn vacuum_owned(&self, token: &str) -> Result<()> {
+        meta::verify_writer_owner(&self.conn, token)?;
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
     }
 
     pub fn query_request_attempts(
@@ -739,6 +780,10 @@ impl SessionDb {
         range: std::ops::Range<usize>,
     ) -> Result<Vec<protocol::HistoryItem>> {
         history::read_history_items_range(&self.conn, range)
+    }
+
+    pub fn legacy_attachment_references(&self, history_end: usize) -> Result<Vec<String>> {
+        history::legacy_attachment_references(&self.conn, history_end)
     }
 
     pub fn history_item_count(&self) -> Result<usize> {
@@ -1469,6 +1514,20 @@ mod tests {
         fs::write(&companion_target, []).unwrap();
         symlink(&companion_target, companion_dir.join("session.db-wal")).unwrap();
         assert!(SessionDb::open(companion_dir.join("session.db")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_rejects_symlinked_database() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        drop(SessionDb::open(&target).unwrap());
+        let linked = root.path().join("session.db");
+        symlink(&target, &linked).unwrap();
+
+        assert!(SessionDb::open_read_only(linked).is_err());
     }
 
     #[test]

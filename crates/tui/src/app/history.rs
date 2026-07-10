@@ -72,6 +72,7 @@ pub(crate) fn live_session_for_test(
         },
         history_len,
         revision,
+        degraded_warnings: Vec::new(),
     };
     smelt_core::session_runtime::LiveSession::from_parts(header, std::path::PathBuf::new(), None)
 }
@@ -156,30 +157,21 @@ pub(crate) fn materialize_full_transcript_read_only_result(
     )))
 }
 
-fn copy_blob_dir(source: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    let source_metadata = match std::fs::symlink_metadata(source) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "refusing non-directory attachment source {}",
-                source.display()
-            ),
-        ));
+fn copy_legacy_attachment_blobs(
+    source: &smelt_store::SessionReader,
+    dest: &std::path::Path,
+    references: &[String],
+) -> Result<(), smelt_store::StoreError> {
+    if references.is_empty() {
+        return Ok(());
     }
     smelt_core::session::create_private_dir_all(dest)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_file() || file_type.is_symlink() {
-            continue;
-        }
-        let contents = std::fs::read(entry.path())?;
-        smelt_core::session::write_private_file(&dest.join(entry.file_name()), &contents)?;
+    for reference in references {
+        let blob = source.legacy_attachment_blob(reference)?;
+        smelt_core::session::write_private_file(
+            &dest.join(blob.filename),
+            blob.data_url.as_bytes(),
+        )?;
     }
     Ok(())
 }
@@ -1094,6 +1086,15 @@ impl TuiApp {
                 return;
             }
         };
+        let legacy_attachments = match source.legacy_attachment_references(history_len) {
+            Ok(references) => references,
+            Err(err) => {
+                self.notify_error_sticky(format!(
+                    "failed to inspect source session attachments: {err}"
+                ));
+                return;
+            }
+        };
         let maintenance = match smelt_store::SessionMaintenance::open(&fork_work_dir, &forked.id) {
             Ok(maintenance) => maintenance,
             Err(err) => {
@@ -1105,8 +1106,10 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to fork session store: {err}"));
             return;
         }
-        if let Err(err) = copy_blob_dir(&live.dir().join("blobs"), &fork_work_dir.join("blobs")) {
-            self.notify_error_sticky(format!("failed to fork session blobs: {err}"));
+        if let Err(err) =
+            copy_legacy_attachment_blobs(&source, &fork_work_dir.join("blobs"), &legacy_attachments)
+        {
+            self.notify_error_sticky(format!("failed to fork legacy session attachments: {err}"));
             return;
         }
         if let Err(err) = session::refresh_derived_files(&fork_work_dir) {
@@ -1691,13 +1694,11 @@ impl TuiApp {
             return;
         }
         self.session_document.clear_queued_save();
-        let blobs = self.pending_image_blobs();
         let metadata = self.runtime_session_metadata();
-        let prepared = match self.session_document.prepare_save(
-            &mut self.core.session,
-            metadata,
-            !blobs.is_empty(),
-        ) {
+        let prepared = match self
+            .session_document
+            .prepare_save(&mut self.core.session, metadata)
+        {
             Ok(prepared) => prepared,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to prepare session save: {err}"));
@@ -1735,7 +1736,6 @@ impl TuiApp {
                 };
                 self.persister.save(crate::persist::PersistRequest {
                     command: submitted.command,
-                    blobs: Vec::new(),
                 });
             }
             crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
@@ -1754,7 +1754,6 @@ impl TuiApp {
                 };
                 self.persister.save(crate::persist::PersistRequest {
                     command: submitted.command,
-                    blobs,
                 });
             }
             crate::app::session_document::PreparedSessionSave::RequestHistoryAppend { .. } => {
@@ -1773,13 +1772,11 @@ impl TuiApp {
             "live_session:suffix_bytes",
             live.live_suffix_bytes() as u64,
         );
-        let blobs = self.pending_image_blobs();
         let metadata = self.runtime_session_metadata();
-        let prepared = match self.session_document.prepare_save(
-            &mut self.core.session,
-            metadata,
-            !blobs.is_empty(),
-        ) {
+        let prepared = match self
+            .session_document
+            .prepare_save(&mut self.core.session, metadata)
+        {
             Ok(prepared) => prepared,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to prepare session save: {err}"));
@@ -1818,18 +1815,7 @@ impl TuiApp {
         };
         self.persister.save(crate::persist::PersistRequest {
             command: submitted.command,
-            blobs,
         });
-    }
-    fn pending_image_blobs(&self) -> Vec<crate::persist::Blob> {
-        self.input
-            .store
-            .lock()
-            .unwrap()
-            .image_blobs()
-            .into_iter()
-            .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
-            .collect()
     }
 
     fn runtime_session_metadata(&self) -> crate::app::session_document::RuntimeSessionMetadata {
@@ -2241,7 +2227,6 @@ impl TuiApp {
         };
         self.persister.save(crate::persist::PersistRequest {
             command: submitted.command,
-            blobs: self.pending_image_blobs(),
         });
         true
     }
@@ -2257,7 +2242,6 @@ impl TuiApp {
         let descriptor_order_start = self.session_document.transcript.history().len();
         self.commit_request_history_item_to_document(item.clone(), block, first_user_message);
         let metadata = self.runtime_session_metadata();
-        let blobs_pending = !self.pending_image_blobs().is_empty();
         let prepared = match self.session_document.prepare_request_history_append_save(
             &mut self.core.session,
             metadata,
@@ -2266,7 +2250,6 @@ impl TuiApp {
                 descriptor_order_start,
                 item: &item,
                 include_side_tables: false,
-                blobs_pending,
             },
         ) {
             Ok(plan) => plan,
@@ -2323,7 +2306,6 @@ impl TuiApp {
         let descriptor_order_start = self.session_document.transcript.history().len();
         self.commit_request_history_item_to_document(item.clone(), block, first_user_message);
         let metadata = self.runtime_session_metadata();
-        let blobs_pending = !self.pending_image_blobs().is_empty();
         let prepared = match self.session_document.prepare_request_history_append_save(
             &mut self.core.session,
             metadata,
@@ -2332,7 +2314,6 @@ impl TuiApp {
                 descriptor_order_start,
                 item: &item,
                 include_side_tables: true,
-                blobs_pending,
             },
         ) {
             Ok(plan) => plan,
@@ -2924,8 +2905,7 @@ mod checkpoint_tests {
             assistant("history only assistant 1"),
             user("history only user 2"),
         ];
-        session::save_result(&saved, &smelt_core::attachment::AttachmentStore::new())
-            .expect("save history-only session fixture");
+        session::save_result(&saved).expect("save history-only session fixture");
 
         {
             let _guard = crate::lua::install_app_ptr(&mut app.app);

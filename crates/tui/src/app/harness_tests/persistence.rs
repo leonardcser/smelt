@@ -242,17 +242,8 @@ fn sparse_fork_publishes_a_complete_destination() {
     assert!(fork_dir.join("content.txt").is_file());
 }
 
-#[cfg(unix)]
 #[test]
-fn failed_sparse_fork_leaves_no_published_destination() {
-    use std::os::unix::fs::PermissionsExt;
-
-    // Privileged processes can read mode-000 files, so this failure injection
-    // is meaningful only for the unprivileged environment smelt supports.
-    if unsafe { libc::geteuid() } == 0 {
-        return;
-    }
-
+fn sparse_fork_does_not_copy_unreferenced_legacy_blobs() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -266,29 +257,79 @@ fn failed_sparse_fork_leaves_no_published_destination() {
     let source_dir = smelt_core::session::dir_for_id(&session_id);
     let blob_dir = source_dir.join("blobs");
     std::fs::create_dir_all(&blob_dir).unwrap();
-    let unreadable = blob_dir.join("unreadable.png");
-    std::fs::write(&unreadable, "private attachment").unwrap();
-    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o0)).unwrap();
-    let sessions_dir = source_dir.parent().unwrap().to_path_buf();
-    let before = std::fs::read_dir(&sessions_dir)
-        .unwrap()
-        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
-        .collect::<std::collections::HashSet<_>>();
+    std::fs::write(blob_dir.join("unreferenced.png"), "private attachment").unwrap();
 
     resumed.app.fork_session();
 
-    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let fork_id = resumed.app.core.session.id.clone();
+    assert_ne!(fork_id, session_id);
+    assert!(!smelt_core::session::dir_for_id(&fork_id)
+        .join("blobs")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn sparse_fork_rejects_symlinked_legacy_attachment() {
+    use std::os::unix::fs::symlink;
+
+    const DATA_URL: &str = "data:image/png;base64,OUTSIDE";
+    const HASH: &str = "94fc06df2866baea99e3b3ea05bc2cd733de4ed7a085dda436280f7f69ffd426";
+
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("fork source")));
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+    let source_dir = smelt_core::session::dir_for_id(&session_id);
+    let reader = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
+    let state = reader.session_state().unwrap().unwrap();
+    let descriptor_len = reader.transcript_descriptor_count().unwrap();
+    drop(reader);
+    let writer = smelt_store::OwnedSessionWriter::open(&source_dir, &session_id).unwrap();
+    writer
+        .commit_session(&smelt_store::SessionCommit {
+            session_id: session_id.clone(),
+            save_id: smelt_store::SaveId::new(99),
+            base_revision: smelt_store::Revision::new(state.revision),
+            base_history_len: smelt_store::HistoryLen::new(state.history_len),
+            base_descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+            state,
+            history: smelt_store::HistorySuffix {
+                start: smelt_store::HistoryIndex::ZERO,
+                final_len: smelt_store::HistoryLen::new(1),
+                items: vec![HistoryItem::user(Content::with_images(
+                    "legacy".into(),
+                    vec![("attachment.png".into(), format!("blob:{HASH}.png"))],
+                ))],
+            },
+            side_tables: smelt_store::SideTableSuffixes::default(),
+            descriptors: None,
+        })
+        .unwrap();
+    writer.release().unwrap();
+
+    let blob_dir = source_dir.join("blobs");
+    std::fs::create_dir(&blob_dir).unwrap();
+    let blob_path = blob_dir.join(format!("{HASH}.png"));
+    std::fs::write(&blob_path, DATA_URL).unwrap();
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert!(resumed.app.session_document.live_session.is_some());
+
+    let external = tempfile::tempdir().unwrap();
+    let target = external.path().join("private-image");
+    std::fs::write(&target, DATA_URL).unwrap();
+    std::fs::remove_file(&blob_path).unwrap();
+    symlink(&target, &blob_path).unwrap();
+    resumed.app.fork_session();
+
     assert_eq!(resumed.app.core.session.id, session_id);
     assert!(resumed.app.notification.is_some());
-    let destinations = std::fs::read_dir(&sessions_dir)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| !before.contains(&entry.file_name()))
-        .collect::<Vec<_>>();
-    assert!(
-        destinations.is_empty(),
-        "failed fork published partial destinations: {destinations:#?}"
-    );
+    assert_eq!(smelt_core::session::list_sessions().len(), 1);
 }
 
 #[test]

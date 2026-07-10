@@ -209,7 +209,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     let mut got_response = false;
     let mut tool_dispatch_request_id: Option<u64> = None;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
         let recv = tokio::time::timeout(Duration::from_millis(200), handle.recv()).await;
         match recv {

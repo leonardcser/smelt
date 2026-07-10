@@ -1239,31 +1239,16 @@ pub struct SessionHeader {
     pub meta: SessionMeta,
     pub history_len: usize,
     pub revision: u64,
+    pub degraded_warnings: Vec<String>,
 }
 
-pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
-    if let Err(err) = save_result(session, store) {
+pub fn save(session: &Session) {
+    if let Err(err) = save_result(session) {
         eprintln!("smelt: failed to save session {}: {err}", session.id);
     }
 }
 
-pub fn save_result(
-    session: &Session,
-    store: &crate::attachment::AttachmentStore,
-) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
-    let blobs = store.image_blobs();
-    let url_to_blob = blobs
-        .iter()
-        .map(|(filename, data_url)| (data_url.clone(), format!("blob:{filename}")))
-        .collect();
-    save_with_blob_payloads_result(session, &url_to_blob, &blobs)
-}
-
-fn save_with_blob_payloads_result(
-    session: &Session,
-    url_to_blob: &std::collections::HashMap<String, String>,
-    blobs: &[(String, String)],
-) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
+pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
     let session_id = crate::session_id::SessionId::parse(&session.id)
         .map_err(|err| smelt_store::StoreError::Integrity(err.to_string()))?;
@@ -1279,66 +1264,39 @@ fn save_with_blob_payloads_result(
         .as_ref()
         .map_or(session_dir.as_path(), |staged| staged.path());
 
-    let session_out = if url_to_blob.is_empty() {
-        std::borrow::Cow::Borrowed(session)
-    } else {
-        let mut s = session.clone();
-        externalize_blobs(&mut s.history, url_to_blob);
-        std::borrow::Cow::Owned(s)
-    };
-
     let writer = smelt_store::OwnedSessionWriter::open(writer_dir, &session.id)?;
     let current_state = writer.session_state()?;
     let base_revision = current_state.as_ref().map_or(0, |state| state.revision);
     let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
     let base_descriptor_len = writer.transcript_descriptor_count()? as u64;
-    let history_len = session_out.history.len();
+    let history_len = session.history.len();
     let history_start_idx = 0;
     let command = smelt_store::SessionCommit {
-        session_id: session_out.id.clone(),
+        session_id: session.id.clone(),
         save_id: smelt_store::SaveId::ZERO,
         base_revision: smelt_store::Revision::new(base_revision),
         base_history_len: smelt_store::HistoryLen::new(base_history_len),
         base_descriptor_len: smelt_store::DescriptorLen::new(base_descriptor_len),
-        state: store_state_from_session(session_out.as_ref(), history_len)?,
+        state: store_state_from_session(session, history_len)?,
         history: smelt_store::HistorySuffix {
             start: smelt_store::HistoryIndex::new(history_start_idx as u64),
             final_len: smelt_store::HistoryLen::new(history_len as u64),
-            items: session_out.history[history_start_idx..].to_vec(),
+            items: session.history[history_start_idx..].to_vec(),
         },
         side_tables: store_side_table_suffixes_from_session_at(
-            session_out.as_ref(),
+            session,
             history_start_idx,
             history_len,
         )?,
         descriptors: None,
     };
-    let blobs = blobs
-        .iter()
-        .map(|(filename, data_url)| smelt_store::SessionBlob {
-            filename: filename.clone(),
-            bytes: data_url.as_bytes().to_vec(),
-        })
-        .collect::<Vec<_>>();
-    let outcome = writer
-        .commit_session_with_blobs(&command, &blobs)
-        .map_err(|err| match err {
-            smelt_store::SessionWriteFailure::Stage(err) => err,
-            smelt_store::SessionWriteFailure::Commit(err) => {
-                session_commit_failure_to_store_error(err)
-            }
-        })?;
-    let receipt = outcome.receipt;
-    if let Some(err) = outcome.deferred_blob_error {
-        eprintln!(
-            "smelt: deferred blob publication for session {}: {err}",
-            session_out.id
-        );
-    }
+    let receipt = writer
+        .commit_session(&command)
+        .map_err(session_commit_failure_to_store_error)?;
     if let Err(err) = refresh_derived_files(writer_dir) {
         eprintln!(
             "smelt: failed to refresh derived files for session {}: {err}",
-            session_out.id
+            session.id
         );
     }
     writer.release()?;
@@ -1785,10 +1743,14 @@ pub fn load_store_header_for_dir_result(
         return Ok(None);
     };
     let history_len = state.history_len as usize;
+    let degraded_warnings = db.degraded_warnings().map_err(|err| {
+        crate::session_store::store_error("inspect session objects", &db_path, err)
+    })?;
     let header = SessionHeader {
         meta,
         history_len,
         revision: state.revision,
+        degraded_warnings,
     };
     Ok(Some((
         header,
@@ -1818,26 +1780,7 @@ fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
 
 fn load_session_files_result(dir_path: &std::path::Path) -> SessionStoreResult<Option<Session>> {
     crate::session_store::ensure_session_db_read_only(dir_path)?;
-    let Some(session) = load_db_session_result(dir_path)? else {
-        return Ok(None);
-    };
-    Ok(internalize_session_blobs(dir_path, session))
-}
-
-fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -> Option<Session> {
-    let blob_dir = dir_path.join("blobs");
-    if blob_dir.is_dir() {
-        let blob_to_url = {
-            let _perf = smelt_perf::perf::begin("session:load_full:read_blobs");
-            crate::attachment::AttachmentStore::load_blobs(&blob_dir)
-        };
-        smelt_perf::perf::record_value("session:load_full:blobs", blob_to_url.len() as u64);
-        if !blob_to_url.is_empty() {
-            let _perf = smelt_perf::perf::begin("session:load_full:internalize_blobs");
-            internalize_blobs(&mut session.history, &blob_to_url);
-        }
-    }
-    Some(session)
+    load_db_session_result(dir_path)
 }
 
 fn load_db_session_result(dir_path: &std::path::Path) -> SessionStoreResult<Option<Session>> {
@@ -2488,55 +2431,6 @@ pub fn load_search_blobs(ids: Vec<String>) -> Vec<(String, String)> {
     crate::utils::parallel_filter_map(ids, |id| load_search_blob(&id).map(|blob| (id, blob)))
 }
 
-/// Walk every image-url part in a history item's content, applying `swap`.
-fn rewrite_image_urls<F: Fn(&mut String)>(content: &mut protocol::Content, swap: &F) {
-    if let protocol::Content::Parts(parts) = content {
-        for part in parts {
-            if let protocol::ContentPart::ImageUrl { url, .. } = part {
-                swap(url);
-            }
-        }
-    }
-}
-
-fn rewrite_history_image_urls<F: Fn(&mut String)>(history: &mut [HistoryItem], swap: F) {
-    for item in history {
-        match item {
-            HistoryItem::System { content } | HistoryItem::User { content, .. } => {
-                rewrite_image_urls(content, &swap);
-            }
-            HistoryItem::Assistant(turn) => {
-                if let Some(c) = turn.content.as_mut() {
-                    rewrite_image_urls(c, &swap);
-                }
-            }
-            HistoryItem::Note(_) => {}
-        }
-    }
-}
-
-pub fn externalize_blobs(
-    history: &mut [HistoryItem],
-    url_to_blob: &std::collections::HashMap<String, String>,
-) {
-    rewrite_history_image_urls(history, |url| {
-        if let Some(blob_ref) = url_to_blob.get(url.as_str()) {
-            *url = blob_ref.clone();
-        }
-    });
-}
-
-fn internalize_blobs(
-    history: &mut [HistoryItem],
-    blob_to_url: &std::collections::HashMap<String, String>,
-) {
-    rewrite_history_image_urls(history, |url| {
-        if let Some(data_url) = blob_to_url.get(url.as_str()) {
-            *url = data_url.clone();
-        }
-    });
-}
-
 fn session_updated_at(meta: &SessionMeta) -> u64 {
     if meta.updated_at_ms > 0 {
         meta.updated_at_ms
@@ -2903,7 +2797,7 @@ mod tests {
             s.title = Some(format!("stale meta {i}"));
             s.updated_at_ms = 1_700_000_000_000 + i;
             s.history.push(user_item(&format!("prompt {i}")));
-            save(&s, &crate::attachment::AttachmentStore::new());
+            save(&s);
 
             let meta_path = dir_for(&s).join("meta.json");
             let mut meta_json: Value =
@@ -2996,7 +2890,7 @@ mod tests {
         let mut session = fixture_session();
         session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("read only"));
-        save(&session, &crate::attachment::AttachmentStore::new());
+        save(&session);
         let dir = dir_for(&session);
         let db_path = dir.join("session.db");
         fs::remove_file(dir.join("meta.json")).unwrap();
@@ -3024,7 +2918,7 @@ mod tests {
         session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("revisioned cache"));
 
-        let receipt = save_result(&session, &crate::attachment::AttachmentStore::new()).unwrap();
+        let receipt = save_result(&session).unwrap();
         let dir = dir_for(&session);
         let meta: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
@@ -3052,7 +2946,7 @@ mod tests {
         let mut session = fixture_session();
         session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("private"));
-        save(&session, &crate::attachment::AttachmentStore::new());
+        save(&session);
         let session_dir = dir_for(&session);
         for dir in [engine::state_dir(), sessions_dir(), session_dir.clone()] {
             assert_eq!(
@@ -3080,7 +2974,7 @@ mod tests {
         let mut healthy = fixture_session();
         healthy.id = numbered_session_id(20);
         healthy.history.push(user_item("healthy"));
-        save(&healthy, &crate::attachment::AttachmentStore::new());
+        save(&healthy);
         let corrupt_id = numbered_session_id(21);
         let corrupt_dir = sessions_dir().join(&corrupt_id);
         fs::create_dir_all(&corrupt_dir).unwrap();
@@ -3200,7 +3094,7 @@ mod tests {
         let mut session = fixture_session();
         session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("hello"));
-        save(&session, &crate::attachment::AttachmentStore::new());
+        save(&session);
 
         assert!(resolve_session_dir_for_read("abcd").is_none());
         assert!(!stale_dir.join("session.db").exists());
@@ -3807,71 +3701,37 @@ mod tests {
     }
 
     #[test]
-    fn save_stages_attachment_with_canonical_commit_and_round_trips() {
+    fn save_stores_attachment_with_canonical_commit_and_round_trips() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         let data_url = "data:image/png;base64,AAAA";
         let mut session = Session::new(1, PathBuf::from("/tmp"));
         session.id = TEST_SESSION_ID.into();
         session.history = vec![image_item(data_url)];
-        let mut attachments = crate::attachment::AttachmentStore::new();
-        attachments.insert_image("attachment.png".into(), data_url.into());
-
-        save(&session, &attachments);
+        save(&session);
 
         let session_dir = dir_for(&session);
-        let blob_files = fs::read_dir(session_dir.join("blobs"))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(blob_files.len(), 1);
-        assert_eq!(fs::read_to_string(blob_files[0].path()).unwrap(), data_url);
+        assert!(!session_dir.join("blobs").exists());
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert_eq!(
+            db.connection()
+                .query_row("SELECT COUNT(*) FROM objects", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.connection()
+                .query_row("SELECT role FROM history_object_refs", [], |row| row
+                    .get::<_, String>(0),)
+                .unwrap(),
+            "attachment_image"
+        );
         let reader = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
         let stored = reader.read_history_items_range(0..1).unwrap();
-        assert!(first_image_url(&stored[0]).starts_with("blob:"));
+        assert_eq!(first_image_url(&stored[0]), data_url);
         let loaded = load_full_result(TEST_SESSION_ID).unwrap().unwrap();
         assert_eq!(first_image_url(&loaded.history[0]), data_url);
-    }
-
-    #[test]
-    fn externalize_blobs_swaps_urls_to_blob_refs() {
-        let mut items = vec![image_item("data:image/png;base64,AAA")];
-        let mut map = std::collections::HashMap::new();
-        map.insert("data:image/png;base64,AAA".into(), "blob://abc".into());
-        externalize_blobs(&mut items, &map);
-        assert_eq!(first_image_url(&items[0]), "blob://abc");
-    }
-
-    #[test]
-    fn externalize_blobs_leaves_unmapped_urls_alone() {
-        let mut items = vec![image_item("data:other")];
-        let map = std::collections::HashMap::new();
-        externalize_blobs(&mut items, &map);
-        assert_eq!(first_image_url(&items[0]), "data:other");
-    }
-
-    #[test]
-    fn internalize_blobs_replaces_blob_refs_with_data_urls() {
-        let mut items = vec![image_item("blob://abc")];
-        let mut map = std::collections::HashMap::new();
-        map.insert("blob://abc".into(), "data:image/png;base64,AAA".into());
-        internalize_blobs(&mut items, &map);
-        assert_eq!(first_image_url(&items[0]), "data:image/png;base64,AAA");
-    }
-
-    #[test]
-    fn internalize_blobs_leaves_text_history_unchanged() {
-        let mut items = vec![user_item("hello")];
-        let mut map = std::collections::HashMap::new();
-        map.insert("foo".into(), "bar".into());
-        internalize_blobs(&mut items, &map);
-        match &items[0] {
-            HistoryItem::User { content, .. } => match content {
-                Content::Text(t) => assert_eq!(t, "hello"),
-                _ => panic!("expected text content"),
-            },
-            _ => panic!("expected user"),
-        }
     }
 
     #[test]

@@ -6,7 +6,6 @@
 //! a long transcript without a live LLM.
 
 use protocol::Content;
-use smelt_core::attachment::AttachmentStore;
 use smelt_core::session::{self, Session};
 
 pub fn run() {
@@ -84,7 +83,7 @@ fn generate(turns: usize, words: usize, title: Option<String>) {
 
     session.updated_at_ms = session::now_ms();
 
-    session::save(&session, &AttachmentStore::new());
+    session::save(&session);
     println!("{}", stamp);
     eprintln!(
         "synth: wrote {turns} turns ({} history items) → {}",

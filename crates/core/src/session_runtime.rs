@@ -392,6 +392,7 @@ mod tests {
             },
             history_len: 2,
             revision: 1,
+            degraded_warnings: Vec::new(),
         };
         let mut live = LiveSession::from_store(
             header,
@@ -506,6 +507,7 @@ mod tests {
             },
             history_len: 3,
             revision: 1,
+            degraded_warnings: Vec::new(),
         };
         let live = LiveSession::from_store(
             header,

@@ -1,14 +1,15 @@
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 
+use crate::blob_staging::recover_blob_staging;
 #[cfg(test)]
-use crate::blob_staging::BLOB_STAGING_DIR;
-use crate::blob_staging::{recover_blob_staging, stage_session_blobs, SessionBlob};
+use crate::blob_staging::{stage_session_blobs, SessionBlob, BLOB_STAGING_DIR};
 use crate::db::SessionDb;
 use crate::{
     ObjectMeta, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
@@ -18,6 +19,12 @@ use crate::{
     TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
     TranscriptSearchCandidate, TranscriptSearchDirection, WriterOwner,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAttachmentBlob {
+    pub filename: String,
+    pub data_url: String,
+}
 
 #[derive(Debug)]
 pub struct SessionReader {
@@ -53,6 +60,15 @@ impl SessionReader {
 
     pub fn writer_owner(&self) -> Result<Option<WriterOwner>> {
         self.db.writer_owner()
+    }
+
+    pub fn degraded_warnings(&self) -> Result<Vec<String>> {
+        Ok(self
+            .db
+            .missing_object_references()?
+            .into_iter()
+            .map(|reference| format!("missing SQLite object {reference}"))
+            .collect())
     }
 
     pub fn session_state(&self) -> Result<Option<SessionState>> {
@@ -102,7 +118,11 @@ impl SessionReader {
     }
 
     pub fn load_full_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
-        self.db.load_full_session_snapshot()
+        let mut snapshot = self.db.load_full_session_snapshot()?;
+        if let Some(snapshot) = &mut snapshot {
+            self.hydrate_legacy_attachments(&mut snapshot.history)?;
+        }
+        Ok(snapshot)
     }
 
     pub fn transcript_descriptor_count(&self) -> Result<usize> {
@@ -216,7 +236,22 @@ impl SessionReader {
         &self,
         range: std::ops::Range<usize>,
     ) -> Result<Vec<protocol::HistoryItem>> {
-        self.db.read_history_items_range(range)
+        let mut items = self.db.read_history_items_range(range)?;
+        self.hydrate_legacy_attachments(&mut items)?;
+        Ok(items)
+    }
+
+    pub fn legacy_attachment_references(&self, history_end: usize) -> Result<Vec<String>> {
+        self.db.legacy_attachment_references(history_end)
+    }
+
+    pub fn legacy_attachment_blob(&self, reference: &str) -> Result<LegacyAttachmentBlob> {
+        let session_dir = self
+            .db
+            .path()
+            .parent()
+            .ok_or_else(|| StoreError::Integrity("session database has no parent".into()))?;
+        read_legacy_attachment(session_dir, reference)
     }
 
     pub fn history_item_count(&self) -> Result<usize> {
@@ -260,16 +295,154 @@ impl SessionReader {
     pub fn search_blob(&self) -> Result<String> {
         self.db.search_blob()
     }
+
+    fn hydrate_legacy_attachments(&self, items: &mut [protocol::HistoryItem]) -> Result<()> {
+        let session_dir = self
+            .db
+            .path()
+            .parent()
+            .ok_or_else(|| StoreError::Integrity("session database has no parent".into()))?;
+        for item in items {
+            let mut value = serde_json::to_value(&*item)?;
+            hydrate_legacy_attachment_value(session_dir, &mut value)?;
+            *item = serde_json::from_value(value)?;
+        }
+        Ok(())
+    }
 }
 
+// COMPAT(legacy-attachment-blobs): hydrate pre-object-store image references from
+// private external blob files until those sessions have been explicitly migrated.
+fn hydrate_legacy_attachment_value(
+    session_dir: &Path,
+    value: &mut serde_json::Value,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(serde_json::Value::as_str) == Some("image_url") {
+                let url = map
+                    .get_mut("image_url")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|image| image.get_mut("url"));
+                if let Some(serde_json::Value::String(reference)) = url {
+                    if reference.starts_with("blob:") {
+                        *reference = read_legacy_attachment(session_dir, reference)?.data_url;
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                hydrate_legacy_attachment_value(session_dir, child)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                hydrate_legacy_attachment_value(session_dir, child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn legacy_attachment_path(session_dir: &Path, reference: &str) -> Result<PathBuf> {
+    let filename = reference
+        .strip_prefix("blob:")
+        .filter(|filename| !filename.is_empty())
+        .ok_or_else(|| StoreError::Integrity(format!("invalid legacy attachment {reference:?}")))?;
+    let path = Path::new(filename);
+    if path.components().count() != 1
+        || path.file_name().and_then(|name| name.to_str()) != Some(filename)
+    {
+        return Err(StoreError::Integrity(format!(
+            "invalid legacy attachment filename {filename:?}"
+        )));
+    }
+    Ok(session_dir.join("blobs").join(filename))
+}
+
+fn read_legacy_attachment(session_dir: &Path, reference: &str) -> Result<LegacyAttachmentBlob> {
+    let blob_path = legacy_attachment_path(session_dir, reference)?;
+    let filename = blob_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("validated legacy attachment filename");
+    let (expected_hash, _) = filename.rsplit_once('.').ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "legacy attachment filename has no extension: {filename:?}"
+        ))
+    })?;
+    if expected_hash.len() != 64
+        || !expected_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(StoreError::Integrity(format!(
+            "invalid legacy attachment hash in {filename:?}"
+        )));
+    }
+    let metadata = match fs::symlink_metadata(&blob_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        Ok(_) => {
+            return Err(StoreError::Integrity(format!(
+                "legacy attachment is not a regular file: {}",
+                blob_path.display()
+            )));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StoreError::MissingObject {
+                reference: reference.to_string(),
+            });
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if metadata.len() > crate::object::MAX_OBJECT_RAW_SIZE {
+        return Err(StoreError::ObjectTooLarge {
+            size: metadata.len(),
+            max: crate::object::MAX_OBJECT_RAW_SIZE,
+        });
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(&blob_path)?
+        .take(crate::object::MAX_OBJECT_RAW_SIZE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > crate::object::MAX_OBJECT_RAW_SIZE {
+        return Err(StoreError::ObjectTooLarge {
+            size: bytes.len() as u64,
+            max: crate::object::MAX_OBJECT_RAW_SIZE,
+        });
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"image:");
+    hasher.update(&bytes);
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if actual_hash != expected_hash {
+        return Err(StoreError::Integrity(format!(
+            "legacy attachment hash mismatch for {filename:?}"
+        )));
+    }
+    let data_url = String::from_utf8(bytes)
+        .map_err(|err| StoreError::Integrity(format!("legacy attachment is not UTF-8: {err}")))?;
+    if !data_url.starts_with("data:image/") {
+        return Err(StoreError::Integrity(format!(
+            "legacy attachment is not an image data URL: {filename:?}"
+        )));
+    }
+    Ok(LegacyAttachmentBlob {
+        filename: filename.to_string(),
+        data_url,
+    })
+}
+
+#[cfg(test)]
 #[derive(Debug)]
-pub struct SessionCommitOutcome {
+pub(crate) struct SessionCommitOutcome {
     pub receipt: SaveReceipt,
     pub deferred_blob_error: Option<StoreError>,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
-pub enum SessionWriteFailure {
+pub(crate) enum SessionWriteFailure {
     Stage(StoreError),
     Commit(SessionCommitFailure),
 }
@@ -339,7 +512,8 @@ impl OwnedSessionWriter {
         self.commit_canonical(command)
     }
 
-    pub fn commit_session_with_blobs(
+    #[cfg(test)]
+    pub(crate) fn commit_session_with_blobs(
         &self,
         command: &SessionCommit,
         blobs: &[SessionBlob],
@@ -380,6 +554,8 @@ impl OwnedSessionWriter {
         self.db.commit_session_owned(self.token(), command)
     }
 
+    // COMPAT(legacy-attachment-blobs): finish or discard external attachment
+    // publication staged by pre-object-store writers after a process crash.
     fn recover_staged_blobs(&self) -> Result<()> {
         let fingerprint = self.db.last_session_commit_fingerprint()?;
         recover_blob_staging(&self.session_dir, fingerprint.as_deref())
@@ -516,6 +692,31 @@ impl SessionMaintenance {
         self.writer
             .db
             .copy_prefix_from(&source.db, state, history_len, Some(self.writer.token()))
+    }
+
+    pub fn import_legacy_attachments(&self) -> Result<usize> {
+        let history_len = self.writer.db.history_item_count()?;
+        let references = self.writer.db.legacy_attachment_references(history_len)?;
+        let mut attachments = std::collections::BTreeMap::new();
+        for reference in references {
+            attachments.insert(
+                reference.clone(),
+                read_legacy_attachment(&self.writer.session_dir, &reference)?.data_url,
+            );
+        }
+        self.writer
+            .db
+            .import_legacy_attachments_owned(self.writer.token(), &attachments)
+    }
+
+    pub fn garbage_collect_objects(&self) -> Result<usize> {
+        self.writer
+            .db
+            .garbage_collect_objects_owned(self.writer.token())
+    }
+
+    pub fn vacuum(&self) -> Result<()> {
+        self.writer.db.vacuum_owned(self.writer.token())
     }
 
     pub fn release(self) -> Result<()> {
@@ -912,6 +1113,155 @@ mod tests {
         ));
         assert!(!root.path().join("escape").exists());
         assert!(writer.session_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_attachment_blobs_remain_readable_and_missing_blobs_are_explicit() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let data_url = "data:image/png;base64,AAAA";
+        let mut hasher = Sha256::new();
+        hasher.update(b"image:");
+        hasher.update(data_url.as_bytes());
+        let filename = format!("{:x}.png", hasher.finalize());
+        let reference = format!("blob:{filename}");
+        let mut command = empty_commit("session", 1, 0);
+        command.state.history_len = 1;
+        command.history.final_len = crate::HistoryLen::new(1);
+        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
+            "legacy".into(),
+            vec![("attachment.png".into(), reference.clone())],
+        ))];
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        writer.commit_session(&command).unwrap();
+        writer.release().unwrap();
+        fs::create_dir(session_dir.join("blobs")).unwrap();
+        fs::write(session_dir.join("blobs").join(&filename), data_url).unwrap();
+
+        let reader = SessionReader::open_existing(&session_dir).unwrap();
+        let history = reader.read_history_items_range(0..1).unwrap();
+        let value = serde_json::to_value(&history[0]).unwrap();
+        assert_eq!(value["content"][1]["image_url"]["url"], data_url);
+        assert_eq!(
+            reader.legacy_attachment_references(1).unwrap(),
+            vec![reference.clone()]
+        );
+        let blob_path = session_dir.join("blobs").join(filename);
+        fs::remove_file(&blob_path).unwrap();
+        assert!(reader.degraded_warnings().unwrap().is_empty());
+        assert!(matches!(
+            reader.read_history_items_range(0..1),
+            Err(StoreError::MissingObject { reference: missing }) if missing == reference
+        ));
+        fs::write(&blob_path, data_url).unwrap();
+        drop(reader);
+
+        let maintenance = SessionMaintenance::open(&session_dir, "session").unwrap();
+        assert_eq!(maintenance.import_legacy_attachments().unwrap(), 1);
+        assert_eq!(maintenance.import_legacy_attachments().unwrap(), 0);
+        maintenance.release().unwrap();
+        fs::remove_file(blob_path).unwrap();
+        let reader = SessionReader::open_existing(&session_dir).unwrap();
+        assert!(reader.legacy_attachment_references(1).unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(&reader.read_history_items_range(0..1).unwrap()[0]).unwrap()
+                ["content"][1]["image_url"]["url"],
+            data_url
+        );
+    }
+
+    #[test]
+    fn missing_attachment_objects_are_reported_without_hydrating_history() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let data_url = "data:image/png;base64,AAAA";
+        let mut command = empty_commit("session", 1, 0);
+        command.state.history_len = 1;
+        command.history.final_len = crate::HistoryLen::new(1);
+        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
+            "attached".into(),
+            vec![("attachment.png".into(), data_url.into())],
+        ))];
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        writer.commit_session(&command).unwrap();
+        let hash = crate::object::sha256_hex(data_url.as_bytes());
+        writer
+            .db
+            .connection()
+            .execute_batch("PRAGMA foreign_keys = OFF; DELETE FROM objects;")
+            .unwrap();
+        writer.release().unwrap();
+
+        let reader = SessionReader::open_existing(&session_dir).unwrap();
+        assert_eq!(
+            reader.degraded_warnings().unwrap(),
+            vec![format!("missing SQLite object {hash}")]
+        );
+        assert!(matches!(
+            reader.read_history_items_range(0..1),
+            Err(StoreError::MissingObject { reference }) if reference == hash
+        ));
+    }
+
+    #[test]
+    fn maintenance_gc_removes_only_unreachable_objects_and_vacuums() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let data_url = "data:image/png;base64,AAAA";
+        let mut command = empty_commit("session", 1, 0);
+        command.state.history_len = 1;
+        command.history.final_len = crate::HistoryLen::new(1);
+        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
+            "attached".into(),
+            vec![("attachment.png".into(), data_url.into())],
+        ))];
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        writer.commit_session(&command).unwrap();
+        writer.db.put_object("orphan", b"unreachable").unwrap();
+        let maintenance = SessionMaintenance { writer };
+
+        assert_eq!(maintenance.garbage_collect_objects().unwrap(), 1);
+        assert_eq!(maintenance.garbage_collect_objects().unwrap(), 0);
+        maintenance.vacuum().unwrap();
+        maintenance.release().unwrap();
+
+        let history = SessionReader::open_existing(&session_dir)
+            .unwrap()
+            .read_history_items_range(0..1)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&history[0]).unwrap()["content"][1]["image_url"]["url"],
+            data_url
+        );
+    }
+
+    #[test]
+    fn large_rewind_reclaims_unreachable_attachment_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let data_url = "data:image/png;base64,AAAA";
+        let item = protocol::HistoryItem::user(protocol::Content::with_images(
+            "attached".into(),
+            vec![("attachment.png".into(), data_url.into())],
+        ));
+        let mut initial = empty_commit("session", 1, 0);
+        initial.state.history_len = 129;
+        initial.history.final_len = crate::HistoryLen::new(129);
+        initial.history.items = vec![item; 129];
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        writer.commit_session(&initial).unwrap();
+        let object_hash = crate::object::sha256_hex(data_url.as_bytes());
+        assert!(writer.db.object(&object_hash).unwrap().is_some());
+
+        let mut rewind = empty_commit("session", 2, 1);
+        rewind.base_history_len = crate::HistoryLen::new(129);
+        writer.commit_session(&rewind).unwrap();
+
+        assert!(writer.db.object(&object_hash).unwrap().is_none());
     }
 
     #[test]

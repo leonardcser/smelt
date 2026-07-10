@@ -9,15 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-/// One image blob to write alongside the session.
-pub(crate) struct Blob {
-    pub(crate) filename: String,
-    pub(crate) data_url: String,
-}
-
 pub(crate) struct PersistRequest {
     pub(crate) command: smelt_store::SessionCommit,
-    pub(crate) blobs: Vec<Blob>,
 }
 
 pub(crate) struct PersistRequestAudit {
@@ -526,7 +519,6 @@ fn write(
         "persist:write:history_items",
         req.command.history.items.len() as u64,
     );
-    smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     let descriptor_records = req
         .command
         .descriptors
@@ -534,38 +526,11 @@ fn write(
         .map_or(0, |descriptors| descriptors.records.len() as u64);
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
 
-    let url_to_blob = req
-        .blobs
-        .iter()
-        .map(|blob| (blob.data_url.clone(), format!("blob:{}", blob.filename)))
-        .collect();
-    let mut command = req.command.clone();
-    smelt_core::session::externalize_blobs(&mut command.history.items, &url_to_blob);
-    let staged_blobs = req
-        .blobs
-        .iter()
-        .map(|blob| smelt_store::SessionBlob {
-            filename: blob.filename.clone(),
-            bytes: blob.data_url.as_bytes().to_vec(),
-        })
-        .collect::<Vec<_>>();
-    let outcome = writer
-        .commit_session_with_blobs(&command, &staged_blobs)
-        .map_err(|err| match err {
-            smelt_store::SessionWriteFailure::Stage(err) => {
-                persist_write_error(format!("stage session blobs: {err}"))
-            }
-            smelt_store::SessionWriteFailure::Commit(err) => PersistWriteError::Commit(err),
-        })?;
-    let receipt = outcome.receipt;
+    let command = &req.command;
+    let receipt = writer
+        .commit_session(command)
+        .map_err(PersistWriteError::Commit)?;
     let mut warnings = Vec::new();
-    if let Some(err) = outcome.deferred_blob_error {
-        smelt_perf::perf::record_value("persist:write:blob_publish_deferred", 1);
-        warnings.push(format!(
-            "session {} was saved, but attachment publication was deferred: {err}",
-            receipt.session_id
-        ));
-    }
     record_save_receipt(&receipt);
     let (descriptor_start_idx, descriptor_records) = command
         .descriptors
@@ -704,10 +669,6 @@ mod tests {
         std::fs::create_dir(&session_dir).unwrap();
         let request = PersistRequest {
             command: commit("session-a", 9),
-            blobs: vec![Blob {
-                filename: "attachment.png".into(),
-                data_url: "data:image/png;base64,AAAA".into(),
-            }],
         };
         let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
@@ -726,31 +687,59 @@ mod tests {
         if staging_root.exists() {
             assert_eq!(std::fs::read_dir(staging_root).unwrap().count(), 0);
         }
-        let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
         assert!(db.session_state().unwrap().is_none());
+        assert_eq!(
+            db.connection()
+                .query_row("SELECT COUNT(*) FROM objects", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
-    fn deferred_blob_publication_returns_success_with_warning() {
+    fn attachment_is_stored_in_the_canonical_transaction() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("session-a");
         std::fs::create_dir(&session_dir).unwrap();
-        std::fs::write(session_dir.join("blobs"), "publication blocker").unwrap();
-        let request = PersistRequest {
-            command: commit("session-a", 0),
-            blobs: vec![Blob {
-                filename: "attachment.png".into(),
-                data_url: "data:image/png;base64,AAAA".into(),
-            }],
-        };
+        let data_url = "data:image/png;base64,AAAA";
+        let mut command = commit("session-a", 0);
+        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
+            "attached".into(),
+            vec![("attachment.png".into(), data_url.into())],
+        ))];
+        let request = PersistRequest { command };
         let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
         let success = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
 
         assert_eq!(success.receipt.revision.get(), 1);
-        assert!(success
-            .warning
-            .is_some_and(|warning| warning.contains("attachment publication was deferred")));
+        assert!(success.warning.is_none());
+        assert!(!session_dir.join("blobs").exists());
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert_eq!(
+            db.connection()
+                .query_row("SELECT COUNT(*) FROM objects", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let rows = smelt_store::SessionReader::open_existing(&session_dir)
+            .unwrap()
+            .read_history_items_range(0..1)
+            .unwrap();
+        let protocol::HistoryItem::User { content, .. } = &rows[0] else {
+            panic!("expected user history item");
+        };
+        assert!(matches!(
+            content,
+            protocol::Content::Parts(parts)
+                if parts.iter().any(|part| matches!(
+                    part,
+                    protocol::ContentPart::ImageUrl { url, .. } if url == data_url
+                ))
+        ));
     }
 
     #[test]
@@ -760,7 +749,6 @@ mod tests {
         std::fs::create_dir_all(session_dir.join("meta.json")).unwrap();
         let request = PersistRequest {
             command: commit("session-a", 0),
-            blobs: Vec::new(),
         };
         let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
@@ -786,7 +774,6 @@ mod tests {
 
         persister.save(PersistRequest {
             command: commit(SESSION_ID, 9),
-            blobs: Vec::new(),
         });
         persister.flush();
 
@@ -810,7 +797,6 @@ mod tests {
         assert!(!first_dir.exists(), "uncommitted session must stay hidden");
         persister.save(PersistRequest {
             command: commit(SESSION_ID, 0),
-            blobs: Vec::new(),
         });
         persister.flush();
         assert!(matches!(
@@ -822,7 +808,6 @@ mod tests {
         persister.open_owned(SECOND_SESSION_ID).unwrap();
         persister.save(PersistRequest {
             command: commit(SECOND_SESSION_ID, 0),
-            blobs: Vec::new(),
         });
         persister.flush();
         assert!(matches!(
@@ -847,7 +832,6 @@ mod tests {
         let persister = Persister::spawn();
         persister.save(PersistRequest {
             command: commit(SESSION_ID, 0),
-            blobs: Vec::new(),
         });
         persister.flush();
         assert!(matches!(

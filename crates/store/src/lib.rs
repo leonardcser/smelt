@@ -12,11 +12,7 @@ mod schema;
 mod session_commit;
 mod session_snapshot;
 
-pub use access::{
-    OwnedSessionWriter, SessionCommitOutcome, SessionMaintenance, SessionReader,
-    SessionWriteFailure,
-};
-pub use blob_staging::SessionBlob;
+pub use access::{LegacyAttachmentBlob, OwnedSessionWriter, SessionMaintenance, SessionReader};
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
     DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
@@ -30,7 +26,7 @@ pub use history::{
     TranscriptSearchCandidate, TranscriptSearchDirection,
 };
 pub use meta::{SessionMeta, SessionState, WriterOwner};
-pub use object::{ObjectCodec, ObjectMeta, StoredObject};
+pub use object::{ObjectCodec, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
     RequestAuditStats, RequestAuditSummary,

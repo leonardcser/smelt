@@ -7,6 +7,8 @@ pub enum StoreError {
     Json(serde_json::Error),
     OwnershipConflict { owner: Option<String> },
     OwnershipLost,
+    MissingObject { reference: String },
+    ObjectTooLarge { size: u64, max: u64 },
     Integrity(String),
     UnsupportedSchema { found: i32, expected: i32 },
 }
@@ -35,6 +37,12 @@ impl fmt::Display for StoreError {
                 None => f.write_str("session is owned by another writer"),
             },
             StoreError::OwnershipLost => f.write_str("session writer ownership was lost"),
+            StoreError::MissingObject { reference } => {
+                write!(f, "session object is missing: {reference}")
+            }
+            StoreError::ObjectTooLarge { size, max } => {
+                write!(f, "session object is too large: {size} bytes exceeds {max}")
+            }
             StoreError::Integrity(message) => write!(f, "integrity error: {message}"),
             StoreError::UnsupportedSchema { found, expected } => {
                 write!(f, "unsupported schema version {found}; expected {expected}")
