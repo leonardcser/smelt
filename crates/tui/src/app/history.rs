@@ -3967,7 +3967,7 @@ mod checkpoint_tests {
         session.context_tokens_history_len = Some(2);
         session.snapshot_context();
 
-        session.history.truncate(0);
+        session.history.clear();
         session.restore_context_after_rewind(0, false);
 
         assert_eq!(session.session_usage.prompt_tokens, Some(10));
