@@ -69,6 +69,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     // ── Fake LLM server ────────────────────────────────────────────────
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (stream_started_tx, stream_started_rx) = tokio::sync::oneshot::channel();
 
     let server = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
@@ -107,6 +108,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         let _ = sock.write_all(header.as_bytes()).await;
         let _ = sock.write_all(body.as_bytes()).await;
         let _ = sock.flush().await;
+        let _ = stream_started_tx.send(());
         // Hold the socket so the engine doesn't see EOF on the next request.
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
@@ -164,6 +166,12 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     let mut bad_snapshots: Vec<(&'static str, Vec<HistoryItem>, Vec<String>)> = Vec::new();
     let mut all_snapshots: Vec<(&'static str, Vec<HistoryItem>)> = Vec::new();
 
+    // Start the observation window when the response is available. Coverage
+    // instrumentation and parallel tests can delay the provider request.
+    tokio::time::timeout(Duration::from_secs(10), stream_started_rx)
+        .await
+        .expect("provider request timed out")
+        .expect("fake server closed before streaming");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         if tokio::time::Instant::now() >= deadline {
