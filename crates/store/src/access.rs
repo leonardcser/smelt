@@ -426,14 +426,23 @@ impl SessionMaintenance {
             .file_name()
             .ok_or_else(|| StoreError::Integrity("session directory has no name".into()))?;
         let lock = SessionLock::acquire(session_dir)?;
-        let tombstone = session_dir.with_file_name(format!(
-            ".smelt-delete-{}-{}",
+        let root = session_dir
+            .parent()
+            .ok_or_else(|| StoreError::Integrity("session directory has no parent".into()))?;
+        let trash = root.join(".trash");
+        ensure_private_directory(&trash)?;
+        let tombstone = trash.join(format!(
+            "{}-{}",
             session_name.to_string_lossy(),
             random_token()?
         ));
         fs::rename(session_dir, &tombstone)?;
+        sync_directory(root)?;
         drop(lock);
-        fs::remove_dir_all(tombstone)?;
+        fs::remove_dir_all(&tombstone)?;
+        sync_directory(&trash)?;
+        let _ = fs::remove_dir(&trash);
+        sync_directory(root)?;
         Ok(())
     }
 
@@ -567,6 +576,34 @@ impl SessionLock {
         }
         Ok(Self { _file: file })
     }
+}
+
+fn ensure_private_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing non-directory storage path {}", path.display()),
+            )));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => fs::create_dir(path)?,
+        Err(err) => return Err(err.into()),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {

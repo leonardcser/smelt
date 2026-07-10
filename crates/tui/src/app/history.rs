@@ -1065,7 +1065,21 @@ impl TuiApp {
         let history_len = live.history_len();
         let mut forked = self.core.session.fork(self.core.env.pid());
         forked.history.clear();
-        let fork_dir = session::dir_for(&forked);
+        let fork_id = match smelt_core::session_id::SessionId::parse(&forked.id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare fork id: {err}"));
+                return;
+            }
+        };
+        let staged_fork = match session::StagedSessionDir::create(&fork_id) {
+            Ok(staged) => staged,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to stage fork directory: {err}"));
+                return;
+            }
+        };
+        let fork_work_dir = staged_fork.path().to_path_buf();
         let state = match session::store_state_from_session(&forked, history_len) {
             Ok(state) => state,
             Err(err) => {
@@ -1080,11 +1094,7 @@ impl TuiApp {
                 return;
             }
         };
-        if let Err(err) = session::create_private_dir_all(&fork_dir) {
-            self.notify_error_sticky(format!("failed to create fork directory: {err}"));
-            return;
-        }
-        let maintenance = match smelt_store::SessionMaintenance::open(&fork_dir, &forked.id) {
+        let maintenance = match smelt_store::SessionMaintenance::open(&fork_work_dir, &forked.id) {
             Ok(maintenance) => maintenance,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to own fork destination: {err}"));
@@ -1095,11 +1105,11 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to fork session store: {err}"));
             return;
         }
-        if let Err(err) = copy_blob_dir(&live.dir().join("blobs"), &fork_dir.join("blobs")) {
+        if let Err(err) = copy_blob_dir(&live.dir().join("blobs"), &fork_work_dir.join("blobs")) {
             self.notify_error_sticky(format!("failed to fork session blobs: {err}"));
             return;
         }
-        if let Err(err) = session::refresh_derived_files(&fork_dir) {
+        if let Err(err) = session::refresh_derived_files(&fork_work_dir) {
             self.notify_error_sticky(format!("failed to refresh fork metadata: {err}"));
             return;
         }
@@ -1107,6 +1117,13 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to release fork destination: {err}"));
             return;
         }
+        let fork_dir = match staged_fork.publish() {
+            Ok(path) => path,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to publish fork destination: {err}"));
+                return;
+            }
+        };
         let Some((header, store_ref)) = session::load_store_header_for_dir(fork_dir.clone()) else {
             self.notify_error_sticky("failed to load forked session header".into());
             return;

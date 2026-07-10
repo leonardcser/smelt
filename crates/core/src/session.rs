@@ -1037,6 +1037,185 @@ pub fn session_dir(id: &crate::session_id::SessionId) -> PathBuf {
     sessions_dir().join(id.as_str())
 }
 
+const SESSION_STAGING_DIR: &str = ".staging";
+const DERIVED_CACHE_FORMAT_VERSION: u32 = 1;
+const ABANDONED_SESSION_ARTIFACT_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Debug)]
+pub struct StagedSessionDir {
+    path: PathBuf,
+    destination: PathBuf,
+    published: bool,
+}
+
+impl StagedSessionDir {
+    pub fn create(id: &crate::session_id::SessionId) -> std::io::Result<Self> {
+        let root = sessions_dir();
+        create_private_dir_all(&root)?;
+        let staging_root = root.join(SESSION_STAGING_DIR);
+        create_private_dir_all(&staging_root)?;
+        let created_at_ms = now_ms();
+        for _ in 0..16 {
+            let nonce = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = staging_root.join(format!(
+                "{}.{}.{}.{}",
+                id.as_str(),
+                std::process::id(),
+                created_at_ms,
+                nonce
+            ));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        destination: session_dir(id),
+                        published: false,
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "could not allocate unique staging directory for session {}",
+                id.as_str()
+            ),
+        ))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    pub fn publish(mut self) -> std::io::Result<PathBuf> {
+        match fs::symlink_metadata(&self.destination) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "session destination already exists: {}",
+                        self.destination.display()
+                    ),
+                ));
+            }
+        }
+        fs::rename(&self.path, &self.destination)?;
+        self.published = true;
+        sync_directory(
+            self.destination
+                .parent()
+                .expect("session destination parent"),
+        )?;
+        Ok(self.destination.clone())
+    }
+}
+
+impl Drop for StagedSessionDir {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+pub fn cleanup_abandoned_session_artifacts() {
+    let root = sessions_dir();
+    let staging_root = root.join(SESSION_STAGING_DIR);
+    let staging_is_private_dir = fs::symlink_metadata(&staging_root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if staging_is_private_dir {
+        if let Ok(entries) = fs::read_dir(&staging_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                if entry.file_name() == std::ffi::OsStr::new(".trash") && is_dir {
+                    let _ = fs::remove_dir_all(path);
+                    continue;
+                }
+                if is_dir && staging_artifact_is_abandoned(&entry.file_name()) {
+                    let _ = smelt_store::SessionMaintenance::delete_session(path);
+                }
+            }
+        }
+    }
+    let trash_root = root.join(".trash");
+    let trash_is_private_dir = fs::symlink_metadata(&trash_root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if trash_is_private_dir {
+        if let Ok(entries) = fs::read_dir(&trash_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    let _ = fs::remove_dir_all(path);
+                } else {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
+    cleanup_stale_derived_temps(&root);
+}
+
+fn staging_artifact_is_abandoned(name: &std::ffi::OsStr) -> bool {
+    let Some(created_at_ms) = name
+        .to_str()
+        .and_then(|name| name.rsplit('.').nth(1))
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    now_ms().saturating_sub(created_at_ms) >= ABANDONED_SESSION_ARTIFACT_AGE.as_millis() as u64
+}
+
+fn cleanup_stale_derived_temps(root: &Path) {
+    let stale_after = std::time::Duration::from_secs(24 * 60 * 60);
+    let Ok(sessions) = fs::read_dir(root) else {
+        return;
+    };
+    for session in sessions.flatten() {
+        if !session.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(name) = session.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if crate::session_id::SessionId::parse(&name).is_err() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(session.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let derived_temp = name.starts_with(".meta.json.") || name.starts_with(".content.txt.");
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+                .is_ok_and(|age| age >= stale_after);
+            if derived_temp && stale {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionDirKind {
     Store,
@@ -1086,8 +1265,19 @@ fn save_with_blob_payloads_result(
     blobs: &[(String, String)],
 ) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
-    let session_dir = dir_for(session);
-    create_private_dir_all(&session_dir)?;
+    let session_id = crate::session_id::SessionId::parse(&session.id)
+        .map_err(|err| smelt_store::StoreError::Integrity(err.to_string()))?;
+    let session_dir = session_dir(&session_id);
+    let staged = match fs::symlink_metadata(&session_dir) {
+        Ok(_) => None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Some(StagedSessionDir::create(&session_id)?)
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let writer_dir = staged
+        .as_ref()
+        .map_or(session_dir.as_path(), |staged| staged.path());
 
     let session_out = if url_to_blob.is_empty() {
         std::borrow::Cow::Borrowed(session)
@@ -1097,7 +1287,7 @@ fn save_with_blob_payloads_result(
         std::borrow::Cow::Owned(s)
     };
 
-    let writer = smelt_store::OwnedSessionWriter::open(&session_dir, &session.id)?;
+    let writer = smelt_store::OwnedSessionWriter::open(writer_dir, &session.id)?;
     let current_state = writer.session_state()?;
     let base_revision = current_state.as_ref().map_or(0, |state| state.revision);
     let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
@@ -1145,11 +1335,15 @@ fn save_with_blob_payloads_result(
             session_out.id
         );
     }
-    if let Err(err) = refresh_derived_files(&session_dir) {
+    if let Err(err) = refresh_derived_files(writer_dir) {
         eprintln!(
             "smelt: failed to refresh derived files for session {}: {err}",
             session_out.id
         );
+    }
+    writer.release()?;
+    if let Some(staged) = staged {
+        staged.publish()?;
     }
     Ok(receipt)
 }
@@ -1448,16 +1642,57 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     std::io::Write::write_all(&mut file, contents)
 }
 
-/// Write `contents` to `path` atomically via a private temporary file + rename.
-pub fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
-    let Some(dir) = path.parent() else { return };
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return;
-    };
-    let tmp = dir.join(format!("{name}.{ts}.tmp"));
-    if write_private_file(&tmp, contents).is_ok() {
-        let _ = fs::rename(&tmp, path);
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Write `contents` to `path` atomically via a private temporary file + rename.
+pub fn atomic_write(path: &Path, contents: &[u8], ts: u64) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("storage file has no parent: {}", path.display()),
+        )
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("storage file has no valid name: {}", path.display()),
+            )
+        })?;
+    reject_filesystem_symlink(dir)?;
+    reject_filesystem_symlink(path)?;
+    let nonce = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{ts}.{nonce}.tmp"));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&tmp)?;
+        std::io::Write::write_all(&mut file, contents)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        sync_directory(dir)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Load the full semantic session by exact ID or unique prefix (git-style short ID).
@@ -2125,29 +2360,40 @@ fn load_meta_for_dir_result(
     load_meta_from_db_result(&path)
 }
 
-pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
-    let meta_written = write_db_meta_sidecar(dir_path)?;
-    let db_path = dir_path.join("session.db");
-    if db_path.is_file() {
-        let db =
-            smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
-        let blob = db.search_blob().map_err(|err| err.to_string())?;
-        atomic_write(&dir_path.join("content.txt"), blob.as_bytes(), now_ms());
-    }
-    Ok(meta_written)
+fn derived_meta_json(meta: &smelt_store::SessionMeta) -> Result<Vec<u8>, String> {
+    let mut value = serde_json::to_value(meta).map_err(|err| err.to_string())?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "session metadata must serialize as an object".to_string())?;
+    object.insert(
+        "cache_format_version".into(),
+        DERIVED_CACHE_FORMAT_VERSION.into(),
+    );
+    object.insert("source_revision".into(), meta.revision.into());
+    serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())
 }
 
-pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
-    let Some(meta) = load_meta_from_db(dir_path) else {
+pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
+    let db_path = dir_path.join("session.db");
+    if !db_path.is_file() {
+        return Ok(false);
+    }
+    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
+    let Some(meta) = db.session_meta().map_err(|err| err.to_string())? else {
         return Ok(false);
     };
-    let json = serde_json::to_vec_pretty(&meta).map_err(|err| err.to_string())?;
-    write_private_file(&dir_path.join("meta.json"), &json).map_err(|err| err.to_string())?;
+    let blob = db.search_blob().map_err(|err| err.to_string())?;
+    let meta_json = derived_meta_json(&meta)?;
+    let content = format!("# smelt-revision:{}\n{blob}", meta.revision);
+    let ts = now_ms();
+    atomic_write(&dir_path.join("meta.json"), &meta_json, ts).map_err(|err| err.to_string())?;
+    atomic_write(&dir_path.join("content.txt"), content.as_bytes(), ts)
+        .map_err(|err| err.to_string())?;
     Ok(true)
 }
 
-fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
-    load_meta_from_db_result(path).ok().flatten()
+pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
+    refresh_derived_files(dir_path)
 }
 
 fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMeta>> {
@@ -2768,6 +3014,32 @@ mod tests {
             fs::metadata(&db_path).unwrap().modified().unwrap(),
             modified
         );
+    }
+
+    #[test]
+    fn derived_files_identify_the_canonical_revision() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let mut session = fixture_session();
+        session.id = TEST_SESSION_ID.into();
+        session.history.push(user_item("revisioned cache"));
+
+        let receipt = save_result(&session, &crate::attachment::AttachmentStore::new()).unwrap();
+        let dir = dir_for(&session);
+        let meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
+        let content = fs::read_to_string(dir.join("content.txt")).unwrap();
+
+        assert_eq!(meta["revision"].as_u64(), Some(receipt.revision.get()));
+        assert_eq!(
+            meta["source_revision"].as_u64(),
+            Some(receipt.revision.get())
+        );
+        assert_eq!(
+            meta["cache_format_version"].as_u64(),
+            Some(DERIVED_CACHE_FORMAT_VERSION.into())
+        );
+        assert!(content.starts_with(&format!("# smelt-revision:{}\n", receipt.revision.get())));
     }
 
     #[cfg(unix)]
@@ -3726,13 +3998,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn staged_session_is_hidden_until_atomic_publication() {
+        let state = tempfile::tempdir().unwrap();
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let id = crate::session_id::SessionId::parse(TEST_SESSION_ID).unwrap();
+        let staged = StagedSessionDir::create(&id).unwrap();
+        let staged_path = staged.path().to_path_buf();
+        let destination = staged.destination().to_path_buf();
+        fs::write(staged.path().join("marker"), "complete").unwrap();
+
+        assert!(!destination.exists());
+        let published = staged.publish().unwrap();
+
+        assert_eq!(published, destination);
+        assert!(!staged_path.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("marker")).unwrap(),
+            "complete"
+        );
+    }
+
+    #[test]
+    fn lifecycle_cleanup_removes_abandoned_but_not_active_staging_and_trash() {
+        let state = tempfile::tempdir().unwrap();
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let staging_root = sessions_dir().join(SESSION_STAGING_DIR);
+        create_private_dir_all(&staging_root).unwrap();
+        let abandoned_path = staging_root.join(format!("{TEST_SESSION_ID}.1.0.0"));
+        create_private_dir_all(&abandoned_path).unwrap();
+
+        let active_id = crate::session_id::SessionId::parse(&numbered_session_id(2)).unwrap();
+        let active = StagedSessionDir::create(&active_id).unwrap();
+        let active_path = active.path().to_path_buf();
+        let writer =
+            smelt_store::OwnedSessionWriter::open(&active_path, active_id.as_str()).unwrap();
+        let recent_id = crate::session_id::SessionId::parse(&numbered_session_id(3)).unwrap();
+        let recent = StagedSessionDir::create(&recent_id).unwrap();
+        let recent_path = recent.path().to_path_buf();
+        let trash_path = sessions_dir().join(".trash/crashed-delete");
+        create_private_dir_all(&trash_path).unwrap();
+        fs::write(trash_path.join("session.db"), "tombstone").unwrap();
+
+        cleanup_abandoned_session_artifacts();
+
+        assert!(!abandoned_path.exists());
+        assert!(active_path.exists());
+        assert!(recent_path.exists());
+        assert!(!trash_path.exists());
+        writer.release().unwrap();
+        drop((active, recent));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_cleanup_never_follows_storage_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let state = tempfile::tempdir().unwrap();
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        create_private_dir_all(&sessions_dir()).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("sentinel");
+        fs::write(&sentinel, "keep").unwrap();
+        symlink(external.path(), sessions_dir().join(SESSION_STAGING_DIR)).unwrap();
+        symlink(external.path(), sessions_dir().join(".trash")).unwrap();
+        symlink(external.path(), sessions_dir().join(TEST_SESSION_ID)).unwrap();
+
+        cleanup_abandoned_session_artifacts();
+
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep");
+    }
+
     // ── atomic_write ──────────────────────────────────────────────────
 
     #[test]
     fn atomic_write_writes_contents_and_renames_into_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data.json");
-        atomic_write(&path, b"hello", 42);
+        atomic_write(&path, b"hello", 42).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
         // No leftover tmp file in the directory.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
@@ -3749,7 +4093,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data");
         std::fs::write(&path, "old").unwrap();
-        atomic_write(&path, b"new", 1);
+        atomic_write(&path, b"new", 1).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 }

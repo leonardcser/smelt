@@ -215,9 +215,36 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     assert!(!session_dir.join("session.db").exists());
 }
 
+#[test]
+fn sparse_fork_publishes_a_complete_destination() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("fork source")));
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+
+    resumed.app.fork_session();
+
+    let fork_id = resumed.app.core.session.id.clone();
+    assert_ne!(fork_id, session_id);
+    let fork_dir = smelt_core::session::dir_for_id(&fork_id);
+    let reader = smelt_store::SessionReader::open_existing(&fork_dir).unwrap();
+    let state = reader.session_state().unwrap().unwrap();
+    assert_eq!(state.id, fork_id);
+    assert_eq!(state.parent_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(reader.read_history_items_range(0..1).unwrap().len(), 1);
+    assert!(fork_dir.join("meta.json").is_file());
+    assert!(fork_dir.join("content.txt").is_file());
+}
+
 #[cfg(unix)]
 #[test]
-fn failed_sparse_fork_currently_leaves_a_published_destination_database() {
+fn failed_sparse_fork_leaves_no_published_destination() {
     use std::os::unix::fs::PermissionsExt;
 
     // Privileged processes can read mode-000 files, so this failure injection
@@ -258,12 +285,10 @@ fn failed_sparse_fork_currently_leaves_a_published_destination_database() {
         .filter_map(|entry| entry.ok())
         .filter(|entry| !before.contains(&entry.file_name()))
         .collect::<Vec<_>>();
-    assert_eq!(
-        destinations.len(),
-        1,
-        "failed fork should leave one partial destination"
+    assert!(
+        destinations.is_empty(),
+        "failed fork published partial destinations: {destinations:#?}"
     );
-    assert!(destinations[0].path().join("session.db").is_file());
 }
 
 #[test]
