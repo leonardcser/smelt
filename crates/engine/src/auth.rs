@@ -34,14 +34,48 @@ where
 }
 
 /// Which OAuth-based provider to authenticate with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AuthProvider {
     Codex,
     Copilot,
     KimiCode,
 }
 
+impl AuthProvider {
+    pub fn from_provider_type(provider_type: &str) -> Option<Self> {
+        match provider_type {
+            "codex" => Some(Self::Codex),
+            "copilot" => Some(Self::Copilot),
+            "kimi-code" => Some(Self::KimiCode),
+            _ => None,
+        }
+    }
+
+    pub const fn provider_type(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Copilot => "copilot",
+            Self::KimiCode => "kimi-code",
+        }
+    }
+}
+
 pub type AuthModelInfo = protocol::ModelMetadata;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedModelsRefreshOutcome {
+    Fresh {
+        models: Vec<AuthModelInfo>,
+        cache_warning: Option<String>,
+    },
+    CachedFallback {
+        models: Vec<AuthModelInfo>,
+        warning: String,
+    },
+    Unauthenticated,
+    CredentialsChanged,
+    Failed(String),
+}
 
 /// Login method for providers that support multiple flows.
 #[derive(Debug, Clone, Copy)]
@@ -111,11 +145,34 @@ pub fn cached_model_info(kind: AuthProvider) -> Vec<AuthModelInfo> {
 }
 
 pub fn is_logged_in(provider: AuthProvider) -> bool {
+    credential_fingerprint(provider).is_some()
+}
+
+/// In-memory identity used only to invalidate stale refreshes after credentials
+/// change. The hash is never persisted or logged.
+pub fn credential_fingerprint(provider: AuthProvider) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match provider {
-        AuthProvider::Codex => provider::codex::load_tokens().is_some(),
-        AuthProvider::Copilot => provider::copilot::load_tokens().is_some(),
-        AuthProvider::KimiCode => provider::kimi_code::is_logged_in(),
+        AuthProvider::Codex => {
+            let tokens = provider::codex::load_tokens()?;
+            tokens
+                .account_id
+                .as_deref()
+                .unwrap_or(&tokens.refresh_token)
+                .hash(&mut hasher);
+        }
+        AuthProvider::Copilot => {
+            let tokens = provider::copilot::load_tokens()?;
+            tokens.refresh_token.hash(&mut hasher);
+        }
+        AuthProvider::KimiCode => {
+            let tokens = provider::kimi_code::load_tokens()?;
+            tokens.refresh_token.hash(&mut hasher);
+        }
     }
+    Some(hasher.finish())
 }
 
 #[derive(Debug, Clone)]
@@ -203,35 +260,80 @@ where
     Ok(AuthenticatedResponse { status, body })
 }
 
-pub async fn refresh_models_cache(kind: AuthProvider, client: &reqwest::Client) -> Vec<String> {
-    refresh_model_info(kind, client)
-        .await
-        .into_iter()
-        .map(|model| model.id)
-        .collect()
-}
-
-pub async fn refresh_model_info(
+pub async fn refresh_model_info_outcome_for(
     kind: AuthProvider,
     client: &reqwest::Client,
-) -> Vec<AuthModelInfo> {
+    expected_fingerprint: u64,
+) -> ManagedModelsRefreshOutcome {
+    if credential_fingerprint(kind) != Some(expected_fingerprint) {
+        return ManagedModelsRefreshOutcome::CredentialsChanged;
+    }
     match kind {
-        AuthProvider::Codex => provider::codex::refresh_models_cache(client)
-            .await
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        AuthProvider::Copilot => provider::copilot::refresh_models_cache(client)
-            .await
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        AuthProvider::KimiCode => provider::kimi_code::fetch_model_info(client)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+        AuthProvider::Codex => match provider::codex::fetch_models_fresh(client).await {
+            Ok(models) => finish_model_refresh(
+                kind,
+                expected_fingerprint,
+                models,
+                provider::codex::save_models_cache,
+            ),
+            Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
+        },
+        AuthProvider::Copilot => match provider::copilot::fetch_models_fresh(client).await {
+            Ok(models) => finish_model_refresh(
+                kind,
+                expected_fingerprint,
+                models,
+                provider::copilot::save_models_cache,
+            ),
+            Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
+        },
+        AuthProvider::KimiCode => match provider::kimi_code::fetch_models_fresh(client).await {
+            Ok(models) => finish_model_refresh(
+                kind,
+                expected_fingerprint,
+                models,
+                provider::kimi_code::save_models_cache,
+            ),
+            Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
+        },
+    }
+}
+
+fn finish_model_refresh<T>(
+    kind: AuthProvider,
+    expected_fingerprint: u64,
+    models: Vec<T>,
+    save: impl FnOnce(&[T]) -> Result<(), String>,
+) -> ManagedModelsRefreshOutcome
+where
+    T: Into<AuthModelInfo>,
+{
+    if credential_fingerprint(kind) != Some(expected_fingerprint) {
+        return ManagedModelsRefreshOutcome::CredentialsChanged;
+    }
+    let cache_warning = save(&models).err();
+    ManagedModelsRefreshOutcome::Fresh {
+        models: models.into_iter().map(Into::into).collect(),
+        cache_warning,
+    }
+}
+
+fn model_refresh_failure(
+    kind: AuthProvider,
+    expected_fingerprint: u64,
+    error: String,
+) -> ManagedModelsRefreshOutcome {
+    if credential_fingerprint(kind) != Some(expected_fingerprint) {
+        return ManagedModelsRefreshOutcome::CredentialsChanged;
+    }
+    let models = cached_model_info(kind);
+    if models.is_empty() {
+        ManagedModelsRefreshOutcome::Failed(error)
+    } else {
+        ManagedModelsRefreshOutcome::CachedFallback {
+            models,
+            warning: error,
+        }
     }
 }
 
@@ -395,6 +497,26 @@ mod tests {
             messages.lock().unwrap().as_slice(),
             &["Could not open browser automatically: missing opener"]
         );
+    }
+
+    #[test]
+    fn changed_credentials_prevent_a_stale_refresh_from_writing_cache() {
+        let current = credential_fingerprint(AuthProvider::Codex);
+        let expected = current.unwrap_or(0).wrapping_add(1);
+        let cache_written = std::cell::Cell::new(false);
+
+        let outcome = finish_model_refresh(
+            AuthProvider::Codex,
+            expected,
+            Vec::<protocol::ModelMetadata>::new(),
+            |_| {
+                cache_written.set(true);
+                Ok(())
+            },
+        );
+
+        assert_eq!(outcome, ManagedModelsRefreshOutcome::CredentialsChanged);
+        assert!(!cache_written.get());
     }
 
     #[test]

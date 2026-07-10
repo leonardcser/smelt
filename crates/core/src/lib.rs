@@ -27,6 +27,7 @@ pub mod http;
 pub mod keymap;
 pub mod lsp;
 pub mod lua;
+pub mod managed_models;
 pub mod mcp;
 pub mod messages;
 pub mod notebook;
@@ -78,6 +79,7 @@ pub(crate) use clipboard::{Osc52Sink, SystemSink};
 pub use engine_client::EngineClient;
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
+pub use managed_models::{ManagedModels, ManagedModelsStatus, ManagedProviderModels, RefreshToken};
 pub use runtime::{Core, FrontendKind};
 pub use runtime_state::{
     managed_model_selection_is_pending, resolve_runtime, ActiveModel, ModelAvailability,

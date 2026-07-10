@@ -114,6 +114,7 @@ impl TuiApp {
         let mut did_work = self.dismiss_expired_notification();
         did_work |= self.expire_pending_keymap_chord();
         did_work |= self.flush_due_tool_drafts();
+        did_work |= self.poll_managed_auth();
         did_work |= self.try_perform_scheduled_runtime_reconcile();
         did_work |= self.try_perform_scheduled_cwd_change();
         did_work |= self.try_perform_scheduled_lua_reload();
@@ -210,13 +211,14 @@ impl TuiApp {
                 return Some(failed.message);
             }
         };
-        let next_runtime = match self.resolve_lua_runtime_config(candidate.desired()) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                self.discard_lua_candidate_resources(candidate_id);
-                return Some(error);
-            }
-        };
+        let (next_runtime, next_managed_models) =
+            match self.resolve_lua_runtime_config(candidate.desired()) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    self.discard_lua_candidate_resources(candidate_id);
+                    return Some(error);
+                }
+            };
         let next_permissions = smelt_core::permissions::resolve_permissions(
             &candidate.desired().permissions.rules,
             &candidate.desired().permissions.tool_defaults,
@@ -279,7 +281,9 @@ impl TuiApp {
         for warning in self.lua.warnings().to_vec() {
             self.notify_warn(warning);
         }
+        self.managed_models = next_managed_models;
         self.commit_lua_runtime_config(next_runtime, next_permissions);
+        self.submit_managed_model_refreshes();
         if let Some(mark_session_dirty) = committed_cwd {
             self.sync_inline_options();
             self.restart_auto_reload_for_cwd();
@@ -334,8 +338,12 @@ impl TuiApp {
 
     pub(crate) fn reconcile_committed_lua_runtime(&mut self) -> Result<(), String> {
         self.lua.refresh_desired_state()?;
+        self.reconcile_runtime_snapshot()
+    }
+
+    pub(crate) fn reconcile_runtime_snapshot(&mut self) -> Result<(), String> {
         let desired = self.lua.desired().clone();
-        let next = self.resolve_lua_runtime_config(&desired)?;
+        let (next, managed_models) = self.resolve_lua_runtime_config(&desired)?;
         let permissions = smelt_core::permissions::resolve_permissions(
             &desired.permissions.rules,
             &desired.permissions.tool_defaults,
@@ -344,7 +352,9 @@ impl TuiApp {
             &self.core.env.cwd(),
             self.core.permissions.paths_fn(),
         );
+        self.managed_models = managed_models;
         self.commit_lua_runtime_config(next, permissions);
+        self.submit_managed_model_refreshes();
         self.publish_diff_signals();
         self.drain_signals_pending();
         Ok(())
@@ -353,10 +363,15 @@ impl TuiApp {
     fn resolve_lua_runtime_config(
         &self,
         desired: &crate::lua::LuaDesiredState,
-    ) -> Result<smelt_core::RuntimeState, String> {
-        let available_models = desired.config.resolve_models();
-        smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
-            config: &desired.config,
+    ) -> Result<(smelt_core::RuntimeState, smelt_core::ManagedModels), String> {
+        let mut config = desired.config.clone();
+        let mut managed_models = self.managed_models.clone();
+        managed_models.inject_oauth_providers(&mut config);
+        managed_models.sync_desired(&config, self.core.config.revision.wrapping_add(1));
+        let mut available_models = config.resolve_models();
+        managed_models.inject(&config, &mut available_models);
+        let mut runtime = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
+            config: &config,
             startup: &self.core.startup_overrides,
             available_models: &available_models,
             registered_modes: &desired.modes.cycle,
@@ -364,7 +379,16 @@ impl TuiApp {
             previous: Some(&self.core.config),
             headless: false,
         })
-        .map_err(|error| format!("runtime config reconciliation failed: {error}"))
+        .map_err(|error| format!("runtime config reconciliation failed: {error}"))?;
+        if let Some(active) = runtime.active_model_mut() {
+            let provider = engine::auth::AuthProvider::from_provider_type(&active.provider_type);
+            if provider.is_some_and(|provider| !managed_models.provider(provider).authenticated) {
+                active.availability = smelt_core::ModelAvailability::Unavailable {
+                    reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+                };
+            }
+        }
+        Ok((runtime, managed_models))
     }
 
     pub(crate) fn reconcile_permissions(&mut self) {

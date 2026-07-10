@@ -364,6 +364,7 @@ impl From<CopilotModel> for protocol::ModelMetadata {
             id: model.id,
             display_name: Some(model.name),
             context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
             supports_reasoning: (!model.supported_reasoning_efforts.is_empty()).then_some(true),
             supports_fast_mode: None,
             input_modalities: None,

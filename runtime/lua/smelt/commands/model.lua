@@ -8,9 +8,9 @@ local function build_items()
   local out = {}
   for _, m in ipairs(models_list()) do
     out[#out + 1] = {
-      label        = m.name,
+      label        = m.display_name or m.name,
       description  = m.provider,
-      search_terms = (m.key or "") .. " " .. (m.provider or ""),
+      search_terms = (m.key or "") .. " " .. (m.name or "") .. " " .. (m.provider or ""),
       _key         = m.key,
     }
   end

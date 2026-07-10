@@ -134,113 +134,23 @@ where
 pub struct ResolvedStartup {
     pub runtime: smelt_core::RuntimeState,
     pub startup_overrides: smelt_core::StartupOverrides,
+    pub managed_models: smelt_core::ManagedModels,
     pub startup_auth_error: Option<String>,
-}
-
-fn has_managed_provider(
-    cfg: &smelt_core::config::Config,
-    provider: engine::auth::AuthProvider,
-) -> bool {
-    match provider {
-        engine::auth::AuthProvider::Codex => cfg.has_codex_provider(),
-        engine::auth::AuthProvider::Copilot => cfg.has_copilot_provider(),
-        engine::auth::AuthProvider::KimiCode => cfg.has_kimi_code_provider(),
-    }
-}
-
-fn inject_managed_models(
-    cfg: &smelt_core::config::Config,
-    available_models: &mut Vec<smelt_core::config::ResolvedModel>,
-    provider: engine::auth::AuthProvider,
-    models: &[smelt_core::config::DynamicModel],
-) {
-    match provider {
-        engine::auth::AuthProvider::Codex => cfg.inject_codex_models(available_models, models),
-        engine::auth::AuthProvider::Copilot => cfg.inject_copilot_models(available_models, models),
-        engine::auth::AuthProvider::KimiCode => {
-            cfg.inject_kimi_code_models(available_models, models)
-        }
-    }
-}
-
-fn managed_model_metadata_needs_refresh(
-    provider: engine::auth::AuthProvider,
-    models: &[smelt_core::config::DynamicModel],
-    refresh_if_empty: bool,
-) -> bool {
-    (refresh_if_empty && models.is_empty())
-        || (provider == engine::auth::AuthProvider::Codex
-            && models
-                .iter()
-                .any(|model| model.supports_fast_mode.is_none()))
-}
-
-async fn inject_managed_provider_models(
-    cfg: &smelt_core::config::Config,
-    available_models: &mut Vec<smelt_core::config::ResolvedModel>,
-    provider: engine::auth::AuthProvider,
-    http_client: &reqwest::Client,
-    refresh_if_empty: bool,
-) {
-    if !has_managed_provider(cfg, provider) {
-        return;
-    }
-
-    let cached_models = engine::auth::cached_model_info(provider);
-    let client = http_client.clone();
-    inject_managed_provider_models_with_refresh(
-        cfg,
-        available_models,
-        provider,
-        refresh_if_empty,
-        cached_models,
-        move || {
-            let client = client.clone();
-            async move { engine::auth::refresh_model_info(provider, &client).await }
-        },
-    )
-    .await;
-}
-
-async fn inject_managed_provider_models_with_refresh<F, Fut>(
-    cfg: &smelt_core::config::Config,
-    available_models: &mut Vec<smelt_core::config::ResolvedModel>,
-    provider: engine::auth::AuthProvider,
-    refresh_if_empty: bool,
-    mut models: Vec<engine::auth::AuthModelInfo>,
-    refresh: F,
-) where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Vec<engine::auth::AuthModelInfo>> + Send + 'static,
-{
-    if !has_managed_provider(cfg, provider) {
-        return;
-    }
-
-    if managed_model_metadata_needs_refresh(provider, &models, refresh_if_empty) {
-        models = refresh().await;
-    }
-    if !models.is_empty() {
-        inject_managed_models(cfg, available_models, provider, &models);
-    }
-
-    tokio::spawn(async move {
-        let _ = refresh().await;
-    });
 }
 
 /// Resolve all startup configuration through the shared pure runtime resolver.
 ///
 /// `http_client` is reused for managed-provider cache/refresh work so startup
 /// does not rebuild a rustls client for each provider.
-pub async fn resolve(
+pub fn resolve(
     args: &Args,
     cfg: smelt_core::config::Config,
-    http_client: &reqwest::Client,
     registered_modes: &[AgentMode],
 ) -> ResolvedStartup {
     let mut cfg = cfg;
-    cfg.inject_oauth_providers();
+    let mut managed_models = smelt_core::ManagedModels::load(&cfg, 0);
+    managed_models.inject_oauth_providers(&mut cfg);
+    managed_models.sync_desired(&cfg, 0);
 
     let mut settings = std::collections::HashMap::new();
     for pair in &args.set {
@@ -343,30 +253,7 @@ pub async fn resolve(
         reasoning_effort: recent.reasoning_effort,
     };
     let mut available_models = cfg.resolve_models();
-    inject_managed_provider_models(
-        &cfg,
-        &mut available_models,
-        engine::auth::AuthProvider::Codex,
-        http_client,
-        false,
-    )
-    .await;
-    inject_managed_provider_models(
-        &cfg,
-        &mut available_models,
-        engine::auth::AuthProvider::Copilot,
-        http_client,
-        false,
-    )
-    .await;
-    inject_managed_provider_models(
-        &cfg,
-        &mut available_models,
-        engine::auth::AuthProvider::KimiCode,
-        http_client,
-        false,
-    )
-    .await;
+    managed_models.inject(&cfg, &mut available_models);
 
     let mut runtime = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
         config: &cfg,
@@ -383,13 +270,12 @@ pub async fn resolve(
     });
 
     let startup_auth_error = runtime.active_model().and_then(|model| {
-        let provider_kind = smelt_provider::ProviderKind::from_config_and_url(
-            &model.provider_type,
-            &model.api_base,
-        );
-        (provider_kind != smelt_provider::ProviderKind::KimiCode)
-            .then(|| validate_api_key(&model.api_key_env).err())
-            .flatten()
+        let managed_provider = engine::auth::AuthProvider::from_provider_type(&model.provider_type);
+        if let Some(provider) = managed_provider {
+            return (!managed_models.provider(provider).authenticated)
+                .then(|| format!("not logged in to managed provider {provider:?}"));
+        }
+        validate_api_key(&model.api_key_env).err()
     });
     if startup_auth_error.is_some() {
         if let Some(active) = runtime.active_model_mut() {
@@ -402,6 +288,7 @@ pub async fn resolve(
     ResolvedStartup {
         runtime,
         startup_overrides,
+        managed_models,
         startup_auth_error,
     }
 }
@@ -409,64 +296,6 @@ pub async fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct ModelRefreshControl {
-        started: tokio::sync::oneshot::Receiver<()>,
-        release: tokio::sync::oneshot::Sender<()>,
-        completed: tokio::sync::oneshot::Receiver<()>,
-    }
-
-    #[derive(Clone)]
-    struct ControlledModelRefresh {
-        result: Vec<engine::auth::AuthModelInfo>,
-        started: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-        release: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
-        completed: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    }
-
-    fn controlled_model_refresh(
-        result: Vec<engine::auth::AuthModelInfo>,
-    ) -> (ModelRefreshControl, ControlledModelRefresh) {
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
-        (
-            ModelRefreshControl {
-                started: started_rx,
-                release: release_tx,
-                completed: completed_rx,
-            },
-            ControlledModelRefresh {
-                result,
-                started: std::sync::Arc::new(std::sync::Mutex::new(Some(started_tx))),
-                release: std::sync::Arc::new(tokio::sync::Mutex::new(Some(release_rx))),
-                completed: std::sync::Arc::new(std::sync::Mutex::new(Some(completed_tx))),
-            },
-        )
-    }
-
-    impl ModelRefreshControl {
-        async fn release(self) {
-            let _ = self.started.await;
-            let _ = self.release.send(());
-            let _ = self.completed.await;
-        }
-    }
-
-    impl ControlledModelRefresh {
-        async fn complete(self) -> Vec<engine::auth::AuthModelInfo> {
-            if let Some(tx) = self.started.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            if let Some(rx) = self.release.lock().await.take() {
-                let _ = rx.await;
-            }
-            if let Some(tx) = self.completed.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            self.result
-        }
-    }
 
     fn bootstrap(args: &[&str]) -> BootstrapArgs {
         scan_bootstrap_args(args.iter().copied())
@@ -532,85 +361,6 @@ mod tests {
         assert_eq!(
             bootstrap(&["smelt", "--", "--worktree=x"]),
             BootstrapArgs::default()
-        );
-    }
-
-    fn dynamic_model(supports_fast_mode: Option<bool>) -> smelt_core::config::DynamicModel {
-        smelt_core::config::DynamicModel {
-            id: "gpt-test".into(),
-            display_name: None,
-            context_window: None,
-            supports_reasoning: None,
-            supports_fast_mode,
-            input_modalities: None,
-        }
-    }
-
-    #[test]
-    fn legacy_codex_cache_requires_metadata_refresh() {
-        assert!(managed_model_metadata_needs_refresh(
-            engine::auth::AuthProvider::Codex,
-            &[dynamic_model(None)],
-            false,
-        ));
-        assert!(!managed_model_metadata_needs_refresh(
-            engine::auth::AuthProvider::Codex,
-            &[dynamic_model(Some(false))],
-            false,
-        ));
-        assert!(!managed_model_metadata_needs_refresh(
-            engine::auth::AuthProvider::Copilot,
-            &[dynamic_model(None)],
-            false,
-        ));
-    }
-
-    #[tokio::test]
-    #[ignore = "hot reload refactor characterization"]
-    async fn background_managed_model_refresh_updates_the_running_catalog() {
-        let cfg = smelt_core::config::Config {
-            providers: vec![smelt_core::config::ProviderConfig {
-                name: Some("codex".into()),
-                provider_type: Some("codex".into()),
-                api_base: Some("https://example.invalid".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let cached = protocol::ModelMetadata {
-            id: "cached-model".into(),
-            display_name: None,
-            context_window: None,
-            supports_reasoning: None,
-            supports_fast_mode: None,
-            input_modalities: None,
-        };
-        let refreshed = protocol::ModelMetadata {
-            id: "fresh-model".into(),
-            display_name: None,
-            context_window: Some(128_000),
-            supports_reasoning: Some(true),
-            supports_fast_mode: Some(true),
-            input_modalities: Some(vec!["text".into()]),
-        };
-        let (control, refresh) = controlled_model_refresh(vec![refreshed]);
-
-        let mut catalog = Vec::new();
-        inject_managed_provider_models_with_refresh(
-            &cfg,
-            &mut catalog,
-            engine::auth::AuthProvider::Codex,
-            false,
-            vec![cached],
-            move || refresh.clone().complete(),
-        )
-        .await;
-
-        control.release().await;
-
-        assert!(
-            catalog.iter().any(|model| model.key == "codex/fresh-model"),
-            "a completed background refresh must update the running model catalog"
         );
     }
 }

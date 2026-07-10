@@ -356,6 +356,7 @@ pub struct ResolvedModel {
     pub key: String,
     pub provider_name: String,
     pub model_name: String,
+    pub display_name: Option<String>,
     pub api_base: String,
     pub api_key_env: String,
     /// Provider type from config: "openai-compatible" (default), "openai", "codex", "anthropic-compatible", "anthropic", or "copilot".
@@ -496,6 +497,14 @@ fn is_kimi_code_provider(provider: &ProviderConfig) -> bool {
             .is_some_and(smelt_provider::is_kimi_code_api_base)
 }
 
+pub(crate) fn is_managed_provider_kind(provider: &ProviderConfig, kind: &str) -> bool {
+    match kind {
+        "codex" | "copilot" => provider.provider_type.as_deref() == Some(kind),
+        "kimi-code" => is_kimi_code_provider(provider),
+        _ => false,
+    }
+}
+
 impl Config {
     /// Flatten providers + models into a list of resolved model entries.
     pub fn resolve_models(&self) -> Vec<ResolvedModel> {
@@ -523,6 +532,7 @@ impl Config {
                     key,
                     provider_name: provider_name.clone(),
                     model_name,
+                    display_name: None,
                     api_base: api_base.clone(),
                     api_key_env: api_key_env.clone(),
                     provider_type: provider_type.clone(),
@@ -539,44 +549,58 @@ impl Config {
         provider: &ProviderConfig,
         provider_type: &str,
         models: &[DynamicModel],
-        replace_existing: bool,
     ) {
         let provider_name = provider.name.clone().unwrap_or_default();
         let api_base = provider.api_base.clone().unwrap_or_default();
-        if replace_existing {
-            resolved.retain(|m| m.provider_name != provider_name);
-        }
-        let existing: std::collections::HashSet<String> = resolved
-            .iter()
-            .filter(|m| m.provider_name == provider_name)
-            .map(|m| m.model_name.clone())
-            .collect();
+        let api_key_env = provider.api_key_env.clone().unwrap_or_default();
 
         for model in models {
-            for resolved_model in resolved
-                .iter_mut()
-                .filter(|m| m.provider_name == provider_name && model.matches_name(&m.model_name))
-            {
-                resolved_model.config.context_window = model.context_window;
-                resolved_model.config.supports_reasoning = model.supports_reasoning;
-                resolved_model.config.supports_fast_mode = model.supports_fast_mode;
-                resolved_model.config.input_modalities = model.input_modalities.clone();
+            for resolved_model in resolved.iter_mut().filter(|entry| {
+                entry.provider_name == provider_name && model.matches_name(&entry.model_name)
+            }) {
+                if resolved_model.display_name.is_none() {
+                    resolved_model.display_name = model.display_name.clone();
+                }
+                resolved_model.config.context_window = resolved_model
+                    .config
+                    .context_window
+                    .or(model.context_window);
+                resolved_model.config.max_tokens =
+                    resolved_model.config.max_tokens.or(model.max_output_tokens);
+                resolved_model.config.supports_reasoning = resolved_model
+                    .config
+                    .supports_reasoning
+                    .or(model.supports_reasoning);
+                resolved_model.config.supports_fast_mode = resolved_model
+                    .config
+                    .supports_fast_mode
+                    .or(model.supports_fast_mode);
+                if resolved_model.config.input_modalities.is_none() {
+                    resolved_model.config.input_modalities = model.input_modalities.clone();
+                }
             }
         }
 
-        for model in models {
-            if existing.contains(&model.id) {
+        let mut discovered = models.iter().collect::<Vec<_>>();
+        discovered.sort_by(|left, right| left.id.cmp(&right.id));
+        for model in discovered {
+            if resolved
+                .iter()
+                .any(|entry| entry.provider_name == provider_name && entry.model_name == model.id)
+            {
                 continue;
             }
             resolved.push(ResolvedModel {
                 key: format!("{provider_name}/{}", model.id),
                 provider_name: provider_name.clone(),
                 model_name: model.id.clone(),
+                display_name: model.display_name.clone(),
                 api_base: api_base.clone(),
-                api_key_env: String::new(),
+                api_key_env: api_key_env.clone(),
                 provider_type: provider_type.to_string(),
                 config: ModelConfig {
                     name: Some(model.id.clone()),
+                    max_tokens: model.max_output_tokens,
                     context_window: model.context_window,
                     supports_reasoning: model.supports_reasoning,
                     supports_fast_mode: model.supports_fast_mode,
@@ -596,7 +620,7 @@ impl Config {
         else {
             return;
         };
-        self.inject_dynamic_models(resolved, provider, "codex", models, true);
+        self.inject_dynamic_models(resolved, provider, "codex", models);
     }
 
     /// Returns true if the config has a codex provider.
@@ -619,7 +643,7 @@ impl Config {
         else {
             return;
         };
-        self.inject_dynamic_models(resolved, provider, "copilot", models, true);
+        self.inject_dynamic_models(resolved, provider, "copilot", models);
     }
 
     pub fn has_copilot_provider(&self) -> bool {
@@ -638,54 +662,12 @@ impl Config {
         let Some(provider) = self.providers.iter().find(|p| is_kimi_code_provider(p)) else {
             return;
         };
-        self.inject_dynamic_models(resolved, provider, "kimi-code", models, false);
+        self.inject_dynamic_models(resolved, provider, "kimi-code", models);
     }
 
     /// Returns true if the config has a Kimi Code provider.
     pub fn has_kimi_code_provider(&self) -> bool {
         self.providers.iter().any(is_kimi_code_provider)
-    }
-
-    /// Auto-inject OAuth providers (Codex, Copilot, Kimi Code) when the user has stored
-    /// credentials but no explicit config entry. This eliminates the need for
-    /// `smelt auth` to mutate the user's config file.
-    pub fn inject_oauth_providers(&mut self) {
-        if !self.has_codex_provider()
-            && engine::auth::is_logged_in(engine::auth::AuthProvider::Codex)
-        {
-            self.providers.push(ProviderConfig {
-                name: Some("codex".to_string()),
-                provider_type: Some("codex".to_string()),
-                api_base: Some(smelt_provider::codex::CODEX_API_ENDPOINT.to_string()),
-                api_key_env: None,
-                models: vec![],
-            });
-        }
-        if !self.has_copilot_provider()
-            && engine::auth::is_logged_in(engine::auth::AuthProvider::Copilot)
-        {
-            self.providers.push(ProviderConfig {
-                name: Some("copilot".to_string()),
-                provider_type: Some("copilot".to_string()),
-                api_base: Some(smelt_provider::copilot::DEFAULT_COPILOT_API_BASE.to_string()),
-                api_key_env: None,
-                models: vec![],
-            });
-        }
-        if !self.has_kimi_code_provider()
-            && engine::auth::is_logged_in(engine::auth::AuthProvider::KimiCode)
-        {
-            self.providers.push(ProviderConfig {
-                name: Some("kimi-code".to_string()),
-                provider_type: Some("kimi-code".to_string()),
-                api_base: Some(smelt_provider::kimi_code::API_BASE.to_string()),
-                api_key_env: None,
-                models: vec![ModelConfig {
-                    name: Some("kimi-for-coding".to_string()),
-                    ..ModelConfig::default()
-                }],
-            });
-        }
     }
 }
 
@@ -741,6 +723,58 @@ mod tests {
         assert_eq!(resolved[0].api_base, "https://api.z.ai/api/coding/paas/v4");
         assert_eq!(resolved[1].key, "box/Qwen3.5-122B-A10B-Q4_0");
         assert_eq!(resolved[1].api_base, "https://llm.box.home.arpa");
+    }
+
+    #[test]
+    fn dynamic_metadata_preserves_aliases_and_fills_only_missing_fields() {
+        let cfg = Config {
+            providers: vec![ProviderConfig {
+                name: Some("copilot".into()),
+                provider_type: Some("copilot".into()),
+                api_base: Some("https://copilot.example".into()),
+                api_key_env: Some("COPILOT_KEY".into()),
+                models: vec![ModelConfig {
+                    name: Some("friendly-alias".into()),
+                    context_window: Some(8_192),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut resolved = cfg.resolve_models();
+        cfg.inject_copilot_models(
+            &mut resolved,
+            &[
+                DynamicModel {
+                    id: "z-model".into(),
+                    display_name: Some("Zed".into()),
+                    context_window: Some(64_000),
+                    max_output_tokens: Some(4_096),
+                    supports_reasoning: Some(true),
+                    supports_fast_mode: Some(true),
+                    input_modalities: Some(vec!["text".into()]),
+                },
+                DynamicModel {
+                    id: "canonical".into(),
+                    display_name: Some("friendly-alias".into()),
+                    context_window: Some(128_000),
+                    max_output_tokens: Some(8_192),
+                    supports_reasoning: Some(true),
+                    supports_fast_mode: Some(true),
+                    input_modalities: Some(vec!["text".into(), "image".into()]),
+                },
+            ],
+        );
+
+        assert_eq!(resolved[0].key, "copilot/friendly-alias");
+        assert_eq!(resolved[0].config.context_window, Some(8_192));
+        assert_eq!(resolved[0].config.max_tokens, Some(8_192));
+        assert_eq!(resolved[0].display_name.as_deref(), Some("friendly-alias"));
+        assert_eq!(resolved[1].key, "copilot/canonical");
+        assert_eq!(resolved[2].key, "copilot/z-model");
+        assert!(resolved[1..]
+            .iter()
+            .all(|model| model.api_key_env == "COPILOT_KEY"));
     }
 
     #[test]

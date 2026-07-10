@@ -41,6 +41,7 @@ impl From<CodexModel> for protocol::ModelMetadata {
             id: model.slug,
             display_name: Some(model.display_name),
             context_window: model.context_window,
+            max_output_tokens: None,
             supports_reasoning: None,
             supports_fast_mode: model.supports_fast_mode,
             input_modalities: None,

@@ -63,6 +63,7 @@ impl From<KimiCodeModelInfo> for protocol::ModelMetadata {
             id: model.id,
             display_name: model.display_name,
             context_window: model.context_length,
+            max_output_tokens: None,
             supports_reasoning: model.supports_reasoning,
             supports_fast_mode: None,
             input_modalities: Some(input_modalities),

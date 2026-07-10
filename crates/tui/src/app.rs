@@ -15,6 +15,7 @@ pub(crate) mod history;
 pub(crate) mod host_dispatch;
 pub(crate) mod lua_bridge;
 pub(crate) mod lua_handlers;
+pub(crate) mod managed_models;
 pub(crate) mod mouse;
 pub(crate) mod pane_focus;
 pub(crate) mod queue;
@@ -105,7 +106,11 @@ impl SessionPersistence {
 
 pub struct TuiAppOptions {
     pub startup_auth_error: Option<String>,
-    pub app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+    pub app_events: Option<(
+        tokio::sync::mpsc::UnboundedSender<AppEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    )>,
+    pub managed_models: Option<smelt_core::ManagedModels>,
     pub session_persistence: SessionPersistence,
 }
 
@@ -113,7 +118,8 @@ impl Default for TuiAppOptions {
     fn default() -> Self {
         Self {
             startup_auth_error: None,
-            app_event_rx: None,
+            app_events: None,
+            managed_models: None,
             session_persistence: SessionPersistence::persistent(),
         }
     }
@@ -195,7 +201,11 @@ pub struct TuiApp {
     pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
     process_completion_rx:
         tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
+    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+    pub(crate) managed_models: smelt_core::ManagedModels,
+    next_managed_auth_check: Instant,
+    managed_auth_check_in_flight: bool,
     pub(crate) context_tokens_updated_this_turn: bool,
     /// Agent mode that is known to be in effect for the active turn/request.
     pub(crate) applied_agent_mode: protocol::AgentMode,
@@ -304,6 +314,22 @@ pub(crate) struct PromptResizeClick {
 
 #[derive(Debug)]
 pub enum AppEvent {
+    ManagedModelsRefreshCompleted {
+        token: smelt_core::RefreshToken,
+        outcome: engine::auth::ManagedModelsRefreshOutcome,
+    },
+    ManagedModelsRetry {
+        provider: engine::auth::AuthProvider,
+        auth_revision: u64,
+        desired_revision: u64,
+    },
+    ManagedAuthChecked {
+        snapshots: Vec<(
+            engine::auth::AuthProvider,
+            Option<u64>,
+            Vec<protocol::ModelMetadata>,
+        )>,
+    },
     ShutdownSignal,
 }
 
@@ -1267,9 +1293,17 @@ impl TuiApp {
         let host_rx = engine.take_host_rx();
         let TuiAppOptions {
             startup_auth_error,
-            app_event_rx,
+            app_events,
+            managed_models,
             session_persistence,
         } = options;
+        let (app_event_tx, app_event_rx) = app_events
+            .map(|(tx, rx)| (tx, Some(rx)))
+            .unwrap_or_else(|| {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                (tx, Some(rx))
+            });
+        let managed_models = managed_models.unwrap_or_else(smelt_core::ManagedModels::empty);
         let input = PromptState::new();
         let vim_enabled = config.settings.vim;
 
@@ -1413,6 +1447,7 @@ impl TuiApp {
         resume_preview_cache.set_inline_options(inline_options);
 
         let working_clock = Arc::clone(&clock);
+        let next_managed_auth_check = clock.instant_now() + Duration::from_secs(2);
         let initial_agent_mode = runtime_state.mode.clone();
         let initial_reasoning_effort = runtime_state.reasoning_effort;
         let auto_reload_start_pending = runtime_state.settings.auto_reload;
@@ -1484,7 +1519,11 @@ impl TuiApp {
             pending_turn_meta: None,
             pending_history_appends: Vec::new(),
             process_completion_rx,
+            app_event_tx,
             app_event_rx,
+            managed_models,
+            next_managed_auth_check,
+            managed_auth_check_in_flight: false,
             context_tokens_updated_this_turn: false,
             applied_agent_mode: initial_agent_mode,
             applied_reasoning_effort: initial_reasoning_effort,
@@ -2254,6 +2293,17 @@ impl TuiApp {
 
     pub(crate) fn handle_app_event(&mut self, event: AppEvent) {
         match event {
+            AppEvent::ManagedModelsRefreshCompleted { token, outcome } => {
+                self.handle_managed_models_refresh(token, outcome)
+            }
+            AppEvent::ManagedModelsRetry {
+                provider,
+                auth_revision,
+                desired_revision,
+            } => self.handle_managed_models_retry(provider, auth_revision, desired_revision),
+            AppEvent::ManagedAuthChecked { snapshots } => {
+                self.handle_managed_auth_checked(snapshots)
+            }
             AppEvent::ShutdownSignal => self.pending_quit = true,
         }
     }
@@ -2559,7 +2609,7 @@ impl TuiApp {
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::unbounded_channel::<ContextWindowUpdate>();
-        self.http_client = Some(http_client);
+        self.install_http_client(http_client);
         self.context_window_tx = Some(ctx_tx);
         self.refresh_context_window();
         crate::theme::detect_background(self.ui.theme_mut());

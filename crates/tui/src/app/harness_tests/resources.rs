@@ -1,5 +1,29 @@
 use super::*;
 
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        unsafe { std::env::set_var(name, value) };
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+}
+
 #[test]
 fn builds_a_fresh_test_app() {
     let app = TestApp::builder().build();
@@ -115,6 +139,7 @@ fn model_switch_marks_missing_credentials_unavailable() {
             key: "missing/credentials".into(),
             provider_name: "missing".into(),
             model_name: "credentials".into(),
+            display_name: None,
             api_base: "https://example.invalid/v1".into(),
             api_key_env: "SMELT_TEST_INTENTIONALLY_MISSING_MODEL_KEY_7F31A9".into(),
             provider_type: "openai-compatible".into(),
@@ -318,6 +343,7 @@ fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
             key: "other/switched".into(),
             provider_name: "other".into(),
             model_name: "switched".into(),
+            display_name: None,
             api_base: "https://switch.example/v1".into(),
             api_key_env: String::new(),
             provider_type: "anthropic".into(),
@@ -371,6 +397,7 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
         key: "other/target-model".into(),
         provider_name: "other".into(),
         model_name: "target-model".into(),
+        display_name: None,
         api_base: "https://other.example/v1".into(),
         api_key_env: String::new(),
         provider_type: "anthropic-compatible".into(),
@@ -533,6 +560,165 @@ fn request_settings_changes_only_affect_requests_created_after_reconciliation() 
     assert!(after.redact_secrets);
     assert!(after.cache_ttl_long);
     assert_eq!(after.request_audit, protocol::RequestAuditMode::Full);
+}
+
+#[tokio::test]
+async fn installing_the_runtime_http_client_starts_managed_refreshes() {
+    let environment_guard = test_environment_guard();
+    let _tokens = EnvVarGuard::set(
+        "SMELT_CODEX_TOKENS",
+        r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at":9999999999,"account_id":"test-account","last_refresh":0}"#,
+    );
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    assert!(app.run_lua(
+        r#"
+        smelt.provider.register("codex", {
+            type = "codex",
+            api_base = "https://example.invalid",
+            models = {},
+        })
+        "#,
+    ));
+    app.app.reconcile_committed_lua_runtime().unwrap();
+    app.app.handle_managed_auth_checked(vec![(
+        engine::auth::AuthProvider::Codex,
+        engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
+        Vec::new(),
+    )]);
+
+    app.app.install_http_client(engine::HttpClient::new());
+
+    assert_eq!(
+        app.app
+            .managed_models
+            .provider(engine::auth::AuthProvider::Codex)
+            .status,
+        smelt_core::ManagedModelsStatus::Refreshing
+    );
+}
+
+#[test]
+fn managed_model_refresh_event_updates_the_running_catalog() {
+    let environment_guard = test_environment_guard();
+    let _tokens = EnvVarGuard::set(
+        "SMELT_CODEX_TOKENS",
+        r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at":9999999999,"account_id":"test-account","last_refresh":0}"#,
+    );
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    assert!(app.run_lua(
+        r#"
+        smelt.provider.register("codex", {
+            type = "codex",
+            api_base = "https://example.invalid",
+            models = {},
+        })
+        "#,
+    ));
+    app.app.reconcile_committed_lua_runtime().unwrap();
+    app.app.handle_managed_auth_checked(vec![(
+        engine::auth::AuthProvider::Codex,
+        engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
+        Vec::new(),
+    )]);
+    app.app.core.config.model_selection = smelt_core::ModelSelectionState {
+        requested_key: Some("codex/fresh-model".into()),
+        requested_by: smelt_core::ModelSelectionSource::Session,
+        active: None,
+    };
+    let token = app
+        .app
+        .managed_models
+        .begin_refreshes()
+        .pop()
+        .expect("codex refresh token");
+
+    app.app
+        .handle_app_event(crate::app::AppEvent::ManagedModelsRefreshCompleted {
+            token,
+            outcome: engine::auth::ManagedModelsRefreshOutcome::Fresh {
+                models: vec![protocol::ModelMetadata {
+                    id: "fresh-model".into(),
+                    display_name: Some("Fresh Model".into()),
+                    context_window: Some(128_000),
+                    max_output_tokens: Some(8_192),
+                    supports_reasoning: Some(true),
+                    supports_fast_mode: Some(true),
+                    input_modalities: Some(vec!["text".into()]),
+                }],
+                cache_warning: None,
+            },
+        });
+
+    let model = app
+        .app
+        .core
+        .config
+        .available_models
+        .iter()
+        .find(|model| model.key == "codex/fresh-model")
+        .expect("refresh should update the live picker catalog");
+    assert_eq!(model.display_name.as_deref(), Some("Fresh Model"));
+    assert_eq!(model.config.max_tokens, Some(8_192));
+    let active = app
+        .app
+        .core
+        .config
+        .active_model()
+        .expect("pending selection");
+    assert_eq!(active.key, "codex/fresh-model");
+    assert_eq!(active.config.context_window, Some(128_000));
+    assert_eq!(active.config.supports_reasoning, Some(true));
+    assert!(app.run_lua(
+        r#"
+        local status = smelt.model.status()
+        assert(status.providers.codex.authenticated == true)
+        assert(status.providers.codex.status == "fresh")
+        "#,
+    ));
+
+    app.app.handle_managed_auth_checked(vec![(
+        engine::auth::AuthProvider::Codex,
+        None,
+        Vec::new(),
+    )]);
+    assert!(app
+        .app
+        .core
+        .config
+        .available_models
+        .iter()
+        .all(|model| model.key != "codex/fresh-model"));
+    assert!(app.run_lua(
+        r#"
+        local status = smelt.model.status()
+        assert(status.providers.codex.authenticated == false)
+        assert(status.providers.codex.status == "unauthenticated")
+        assert(status.availability == "unavailable")
+        assert(status.reason == "missing_credentials")
+        "#,
+    ));
+
+    app.app.handle_managed_auth_checked(vec![(
+        engine::auth::AuthProvider::Codex,
+        engine::auth::credential_fingerprint(engine::auth::AuthProvider::Codex),
+        vec![protocol::ModelMetadata {
+            id: "fresh-model".into(),
+            display_name: Some("Fresh Model".into()),
+            context_window: Some(128_000),
+            max_output_tokens: Some(8_192),
+            supports_reasoning: Some(true),
+            supports_fast_mode: Some(true),
+            input_modalities: Some(vec!["text".into()]),
+        }],
+    )]);
+    assert_eq!(
+        app.app
+            .core
+            .config
+            .active_model()
+            .map(|model| model.key.as_str()),
+        Some("codex/fresh-model")
+    );
 }
 
 #[test]

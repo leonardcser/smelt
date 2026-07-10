@@ -55,7 +55,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "list",
-        "Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.",
+        "Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
@@ -64,6 +64,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     let entry = lua.create_table()?;
                     entry.set("key", m.key.clone())?;
                     entry.set("name", m.model_name.clone())?;
+                    entry.set("display_name", m.display_name.clone())?;
                     entry.set("provider", m.provider_name.clone())?;
                     entry.set("api_base", m.api_base.clone())?;
                     entry.set("provider_type", m.provider_type.clone())?;
@@ -324,11 +325,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "status",
-        "Return `{ current, requested, availability, reason? }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings.",
+        "Return `{ current, requested, availability, reason?, providers }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings. `providers` reports each managed provider's authentication and refresh status without exposing credential identity.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some((current, requested, availability, reason)) =
+            if let Some((current, requested, availability, reason, providers)) =
                 crate::lua::try_with_app(|app| {
                     let selection = &app.core.config.model_selection;
                     let current = selection.active.as_ref().map(|model| model.key.clone());
@@ -345,13 +346,36 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                             None if requested.is_some() => ("pending", None),
                             None => ("none", None),
                         };
-                    (current, requested, availability, reason)
+                    let providers = smelt_core::ManagedModels::provider_kinds()
+                        .into_iter()
+                        .map(|provider| {
+                            let state = app.managed_models.provider(provider);
+                            let name = provider.provider_type().replace('-', "_");
+                            let status = state.status.as_str();
+                            (
+                                name,
+                                state.authenticated,
+                                status,
+                                state.last_error.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    (current, requested, availability, reason, providers)
                 })
             {
                 out.set("current", current)?;
                 out.set("requested", requested)?;
                 out.set("availability", availability)?;
                 out.set("reason", reason)?;
+                let provider_status = lua.create_table()?;
+                for (name, authenticated, status, error) in providers {
+                    let row = lua.create_table()?;
+                    row.set("authenticated", authenticated)?;
+                    row.set("status", status)?;
+                    row.set("error", error)?;
+                    provider_status.set(name, row)?;
+                }
+                out.set("providers", provider_status)?;
             } else {
                 out.set("availability", "none")?;
             }

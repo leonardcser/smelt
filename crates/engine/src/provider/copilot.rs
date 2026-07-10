@@ -26,7 +26,6 @@ fn cred_store() -> CredStore {
 struct CopilotAuthEnv {
     token_store: CredStore,
     config: CopilotAuthConfig,
-    models_cache_path: PathBuf,
 }
 
 impl CopilotAuthEnv {
@@ -34,7 +33,6 @@ impl CopilotAuthEnv {
         Self {
             token_store: cred_store(),
             config: CopilotAuthConfig::production(unix_now),
-            models_cache_path: cache_path(),
         }
     }
 }
@@ -85,7 +83,13 @@ pub(crate) async fn device_code_login(
         };
     if !models.is_empty() {
         (callbacks.on_progress)(&format!("Fetched {} Copilot models", models.len()));
-        save_models_cache_to(&cache_path(), &models);
+        if let Err(error) = save_models_cache_to(&cache_path(), &models) {
+            log::entry(
+                log::Level::Warn,
+                "copilot_models_cache_write_failed",
+                &serde_json::json!({ "error": error }),
+            );
+        }
     }
 
     Ok(tokens)
@@ -153,32 +157,27 @@ fn load_cached_models_from(path: &Path) -> Vec<CopilotModel> {
         .collect()
 }
 
-fn save_models_cache_to(path: &Path, models: &[CopilotModel]) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, serde_json::to_string(models).unwrap_or_default());
+fn save_models_cache_to(path: &Path, models: &[CopilotModel]) -> Result<(), String> {
+    let json = serde_json::to_vec(models).map_err(|error| error.to_string())?;
+    crate::paths::write_atomic(path, &json).map_err(|error| error.to_string())
 }
 
-pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CopilotModel> {
-    refresh_models_cache_with_env(client, &CopilotAuthEnv::production()).await
+pub(crate) fn save_models_cache(models: &[CopilotModel]) -> Result<(), String> {
+    save_models_cache_to(&cache_path(), models)
 }
 
-async fn refresh_models_cache_with_env(
+pub(crate) async fn fetch_models_fresh(
+    client: &reqwest::Client,
+) -> Result<Vec<CopilotModel>, String> {
+    fetch_models_fresh_with_env(client, &CopilotAuthEnv::production()).await
+}
+
+async fn fetch_models_fresh_with_env(
     client: &reqwest::Client,
     env: &CopilotAuthEnv,
-) -> Vec<CopilotModel> {
-    let Ok(tokens) = ensure_access_token_full_with_env(client, env).await else {
-        return Vec::new();
-    };
-    let models =
-        match copilot::fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
-        {
-            Ok(m) => m,
-            Err(_) => return Vec::new(),
-        };
-    save_models_cache_to(&env.models_cache_path, &models);
-    models
+) -> Result<Vec<CopilotModel>, String> {
+    let tokens = ensure_access_token_full_with_env(client, env).await?;
+    copilot::fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
 }
 
 pub(crate) fn cached_model(model: &str) -> Option<CopilotModel> {
@@ -344,7 +343,6 @@ mod tests {
                 copilot_token_url: token_url,
                 now: fixed_now,
             },
-            models_cache_path: std::path::PathBuf::from("unused-model-cache.json"),
         }
     }
 

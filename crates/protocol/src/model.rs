@@ -129,6 +129,8 @@ pub struct ModelMetadata {
     pub id: String,
     pub display_name: Option<String>,
     pub context_window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_output_tokens: Option<u32>,
     pub supports_reasoning: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub supports_fast_mode: Option<bool>,

@@ -120,37 +120,17 @@ pub(crate) fn load_cached_models() -> Vec<CodexModel> {
     serde_json::from_str::<Vec<CodexModel>>(&data).unwrap_or_default()
 }
 
-fn save_models_cache(models: &[CodexModel]) {
+pub(crate) fn save_models_cache(models: &[CodexModel]) -> Result<(), String> {
     let cache_path = crate::paths::cache_dir().join("codex_models.json");
-    if let Some(parent) = cache_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(
-        &cache_path,
-        serde_json::to_string(models).unwrap_or_default(),
-    );
+    let json = serde_json::to_vec(models).map_err(|error| error.to_string())?;
+    crate::paths::write_atomic(&cache_path, &json).map_err(|error| error.to_string())
 }
 
-pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CodexModel> {
-    let (access_token, account_id) = match ensure_access_token(client).await {
-        Ok(tokens) => tokens,
-        Err(_) => return load_cached_models(),
-    };
-    let models =
-        match smelt_provider::codex::fetch_models(client, &access_token, account_id.as_deref())
-            .await
-        {
-            Ok(m) => m,
-            Err(_) => return load_cached_models(),
-        };
-    if models.is_empty() {
-        // The server can return a 200 with an empty list during outages or
-        // account transitions. Keep the last known-good cache rather than
-        // wiping the model picker.
-        return load_cached_models();
-    }
-    save_models_cache(&models);
-    models
+pub(crate) async fn fetch_models_fresh(
+    client: &reqwest::Client,
+) -> Result<Vec<CodexModel>, String> {
+    let (access_token, account_id) = ensure_access_token(client).await?;
+    smelt_provider::codex::fetch_models(client, &access_token, account_id.as_deref()).await
 }
 
 /// Device-code flow for headless environments.

@@ -913,10 +913,11 @@ async fn async_main() {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let s = startup::resolve(&args, lua_cfg, &startup_http_client, &lua_modes).await;
+    let s = startup::resolve(&args, lua_cfg, &lua_modes);
     let startup::ResolvedStartup {
         runtime,
         startup_overrides,
+        managed_models,
         mut startup_auth_error,
     } = s;
 
@@ -1169,7 +1170,8 @@ async fn async_main() {
             Arc::clone(&env),
             tui::app::TuiAppOptions {
                 startup_auth_error: startup_auth_error.take(),
-                app_event_rx: Some(app_event_rx),
+                app_events: Some((app_event_tx, app_event_rx)),
+                managed_models: Some(managed_models),
                 session_persistence,
             },
         );

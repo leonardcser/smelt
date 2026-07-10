@@ -1,3 +1,4 @@
+use crate::log;
 use crate::paths::{cache_dir, state_dir};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -64,7 +65,7 @@ fn save_tokens_to(tokens: &KimiCodeTokens, store: &CredStore) -> Result<(), Stri
     store.save(&json)
 }
 
-fn load_tokens() -> Option<KimiCodeTokens> {
+pub(crate) fn load_tokens() -> Option<KimiCodeTokens> {
     load_tokens_from(&cred_store())
 }
 
@@ -207,7 +208,13 @@ async fn login_with_env(
     let outcome = kimi_protocol::login(client, &progress, &env.protocol).await?;
     save_tokens_to(&outcome.tokens, &env.token_store)?;
     if !outcome.models.is_empty() {
-        save_models_cache_to(&env.models_cache_path, &outcome.models);
+        if let Err(error) = save_models_cache_to(&env.models_cache_path, &outcome.models) {
+            log::entry(
+                log::Level::Warn,
+                "kimi_code_models_cache_write_failed",
+                &serde_json::json!({ "error": error }),
+            );
+        }
     }
     Ok(outcome.tokens)
 }
@@ -308,29 +315,38 @@ pub fn load_cached_models() -> Vec<String> {
         .collect()
 }
 
-fn save_models_cache_to(cache_path: &Path, models: &[KimiCodeModelInfo]) {
-    if let Some(parent) = cache_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+fn save_models_cache_to(cache_path: &Path, models: &[KimiCodeModelInfo]) -> Result<(), String> {
     let cache = KimiCodeModelsCache::new(models.to_vec());
-    let _ = std::fs::write(
-        cache_path,
-        serde_json::to_string_pretty(&cache).unwrap_or_default(),
-    );
+    let json = serde_json::to_vec_pretty(&cache).map_err(|error| error.to_string())?;
+    crate::paths::write_atomic(cache_path, &json).map_err(|error| error.to_string())
 }
 
-pub async fn fetch_model_info(client: &reqwest::Client) -> Result<Vec<KimiCodeModelInfo>, String> {
-    fetch_model_info_with_env(client, &EngineKimiEnv::production()).await
+pub(crate) fn save_models_cache(models: &[KimiCodeModelInfo]) -> Result<(), String> {
+    save_models_cache_to(&models_cache_path(), models)
 }
 
-async fn fetch_model_info_with_env(
+pub(crate) async fn fetch_models_fresh(
+    client: &reqwest::Client,
+) -> Result<Vec<KimiCodeModelInfo>, String> {
+    fetch_models_fresh_with_env(client, &EngineKimiEnv::production()).await
+}
+
+async fn fetch_models_fresh_with_env(
     client: &reqwest::Client,
     env: &EngineKimiEnv,
 ) -> Result<Vec<KimiCodeModelInfo>, String> {
     let token = access_token_with_env(client, env).await?;
-    let models = kimi_protocol::fetch_models_with_token(client, &env.protocol, &token).await?;
-    if !models.is_empty() {
-        save_models_cache_to(&env.models_cache_path, &models);
+    kimi_protocol::fetch_models_with_token(client, &env.protocol, &token).await
+}
+
+pub async fn fetch_model_info(client: &reqwest::Client) -> Result<Vec<KimiCodeModelInfo>, String> {
+    let models = fetch_models_fresh(client).await?;
+    if let Err(error) = save_models_cache(&models) {
+        log::entry(
+            log::Level::Warn,
+            "kimi_code_models_cache_write_failed",
+            &serde_json::json!({ "error": error }),
+        );
     }
     Ok(models)
 }

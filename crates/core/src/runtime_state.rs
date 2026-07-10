@@ -89,6 +89,7 @@ pub enum ModelAvailability {
 pub struct ActiveModel {
     pub key: String,
     pub model_name: String,
+    pub display_name: Option<String>,
     pub api_base: String,
     pub api_key_env: String,
     pub provider_type: String,
@@ -101,6 +102,7 @@ impl ActiveModel {
         Self {
             key: model.key.clone(),
             model_name: model.model_name.clone(),
+            display_name: model.display_name.clone(),
             api_base: model.api_base.clone(),
             api_key_env: model.api_key_env.clone(),
             provider_type: model.provider_type.clone(),
@@ -338,6 +340,7 @@ fn direct_model(startup: &StartupOverrides, model_name: &str) -> Result<ActiveMo
     Ok(ActiveModel {
         key: format!("@direct/{model_name}"),
         model_name: model_name.to_string(),
+        display_name: None,
         api_base,
         api_key_env: startup.api_key_env.clone().unwrap_or_default(),
         provider_type,
@@ -531,6 +534,24 @@ fn same_context_target(left: Option<&ActiveModel>, right: Option<&ActiveModel>) 
 /// Resolve a coherent runtime snapshot without side effects.
 pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, ResolveError> {
     validate_model_overrides(&inputs.startup.model_config)?;
+    for provider_type in ["codex", "copilot", "kimi-code"] {
+        let providers = inputs
+            .config
+            .providers
+            .iter()
+            .filter(|provider| config::is_managed_provider_kind(provider, provider_type))
+            .collect::<Vec<_>>();
+        if providers.len() > 1 {
+            let names = providers
+                .iter()
+                .filter_map(|provider| provider.name.as_deref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ResolveError(format!(
+                "managed provider type '{provider_type}' must be unique; found: {names}"
+            )));
+        }
+    }
     let mut model_keys = HashSet::with_capacity(inputs.available_models.len());
     for model in inputs.available_models {
         validate_model(model)?;
@@ -1168,6 +1189,40 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.0, "duplicate resolved model key 'test/model-a'");
+    }
+
+    #[test]
+    fn runtime_rejects_duplicate_managed_provider_kinds() {
+        let config = config::Config {
+            providers: vec![
+                config::ProviderConfig {
+                    name: Some("kimi-code".into()),
+                    provider_type: Some("kimi-code".into()),
+                    ..Default::default()
+                },
+                config::ProviderConfig {
+                    name: Some("second-kimi".into()),
+                    api_base: Some(smelt_provider::kimi_code::API_BASE.into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let error = resolve_runtime(RuntimeInputs {
+            config: &config,
+            startup: &StartupOverrides::default(),
+            available_models: &[],
+            registered_modes: &[],
+            selections: &RuntimeSelections::default(),
+            previous: None,
+            headless: false,
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.0,
+            "managed provider type 'kimi-code' must be unique; found: kimi-code, second-kimi"
+        );
     }
 
     #[test]
