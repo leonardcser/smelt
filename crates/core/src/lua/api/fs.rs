@@ -338,17 +338,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 Ok(mut file) => {
                                     use std::io::Read;
                                     let mut sample = vec![0u8; 8192];
-                                    let n = file.read(&mut sample).unwrap_or(0);
-                                    sample.truncate(n);
-                                    let file_kind = if sample.starts_with(b"%PDF-") {
-                                        "pdf"
-                                    } else if engine::image::sniff_image_mime(&sample).is_some() {
-                                        "image"
-                                    } else if std::str::from_utf8(&sample).is_ok() {
-                                        "text"
-                                    } else {
-                                        "binary"
+                                    let n = match file.read(&mut sample) {
+                                        Ok(n) => n,
+                                        Err(err) => {
+                                            return serde_json::json!({ "err": err.to_string() });
+                                        }
                                     };
+                                    sample.truncate(n);
+                                    let file_kind =
+                                        classify_file_sample(&sample, meta.len() > n as u64);
                                     serde_json::json!({
                                         "is_file": true,
                                         "len": meta.len(),
@@ -679,6 +677,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
+fn classify_file_sample(sample: &[u8], has_more: bool) -> &'static str {
+    if sample.starts_with(b"%PDF-") {
+        "pdf"
+    } else if engine::image::sniff_image_mime(sample).is_some() {
+        "image"
+    } else {
+        match std::str::from_utf8(sample) {
+            Ok(_) => "text",
+            // A fixed-size sample may stop inside a valid multibyte character.
+            Err(err) if has_more && err.error_len().is_none() => "text",
+            Err(_) => "binary",
+        }
+    }
+}
+
 fn event_to_json(event: &notify::Event) -> serde_json::Value {
     use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
     let (kind, detail) = match event.kind {
@@ -858,4 +871,28 @@ fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {
         .into_iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_file_sample;
+
+    #[test]
+    fn file_sample_split_inside_utf8_character_is_text() {
+        let content = format!("{}─", "a".repeat(8191));
+        let sample = &content.as_bytes()[..8192];
+
+        assert!(std::str::from_utf8(sample).is_err());
+        assert_eq!(classify_file_sample(sample, true), "text");
+    }
+
+    #[test]
+    fn incomplete_utf8_at_end_of_file_is_binary() {
+        assert_eq!(classify_file_sample(b"text\xe2", false), "binary");
+    }
+
+    #[test]
+    fn malformed_utf8_inside_sample_is_binary() {
+        assert_eq!(classify_file_sample(b"text\xffmore", true), "binary");
+    }
 }

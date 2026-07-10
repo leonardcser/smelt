@@ -1574,6 +1574,58 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_file_tool_accepts_utf8_split_at_sample_boundary() {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let path = tmp.path().to_string_lossy().into_owned();
+        let content = format!("{}─\nvisible\n", "a".repeat(8191));
+        std::fs::write(&path, content).expect("write fixture");
+
+        let mut rt = LuaRuntime::new();
+        rt.load_autoload();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        let mut args = std::collections::HashMap::new();
+        args.insert("file_path".into(), serde_json::json!(path));
+        let result = rt.execute_tool(
+            "read_file",
+            &args,
+            11,
+            "call-read-file-utf8-boundary",
+            ToolEnv {
+                mode: protocol::AgentMode::normal(),
+                session_id: "sess",
+                session_dir: tmp.path(),
+            },
+            std::time::Instant::now(),
+        );
+        assert!(matches!(result, ToolExecResult::Pending));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut completion = None;
+        while std::time::Instant::now() < deadline && completion.is_none() {
+            rt.pump_task_events();
+            completion = rt
+                .drive_tasks(std::time::Instant::now())
+                .into_iter()
+                .find_map(|out| match out {
+                    TaskDriveOutput::ToolComplete {
+                        request_id: 11,
+                        call_id,
+                        content,
+                        is_error,
+                        ..
+                    } if call_id == "call-read-file-utf8-boundary" => Some((content, is_error)),
+                    _ => None,
+                });
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        let (content, is_error) = completion.expect("read_file completion");
+        assert!(!is_error, "{content}");
+        assert!(content.contains("   2\tvisible"), "{content}");
+    }
+
     #[test]
     fn notify_queues_for_drain() {
         let rt = LuaRuntime::new();
