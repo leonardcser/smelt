@@ -7,13 +7,13 @@ pub mod kimi_code;
 use crate::log;
 pub(crate) use auth::LoginCallbacks;
 pub use protocol::TokenUsage;
-use protocol::{Message, ReasoningEffort};
+use protocol::{Message, ModelConfig, ReasoningEffort};
 use reqwest::Client;
 #[cfg(test)]
 use smelt_provider::ParsedResponse;
 #[cfg(test)]
 use smelt_provider::{apply_response_format, sanitize_tool_call_arguments};
-use smelt_provider::{ChatProvider, ChatResponse, CopilotInitiator, ModelConfig};
+use smelt_provider::{ChatProvider, ChatResponse, CopilotInitiator};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -160,14 +160,12 @@ impl EngineProvider {
         *self.turn_state.lock().unwrap() = None;
     }
 
+    #[cfg(test)]
     pub(crate) fn api_base(&self) -> &str {
         &self.api_base
     }
 
-    pub(crate) fn provider_kind(&self) -> ProviderKind {
-        self.kind
-    }
-
+    #[cfg(test)]
     pub(crate) fn model_config(&self) -> &ModelConfig {
         &self.model_config
     }
@@ -1392,51 +1390,6 @@ mod tests {
         )
         .with_model_config(cfg);
         assert!(!p.tool_calling());
-    }
-
-    #[test]
-    fn model_config_with_overrides_threads_each_field() {
-        let cfg = ModelConfig::default().with_overrides(&protocol::ModelConfigOverrides {
-            temperature: Some(0.1),
-            top_p: Some(0.2),
-            top_k: Some(3),
-            min_p: Some(0.4),
-            repeat_penalty: Some(1.5),
-            max_tokens: Some(8192),
-            thinking_budgets: Some(protocol::ThinkingBudgets {
-                low: 1024,
-                medium: 2048,
-                high: 4096,
-                max: 8192,
-            }),
-        });
-        assert_eq!(cfg.temperature, Some(0.1));
-        assert_eq!(cfg.top_p, Some(0.2));
-        assert_eq!(cfg.top_k, Some(3));
-        assert_eq!(cfg.min_p, Some(0.4));
-        assert_eq!(cfg.repeat_penalty, Some(1.5));
-        assert_eq!(cfg.max_tokens, Some(8192));
-        let tb = cfg.thinking_budgets.unwrap();
-        assert_eq!(tb.low, 1024);
-        assert_eq!(tb.medium, 2048);
-        assert_eq!(tb.high, 4096);
-        assert_eq!(tb.max, 8192);
-    }
-
-    #[test]
-    fn model_config_with_overrides_preserves_unset_override_fields() {
-        let base = ModelConfig {
-            temperature: Some(0.5),
-            top_p: Some(0.8),
-            ..Default::default()
-        };
-        let cfg = base.with_overrides(&protocol::ModelConfigOverrides {
-            top_k: Some(42),
-            ..Default::default()
-        });
-        assert_eq!(cfg.temperature, Some(0.5));
-        assert_eq!(cfg.top_p, Some(0.8));
-        assert_eq!(cfg.top_k, Some(42));
     }
 
     // ---- context_window_from_models_entry ----

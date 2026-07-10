@@ -913,7 +913,6 @@ async fn async_main() {
         cfg,
         available_models,
         api_base,
-        api_key,
         api_key_env,
         provider_type,
         model,
@@ -1094,15 +1093,19 @@ async fn async_main() {
             Arc::clone(&permissions),
         ));
 
-    let request_audit_setting =
-        std::env::var("SMELT_REQUEST_AUDIT").unwrap_or_else(|_| settings.request_audit.clone());
-    let request_audit =
-        engine::RequestAuditMode::parse(&request_audit_setting).unwrap_or_else(|| {
-            eprintln!(
-                "warning: invalid request audit mode {request_audit_setting:?}, defaulting to summary"
-            );
-            engine::RequestAuditMode::Summary
-        });
+    let parse_request_audit = |value: &str| {
+        protocol::RequestAuditMode::parse(value).unwrap_or_else(|| {
+            eprintln!("warning: invalid request audit mode {value:?}, defaulting to summary");
+            protocol::RequestAuditMode::Summary
+        })
+    };
+    let request_audit_override = match std::env::var("SMELT_REQUEST_AUDIT") {
+        Ok(value) => Some(parse_request_audit(&value)),
+        Err(_) => {
+            parse_request_audit(&settings.request_audit);
+            None
+        }
+    };
 
     let engine_handle = engine::start(
         engine::EngineConfig {
@@ -1114,21 +1117,7 @@ async fn async_main() {
                 engine::SystemPromptBehavior::Interactive
             },
             skill_section: prompt_inputs.skill_section.clone(),
-            redact_secrets: settings.redact_secrets,
-            cache_ttl_long: settings.cache_ttl_long,
-            request_audit,
-            ..engine::EngineConfig::new(
-                engine::ApiConfig {
-                    base: api_base,
-                    key: api_key,
-                    key_env: api_key_env.clone(),
-                    provider_type,
-                    model_config: model_config.clone(),
-                },
-                model.clone(),
-                cwd.clone(),
-                Arc::clone(&clock),
-            )
+            ..engine::EngineConfig::new(cwd.clone(), Arc::clone(&clock))
         },
         dispatcher,
     );
@@ -1159,6 +1148,7 @@ async fn async_main() {
             reasoning_effort,
             reasoning_cycle,
             settings,
+            request_audit_override,
             cfg.remember.clone(),
         );
         let capabilities = engine::SystemPromptCapabilities::from_tool_calling(
@@ -1215,6 +1205,7 @@ async fn async_main() {
             reasoning_effort,
             reasoning_cycle,
             settings,
+            request_audit_override,
             remember: cfg.remember.clone(),
             context_window: None,
         };
@@ -1362,7 +1353,7 @@ fn build_headless_config(
     api_key_env: String,
     provider_type: String,
     available_models: Vec<smelt_core::config::ResolvedModel>,
-    model_config: smelt_provider::ModelConfig,
+    model_config: protocol::ModelConfig,
     cli_model_override: bool,
     cli_api_base_override: bool,
     cli_api_key_env_override: bool,
@@ -1372,6 +1363,7 @@ fn build_headless_config(
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
     settings: smelt_core::config::ResolvedSettings,
+    request_audit_override: Option<protocol::RequestAuditMode>,
     remember: smelt_core::config::RememberConfig,
 ) -> smelt_core::AppConfig {
     let mode = mode_override.unwrap_or_default();
@@ -1395,6 +1387,7 @@ fn build_headless_config(
         reasoning_effort,
         reasoning_cycle,
         settings,
+        request_audit_override,
         remember,
         context_window: None,
     }

@@ -17,6 +17,10 @@ pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
     }
 }
 
+fn validate_api_key(key_env: &str) -> Result<(), String> {
+    resolve_api_key(key_env).map(drop)
+}
+
 pub fn resolve_project_cwd<I, S>(args: I, mut cwd: std::path::PathBuf) -> std::path::PathBuf
 where
     I: IntoIterator<Item = S>,
@@ -131,7 +135,6 @@ pub struct ResolvedStartup {
     pub cfg: smelt_core::config::Config,
     pub available_models: Vec<smelt_core::config::ResolvedModel>,
     pub api_base: String,
-    pub api_key: String,
     pub api_key_env: String,
     pub provider_type: String,
     pub model: String,
@@ -356,7 +359,7 @@ pub async fn resolve(
 
     let mut startup_auth_error: Option<String> = None;
 
-    let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
+    let (api_base, api_key_env, mut provider_type, model, mut model_config) = {
         let resolved = resolve_model_reference(args, &cfg, &available_models, &recent);
 
         if let Some(r) = resolved {
@@ -367,20 +370,13 @@ pub async fn resolve(
                 .unwrap_or_else(|| r.api_key_env.clone());
             let provider_kind =
                 smelt_provider::ProviderKind::from_config_and_url(&r.provider_type, &base);
-            let key = if provider_kind == smelt_provider::ProviderKind::KimiCode {
-                String::new()
-            } else {
-                match resolve_api_key(&key_env) {
-                    Ok(key) => key,
-                    Err(err) => {
-                        startup_auth_error = Some(err);
-                        String::new()
-                    }
+            if provider_kind != smelt_provider::ProviderKind::KimiCode {
+                if let Err(err) = validate_api_key(&key_env) {
+                    startup_auth_error = Some(err);
                 }
-            };
+            }
             (
                 base,
-                key,
                 key_env,
                 r.provider_type.clone(),
                 r.model_name.clone(),
@@ -389,24 +385,17 @@ pub async fn resolve(
         } else if let Some(base) = args.api_base.clone() {
             let key_env = args.api_key_env.clone().unwrap_or_default();
             let provider_kind = smelt_provider::ProviderKind::detect_from_url(&base);
-            let key = if provider_kind == smelt_provider::ProviderKind::KimiCode {
-                String::new()
-            } else {
-                match resolve_api_key(&key_env) {
-                    Ok(key) => key,
-                    Err(err) => {
-                        startup_auth_error = Some(err);
-                        String::new()
-                    }
+            if provider_kind != smelt_provider::ProviderKind::KimiCode {
+                if let Err(err) = validate_api_key(&key_env) {
+                    startup_auth_error = Some(err);
                 }
-            };
+            }
             let Some(model) = args.model.clone() else {
                 eprintln!("error: --model is required when using --api-base without a config file");
                 std::process::exit(1);
             };
             (
                 base.clone(),
-                key,
                 key_env,
                 provider_kind.as_config_str().to_string(),
                 model,
@@ -516,7 +505,6 @@ pub async fn resolve(
         cfg,
         available_models,
         api_base,
-        api_key,
         api_key_env,
         provider_type,
         model,

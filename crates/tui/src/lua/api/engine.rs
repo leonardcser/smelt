@@ -510,14 +510,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
                     }
-                    let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
+                    let target = model_ref
+                        .and_then(|r| resolve_model_for_ask(app, &r))
+                        .unwrap_or_else(|| active_model_target(app));
+                    let request_config = app.core.config.request_runtime_config();
                     let session_id = app.core.session.id.clone();
                     let session_dir = smelt_core::session::dir_for(&app.core.session);
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
                         messages,
-                        model,
+                        target: Box::new(target),
+                        request_config,
                         response_format,
                         reasoning_effort,
                         fast_mode: false,
@@ -577,14 +581,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
                     }
-                    let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
+                    let target = model_ref
+                        .and_then(|r| resolve_model_for_ask(app, &r))
+                        .unwrap_or_else(|| active_model_target(app));
+                    let request_config = app.core.config.request_runtime_config();
                     let session_id = app.core.session.id.clone();
                     let session_dir = smelt_core::session::dir_for(&app.core.session);
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
                         messages,
-                        model,
+                        target: Box::new(target),
+                        request_config,
                         response_format,
                         reasoning_effort,
                         fast_mode: app.fast_mode_active(),
@@ -628,12 +636,12 @@ fn register_ask_callbacks(
     Ok(stream)
 }
 
-/// Resolve a Lua-provided model reference into an `AskModel` carrying api
-/// base / key / provider type. Notifies on error and returns `None`.
+/// Resolve a Lua-provided model reference into a complete dispatch target.
+/// Notifies on error and returns `None`.
 fn resolve_model_for_ask(
     app: &mut crate::app::TuiApp,
     reference: &str,
-) -> Option<protocol::AskModel> {
+) -> Option<protocol::ModelTarget> {
     let resolved =
         match smelt_core::config::resolve_model_ref(&app.core.config.available_models, reference) {
             Ok(m) => m.clone(),
@@ -645,10 +653,10 @@ fn resolve_model_for_ask(
     let api_key = app
         .resolve_api_key_for_env(&resolved.api_key_env)
         .unwrap_or_default();
-    Some(protocol::AskModel {
-        model: resolved.model_name,
-        api_base: resolved.api_base,
-        api_key,
-        provider_type: resolved.provider_type,
-    })
+    Some(resolved.target(api_key))
+}
+
+fn active_model_target(app: &mut crate::app::TuiApp) -> protocol::ModelTarget {
+    let api_key = app.resolve_api_key().unwrap_or_default();
+    app.core.config.model_target(api_key)
 }

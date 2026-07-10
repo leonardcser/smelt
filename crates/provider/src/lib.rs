@@ -35,7 +35,7 @@ pub use client::{
     ChatOptions, ChatProvider, ChatRequest, ChatRequestOptions, CopilotInitiator, ProviderClient,
     RequestAttemptInfo,
 };
-pub use config::{effective_reasoning_effort, ModelConfig};
+pub use config::effective_reasoning_effort;
 #[cfg(not(feature = "test-support"))]
 pub(crate) use endpoint::endpoint_url;
 #[cfg(feature = "test-support")]
@@ -66,6 +66,7 @@ pub use kind::{
     is_kimi_code_api_base, ApiKeyAuth, AuthKind, ProviderDescriptor, ProviderKind, WireApi,
 };
 pub use pricing::{resolve as resolve_pricing, ModelPricing, PricingSource, ResolvedPricing};
+pub(crate) use protocol::ModelConfig;
 #[cfg(not(feature = "test-support"))]
 pub(crate) use response::{
     collect_indexed_tool_calls, non_empty, non_empty_blocks, sanitize_tool_call_arguments,

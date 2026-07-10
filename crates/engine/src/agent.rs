@@ -1,19 +1,20 @@
 use crate::log;
 use crate::provider::EngineProvider;
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
-use crate::{ApiConfig, EngineConfig};
+use crate::EngineConfig;
 use protocol::Decision;
+#[cfg(test)]
+use protocol::ModelConfig;
 use protocol::{
-    AgentMode, AskModel, AssistantStep, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
-    HistoryItem, Message, ReasoningEffort, ReasoningKind, ToolInvocation, ToolOutcome, TurnMeta,
-    UiCommand,
+    AgentMode, AssistantStep, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
+    HistoryItem, Message, ModelTarget, ReasoningEffort, ReasoningKind, RequestRuntimeConfig,
+    ToolInvocation, ToolOutcome, TurnMeta, UiCommand,
 };
 use serde_json::Value;
 use smelt_provider::{
     quota_exceeded_message, sort_tools_for_cache_stability, CancellationToken, ChatOptions,
-    ChatRequestOptions, ChatResponse, FunctionSchema, ModelConfig, ProviderError,
-    ProviderStreamEvent, ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat,
-    ToolCallStreamEvent, ToolDefinition,
+    ChatRequestOptions, ChatResponse, FunctionSchema, ProviderError, ProviderStreamEvent,
+    ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat, ToolCallStreamEvent, ToolDefinition,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,7 +35,7 @@ fn dispatch_request_audit(
     ctx: crate::request_log::RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
-    mode: crate::RequestAuditMode,
+    mode: protocol::RequestAuditMode,
 ) {
     let Some((entry, payload_mode)) = crate::request_log::entry(ctx, info, pricing, mode) else {
         return;
@@ -96,15 +97,13 @@ pub(crate) async fn engine_task(
                             turn_id,
                             input,
                             mode,
-                            model,
+                            model_target,
+                            request_config,
                             reasoning_effort,
                             fast_mode,
                             history,
-                            api_base,
-                            api_key,
                             session_id,
                             session_dir,
-                            model_config_overrides,
                             permission_overrides,
                             system_prompt: tui_system_prompt,
                             tools,
@@ -123,9 +122,8 @@ pub(crate) async fn engine_task(
                         };
 
                         let provider = build_provider(
-                            &config.api, &client,
-                            api_base.as_deref(), api_key.as_deref(),
-                            model_config_overrides.as_ref(),
+                            &model_target,
+                            &client,
                             std::sync::Arc::clone(&config.clock),
                         );
                         let system_prompt = tui_system_prompt
@@ -156,7 +154,9 @@ pub(crate) async fn engine_task(
                             reasoning_effort,
                             fast_mode,
                             turn_id,
-                            model,
+                            model_target,
+                            target_revision: 0,
+                            request_config,
                             display,
                             system_prompt,
                             tools,
@@ -171,12 +171,7 @@ pub(crate) async fn engine_task(
                         };
                         turn.run(input, loaded_history.items).await;
                     }
-                    UiCommand::SetModel { model, api_base, api_key, provider_type } => {
-                        config.api.base = api_base;
-                        config.api.key = api_key;
-                        config.api.provider_type = provider_type;
-                        config.model = model;
-                    }
+                    UiCommand::SetTurnModel { .. } => {}
                     UiCommand::ReloadAgentConfig {
                         instructions,
                         skill_section,
@@ -266,23 +261,6 @@ fn load_model_history(
     Ok(LoadedModelHistory { items, coordinates })
 }
 
-/// Resolve an `AskModel` override (or the primary) into `(ApiConfig, model_name)`.
-fn resolve_ask_target(config: &EngineConfig, model: Option<AskModel>) -> (ApiConfig, String) {
-    match model {
-        Some(m) => (
-            ApiConfig {
-                base: m.api_base,
-                key: m.api_key,
-                key_env: String::new(),
-                provider_type: m.provider_type,
-                model_config: config.api.model_config.clone(),
-            },
-            m.model,
-        ),
-        None => (config.api.clone(), config.model.clone()),
-    }
-}
-
 /// One pending out-of-band LLM call. Mirrors the fields plumbed through
 /// `UiCommand::EngineAsk`; bundles them so the spawn surface stays a
 /// two-arg function (config + task) instead of an ever-growing arg list.
@@ -290,7 +268,8 @@ pub(crate) struct AskTask {
     pub id: u64,
     pub system: String,
     pub messages: Vec<protocol::Message>,
-    pub model: Option<AskModel>,
+    pub target: ModelTarget,
+    pub request_config: RequestRuntimeConfig,
     pub response_format: Option<protocol::AskResponseFormat>,
     pub reasoning_effort: ReasoningEffort,
     pub fast_mode: bool,
@@ -341,7 +320,8 @@ pub(crate) fn dispatch_background_cmd(
             id,
             system,
             messages,
-            model,
+            target,
+            request_config,
             response_format,
             reasoning_effort,
             fast_mode,
@@ -359,7 +339,8 @@ pub(crate) fn dispatch_background_cmd(
                     id,
                     system,
                     messages,
-                    model,
+                    target: *target,
+                    request_config,
                     response_format,
                     reasoning_effort,
                     fast_mode,
@@ -392,7 +373,8 @@ fn spawn_engine_ask(
         id,
         system,
         messages: supplied_messages,
-        model,
+        target,
+        request_config,
         response_format,
         reasoning_effort,
         fast_mode,
@@ -411,25 +393,27 @@ fn spawn_engine_ask(
     // field - sending MCP defs to them would waste tokens and break
     // their own cache prefix.
     let mut messages = supplied_messages;
+    if request_config.redact_secrets {
+        for message in &mut messages {
+            if matches!(message.role, protocol::Role::User | protocol::Role::Tool) {
+                if let Some(content) = &mut message.content {
+                    crate::redact::redact_content(content);
+                }
+            }
+        }
+    }
     let tools = supplied_tools;
     let mcp_defs = if tools.is_empty() {
         Vec::new()
     } else {
         dispatcher.definitions()
     };
-    let (api, model_name) = resolve_ask_target(config, model);
-    let provider = build_provider(
-        &api,
-        client,
-        None,
-        None,
-        None,
-        std::sync::Arc::clone(&config.clock),
-    );
-    let pricing = PricingContext::from_api(&api);
+    let provider = build_provider(&target, client, std::sync::Arc::clone(&config.clock));
+    let model_name = target.model.clone();
+    let pricing_target = target.clone();
     let tx = event_tx.clone();
-    let cache_ttl_long = config.cache_ttl_long;
-    let audit_mode = config.request_audit;
+    let cache_ttl_long = request_config.cache_ttl_long;
+    let audit_mode = request_config.request_audit;
     let audit_host_tx = host_tx.clone();
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
@@ -486,13 +470,13 @@ fn spawn_engine_ask(
             if stream {
                 opts.on_delta = Some(&on_delta);
             }
-            let log_pricing = pricing.clone();
+            let log_target = pricing_target.clone();
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
                 let resolved = smelt_provider::resolve_pricing(
                     info.model,
-                    &log_pricing.provider_type,
-                    &log_pricing.api_base,
-                    &log_pricing.model_config,
+                    &log_target.provider_type,
+                    &log_target.api_base,
+                    &log_target.config,
                 );
                 let ctx = crate::request_log::RequestContext {
                     request_id: ask_id,
@@ -526,7 +510,7 @@ fn spawn_engine_ask(
 
         match result {
             Ok(resp) => {
-                pricing.emit(&tx, &model_name, resp.usage);
+                send_usage(&tx, &pricing_target, resp.usage, None, true);
                 let message = protocol::Message::assistant_with_reasoning(
                     resp.content.map(protocol::Content::text),
                     resp.reasoning_content,
@@ -611,25 +595,18 @@ fn is_context_window_error(e: &ProviderError) -> bool {
 }
 
 fn build_provider(
-    api: &ApiConfig,
+    target: &ModelTarget,
     client: &reqwest::Client,
-    api_base: Option<&str>,
-    api_key: Option<&str>,
-    model_overrides: Option<&protocol::ModelConfigOverrides>,
     clock: std::sync::Arc<dyn crate::clock::Clock>,
 ) -> EngineProvider {
-    let model_config = match model_overrides {
-        Some(o) => api.model_config.clone().with_overrides(o),
-        None => api.model_config.clone(),
-    };
     EngineProvider::new(
-        api_base.unwrap_or(&api.base).to_string(),
-        api_key.unwrap_or(&api.key).to_string(),
-        &api.provider_type,
+        target.api_base.clone(),
+        target.api_key.clone(),
+        &target.provider_type,
         client.clone(),
         clock,
     )
-    .with_model_config(model_config)
+    .with_model_config(target.config.clone())
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -811,7 +788,9 @@ struct Turn<'a> {
     reasoning_effort: ReasoningEffort,
     fast_mode: bool,
     turn_id: u64,
-    model: String,
+    model_target: ModelTarget,
+    target_revision: u64,
+    request_config: RequestRuntimeConfig,
     display: Option<String>,
     system_prompt: String,
     tools: Vec<protocol::ToolDef>,
@@ -964,7 +943,7 @@ impl<'a> Turn<'a> {
 
     /// Append a user turn, redacting content first when `redact_secrets` is on.
     fn push_user(&mut self, mut content: Content, display: Option<String>) {
-        let display = if self.config.redact_secrets {
+        let display = if self.request_config.redact_secrets {
             crate::redact::redact_content(&mut content);
             display.map(|text| crate::redact::redact(&text))
         } else {
@@ -976,7 +955,7 @@ impl<'a> Turn<'a> {
 
     /// Append current-turn content that may be a synthetic internal note.
     fn push_turn_content(&mut self, mut content: Content, display: Option<String>) {
-        let display = if self.config.redact_secrets {
+        let display = if self.request_config.redact_secrets {
             crate::redact::redact_content(&mut content);
             display.map(|text| crate::redact::redact(&text))
         } else {
@@ -995,7 +974,7 @@ impl<'a> Turn<'a> {
     /// satisfy `AssistantStep`'s shape - so the on-disk and on-wire
     /// representations can never carry an orphan tool_use.
     fn push_assistant_step(&mut self, mut step: AssistantStep) {
-        if self.config.redact_secrets {
+        if self.request_config.redact_secrets {
             for inv in &mut step.invocations {
                 let redacted = crate::redact::redact(&inv.result.content);
                 if redacted != inv.result.content {
@@ -1230,22 +1209,14 @@ impl<'a> Turn<'a> {
         }
     }
 
-    fn apply_model_change(
-        &mut self,
-        model: String,
-        api_base: String,
-        api_key: String,
-        provider_type: String,
-    ) {
-        self.model = model;
-        self.provider = EngineProvider::new(
-            api_base,
-            api_key,
-            &provider_type,
-            self.http_client.clone(),
+    fn apply_model_change(&mut self, target: ModelTarget) {
+        self.provider = build_provider(
+            &target,
+            self.http_client,
             std::sync::Arc::clone(&self.config.clock),
-        )
-        .with_model_config(self.config.api.model_config.clone());
+        );
+        self.model_target = target;
+        self.target_revision = self.target_revision.wrapping_add(1);
     }
 
     async fn prepare_request_with_host(
@@ -1371,13 +1342,8 @@ impl<'a> Turn<'a> {
                 self.mode = mode;
                 true
             }
-            UiCommand::SetModel {
-                model,
-                api_base,
-                api_key,
-                provider_type,
-            } => {
-                self.apply_model_change(model, api_base, api_key, provider_type);
+            UiCommand::SetTurnModel { target } => {
+                self.apply_model_change(*target);
                 true
             }
             UiCommand::Cancel => {
@@ -1421,6 +1387,7 @@ impl<'a> Turn<'a> {
             }
             first = false;
 
+            let request_target_revision = self.target_revision;
             self.regenerate_system_prompt();
 
             // Sorted by name so the request prefix stays byte-identical
@@ -1488,6 +1455,9 @@ impl<'a> Turn<'a> {
                 }
             }
             self.drain_commands();
+            if self.target_revision != request_target_revision {
+                continue;
+            }
             if self.cancel.is_cancelled() {
                 self.emit_turn_complete(true);
                 return;
@@ -1609,10 +1579,7 @@ impl<'a> Turn<'a> {
             if resp.usage.has_any() {
                 send_usage(
                     self.event_tx,
-                    &self.config.api.provider_type,
-                    &self.config.api.base,
-                    &self.config.api.model_config,
-                    &self.model,
+                    &self.model_target,
                     resp.usage,
                     resp.tokens_per_sec,
                     false,
@@ -2274,7 +2241,7 @@ impl<'a> Turn<'a> {
                     UiCommand::SetReasoningEffort { .. }
                     | UiCommand::SetFastMode { .. }
                     | UiCommand::SetMode { .. }
-                    | UiCommand::SetModel { .. } => deferred.push(cmd),
+                    | UiCommand::SetTurnModel { .. } => deferred.push(cmd),
                     other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
                 },
                 Some((idx, result)) = futs.next(), if !futs.is_empty() => {
@@ -2434,7 +2401,7 @@ impl<'a> Turn<'a> {
 
             if log::Level::Debug.enabled() {
                 let mut preview = content[..content.floor_char_boundary(500)].to_string();
-                if self.config.redact_secrets {
+                if self.request_config.redact_secrets {
                     preview = crate::redact::redact(&preview);
                 }
                 log::entry(
@@ -2490,9 +2457,9 @@ impl<'a> Turn<'a> {
         &mut self,
         tool_defs: &[ToolDefinition],
     ) -> (Result<(ChatResponse, bool), ProviderError>, String, String) {
-        // The chat future borrows self.provider and self.model, so model
+        // The chat future borrows the provider and target model, so target
         // changes received mid-request are deferred until the future resolves.
-        let mut pending_model: Option<(String, String, String, String)> = None;
+        let mut pending_target: Option<ModelTarget> = None;
         // Speculative steer/unsteer commands received while the request is
         // in flight. Applied only if the request succeeds so the app can
         // preserve its queue on failure.
@@ -2572,16 +2539,16 @@ impl<'a> Turn<'a> {
             // Resolve pricing once so the request-log sidecar can record an
             // estimated cost alongside usage on success.
             let pricing = smelt_provider::resolve_pricing(
-                &self.model,
-                self.provider.provider_kind().as_config_str(),
-                self.provider.api_base(),
-                self.provider.model_config(),
+                &self.model_target.model,
+                &self.model_target.provider_type,
+                &self.model_target.api_base,
+                &self.model_target.config,
             );
             let session_dir = self.session_dir.clone();
             let audit_host_tx = self.host_tx.clone();
             let turn_id = self.turn_id;
             let history_len = self.history.len();
-            let audit_mode = self.config.request_audit;
+            let audit_mode = self.request_config.request_audit;
             // Convert the engine's `Vec<HistoryItem>` to the wire-format
             // `Vec<Message>` the provider speaks. Pairing is invariant-safe
             // by construction (every `AssistantStep` carries its
@@ -2607,9 +2574,10 @@ impl<'a> Turn<'a> {
                 );
             };
             let request_opts = ChatRequestOptions {
-                cache: self
-                    .provider
-                    .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
+                cache: self.provider.default_cache_config(
+                    self.request_config.cache_ttl_long,
+                    Some(&self.session_id),
+                ),
                 fast_mode: self.fast_mode,
                 ..ChatRequestOptions::default()
             };
@@ -2622,7 +2590,7 @@ impl<'a> Turn<'a> {
             let chat_future = self.provider.chat(
                 &wire_messages,
                 tool_defs,
-                &self.model,
+                &self.model_target.model,
                 self.reasoning_effort,
                 &request_opts,
                 &opts,
@@ -2650,8 +2618,8 @@ impl<'a> Turn<'a> {
                         }
                         UiCommand::SetMode { mode } => self.mode = mode,
                         UiCommand::SetFastMode { enabled } => self.fast_mode = enabled,
-                        UiCommand::SetModel { model, api_base, api_key, provider_type } => {
-                            pending_model = Some((model, api_base, api_key, provider_type));
+                        UiCommand::SetTurnModel { target } => {
+                            pending_target = Some(*target);
                         }
                         UiCommand::AppendHistoryItem { append } => {
                             deferred_appends.push(append);
@@ -2674,8 +2642,10 @@ impl<'a> Turn<'a> {
         let pt = partial_text.into_inner().unwrap_or_default();
         let pr = partial_reasoning.into_inner().unwrap_or_default();
 
-        if let Some((model, api_base, api_key, provider_type)) = pending_model {
-            self.apply_model_change(model, api_base, api_key, provider_type);
+        if let Some(target) = pending_target {
+            self.handle_turn_cmd(UiCommand::SetTurnModel {
+                target: Box::new(target),
+            });
         }
         for append in deferred_appends {
             self.queue_history_item(append);
@@ -2707,17 +2677,12 @@ impl<'a> Turn<'a> {
                 Some(UiCommand::AppendHistoryItem { append }) => {
                     self.queue_history_item(append);
                 }
-                Some(UiCommand::SetReasoningEffort { effort }) => {
-                    self.apply_reasoning_effort(effort)
+                Some(cmd @ UiCommand::SetReasoningEffort { .. })
+                | Some(cmd @ UiCommand::SetMode { .. })
+                | Some(cmd @ UiCommand::SetTurnModel { .. }) => {
+                    self.handle_turn_cmd(cmd);
                 }
-                Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetFastMode { enabled }) => self.fast_mode = enabled,
-                Some(UiCommand::SetModel {
-                    model,
-                    api_base,
-                    api_key,
-                    provider_type,
-                }) => self.apply_model_change(model, api_base, api_key, provider_type),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     self.bg_cancel.cancel();
@@ -2896,18 +2861,19 @@ fn send_reasoning_part_finished(
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 fn send_usage(
     tx: &mpsc::UnboundedSender<EngineEvent>,
-    provider_type: &str,
-    api_base: &str,
-    model_config: &ModelConfig,
-    model: &str,
+    target: &ModelTarget,
     usage: protocol::TokenUsage,
     tokens_per_sec: Option<f64>,
     background: bool,
 ) {
-    let resolved = smelt_provider::resolve_pricing(model, provider_type, api_base, model_config);
+    let resolved = smelt_provider::resolve_pricing(
+        &target.model,
+        &target.provider_type,
+        &target.api_base,
+        &target.config,
+    );
     let cost = resolved.pricing.cost(&usage);
     let _ = tx.send(EngineEvent::TokenUsage {
         usage,
@@ -2915,41 +2881,6 @@ fn send_usage(
         cost_usd: if cost > 0.0 { Some(cost) } else { None },
         background,
     });
-}
-
-#[derive(Clone)]
-struct PricingContext {
-    provider_type: String,
-    api_base: String,
-    model_config: ModelConfig,
-}
-
-impl PricingContext {
-    fn from_api(api: &crate::ApiConfig) -> Self {
-        Self {
-            provider_type: api.provider_type.clone(),
-            api_base: api.base.clone(),
-            model_config: api.model_config.clone(),
-        }
-    }
-
-    fn emit(
-        &self,
-        tx: &mpsc::UnboundedSender<EngineEvent>,
-        model: &str,
-        usage: protocol::TokenUsage,
-    ) {
-        send_usage(
-            tx,
-            &self.provider_type,
-            &self.api_base,
-            &self.model_config,
-            model,
-            usage,
-            None,
-            true,
-        );
-    }
 }
 
 #[cfg(test)]
@@ -3200,20 +3131,20 @@ mod tests {
         assert_eq!(out[2].elapsed_ms, None);
     }
 
-    fn api_cfg() -> ApiConfig {
-        ApiConfig {
-            base: "https://x/".into(),
-            key: "k".into(),
-            key_env: "K".into(),
+    fn model_target() -> ModelTarget {
+        ModelTarget {
+            model: "m".into(),
+            api_base: "https://x/".into(),
+            api_key: "k".into(),
             provider_type: "openai".into(),
-            model_config: ModelConfig::default(),
+            config: ModelConfig::default(),
         }
     }
 
     fn test_engine_config(clock: std::sync::Arc<dyn crate::clock::Clock>) -> EngineConfig {
         EngineConfig {
             system_prompt_override: Some("sys".into()),
-            ..EngineConfig::new(api_cfg(), "m", std::path::PathBuf::from("/tmp"), clock)
+            ..EngineConfig::new(std::path::PathBuf::from("/tmp"), clock)
         }
     }
 
@@ -3250,7 +3181,9 @@ mod tests {
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
             turn_id: 1,
-            model: "m".into(),
+            model_target: model_target(),
+            target_revision: 0,
+            request_config: RequestRuntimeConfig::default(),
             display: None,
             system_prompt: "sys".into(),
             tools: Vec::new(),
@@ -3324,7 +3257,8 @@ mod tests {
             turn_id: 1,
             input: protocol::StartTurnInput::note(note.clone()),
             mode: AgentMode::normal(),
-            model: "m".into(),
+            model_target: model_target(),
+            request_config: RequestRuntimeConfig::default(),
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
             history: protocol::ModelHistorySource::projected_items(
@@ -3334,11 +3268,8 @@ mod tests {
                 ],
                 protocol::ModelHistoryCoordinates::projected(1, 24),
             ),
-            api_base: None,
-            api_key: None,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp"),
-            model_config_overrides: None,
             permission_overrides: None,
             system_prompt: Some("sys".into()),
             tools: Vec::new(),
@@ -3375,88 +3306,28 @@ mod tests {
     // ---- build_provider ----
 
     #[test]
-    fn build_provider_strips_trailing_slash_from_api_base() {
-        let api = ApiConfig {
-            base: "https://x/".into(),
-            ..api_cfg()
-        };
-        let p = build_provider(
-            &api,
-            &reqwest::Client::new(),
-            None,
-            None,
-            None,
-            std::sync::Arc::new(crate::clock::RealClock),
-        );
-        assert_eq!(p.api_base(), "https://x");
-        assert_eq!(p.api_key(), "k");
-    }
-
-    #[test]
-    fn build_provider_uses_api_base_and_key_overrides_when_some() {
-        let api = ApiConfig {
-            base: "default-base".into(),
-            key: "default-key".into(),
-            ..api_cfg()
-        };
-        let p = build_provider(
-            &api,
-            &reqwest::Client::new(),
-            Some("override-base/"),
-            Some("ok"),
-            None,
-            std::sync::Arc::new(crate::clock::RealClock),
-        );
-        assert_eq!(p.api_base(), "override-base");
-        assert_eq!(p.api_key(), "ok");
-    }
-
-    #[test]
-    fn build_provider_falls_back_to_api_fields_when_overrides_none() {
-        let api = ApiConfig {
-            base: "fallback-base/".into(),
-            key: "fallback-key".into(),
-            ..api_cfg()
-        };
-        let p = build_provider(
-            &api,
-            &reqwest::Client::new(),
-            None,
-            None,
-            None,
-            std::sync::Arc::new(crate::clock::RealClock),
-        );
-        assert_eq!(p.api_base(), "fallback-base");
-        assert_eq!(p.api_key(), "fallback-key");
-    }
-
-    #[test]
-    fn build_provider_applies_model_overrides_when_some() {
-        let api = ApiConfig {
-            model_config: ModelConfig {
-                temperature: Some(0.1),
-                top_p: Some(0.2),
+    fn build_provider_uses_the_complete_target() {
+        let target = ModelTarget {
+            api_base: "https://target.example/v1/".into(),
+            api_key: "target-key".into(),
+            config: ModelConfig {
+                temperature: Some(0.9),
+                top_k: Some(7),
+                tool_calling: Some(false),
                 ..Default::default()
             },
-            ..api_cfg()
+            ..model_target()
         };
-        let overrides = protocol::ModelConfigOverrides {
-            temperature: Some(0.9),
-            top_k: Some(7),
-            ..Default::default()
-        };
-        let p = build_provider(
-            &api,
+        let provider = build_provider(
+            &target,
             &reqwest::Client::new(),
-            None,
-            None,
-            Some(&overrides),
             std::sync::Arc::new(crate::clock::RealClock),
         );
-        let cfg = p.model_config();
-        assert_eq!(cfg.temperature, Some(0.9));
-        assert_eq!(cfg.top_p, Some(0.2));
-        assert_eq!(cfg.top_k, Some(7));
+
+        assert_eq!(provider.api_base(), "https://target.example/v1");
+        assert_eq!(provider.api_key(), "target-key");
+        assert_eq!(provider.model_config(), &target.config);
+        assert!(!provider.tool_calling());
     }
 
     // ---- send_usage ----
@@ -3464,10 +3335,14 @@ mod tests {
     #[test]
     fn send_usage_emits_token_usage_event_with_cost_when_pricing_resolves() {
         let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
-        let cfg = ModelConfig {
-            input_cost: Some(5.0),
-            output_cost: Some(10.0),
-            ..Default::default()
+        let target = ModelTarget {
+            model: "model-x".into(),
+            config: ModelConfig {
+                input_cost: Some(5.0),
+                output_cost: Some(10.0),
+                ..Default::default()
+            },
+            ..model_target()
         };
         let usage = protocol::TokenUsage {
             context_tokens: Some(1_500_000),
@@ -3477,7 +3352,7 @@ mod tests {
             cache_write_tokens: None,
             reasoning_tokens: None,
         };
-        send_usage(&tx, "openai", "", &cfg, "model-x", usage, Some(50.0), false);
+        send_usage(&tx, &target, usage, Some(50.0), false);
         match rx.try_recv().unwrap() {
             EngineEvent::TokenUsage {
                 cost_usd,
@@ -3496,40 +3371,29 @@ mod tests {
     #[test]
     fn send_usage_emits_no_cost_when_pricing_zero() {
         let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
-        let cfg = ModelConfig::default();
+        let target = ModelTarget {
+            provider_type: "openai-compatible".into(),
+            config: ModelConfig::default(),
+            ..model_target()
+        };
         let usage = protocol::TokenUsage::default();
-        send_usage(
-            &tx,
-            "openai-compatible",
-            "",
-            &cfg,
-            "model",
-            usage,
-            None,
-            false,
-        );
+        send_usage(&tx, &target, usage, None, false);
         match rx.try_recv().unwrap() {
             EngineEvent::TokenUsage { cost_usd, .. } => assert!(cost_usd.is_none()),
             _ => panic!("expected TokenUsage"),
         }
     }
 
-    // ---- PricingContext ----
-
     #[test]
-    fn pricing_context_from_api_clones_provider_type_and_model_config() {
-        let api = api_cfg();
-        let pc = PricingContext::from_api(&api);
-        assert_eq!(pc.provider_type, "openai");
-        assert_eq!(pc.api_base, "https://x/");
-        assert!(pc.model_config.tool_calling.is_none());
-    }
-
-    #[test]
-    fn pricing_context_emit_sends_background_event() {
+    fn send_usage_can_mark_background_requests() {
         let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
-        let pc = PricingContext::from_api(&api_cfg());
-        pc.emit(&tx, "m", protocol::TokenUsage::default());
+        send_usage(
+            &tx,
+            &model_target(),
+            protocol::TokenUsage::default(),
+            None,
+            true,
+        );
         match rx.try_recv().unwrap() {
             EngineEvent::TokenUsage {
                 background,

@@ -356,7 +356,8 @@ impl HeadlessApp {
                 turn_id,
                 input: protocol::StartTurnInput::user(Content::text(content), None),
                 mode: self.core.config.mode.clone(),
-                model: self.core.config.model.clone(),
+                model_target: self.core.config.model_target(self.api_key()),
+                request_config: self.core.config.request_runtime_config(),
                 reasoning_effort: self.core.config.reasoning_effort,
                 fast_mode: self.core.config.supports_fast_mode()
                     && self
@@ -365,11 +366,8 @@ impl HeadlessApp {
                         .fast_mode
                         .unwrap_or(self.core.config.settings.fast_mode),
                 history: protocol::ModelHistorySource::items(history),
-                api_base: Some(self.core.config.api_base.clone()),
-                api_key: Some(self.api_key()),
                 session_id: self.core.session.id.clone(),
                 session_dir: crate::session::dir_for(&self.core.session),
-                model_config_overrides: None,
                 permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),
                 tools,
@@ -542,9 +540,9 @@ mod tests {
             api_key_env: "SMELT_TEST_KEY".into(),
             provider_type: "openai".into(),
             available_models: Vec::new(),
-            model_config: smelt_provider::ModelConfig {
+            model_config: protocol::ModelConfig {
                 tool_calling: Some(tool_calling),
-                ..smelt_provider::ModelConfig::default()
+                ..protocol::ModelConfig::default()
             },
             cli_model_override: false,
             cli_api_base_override: false,
@@ -555,6 +553,7 @@ mod tests {
             reasoning_effort: ReasoningEffort::Off,
             reasoning_cycle: vec![ReasoningEffort::Off],
             settings: config::ResolvedSettings::default(),
+            request_audit_override: None,
             remember: config::RememberConfig::default(),
             context_window: None,
         }
@@ -615,6 +614,57 @@ mod tests {
             ),
             cmd_rx,
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_startup_dispatches_complete_target_and_request_config() {
+        let (engine, mut cmd_rx, event_tx) = engine::EngineHandle::for_test();
+        let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
+        let env = Arc::new(engine::env::RuntimeEnv::snapshot());
+        let mut config = app_config(false);
+        config.api_key_env.clear();
+        config.model_config.max_tokens = Some(3210);
+        config.settings.redact_secrets = true;
+        config.settings.cache_ttl_long = true;
+        let core = Core::new(
+            config,
+            engine,
+            FrontendKind::Headless,
+            Arc::new(permissions::Permissions::load()),
+            Arc::clone(&clock),
+            env,
+        );
+        let mut app = HeadlessApp::new(
+            core,
+            HeadlessSink::new(OutputFormat::Text, crate::ColorMode::Never, false),
+            "system".into(),
+            engine::SystemPromptCapabilities::from_tool_calling(false),
+            None,
+        );
+        let cancel = Arc::new(tokio::sync::Notify::new());
+
+        let assert_request = async move {
+            let command = cmd_rx.recv().await.expect("headless StartTurn");
+            let UiCommand::StartTurn(payload) = command else {
+                panic!("expected StartTurn");
+            };
+            assert_eq!(payload.model_target.model, "test-model");
+            assert_eq!(payload.model_target.api_base, "http://example.invalid");
+            assert_eq!(payload.model_target.provider_type, "openai");
+            assert_eq!(payload.model_target.config.max_tokens, Some(3210));
+            assert_eq!(payload.model_target.config.tool_calling, Some(false));
+            assert!(payload.request_config.redact_secrets);
+            assert!(payload.request_config.cache_ttl_long);
+            event_tx
+                .send(EngineEvent::TurnComplete {
+                    turn_id: 1,
+                    history: None,
+                    meta: None,
+                })
+                .unwrap();
+        };
+
+        tokio::join!(app.run_oneshot("hello".into(), cancel), assert_request);
     }
 
     #[test]

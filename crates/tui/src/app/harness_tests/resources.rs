@@ -175,6 +175,106 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
 }
 
 #[test]
+fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
+        key: "other/switched".into(),
+        provider_name: "other".into(),
+        model_name: "switched".into(),
+        api_base: "https://switch.example/v1".into(),
+        api_key_env: String::new(),
+        provider_type: "anthropic".into(),
+        config: protocol::ModelConfig {
+            context_window: Some(200_000),
+            tool_calling: Some(false),
+            ..Default::default()
+        },
+    }];
+    let _ = app.drain_engine_sends();
+
+    app.app.apply_model("other/switched", false);
+    assert!(app
+        .drain_engine_sends()
+        .into_iter()
+        .all(|cmd| !matches!(cmd, protocol::UiCommand::SetTurnModel { .. })));
+
+    app.start_turn(1);
+    app.app.apply_model("other/switched", false);
+    let command = app
+        .drain_engine_sends()
+        .into_iter()
+        .find(|cmd| matches!(cmd, protocol::UiCommand::SetTurnModel { .. }))
+        .expect("active turn model switch should notify the engine");
+    match command {
+        protocol::UiCommand::SetTurnModel { target } => {
+            assert_eq!(target.model, "switched");
+            assert_eq!(target.api_base, "https://switch.example/v1");
+            assert_eq!(target.provider_type, "anthropic");
+            assert_eq!(target.config.context_window, Some(200_000));
+            assert_eq!(target.config.tool_calling, Some(false));
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn custom_command_override_dispatches_its_complete_target_and_request_config() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.app.core.config.provider_type = "openai".into();
+    app.app.core.config.model_config = protocol::ModelConfig {
+        input_cost: Some(99.0),
+        ..Default::default()
+    };
+    app.app.core.config.settings.redact_secrets = true;
+    app.app.core.config.settings.cache_ttl_long = true;
+    app.app.core.config.available_models = vec![smelt_core::config::ResolvedModel {
+        key: "other/target-model".into(),
+        provider_name: "other".into(),
+        model_name: "target-model".into(),
+        api_base: "https://other.example/v1".into(),
+        api_key_env: String::new(),
+        provider_type: "anthropic-compatible".into(),
+        config: protocol::ModelConfig {
+            temperature: Some(0.1),
+            output_cost: Some(3.0),
+            tool_calling: Some(false),
+            ..Default::default()
+        },
+    }];
+    let _ = app.drain_engine_sends();
+
+    let turn = app.app.begin_command_request_turn(
+        "custom".into(),
+        "body".into(),
+        smelt_core::custom_commands::CommandOverrides {
+            model: Some("other/target-model".into()),
+            temperature: Some(0.8),
+            ..Default::default()
+        },
+        crate::app::CommandTurnStart::Fresh,
+    );
+    app.app.agent = Some(turn);
+
+    let payload = app
+        .drain_engine_sends()
+        .into_iter()
+        .find_map(|cmd| match cmd {
+            protocol::UiCommand::StartTurn(payload) => Some(*payload),
+            _ => None,
+        })
+        .expect("custom command should send StartTurn");
+    assert_eq!(payload.model_target.model, "target-model");
+    assert_eq!(payload.model_target.api_base, "https://other.example/v1");
+    assert_eq!(payload.model_target.provider_type, "anthropic-compatible");
+    assert_eq!(payload.model_target.config.temperature, Some(0.8));
+    assert_eq!(payload.model_target.config.output_cost, Some(3.0));
+    assert_eq!(payload.model_target.config.input_cost, None);
+    assert_eq!(payload.model_target.config.tool_calling, Some(false));
+    assert!(payload.request_config.redact_secrets);
+    assert!(payload.request_config.cache_ttl_long);
+}
+
+#[test]
 fn custom_command_turn_includes_registered_lua_tools() {
     let mut app = TestApp::builder().with_vim(false).build();
     let payload = app
@@ -188,10 +288,55 @@ fn custom_command_turn_includes_registered_lua_tools() {
 }
 
 #[test]
-fn engine_ask_probe_registers_pending_callback() {
+fn engine_ask_probe_dispatches_complete_target_and_request_config() {
     let mut app = TestApp::builder().with_vim(false).build();
+    app.app.core.config.model = "ask-model".into();
+    app.app.core.config.api_base = "https://ask.example/v1".into();
+    app.app.core.config.provider_type = "openai-compatible".into();
+    app.app.core.config.model_config = protocol::ModelConfig {
+        max_tokens: Some(1234),
+        supports_reasoning: Some(true),
+        ..Default::default()
+    };
+    app.app.core.config.settings.cache_ttl_long = true;
+    app.app.core.config.settings.request_audit = "off".into();
+    app.app.core.config.request_audit_override = Some(protocol::RequestAuditMode::Full);
+    let _ = app.drain_engine_sends();
+
     app.start_engine_ask_probe("summarize this");
     assert!(app.pending_ask_id().is_some());
+    let command = app
+        .actions()
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::EngineAsk { .. }) =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("probe should send EngineAsk");
+    match command {
+        protocol::UiCommand::EngineAsk {
+            target,
+            request_config,
+            ..
+        } => {
+            assert_eq!(target.model, "ask-model");
+            assert_eq!(target.api_base, "https://ask.example/v1");
+            assert_eq!(target.provider_type, "openai-compatible");
+            assert_eq!(target.config.max_tokens, Some(1234));
+            assert_eq!(target.config.supports_reasoning, Some(true));
+            assert!(request_config.cache_ttl_long);
+            assert_eq!(
+                request_config.request_audit,
+                protocol::RequestAuditMode::Full
+            );
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[test]

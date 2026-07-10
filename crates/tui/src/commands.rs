@@ -494,17 +494,16 @@ impl TuiApp {
         if record {
             self.update_session_persist_metadata();
         }
-        let api_key = self.resolve_api_key().unwrap_or_default();
         if record && self.core.config.remember.model {
             state::set_selected_model(resolved.key.clone());
         }
         self.warn_if_api_base_normalized();
-        self.core.engine.send(UiCommand::SetModel {
-            model: self.core.config.model.clone(),
-            api_base: self.core.config.api_base.clone(),
-            api_key,
-            provider_type: self.core.config.provider_type.clone(),
-        });
+        if self.agent.is_some() || self.dispatching_turn_id.is_some() {
+            let api_key = self.resolve_api_key().unwrap_or_default();
+            self.core.engine.send(UiCommand::SetTurnModel {
+                target: Box::new(self.core.config.model_target(api_key)),
+            });
+        }
         self.core.engine.send(UiCommand::SetFastMode {
             enabled: self.fast_mode_active(),
         });

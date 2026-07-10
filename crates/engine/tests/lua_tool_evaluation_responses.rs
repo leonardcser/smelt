@@ -6,12 +6,12 @@
 //! commands, but they can only be matched once `classify_tools` has built the
 //! full pending request-id plan for `execute_concurrent`.
 
-use engine::{ApiConfig, EngineConfig};
+use engine::EngineConfig;
 use protocol::{
-    AgentMode, Content, EngineEvent, ReasoningEffort, StartTurnPayload, ToolDef, ToolExecutionMode,
-    ToolHookFlags, ToolMetadata, UiCommand,
+    AgentMode, Content, EngineEvent, ModelConfig, ModelTarget, ReasoningEffort,
+    RequestRuntimeConfig, StartTurnPayload, ToolDef, ToolExecutionMode, ToolHookFlags,
+    ToolMetadata, UiCommand,
 };
-use smelt_provider::ModelConfig;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -20,6 +20,19 @@ use tokio::net::TcpListener;
 
 const TOOL_NAME: &str = "probe_lua_tool";
 const TOOL_COUNT: usize = 10_000;
+
+fn model_target(addr: std::net::SocketAddr) -> ModelTarget {
+    ModelTarget {
+        model: "test-model".into(),
+        api_base: format!("http://{addr}"),
+        api_key: "test-key".into(),
+        provider_type: "anthropic-compatible".into(),
+        config: ModelConfig {
+            max_tokens: Some(4096),
+            ..ModelConfig::default()
+        },
+    }
+}
 
 fn multi_tool_sse() -> String {
     let mut events = Vec::with_capacity(2 + TOOL_COUNT * 3);
@@ -195,19 +208,9 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
 
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
-        ..EngineConfig::new(
-            ApiConfig {
-                base: format!("http://{addr}"),
-                key: "test-key".into(),
-                key_env: "TEST_KEY".into(),
-                provider_type: "anthropic-compatible".into(),
-                model_config: ModelConfig::default(),
-            },
-            "test-model",
-            PathBuf::from("/tmp"),
-            Arc::new(engine::clock::RealClock),
-        )
+        ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
+    let target = model_target(addr);
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
     drop(handle.take_host_rx());
@@ -231,15 +234,13 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go"), None),
         mode: AgentMode::normal(),
-        model: "test-model".into(),
+        model_target: target,
+        request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
         history: protocol::ModelHistorySource::items(Vec::new()),
-        api_base: None,
-        api_key: None,
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
-        model_config_overrides: None,
         permission_overrides: None,
         system_prompt: Some("test system".into()),
         tools: vec![tool],
@@ -293,22 +294,9 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
 
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
-        ..EngineConfig::new(
-            ApiConfig {
-                base: format!("http://{addr}"),
-                key: "test-key".into(),
-                key_env: "TEST_KEY".into(),
-                provider_type: "anthropic-compatible".into(),
-                model_config: ModelConfig {
-                    max_tokens: Some(4096),
-                    ..ModelConfig::default()
-                },
-            },
-            "test-model",
-            PathBuf::from("/tmp"),
-            Arc::new(engine::clock::RealClock),
-        )
+        ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
+    let target = model_target(addr);
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
     drop(handle.take_host_rx());
@@ -343,15 +331,13 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 turn_id: 1,
                 input: protocol::StartTurnInput::user(Content::text("go"), None),
                 mode: AgentMode::normal(),
-                model: "test-model".into(),
+                model_target: target,
+                request_config: RequestRuntimeConfig::default(),
                 reasoning_effort: ReasoningEffort::Off,
                 fast_mode: false,
                 history: protocol::ModelHistorySource::items(Vec::new()),
-                api_base: None,
-                api_key: None,
                 session_id: "sess".into(),
                 session_dir: PathBuf::from("/tmp"),
-                model_config_overrides: None,
                 permission_overrides: Some(protocol::PermissionOverrides {
                     tools: Some(protocol::RuleSetOverride {
                         allow: vec![TOOL_NAME.into()],

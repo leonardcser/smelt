@@ -214,7 +214,7 @@ impl TestAppBuilder {
             api_key_env: String::new(),
             provider_type: String::new(),
             available_models: Vec::new(),
-            model_config: smelt_provider::ModelConfig::default(),
+            model_config: protocol::ModelConfig::default(),
             cli_model_override: false,
             cli_api_base_override: false,
             cli_api_key_env_override: false,
@@ -224,6 +224,7 @@ impl TestAppBuilder {
             reasoning_effort: ReasoningEffort::Off,
             reasoning_cycle: Vec::new(),
             settings,
+            request_audit_override: None,
             remember: smelt_core::config::RememberConfig::default(),
             context_window: None,
         };

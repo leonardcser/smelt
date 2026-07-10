@@ -14,11 +14,11 @@
 //! that property end-to-end against the real event loop with a fake
 //! LLM emitting a tool_use mid-turn.
 
-use engine::{ApiConfig, EngineConfig};
+use engine::EngineConfig;
 use protocol::{
-    AgentMode, Content, EngineEvent, HistoryItem, ReasoningEffort, StartTurnPayload, UiCommand,
+    AgentMode, Content, EngineEvent, HistoryItem, ModelConfig, ModelTarget, ReasoningEffort,
+    RequestRuntimeConfig, StartTurnPayload, UiCommand,
 };
-use smelt_provider::ModelConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,21 +116,17 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     // ── Engine ─────────────────────────────────────────────────────────
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
-        ..EngineConfig::new(
-            ApiConfig {
-                base: format!("http://{}", addr),
-                key: "test-key".into(),
-                key_env: "TEST_KEY".into(),
-                provider_type: "anthropic-compatible".into(),
-                model_config: ModelConfig {
-                    max_tokens: Some(4096),
-                    ..ModelConfig::default()
-                },
-            },
-            "test-model",
-            PathBuf::from("/tmp"),
-            Arc::new(engine::clock::RealClock),
-        )
+        ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
+    };
+    let target = ModelTarget {
+        model: "test-model".into(),
+        api_base: format!("http://{addr}"),
+        api_key: "test-key".into(),
+        provider_type: "anthropic-compatible".into(),
+        config: ModelConfig {
+            max_tokens: Some(4096),
+            ..ModelConfig::default()
+        },
     };
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
@@ -149,15 +145,13 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         turn_id: 1,
         input: protocol::StartTurnInput::user(Content::text("go"), None),
         mode: AgentMode::normal(),
-        model: "test-model".into(),
+        model_target: target,
+        request_config: RequestRuntimeConfig::default(),
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
         history: protocol::ModelHistorySource::items(Vec::new()),
-        api_base: None,
-        api_key: None,
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
-        model_config_overrides: None,
         permission_overrides: None,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),

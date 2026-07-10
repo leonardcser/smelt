@@ -21,8 +21,8 @@ pub mod usage;
 
 pub use content::{Content, ContentPart};
 pub use event::{
-    AskModel, AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex, Decision,
-    EngineAskError, EngineAskErrorKind, EngineEvent, ModelHistoryCoordinates, ModelHistoryIndex,
+    AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex, Decision, EngineAskError,
+    EngineAskErrorKind, EngineEvent, ModelHistoryCoordinates, ModelHistoryIndex,
     ModelHistorySource, ReasoningKind, StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation,
     ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };
@@ -35,7 +35,7 @@ pub use history::{
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};
-pub use model::ModelMetadata;
+pub use model::{ModelConfig, ModelMetadata, ModelTarget, RequestAuditMode, RequestRuntimeConfig};
 pub use note::{
     context_note, mode_change_note, process_status_note, CONTEXT_NOTE_PREFIX, MODE_NOTE_PREFIX,
     PROCESS_STATUS_NOTE_PREFIX,

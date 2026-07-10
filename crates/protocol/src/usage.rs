@@ -78,7 +78,7 @@ pub struct TurnMeta {
 }
 
 /// Per-level token budgets for budget-based thinking.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThinkingBudgets {
     pub low: u32,
     pub medium: u32,
@@ -100,7 +100,7 @@ impl ThinkingBudgets {
 }
 
 /// Model-parameter overrides applied to a single turn.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelConfigOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +113,8 @@ pub struct ModelConfigOverrides {
     pub min_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calling: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

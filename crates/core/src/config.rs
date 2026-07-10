@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub use smelt_provider::ModelConfig;
+pub use protocol::ModelConfig;
 
 pub fn config_dir() -> PathBuf {
     engine::config_dir()
@@ -309,6 +309,19 @@ pub struct ResolvedModel {
     /// Provider type from config: "openai-compatible" (default), "openai", "codex", "anthropic-compatible", "anthropic", or "copilot".
     pub provider_type: String,
     pub config: ModelConfig,
+}
+
+impl ResolvedModel {
+    /// Construct a dispatch-ready target after the caller resolves its key env.
+    pub fn target(&self, api_key: String) -> protocol::ModelTarget {
+        protocol::ModelTarget {
+            model: self.model_name.clone(),
+            api_base: self.api_base.clone(),
+            api_key,
+            provider_type: self.provider_type.clone(),
+            config: self.config.clone(),
+        }
+    }
 }
 
 pub type DynamicModel = protocol::ModelMetadata;

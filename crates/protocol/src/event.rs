@@ -3,8 +3,9 @@
 use crate::content::Content;
 use crate::message::{Message, ToolOutcome};
 use crate::mode::{AgentMode, ReasoningEffort};
+use crate::model::{ModelTarget, RequestRuntimeConfig};
 use crate::style::StyledLines;
-use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMeta};
+use crate::usage::{PermissionOverrides, TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,17 +17,6 @@ use std::path::PathBuf;
 pub struct AskResponseFormat {
     pub name: String,
     pub schema: serde_json::Value,
-}
-
-/// Provider connection + model identifier needed for a one-shot
-/// `EngineAsk` call. Lives on the wire so the TUI can resolve a
-/// Lua-provided model reference before dispatching.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AskModel {
-    pub model: String,
-    pub api_base: String,
-    pub api_key: String,
-    pub provider_type: String,
 }
 
 /// Classification of a `smelt.engine.ask` failure. Surfaced to Lua as
@@ -686,22 +676,18 @@ pub struct StartTurnPayload {
     pub turn_id: u64,
     pub input: StartTurnInput,
     pub mode: AgentMode,
-    pub model: String,
+    /// Complete provider/model selection resolved at the dispatch boundary.
+    pub model_target: ModelTarget,
+    /// Runtime policy snapshot that remains stable for this turn.
+    pub request_config: RequestRuntimeConfig,
     pub reasoning_effort: ReasoningEffort,
     #[serde(default)]
     pub fast_mode: bool,
     pub history: ModelHistorySource,
-    /// Override API base URL for this turn (uses engine default if None).
-    pub api_base: Option<String>,
-    /// Override API key for this turn (uses engine default if None).
-    pub api_key: Option<String>,
     /// Session ID for plan file storage.
     pub session_id: String,
     /// On-disk directory for this session (date-bucketed).
     pub session_dir: std::path::PathBuf,
-    /// Per-turn model parameter overrides (from custom commands).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub model_config_overrides: Option<ModelConfigOverrides>,
     /// Per-turn permission overrides (from custom commands or Lua).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_overrides: Option<PermissionOverrides>,
@@ -752,13 +738,9 @@ pub enum UiCommand {
     /// Toggle accelerated provider inference for subsequent requests.
     SetFastMode { enabled: bool },
 
-    /// Change the model/provider while the engine is running.
-    SetModel {
-        model: String,
-        api_base: String,
-        api_key: String,
-        provider_type: String,
-    },
+    /// Apply an explicit user-selected target to the active turn at the next
+    /// provider-request boundary. Ignored when no turn is active.
+    SetTurnModel { target: Box<ModelTarget> },
 
     /// Replace cached prompt inputs after `/reload`. Updates
     /// `EngineConfig::instructions`, `EngineConfig::skill_section`, and
@@ -775,18 +757,18 @@ pub enum UiCommand {
 
     /// One-shot LLM call initiated by Lua. The engine spawns a
     /// fire-and-forget request and returns the response as
-    /// `EngineAskResponse`. `model` overrides the primary model when
-    /// `Some`; `response_format` enforces a JSON schema when present;
-    /// `reasoning_effort` controls effort (defaults to `Off`). Overflow
-    /// handling is the caller's responsibility - context-window failures
+    /// `EngineAskResponse`. The complete target and runtime policy are
+    /// resolved by the frontend; `response_format` enforces a JSON schema
+    /// when present; `reasoning_effort` controls effort (defaults to `Off`).
+    /// Overflow handling is the caller's responsibility - context-window failures
     /// surface through `EngineAskError { kind = "context_window" }` and
     /// plugins compose retry strategy in Lua.
     EngineAsk {
         id: u64,
         system: String,
         messages: Vec<Message>,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        model: Option<AskModel>,
+        target: Box<ModelTarget>,
+        request_config: RequestRuntimeConfig,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         response_format: Option<AskResponseFormat>,
         #[serde(default)]
@@ -1028,29 +1010,106 @@ mod tests {
     // ---- StartTurnPayload optional fields ----
 
     #[test]
-    fn start_turn_payload_omits_none_overrides_on_serialize() {
+    fn start_turn_payload_round_trips_canonical_request_values() {
+        let target = ModelTarget {
+            model: "m".into(),
+            api_base: "https://example.test".into(),
+            api_key: "secret".into(),
+            provider_type: "openai".into(),
+            config: crate::ModelConfig {
+                tool_calling: Some(false),
+                input_cost: Some(1.25),
+                ..Default::default()
+            },
+        };
+        let request_config = RequestRuntimeConfig {
+            redact_secrets: true,
+            cache_ttl_long: true,
+            request_audit: crate::RequestAuditMode::Full,
+        };
         let p = StartTurnPayload {
             turn_id: 1,
             input: StartTurnInput::user(Content::text("hi"), None),
             mode: AgentMode::normal(),
-            model: "m".into(),
+            model_target: target.clone(),
+            request_config,
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
             history: ModelHistorySource::default(),
-            api_base: None,
-            api_key: None,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp"),
-            model_config_overrides: None,
             permission_overrides: None,
             system_prompt: None,
             tools: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v["input"].get("display").is_none());
-        assert!(v.get("model_config_overrides").is_none());
         assert!(v.get("permission_overrides").is_none());
         assert!(v.get("system_prompt").is_none());
         assert!(v.get("tools").is_none());
+        let decoded: StartTurnPayload = serde_json::from_value(v).unwrap();
+        assert_eq!(decoded.model_target, target);
+        assert_eq!(decoded.request_config, request_config);
+    }
+
+    #[test]
+    fn engine_ask_and_turn_model_change_round_trip_canonical_values() {
+        let target = ModelTarget {
+            model: "ask-model".into(),
+            api_base: "https://ask.example".into(),
+            api_key: "ask-secret".into(),
+            provider_type: "anthropic".into(),
+            config: crate::ModelConfig {
+                max_tokens: Some(2048),
+                supports_reasoning: Some(true),
+                ..Default::default()
+            },
+        };
+        let request_config = RequestRuntimeConfig {
+            redact_secrets: true,
+            cache_ttl_long: false,
+            request_audit: crate::RequestAuditMode::Summary,
+        };
+        let ask = UiCommand::EngineAsk {
+            id: 7,
+            system: "system".into(),
+            messages: vec![Message::user(Content::text("question"))],
+            target: Box::new(target.clone()),
+            request_config,
+            response_format: None,
+            reasoning_effort: ReasoningEffort::High,
+            fast_mode: false,
+            tools: Vec::new(),
+            session_id: "session".into(),
+            session_dir: "/tmp/session".into(),
+            stream: true,
+            visible_retries: false,
+        };
+
+        let decoded: UiCommand =
+            serde_json::from_value(serde_json::to_value(ask).unwrap()).unwrap();
+        match decoded {
+            UiCommand::EngineAsk {
+                target: decoded_target,
+                request_config: decoded_config,
+                ..
+            } => {
+                assert_eq!(*decoded_target, target);
+                assert_eq!(decoded_config, request_config);
+            }
+            other => panic!("expected EngineAsk, got {other:?}"),
+        }
+
+        let switch = UiCommand::SetTurnModel {
+            target: Box::new(target.clone()),
+        };
+        let decoded: UiCommand =
+            serde_json::from_value(serde_json::to_value(switch).unwrap()).unwrap();
+        match decoded {
+            UiCommand::SetTurnModel {
+                target: decoded_target,
+            } => assert_eq!(*decoded_target, target),
+            other => panic!("expected SetTurnModel, got {other:?}"),
+        }
     }
 }

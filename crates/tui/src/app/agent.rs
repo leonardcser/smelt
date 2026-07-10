@@ -12,11 +12,9 @@ use std::time::Duration;
 struct PreparedTurn {
     input: protocol::StartTurnInput,
     history: protocol::ModelHistorySource,
-    model: String,
+    model_target: protocol::ModelTarget,
+    request_config: protocol::RequestRuntimeConfig,
     reasoning_effort: protocol::ReasoningEffort,
-    api_base: String,
-    api_key: String,
-    model_config_overrides: Option<protocol::ModelConfigOverrides>,
     permission_overrides: Option<protocol::PermissionOverrides>,
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
     rewind_block_idx: Option<usize>,
@@ -161,14 +159,14 @@ impl TuiApp {
             };
         };
 
+        let model_target = self.core.config.model_target(api_key);
+        let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(content, None),
             history,
-            model: self.core.config.model.clone(),
+            model_target,
+            request_config,
             reasoning_effort: self.core.config.reasoning_effort,
-            api_base: self.core.config.api_base.clone(),
-            api_key,
-            model_config_overrides: None,
             permission_overrides: None,
             permissions: self.core.permissions.clone(),
             rewind_block_idx,
@@ -212,15 +210,13 @@ impl TuiApp {
                 turn_id,
                 input: turn.input,
                 mode: self.core.config.mode.clone(),
-                model: turn.model,
+                model_target: turn.model_target,
+                request_config: turn.request_config,
                 reasoning_effort: turn.reasoning_effort,
                 fast_mode: self.fast_mode_active(),
                 history: turn.history,
-                api_base: Some(turn.api_base),
-                api_key: Some(turn.api_key),
                 session_id: self.core.session.id.clone(),
                 session_dir: self.current_session_dir(),
-                model_config_overrides: turn.model_config_overrides,
                 permission_overrides: turn.permission_overrides,
                 system_prompt: Some(system_prompt),
                 tools,
@@ -265,14 +261,14 @@ impl TuiApp {
                 };
             }
         };
+        let model_target = self.core.config.model_target(api_key);
+        let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::note(history_note),
             history,
-            model: self.core.config.model.clone(),
+            model_target,
+            request_config,
             reasoning_effort: self.core.config.reasoning_effort,
-            api_base: self.core.config.api_base.clone(),
-            api_key,
-            model_config_overrides: None,
             permission_overrides: None,
             permissions: self.core.permissions.clone(),
             rewind_block_idx: None,
@@ -363,7 +359,7 @@ impl TuiApp {
         };
         self.publish_turn_input(submitted);
 
-        let (model, api_base, api_key) = {
+        let mut model_target = {
             let target_model = overrides.model.as_deref();
             let target_provider = overrides.provider.as_deref();
             let resolved = match (target_model, target_provider) {
@@ -373,7 +369,7 @@ impl TuiApp {
                         reference,
                         provider,
                     ) {
-                        Ok(model) => Some(model),
+                        Ok(model) => Some(model.clone()),
                         Err(err) => {
                             self.notify_error_sticky(err.to_string());
                             None
@@ -385,7 +381,7 @@ impl TuiApp {
                         &self.core.config.available_models,
                         provider,
                     ) {
-                        Ok(model) => Some(model),
+                        Ok(model) => Some(model.clone()),
                         Err(err) => {
                             self.notify_error_sticky(err.to_string());
                             None
@@ -393,26 +389,18 @@ impl TuiApp {
                     }
                 }
                 (None, None) => None,
-            }
-            .map(|resolved| {
-                (
-                    resolved.model_name.clone(),
-                    resolved.api_base.clone(),
-                    resolved.api_key_env.clone(),
-                )
-            });
+            };
             match resolved {
-                Some((model_name, api_base, api_key_env)) => (
-                    model_name,
-                    api_base,
-                    self.resolve_api_key_for_env(&api_key_env)
-                        .unwrap_or_default(),
-                ),
-                None => (
-                    self.core.config.model.clone(),
-                    self.core.config.api_base.clone(),
-                    self.resolve_api_key().unwrap_or_default(),
-                ),
+                Some(resolved) => {
+                    let api_key = self
+                        .resolve_api_key_for_env(&resolved.api_key_env)
+                        .unwrap_or_default();
+                    resolved.target(api_key)
+                }
+                None => {
+                    let api_key = self.resolve_api_key().unwrap_or_default();
+                    self.core.config.model_target(api_key)
+                }
             }
         };
 
@@ -441,6 +429,7 @@ impl TuiApp {
                     top_k: o.top_k,
                     min_p: o.min_p,
                     repeat_penalty: o.repeat_penalty,
+                    tool_calling: None,
                     max_tokens: None,
                     thinking_budgets: None,
                 })
@@ -448,6 +437,10 @@ impl TuiApp {
                 None
             }
         };
+
+        if let Some(ref request_overrides) = model_config_overrides {
+            model_target.config = model_target.config.with_overrides(request_overrides);
+        }
 
         let permission_overrides = {
             let o = &overrides;
@@ -480,14 +473,13 @@ impl TuiApp {
             self.working.continue_from_last(TurnPhase::Working);
         }
 
+        let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
             history,
-            model,
+            model_target,
+            request_config,
             reasoning_effort: reasoning,
-            api_base,
-            api_key,
-            model_config_overrides,
             permission_overrides,
             permissions,
             rewind_block_idx,

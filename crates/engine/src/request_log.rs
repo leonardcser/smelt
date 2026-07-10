@@ -8,10 +8,14 @@ pub fn entry(
     ctx: RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
-    mode: crate::RequestAuditMode,
+    mode: protocol::RequestAuditMode,
 ) -> Option<(RequestLogEntry, smelt_store::RequestAuditPayloadMode)> {
-    mode.payload_mode()
-        .map(|payload_mode| (build_entry(ctx, info, pricing), payload_mode))
+    let payload_mode = match mode {
+        protocol::RequestAuditMode::Off => return None,
+        protocol::RequestAuditMode::Summary => smelt_store::RequestAuditPayloadMode::SUMMARY,
+        protocol::RequestAuditMode::Full => smelt_store::RequestAuditPayloadMode::Full,
+    };
+    Some((build_entry(ctx, info, pricing), payload_mode))
 }
 
 /// Append one request attempt to the session's SQLite request audit.
@@ -21,7 +25,7 @@ pub fn append(
     ctx: RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
-    mode: crate::RequestAuditMode,
+    mode: protocol::RequestAuditMode,
 ) -> Result<Option<i64>, smelt_store::StoreError> {
     let Some((entry, payload_mode)) = entry(ctx, info, pricing, mode) else {
         return Ok(None);
@@ -248,7 +252,7 @@ mod tests {
             ctx,
             &info,
             &zero_pricing(),
-            crate::RequestAuditMode::Off,
+            protocol::RequestAuditMode::Off,
         )
         .unwrap();
 
@@ -302,7 +306,7 @@ mod tests {
             ctx,
             &info,
             &zero_pricing(),
-            crate::RequestAuditMode::Full,
+            protocol::RequestAuditMode::Full,
         )
         .unwrap();
 
@@ -332,7 +336,7 @@ mod tests {
             ctx_err,
             &info_err,
             &zero_pricing(),
-            crate::RequestAuditMode::Full,
+            protocol::RequestAuditMode::Full,
         )
         .unwrap();
 

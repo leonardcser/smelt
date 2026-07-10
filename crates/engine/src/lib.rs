@@ -202,50 +202,7 @@ mod system_prompt_tests {
     }
 }
 
-#[derive(Clone)]
-pub struct ApiConfig {
-    pub base: String,
-    pub key: String,
-    pub key_env: String,
-    pub provider_type: String,
-    pub model_config: smelt_provider::ModelConfig,
-}
-
-#[derive(Clone)]
-pub struct RequestModelConfig {
-    pub model: String,
-    pub api: ApiConfig,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestAuditMode {
-    Off,
-    Summary,
-    Full,
-}
-
-impl RequestAuditMode {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "off" | "none" | "disabled" => Some(Self::Off),
-            "summary" | "summaries" => Some(Self::Summary),
-            "full" | "trace" => Some(Self::Full),
-            _ => None,
-        }
-    }
-
-    fn payload_mode(self) -> Option<smelt_store::RequestAuditPayloadMode> {
-        match self {
-            Self::Off => None,
-            Self::Summary => Some(smelt_store::RequestAuditPayloadMode::SUMMARY),
-            Self::Full => Some(smelt_store::RequestAuditPayloadMode::Full),
-        }
-    }
-}
-
 pub struct EngineConfig {
-    pub api: ApiConfig,
-    pub model: String,
     pub instructions: Option<String>,
     /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
@@ -256,11 +213,6 @@ pub struct EngineConfig {
     /// `/reload` through [`protocol::UiCommand::ReloadAgentConfig`]. The
     /// loader itself lives on `Core::skills` for tool execution.
     pub skill_section: Option<String>,
-    pub redact_secrets: bool,
-    /// Use the Anthropic 1-hour cache TTL instead of the default 5-minute
-    /// one when emitting `cache_control` markers.
-    pub cache_ttl_long: bool,
-    pub request_audit: RequestAuditMode,
     /// Source of monotonic + wall-clock time. Production uses
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
     /// [`clock::VirtualClock`] so scenarios can replay against advanced time.
@@ -268,23 +220,13 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
-    pub fn new(
-        api: ApiConfig,
-        model: impl Into<String>,
-        cwd: PathBuf,
-        clock: Arc<dyn clock::Clock>,
-    ) -> Self {
+    pub fn new(cwd: PathBuf, clock: Arc<dyn clock::Clock>) -> Self {
         Self {
-            api,
-            model: model.into(),
             instructions: None,
             system_prompt_override: None,
             system_prompt_behavior: SystemPromptBehavior::Interactive,
             cwd,
             skill_section: None,
-            redact_secrets: false,
-            cache_ttl_long: false,
-            request_audit: RequestAuditMode::Summary,
             clock,
         }
     }
