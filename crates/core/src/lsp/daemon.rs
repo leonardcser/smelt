@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STARTUP_WAIT: Duration = Duration::from_secs(10);
+const SPAWN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Deserialize, Serialize)]
 struct DaemonRequest {
@@ -255,20 +256,54 @@ async fn wait_for_socket(socket: &Path) -> Result<(), String> {
 
 #[cfg(unix)]
 async fn spawn_daemon(socket: &Path, root: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|err| format!("resolve smelt executable: {err}"))?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg("lsp-daemon")
-        .arg(socket)
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    crate::process::without_controlling_terminal(&mut command);
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| format!("start LSP daemon: {err}"))
+    spawn_daemon_with(socket, root, daemon_executable_path).await
+}
+
+#[cfg(unix)]
+async fn spawn_daemon_with(
+    socket: &Path,
+    root: &Path,
+    executable: impl Fn() -> Result<PathBuf, String>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + STARTUP_WAIT;
+    loop {
+        let exe = executable()?;
+        let mut command = std::process::Command::new(&exe);
+        command
+            .arg("lsp-daemon")
+            .arg(socket)
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::process::without_controlling_terminal(&mut command);
+        match command.spawn() {
+            Ok(_) => return Ok(()),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(SPAWN_RETRY_INTERVAL).await;
+            }
+            Err(err) => {
+                return Err(format!("start LSP daemon with {}: {err}", exe.display()));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn daemon_executable_path() -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_exe = PathBuf::from("/proc/self/exe");
+        if std::fs::metadata(&proc_exe).is_ok() {
+            return Ok(proc_exe);
+        }
+    }
+    std::env::current_exe().map_err(|err| format!("resolve smelt executable: {err}"))
 }
 
 #[cfg(unix)]
@@ -315,7 +350,7 @@ fn daemon_key(root: &Path, config: &LspConfig) -> Result<String, String> {
 fn daemon_executable_identity() -> Result<Value, String> {
     use std::os::unix::fs::MetadataExt;
 
-    let path = std::env::current_exe().map_err(|err| format!("resolve smelt executable: {err}"))?;
+    let path = daemon_executable_path()?;
     let metadata = std::fs::metadata(&path)
         .map_err(|err| format!("read smelt executable metadata {}: {err}", path.display()))?;
     Ok(serde_json::json!({
@@ -441,6 +476,31 @@ mod tests {
             daemon_key(Path::new("/tmp/project"), &config_a).unwrap(),
             daemon_key(Path::new("/tmp/project"), &config_b).unwrap()
         );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn daemon_spawn_retries_executable_replacement_window() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("smelt");
+        let replacement = executable.clone();
+        let install = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::fs::write(&replacement, "#!/bin/sh\nexit 0\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+        });
+
+        spawn_daemon_with(&dir.path().join("daemon.sock"), dir.path(), || {
+            Ok(executable.clone())
+        })
+        .await
+        .unwrap();
+        install.await.unwrap();
     }
 
     #[cfg(unix)]
