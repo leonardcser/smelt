@@ -756,14 +756,14 @@ fn redirection_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
     while i < words.len() {
         match words[i].as_str() {
             ">" | ">>" | "&>" | "&>>" => {
-                if let Some(path) = words.get(i + 1).filter(|p| p.as_str() != "/dev/null") {
+                if let Some(path) = words.get(i + 1).filter(|path| !is_shell_stream_path(path)) {
                     out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Write));
                 }
                 i += 2;
             }
             "<<" => i += 2,
             "<" => {
-                if let Some(path) = words.get(i + 1) {
+                if let Some(path) = words.get(i + 1).filter(|path| !is_shell_stream_path(path)) {
                     out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Read));
                 }
                 i += 2;
@@ -799,13 +799,24 @@ fn maybe_push_dir(out: &mut Vec<PathEffect>, word: &str, cwd: &Path, access: Pat
 }
 
 fn looks_like_path(word: &str) -> bool {
-    if word.is_empty() || word == "/dev/null" || word.starts_with('-') || word.contains("://") {
+    if word.is_empty()
+        || is_shell_stream_path(word)
+        || word.starts_with('-')
+        || word.contains("://")
+    {
         return false;
     }
     word.starts_with('/')
         || word.starts_with("~/")
         || word.starts_with("./")
         || word.starts_with("../")
+}
+
+fn is_shell_stream_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+    )
 }
 
 fn shell_words(cmd: &str) -> Vec<String> {
@@ -897,7 +908,7 @@ pub(super) fn is_cd_command(subcmd: &str) -> bool {
 }
 
 /// Returns true if `cmd` redirects output to a real file (`>`, `>>`, `&>`, `&>>`).
-/// Redirects to `/dev/null` and fd duplications (`2>&1`) are ignored. Quote-aware.
+/// Redirects to shell stream devices and fd duplications (`2>&1`) are ignored. Quote-aware.
 pub(super) fn has_output_redirection(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -939,7 +950,7 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
             }
             b'&' if i + 1 < len && bytes[i + 1] == b'>' => {
                 i += 1; // now on '>'
-                if !redirect_is_dev_null(bytes, &mut i) {
+                if !redirect_is_shell_stream(bytes, &mut i) {
                     return true;
                 }
             }
@@ -953,7 +964,7 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
                     }
                     // >& without a digit - treat as real redirection.
                 }
-                if !redirect_is_dev_null(bytes, &mut i) {
+                if !redirect_is_shell_stream(bytes, &mut i) {
                     return true;
                 }
             }
@@ -971,9 +982,9 @@ const fn is_shell_word_boundary(b: u8) -> bool {
     b.is_ascii_whitespace() || matches!(b, b';' | b'|' | b'&' | b'>' | b'<' | b'(' | b')')
 }
 
-/// Starting at `bytes[*pos]` (`>`), check whether the redirection target is `/dev/null`.
-/// Advances `*pos` past the target on a match.
-fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
+/// Starting at `bytes[*pos]` (`>`), check whether the redirection target is a
+/// shell stream device. Advances `*pos` past the target on a match.
+fn redirect_is_shell_stream(bytes: &[u8], pos: &mut usize) -> bool {
     let len = bytes.len();
     let mut j = *pos;
     if j < len && bytes[j] == b'>' {
@@ -985,15 +996,18 @@ fn redirect_is_dev_null(bytes: &[u8], pos: &mut usize) -> bool {
     while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
         j += 1;
     }
-    const DEV_NULL: &[u8] = b"/dev/null";
-    if j + DEV_NULL.len() <= len && &bytes[j..j + DEV_NULL.len()] == DEV_NULL {
-        let end = j + DEV_NULL.len();
-        // Must be followed by a word boundary (whitespace, shell operator, or end).
-        if end == len || is_shell_word_boundary(bytes[end]) {
-            *pos = end;
-            return true;
+    const SHELL_STREAM_PATHS: &[&[u8]] =
+        &[b"/dev/null", b"/dev/stdin", b"/dev/stdout", b"/dev/stderr"];
+    for path in SHELL_STREAM_PATHS {
+        if j + path.len() <= len && &bytes[j..j + path.len()] == *path {
+            let end = j + path.len();
+            // Must be followed by a word boundary (whitespace, shell operator, or end).
+            if end == len || is_shell_word_boundary(bytes[end]) {
+                *pos = end;
+                return true;
+            }
         }
     }
-    *pos += 1; // not /dev/null; caller will return true
+    *pos += 1;
     false
 }

@@ -1134,6 +1134,17 @@ fn workspace_bash_ignores_dev_null_redirect_in_command_substitution() {
 }
 
 #[test]
+fn workspace_bash_ignores_standard_stream_devices() {
+    let p = perms_with_workspace("/home/user/project");
+    let command = "git diff main -- crates/store/src/session_commit.rs crates/core/src/session_save.rs crates/tui/src/persist.rs | git diff --no-index -- /dev/null /dev/stdin >/dev/null || true; git diff main --numstat | awk '{add+=$1; del+=$2} END {printf \"total additions: %d\\ntotal deletions: %d\\n\", add, del}'";
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(yolo(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Allow);
+    assert!(outcome.missing_requirements.is_empty());
+}
+
+#[test]
 fn workspace_bash_ls_directory_requires_that_directory() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "ls -la /tmp | head -50 && git status --short");
@@ -1909,6 +1920,12 @@ fn dev_null_ampersand_redirect() {
 }
 
 #[test]
+fn standard_output_stream_redirects_are_not_escalated() {
+    assert!(!has_output_redirection("cat > /dev/stdout"));
+    assert!(!has_output_redirection("cat 2> /dev/stderr"));
+}
+
+#[test]
 fn dev_null_in_chain_not_escalated() {
     // 2>/dev/null is harmless, the whole command should stay allowed
     assert!(!has_output_redirection(
@@ -2191,6 +2208,12 @@ fn shell_output_redirection_reports_write_effect() {
 #[test]
 fn shell_dev_null_redirection_is_ignored() {
     let paths = extract_paths_from_command("echo hi > /dev/null");
+    assert!(paths.is_empty(), "got: {paths:?}");
+}
+
+#[test]
+fn shell_standard_stream_devices_are_ignored() {
+    let paths = extract_paths_from_command("cat /dev/stdin > /dev/stdout 2> /dev/stderr");
     assert!(paths.is_empty(), "got: {paths:?}");
 }
 
