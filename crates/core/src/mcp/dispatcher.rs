@@ -114,3 +114,78 @@ impl ToolDispatcher for McpDispatcher {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{McpServer, McpServerConfig, McpTransportConfig};
+    use crate::permissions::rules::{RawPerms, RawRuleSet, ToolDefaults};
+    use protocol::Decision;
+    use std::sync::RwLock;
+    use std::time::Duration;
+
+    fn manager_with_tool() -> Arc<McpManager> {
+        let config = McpServerConfig {
+            description: String::new(),
+            enabled: true,
+            transport: McpTransportConfig::Local {
+                command: vec!["unused".into()],
+                env: HashMap::new(),
+                timeout: 30_000,
+            },
+        };
+        let server = Arc::new(McpServer::new("demo".into(), config));
+        server.set_tools(vec![McpToolDef {
+            server_name: "demo".into(),
+            tool_name: "read".into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+            timeout: Duration::from_secs(30),
+        }]);
+        Arc::new(McpManager {
+            servers: RwLock::new(HashMap::from([("demo".into(), server)])),
+        })
+    }
+
+    fn permissions_for_mcp(decision: Decision) -> Arc<crate::permissions::Permissions> {
+        let mut raw = RawPerms::default();
+        let rules = RawRuleSet {
+            allow: (decision == Decision::Allow)
+                .then(|| "*".into())
+                .into_iter()
+                .collect(),
+            ask: (decision == Decision::Ask)
+                .then(|| "*".into())
+                .into_iter()
+                .collect(),
+            deny: (decision == Decision::Deny)
+                .then(|| "*".into())
+                .into_iter()
+                .collect(),
+        };
+        raw.default.patterns.insert("mcp".into(), rules);
+        Arc::new(crate::permissions::Permissions::from_raw(
+            &raw,
+            &ToolDefaults::default(),
+        ))
+    }
+
+    #[test]
+    #[ignore = "hot reload refactor characterization"]
+    fn dispatcher_observes_replaced_runtime_permissions() {
+        let mut live_permissions = permissions_for_mcp(Decision::Deny);
+        let dispatcher = McpDispatcher::new(manager_with_tool(), Arc::clone(&live_permissions));
+        let mode = AgentMode::normal();
+        assert!(!dispatcher.is_visible("demo_read", mode.clone()));
+
+        live_permissions = permissions_for_mcp(Decision::Allow);
+        assert_eq!(
+            live_permissions.check_subcommand(mode.clone(), "mcp", "demo_read"),
+            Decision::Allow
+        );
+        assert!(
+            dispatcher.is_visible("demo_read", mode),
+            "MCP permission evaluation must observe the replacement used by the live runtime"
+        );
+    }
+}

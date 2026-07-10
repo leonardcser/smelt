@@ -659,4 +659,38 @@ mod tests {
         ];
         assert_eq!(format_call_tool_content(items), "kept");
     }
+
+    #[tokio::test]
+    #[ignore = "hot reload refactor characterization"]
+    async fn older_reconcile_cannot_replace_newer_mcp_desired_state() {
+        let manager = McpManager::start(&HashMap::new()).await;
+        let old_desired = HashMap::from([(
+            "old".into(),
+            McpServerConfig {
+                description: String::new(),
+                enabled: false,
+                transport: McpTransportConfig::Local {
+                    command: vec!["unused".into()],
+                    env: HashMap::new(),
+                    timeout: 30_000,
+                },
+            },
+        )]);
+        let (control, completion) = crate::test_util::controlled_completion(());
+        let old_manager = Arc::clone(&manager);
+        let old_task = tokio::spawn(async move {
+            completion.complete().await;
+            old_manager.reconcile(old_desired).await;
+        });
+
+        let release = control.wait_started().await;
+        manager.reconcile(HashMap::new()).await;
+        release.send(()).unwrap();
+        old_task.await.unwrap();
+
+        assert!(
+            manager.server("old").is_none(),
+            "an older reconcile completion must not reinstall a removed server"
+        );
+    }
 }

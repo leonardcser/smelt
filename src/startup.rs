@@ -234,17 +234,46 @@ async fn inject_managed_provider_models(
         return;
     }
 
-    let mut models = engine::auth::cached_model_info(provider);
+    let cached_models = engine::auth::cached_model_info(provider);
+    let client = http_client.clone();
+    inject_managed_provider_models_with_refresh(
+        cfg,
+        available_models,
+        provider,
+        refresh_if_empty,
+        cached_models,
+        move || {
+            let client = client.clone();
+            async move { engine::auth::refresh_model_info(provider, &client).await }
+        },
+    )
+    .await;
+}
+
+async fn inject_managed_provider_models_with_refresh<F, Fut>(
+    cfg: &smelt_core::config::Config,
+    available_models: &mut Vec<smelt_core::config::ResolvedModel>,
+    provider: engine::auth::AuthProvider,
+    refresh_if_empty: bool,
+    mut models: Vec<engine::auth::AuthModelInfo>,
+    refresh: F,
+) where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Vec<engine::auth::AuthModelInfo>> + Send + 'static,
+{
+    if !has_managed_provider(cfg, provider) {
+        return;
+    }
+
     if managed_model_metadata_needs_refresh(provider, &models, refresh_if_empty) {
-        models = engine::auth::refresh_model_info(provider, http_client).await;
+        models = refresh().await;
     }
     if !models.is_empty() {
         inject_managed_models(cfg, available_models, provider, &models);
     }
 
-    let client = http_client.clone();
     tokio::spawn(async move {
-        let _ = engine::auth::refresh_model_info(provider, &client).await;
+        let _ = refresh().await;
     });
 }
 
@@ -505,6 +534,64 @@ pub async fn resolve(
 mod tests {
     use super::*;
 
+    struct ModelRefreshControl {
+        started: tokio::sync::oneshot::Receiver<()>,
+        release: tokio::sync::oneshot::Sender<()>,
+        completed: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    #[derive(Clone)]
+    struct ControlledModelRefresh {
+        result: Vec<engine::auth::AuthModelInfo>,
+        started: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+        release: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+        completed: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    fn controlled_model_refresh(
+        result: Vec<engine::auth::AuthModelInfo>,
+    ) -> (ModelRefreshControl, ControlledModelRefresh) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        (
+            ModelRefreshControl {
+                started: started_rx,
+                release: release_tx,
+                completed: completed_rx,
+            },
+            ControlledModelRefresh {
+                result,
+                started: std::sync::Arc::new(std::sync::Mutex::new(Some(started_tx))),
+                release: std::sync::Arc::new(tokio::sync::Mutex::new(Some(release_rx))),
+                completed: std::sync::Arc::new(std::sync::Mutex::new(Some(completed_tx))),
+            },
+        )
+    }
+
+    impl ModelRefreshControl {
+        async fn release(self) {
+            let _ = self.started.await;
+            let _ = self.release.send(());
+            let _ = self.completed.await;
+        }
+    }
+
+    impl ControlledModelRefresh {
+        async fn complete(self) -> Vec<engine::auth::AuthModelInfo> {
+            if let Some(tx) = self.started.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = self.release.lock().await.take() {
+                let _ = rx.await;
+            }
+            if let Some(tx) = self.completed.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            self.result
+        }
+    }
+
     fn bootstrap(args: &[&str]) -> BootstrapArgs {
         scan_bootstrap_args(args.iter().copied())
     }
@@ -600,5 +687,54 @@ mod tests {
             &[dynamic_model(None)],
             false,
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "hot reload refactor characterization"]
+    async fn background_managed_model_refresh_updates_the_running_catalog() {
+        let cfg = smelt_core::config::Config {
+            providers: vec![smelt_core::config::ProviderConfig {
+                name: Some("codex".into()),
+                provider_type: Some("codex".into()),
+                api_base: Some("https://example.invalid".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let cached = protocol::ModelMetadata {
+            id: "cached-model".into(),
+            display_name: None,
+            context_window: None,
+            supports_reasoning: None,
+            supports_fast_mode: None,
+            input_modalities: None,
+        };
+        let refreshed = protocol::ModelMetadata {
+            id: "fresh-model".into(),
+            display_name: None,
+            context_window: Some(128_000),
+            supports_reasoning: Some(true),
+            supports_fast_mode: Some(true),
+            input_modalities: Some(vec!["text".into()]),
+        };
+        let (control, refresh) = controlled_model_refresh(vec![refreshed]);
+
+        let mut catalog = Vec::new();
+        inject_managed_provider_models_with_refresh(
+            &cfg,
+            &mut catalog,
+            engine::auth::AuthProvider::Codex,
+            false,
+            vec![cached],
+            move || refresh.clone().complete(),
+        )
+        .await;
+
+        control.release().await;
+
+        assert!(
+            catalog.iter().any(|model| model.key == "codex/fresh-model"),
+            "a completed background refresh must update the running model catalog"
+        );
     }
 }

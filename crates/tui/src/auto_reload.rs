@@ -378,6 +378,53 @@ fn debounce_loop_inner(
     }
 }
 
+#[cfg(any(test, feature = "harness"))]
+pub mod test_support {
+    pub struct WatcherSetupControl {
+        started: tokio::sync::oneshot::Receiver<()>,
+        release: tokio::sync::oneshot::Sender<()>,
+    }
+
+    pub struct ControlledWatcherSetup<T> {
+        result: T,
+        started: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    pub fn controlled_watcher_setup<T>(
+        result: T,
+    ) -> (WatcherSetupControl, ControlledWatcherSetup<T>) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        (
+            WatcherSetupControl {
+                started: started_rx,
+                release: release_tx,
+            },
+            ControlledWatcherSetup {
+                result,
+                started: started_tx,
+                release: release_rx,
+            },
+        )
+    }
+
+    impl WatcherSetupControl {
+        pub async fn wait_started(self) -> tokio::sync::oneshot::Sender<()> {
+            let _ = self.started.await;
+            self.release
+        }
+    }
+
+    impl<T> ControlledWatcherSetup<T> {
+        pub async fn complete(self) -> T {
+            let _ = self.started.send(());
+            let _ = self.release.await;
+            self.result
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +634,16 @@ mod tests {
 
         raw_tx.send(AutoReloadMsg::Shutdown).unwrap();
         task.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn controlled_watcher_setup_waits_for_explicit_release() {
+        let (control, setup) = test_support::controlled_watcher_setup(7_u64);
+        let task = tokio::spawn(setup.complete());
+        let release = control.wait_started().await;
+
+        assert!(!task.is_finished());
+        release.send(()).unwrap();
+        assert_eq!(task.await.unwrap(), 7);
     }
 }

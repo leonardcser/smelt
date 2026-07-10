@@ -2408,4 +2408,36 @@ mod tests {
         assert!(err.contains("rust-analyzer"));
         assert!(err.contains("lua-language-server"));
     }
+
+    #[tokio::test]
+    #[ignore = "hot reload refactor characterization"]
+    async fn older_configure_cannot_replace_newer_lsp_desired_state() {
+        let manager = Arc::new(LspManager::default());
+        let old_config = LspConfig {
+            servers: HashMap::from([(
+                "old".into(),
+                test_server("unused", "text", &["txt"]).config,
+            )]),
+        };
+        let (control, completion) = crate::test_util::controlled_completion(());
+        let old_manager = Arc::clone(&manager);
+        let old_task = tokio::spawn(async move {
+            completion.complete().await;
+            old_manager.configure(old_config).await;
+        });
+
+        let release = control.wait_started().await;
+        manager
+            .configure(LspConfig {
+                servers: HashMap::new(),
+            })
+            .await;
+        release.send(()).unwrap();
+        old_task.await.unwrap();
+
+        assert!(
+            manager.config_snapshot().servers.is_empty(),
+            "an older configure completion must not reinstall a removed server"
+        );
+    }
 }

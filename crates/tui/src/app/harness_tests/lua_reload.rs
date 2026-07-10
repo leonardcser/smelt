@@ -25,6 +25,67 @@ fn manual_lua_reload_success_notifies() {
 }
 
 #[test]
+#[ignore = "hot reload refactor characterization"]
+fn failed_lua_reload_preserves_the_committed_command_generation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"
+        smelt.cmd.register("committed_command", {
+            run = function() _G.__committed_command_ran = true end,
+        })
+        "#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let command_names = app.app.lua.command_names_handle();
+    assert!(command_names.lock().unwrap().contains("committed_command"));
+
+    std::fs::write(&init, "this is not valid lua @@@").unwrap();
+    app.reload_lua();
+
+    assert!(
+        command_names.lock().unwrap().contains("committed_command"),
+        "a failed candidate must leave the committed command callable"
+    );
+}
+
+#[test]
+#[ignore = "hot reload refactor characterization"]
+fn provider_reload_rebuilds_the_running_model_catalog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(&init, "-- initially empty\n").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+
+    std::fs::write(
+        &init,
+        r#"
+        smelt.provider.register("phase0", {
+            type = "openai-compatible",
+            api_base = "https://example.invalid/v1",
+            models = { "model-a" },
+        })
+        "#,
+    )
+    .unwrap();
+    app.reload_lua();
+    assert!(app.run_lua(
+        r#"
+        _G.__phase0_provider_count = #smelt.provider.list()
+        _G.__phase0_model_count = #smelt.model.list()
+        "#,
+    ));
+    assert_eq!(app.lua_int_global("__phase0_provider_count"), Some(1));
+    assert_eq!(
+        app.lua_int_global("__phase0_model_count"),
+        Some(1),
+        "committed provider declarations must immediately reach the model picker"
+    );
+}
+
+#[test]
 fn lua_config_session_and_transcript_contracts_are_available() {
     let mut app = TestApp::builder().build();
     app.push_user_block("hello from lua api test");
