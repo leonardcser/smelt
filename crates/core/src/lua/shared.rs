@@ -3,7 +3,7 @@
 use super::hooks::HookRegistry;
 use super::{LuaHandle, LuaTaskRuntime, TaskEvent};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Lua-allocated `BufId`s start here so they can never collide with the
@@ -189,10 +189,12 @@ pub struct LuaShared {
     /// the two maps allocate ids from the same `next_id` counter but each
     /// call_id only ever lands in one of them.
     pub ask_callbacks: Mutex<HashMap<u64, AskCallbacks>>,
-    pub next_id: AtomicU64,
+    pub next_id: Arc<AtomicU64>,
     pub next_registry_token: AtomicU64,
     /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
-    pub next_buf_id: AtomicU64,
+    /// Shared across Lua generations so candidate allocations cannot collide
+    /// with resources retained by the committed generation.
+    pub next_buf_id: Arc<AtomicU64>,
     /// Lives on the shared arc (not `LuaTaskRuntime`) so a coroutine inside `drive_tasks`
     /// can mint an id without re-entering the `tasks` mutex.
     pub next_external_id: AtomicU64,
@@ -206,12 +208,16 @@ pub struct LuaShared {
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
     pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
+    /// Stable session service used by committed LSP calls.
     pub lsp: Arc<crate::lsp::LspManager>,
+    /// Generation-local desired LSP declaration. Loading Lua never mutates the
+    /// stable manager; the app applies this value only after commit.
+    pub lsp_config: Mutex<crate::lsp::LspConfig>,
     pub settings_overrides: Mutex<HashMap<String, crate::config::SettingValue>>,
     pub defaults: Mutex<crate::config::DefaultsConfig>,
     pub remember: Mutex<crate::config::RememberConfig>,
     pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
-    pub messages: Mutex<crate::messages::Messages>,
+    pub messages: Arc<Mutex<crate::messages::Messages>>,
     /// Bundled `smelt.<dotted>` module names the user has opted out of via
     /// `smelt.builtins.disable{}` in `early.lua`. Read by `autoload_modules`
     /// to skip the matching `require()` calls. Names use the dotted module
@@ -240,11 +246,13 @@ pub struct LuaShared {
     /// the entry tears it down. `next_watcher_id` mints fresh ids.
     pub watchers: Mutex<HashMap<u64, crate::lua::watchers::WatcherEntry>>,
     pub next_watcher_id: AtomicU64,
+    external_effects_active: AtomicBool,
     /// Current boot phase. Phase-sensitive APIs use this to gate their
     /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`;
     /// the runtime promotes it to `Init` before autoload and `Running` once
     /// the agent loop is live.
     phase: AtomicU8,
+    generation_id: AtomicU64,
 }
 
 /// Registry entry for one `smelt.engine.ask` request. Response and
@@ -289,7 +297,7 @@ pub struct Hooks {
 }
 
 /// Spec for a Lua-declared CLI flag. Mirrors the subset of clap we need.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliFlagSpec {
     pub name: String,
     pub kind: CliFlagKind,
@@ -311,7 +319,7 @@ pub enum CliFlagKind {
     Integer,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CliFlagValue {
     Boolean(bool),
     String(String),
@@ -327,6 +335,26 @@ pub enum CliFlagValue {
 pub struct DefaultShell {
     pub program: String,
     pub args: Vec<String>,
+}
+
+/// Session-long services injected into each replaceable Lua generation.
+#[derive(Clone)]
+pub struct LuaHostServices {
+    pub lsp: Arc<crate::lsp::LspManager>,
+    pub messages: Arc<Mutex<crate::messages::Messages>>,
+    pub next_buf_id: Arc<AtomicU64>,
+    pub next_callback_id: Arc<AtomicU64>,
+}
+
+impl Default for LuaHostServices {
+    fn default() -> Self {
+        Self {
+            lsp: Arc::new(crate::lsp::LspManager::default()),
+            messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
+            next_buf_id: Arc::new(AtomicU64::new(LUA_BUF_ID_BASE)),
+            next_callback_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
 }
 
 impl Default for LuaShared {
@@ -347,9 +375,9 @@ impl Default for LuaShared {
             transcript_groups_cache_key: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             next_registry_token: AtomicU64::new(1),
-            next_buf_id: AtomicU64::new(LUA_BUF_ID_BASE),
+            next_buf_id: Arc::new(AtomicU64::new(LUA_BUF_ID_BASE)),
             next_external_id: AtomicU64::new(1),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             task_inbox: Mutex::new(Vec::new()),
@@ -359,11 +387,14 @@ impl Default for LuaShared {
             permission_rules: Mutex::new(None),
             mcp_configs: Mutex::new(HashMap::new()),
             lsp: Arc::new(crate::lsp::LspManager::default()),
+            lsp_config: Mutex::new(crate::lsp::LspConfig {
+                servers: HashMap::new(),
+            }),
             settings_overrides: Mutex::new(HashMap::new()),
             defaults: Mutex::new(crate::config::DefaultsConfig::default()),
             remember: Mutex::new(crate::config::RememberConfig::default()),
             tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
-            messages: Mutex::new(crate::messages::Messages::new()),
+            messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
             disabled_modules: Mutex::new(HashSet::new()),
             native_module_names: Mutex::new(HashSet::new()),
             cli_flag_specs: Mutex::new(Vec::new()),
@@ -372,12 +403,61 @@ impl Default for LuaShared {
             default_shell: Mutex::new(None),
             watchers: Mutex::new(HashMap::new()),
             next_watcher_id: AtomicU64::new(1),
+            external_effects_active: AtomicBool::new(true),
             phase: AtomicU8::new(Phase::Early as u8),
+            generation_id: AtomicU64::new(0),
         }
     }
 }
 
 impl LuaShared {
+    pub fn with_host_services(host: LuaHostServices) -> Self {
+        Self {
+            lsp: host.lsp,
+            messages: host.messages,
+            next_buf_id: host.next_buf_id,
+            next_id: host.next_callback_id,
+            ..Self::default()
+        }
+    }
+
+    pub fn host_services(&self) -> LuaHostServices {
+        LuaHostServices {
+            lsp: Arc::clone(&self.lsp),
+            messages: Arc::clone(&self.messages),
+            next_buf_id: Arc::clone(&self.next_buf_id),
+            next_callback_id: Arc::clone(&self.next_id),
+        }
+    }
+
+    pub fn generation_id(&self) -> u64 {
+        self.generation_id.load(Ordering::Acquire)
+    }
+
+    pub fn set_generation_id(&self, id: u64) {
+        self.generation_id.store(id, Ordering::Release);
+    }
+
+    pub fn stage_external_effects(&self) {
+        self.external_effects_active.store(false, Ordering::Release);
+    }
+
+    pub fn external_effects_active(&self) -> bool {
+        self.external_effects_active.load(Ordering::Acquire)
+    }
+
+    pub fn activate_generation_resources(&self) -> Result<(), String> {
+        let mut watchers = self
+            .watchers
+            .lock()
+            .map_err(|_| "filesystem watcher registry unavailable".to_string())?;
+        for watcher in watchers.values_mut() {
+            watcher.activate()?;
+        }
+        self.external_effects_active.store(true, Ordering::Release);
+        Ok(())
+    }
+
     pub fn phase(&self) -> Phase {
         Phase::from_u8(self.phase.load(Ordering::Acquire))
     }
@@ -490,6 +570,9 @@ impl LuaShared {
         }
         if let Ok(mut m) = self.mcp_configs.lock() {
             m.clear();
+        }
+        if let Ok(mut lsp) = self.lsp_config.lock() {
+            lsp.servers.clear();
         }
         if let Ok(mut p) = self.providers.lock() {
             p.clear();

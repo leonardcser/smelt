@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use include_dir::{include_dir, Dir, DirEntry};
@@ -177,6 +177,65 @@ impl ToolVisibility {
     }
 }
 
+#[derive(Clone)]
+struct LuaLaunchInputs {
+    disabled_modules: std::collections::HashSet<String>,
+    cli_flag_specs: Vec<crate::lua::CliFlagSpec>,
+    cli_flag_values: HashMap<String, crate::lua::CliFlagValue>,
+}
+
+#[derive(Clone)]
+struct LuaLoadPaths {
+    config_dir: PathBuf,
+    runtime_override: Option<PathBuf>,
+    development_runtime: Option<PathBuf>,
+    project_cwd: Option<PathBuf>,
+    data_runtime: PathBuf,
+}
+
+impl LuaLoadPaths {
+    fn from_process() -> Self {
+        let development_runtime = if cfg!(debug_assertions) {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("runtime")
+                .join("lua");
+            path.is_dir().then_some(path)
+        } else {
+            None
+        };
+        Self {
+            config_dir: crate::config::config_dir(),
+            runtime_override: std::env::var_os("SMELT_RUNTIME_DIR").map(PathBuf::from),
+            development_runtime,
+            project_cwd: std::env::current_dir().ok(),
+            data_runtime: engine::data_dir().join("runtime"),
+        }
+    }
+
+    fn for_target_cwd(&self, cwd: Option<&std::path::Path>) -> Self {
+        let mut paths = self.clone();
+        paths.project_cwd = cwd.map(std::path::Path::to_path_buf);
+        paths
+    }
+
+    fn module_overlay_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(path) = &self.runtime_override {
+            roots.push(path.clone());
+        }
+        if let Some(path) = &self.development_runtime {
+            roots.push(path.clone());
+        }
+        if let Some(cwd) = &self.project_cwd {
+            roots.push(cwd.join(".smelt").join("runtime"));
+        }
+        roots.push(self.data_runtime.clone());
+        roots
+    }
+}
+
 /// Headless-safe Lua runtime.
 pub struct LuaRuntime {
     pub lua: Lua,
@@ -184,6 +243,11 @@ pub struct LuaRuntime {
     shared: Arc<LuaShared>,
     init_lua_path: Option<PathBuf>,
     bootstrap_mode: BootstrapMode,
+    load_paths: LuaLoadPaths,
+    launch_inputs: Option<LuaLaunchInputs>,
+    load_warnings: Vec<String>,
+    loaded_files: Arc<Mutex<Vec<PathBuf>>>,
+    candidate_commits: Vec<mlua::RegistryKey>,
 }
 
 impl Default for LuaRuntime {
@@ -196,56 +260,60 @@ impl LuaRuntime {
     /// Build a fresh runtime and register the `smelt` global with
     /// Host-tier APIs only.
     pub fn new() -> Self {
-        let lua = Lua::new();
         #[allow(clippy::arc_with_non_send_sync)]
         let shared = Arc::new(LuaShared::default());
-
-        let load_error = Self::register_api(&lua, &shared)
-            .err()
-            .map(|e| e.to_string());
-
-        let mut rt = Self {
-            lua,
-            load_error,
-            shared,
-            init_lua_path: None,
-            bootstrap_mode: BootstrapMode::Host,
-        };
-
-        if rt.load_error.is_none() {
-            if let Err(e) = register_embedded_searcher(&rt.lua) {
-                rt.load_error = Some(format!("embedded searcher: {e}"));
-            }
-        }
-        rt.snapshot_native_modules();
-        rt.load_bootstrap();
-
-        rt
+        Self::with_shared_and_paths(shared, LuaLoadPaths::from_process(), true)
     }
 
     pub fn with_shared(shared: Arc<LuaShared>) -> Self {
+        Self::with_shared_and_paths(shared, LuaLoadPaths::from_process(), true)
+    }
+
+    fn with_shared_and_paths(
+        shared: Arc<LuaShared>,
+        load_paths: LuaLoadPaths,
+        load_bootstrap: bool,
+    ) -> Self {
         let lua = Lua::new();
         let load_error = Self::register_api(&lua, &shared)
             .err()
-            .map(|e| e.to_string());
-
-        let mut rt = Self {
+            .map(|error| error.to_string());
+        let mut runtime = Self {
             lua,
             load_error,
             shared,
             init_lua_path: None,
             bootstrap_mode: BootstrapMode::Host,
+            load_paths,
+            launch_inputs: None,
+            load_warnings: Vec::new(),
+            loaded_files: Arc::new(Mutex::new(Vec::new())),
+            candidate_commits: Vec::new(),
         };
 
-        if rt.load_error.is_none() {
-            if let Err(e) = register_embedded_searcher(&rt.lua) {
-                rt.load_error = Some(format!("embedded searcher: {e}"));
+        if runtime.load_error.is_none() {
+            let roots = runtime.load_paths.module_overlay_roots();
+            if let Err(error) = register_module_searcher_with_roots(
+                &runtime.lua,
+                roots,
+                Some(Arc::clone(&runtime.loaded_files)),
+            ) {
+                runtime.load_error = Some(format!("embedded searcher: {error}"));
             }
         }
-        rt.snapshot_native_modules();
-        rt.load_bootstrap();
+        runtime.snapshot_native_modules();
+        if load_bootstrap {
+            runtime.load_bootstrap();
+        }
+        runtime
+    }
 
-        rt
+    pub fn fresh_with_shared(
+        &self,
+        shared: Arc<LuaShared>,
+        target_cwd: Option<&std::path::Path>,
+    ) -> Self {
+        Self::with_shared_and_paths(shared, self.load_paths.for_target_cwd(target_cwd), false)
     }
 
     pub fn load_error(&self) -> Option<&str> {
@@ -260,16 +328,126 @@ impl LuaRuntime {
         self.bootstrap_mode = BootstrapMode::Full;
     }
 
+    pub fn load_full_bootstrap(&mut self) {
+        self.bootstrap_mode = BootstrapMode::Full;
+        self.load_bootstrap();
+    }
+
+    #[doc(hidden)]
+    pub fn set_load_paths_for_harness(
+        &mut self,
+        config_dir: PathBuf,
+        runtime_override: Option<PathBuf>,
+        target_cwd: Option<PathBuf>,
+    ) {
+        self.load_paths.config_dir = config_dir;
+        self.load_paths.runtime_override = runtime_override;
+        self.load_paths.project_cwd = target_cwd;
+    }
+
+    fn current_launch_inputs(&self) -> LuaLaunchInputs {
+        LuaLaunchInputs {
+            disabled_modules: self
+                .shared
+                .disabled_modules
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            cli_flag_specs: self
+                .shared
+                .cli_flag_specs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+            cli_flag_values: self
+                .shared
+                .cli_flag_values
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+        }
+    }
+
+    pub fn freeze_launch_inputs(&mut self) {
+        self.launch_inputs = Some(self.current_launch_inputs());
+    }
+
+    /// Copy immutable launch inputs into a fresh candidate generation.
+    pub fn inherit_launch_inputs(&mut self, committed: &Self) {
+        self.init_lua_path = committed.init_lua_path.clone();
+        self.bootstrap_mode = committed.bootstrap_mode;
+        let launch = committed
+            .launch_inputs
+            .clone()
+            .unwrap_or_else(|| committed.current_launch_inputs());
+        *self
+            .shared
+            .disabled_modules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = launch.disabled_modules.clone();
+        *self
+            .shared
+            .cli_flag_specs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = launch.cli_flag_specs.clone();
+        *self
+            .shared
+            .cli_flag_values
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = launch.cli_flag_values.clone();
+        self.launch_inputs = Some(launch);
+    }
+
+    pub fn take_load_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.load_warnings)
+    }
+
+    pub fn configured_init_lua_path(&self) -> Option<&std::path::Path> {
+        self.init_lua_path.as_deref()
+    }
+
+    pub fn loaded_config_files(&self) -> Vec<PathBuf> {
+        let mut files = self
+            .loaded_files
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    fn record_loaded_file(&self, path: PathBuf) {
+        self.loaded_files
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(path);
+    }
+
+    pub fn load_manifest_roots(&self, target_cwd: Option<&std::path::Path>) -> Vec<PathBuf> {
+        let mut roots = self.load_paths.module_overlay_roots();
+        roots.push(self.load_paths.config_dir.clone());
+        if let Some(cwd) = target_cwd {
+            roots.push(cwd.join(".smelt"));
+        }
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     fn load_bootstrap(&mut self) {
         if self.load_error.is_some() {
             return;
         }
-        let result = match self.bootstrap_mode {
-            BootstrapMode::Host => load_host_bootstrap_chunks(&self.lua),
-            BootstrapMode::Full => load_bootstrap_chunks(&self.lua),
+        let files = match self.bootstrap_mode {
+            BootstrapMode::Host => HOST_BOOTSTRAP_FILES,
+            BootstrapMode::Full => BOOTSTRAP_FILES,
         };
-        if let Err(e) = result {
-            self.load_error = Some(format!("bootstrap: {e}"));
+        let roots = self.load_paths.module_overlay_roots();
+        if let Err(error) =
+            load_bootstrap_group_with_roots(&self.lua, files, &roots, Some(&self.loaded_files))
+        {
+            self.load_error = Some(format!("bootstrap: {error}"));
         }
     }
 
@@ -277,17 +455,18 @@ impl LuaRuntime {
         if self.load_error.is_some() {
             return;
         }
-        let path = self.init_lua_path.clone().or_else(init_lua_path);
-        if let Some(path) = path {
-            if path.exists() {
-                if let Err(e) = self.load_init(&path) {
-                    let label = self
-                        .init_lua_path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "~/.config/smelt/init.lua".to_string());
-                    self.load_error = Some(format!("{label}: {e}"));
-                }
+        let path = self
+            .init_lua_path
+            .clone()
+            .unwrap_or_else(|| self.load_paths.config_dir.join("init.lua"));
+        if path.exists() {
+            if let Err(error) = self.load_init(&path) {
+                let label = self
+                    .init_lua_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "~/.config/smelt/init.lua".to_string());
+                self.load_error = Some(format!("{label}: {error}"));
             }
         }
     }
@@ -335,9 +514,7 @@ impl LuaRuntime {
         if self.load_error.is_some() {
             return;
         }
-        let Some(path) = early_lua_path() else {
-            return;
-        };
+        let path = self.load_paths.config_dir.join("early.lua");
         if !path.exists() {
             return;
         }
@@ -368,6 +545,7 @@ impl LuaRuntime {
     }
 
     fn run_early_phase(&mut self, path: &std::path::Path, name: &str) -> LuaResult<()> {
+        self.record_loaded_file(path.to_path_buf());
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read {name}: {e}")))?;
         self.with_early_smelt(|this| this.lua.load(&src).set_name(name).exec())
@@ -543,11 +721,118 @@ impl LuaRuntime {
     /// skipped (CLI flags and `builtins.disable` are startup-only).
     /// Returns any load error.
     pub fn reload(&mut self, cwd: Option<&std::path::Path>) -> Option<String> {
+        self.reload_inner(cwd, None, false)
+    }
+
+    /// Load a fresh generation while carrying JSON-compatible `smelt.state`
+    /// values from the committed runtime. Lua functions, userdata, and handles
+    /// remain generation-owned and are intentionally not transferred.
+    pub fn reload_with_state(
+        &mut self,
+        cwd: Option<&std::path::Path>,
+        state: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        self.reload_inner(cwd, state, true)
+    }
+
+    fn reload_inner(
+        &mut self,
+        cwd: Option<&std::path::Path>,
+        state: Option<&serde_json::Value>,
+        candidate: bool,
+    ) -> Option<String> {
         self.load_error = None;
+        self.load_warnings.clear();
+        self.loaded_files
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.candidate_commits.clear();
+        let launch = candidate.then(|| {
+            self.launch_inputs
+                .clone()
+                .unwrap_or_else(|| self.current_launch_inputs())
+        });
         self.clear_for_reload();
+        if candidate {
+            self.shared
+                .disabled_modules
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            self.shared
+                .cli_flag_specs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+        }
+        if candidate {
+            if let Err(error) = self.install_candidate_effect_guards() {
+                self.load_error = Some(format!("candidate effect guards: {error}"));
+                return self.load_error.clone();
+            }
+        }
         self.load_bootstrap();
         if self.load_error.is_some() {
             return self.load_error.clone();
+        }
+        if candidate {
+            if let Err(error) = self.install_candidate_effect_guards() {
+                self.load_error = Some(format!("candidate effect guards: {error}"));
+                return self.load_error.clone();
+            }
+            self.load_bundled_early();
+            self.load_early_init();
+            if let Some(cwd) = cwd {
+                self.load_project_early_init(cwd);
+            }
+            if self.load_error.is_some() {
+                return self.load_error.clone();
+            }
+
+            let candidate_disabled = self
+                .shared
+                .disabled_modules
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let candidate_specs = self
+                .shared
+                .cli_flag_specs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let launch = launch.as_ref().expect("candidate launch inputs");
+            if candidate_disabled != launch.disabled_modules
+                || candidate_specs != launch.cli_flag_specs
+            {
+                self.load_warnings.push(
+                    "early.lua launch declarations changed; restart smelt to apply CLI flag or builtin module changes"
+                        .to_string(),
+                );
+            }
+            *self
+                .shared
+                .disabled_modules
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = launch.disabled_modules.clone();
+            let candidate_names: std::collections::HashSet<&str> = candidate_specs
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect();
+            let mut values = launch.cli_flag_values.clone();
+            values.retain(|name, _| candidate_names.contains(name.as_str()));
+            *self
+                .shared
+                .cli_flag_values
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = values;
+        }
+        if let Some(state) = state {
+            if let Err(error) = self.install_state_snapshot(state) {
+                self.load_error = Some(format!("restore smelt.state: {error}"));
+                return self.load_error.clone();
+            }
         }
         self.load_autoload();
         self.load_user_config();
@@ -557,6 +842,242 @@ impl LuaRuntime {
         }
         let _ = self.lua.load("smelt.__sweep_state()").exec();
         self.load_error.clone()
+    }
+
+    pub fn state_snapshot(&self) -> serde_json::Value {
+        let value = self
+            .lua
+            .load(
+                r#"
+                local seen = {}
+                local function snapshot(value)
+                    local kind = type(value)
+                    if kind == "nil" or kind == "boolean" or kind == "number" or kind == "string" then
+                        return value
+                    end
+                    if kind ~= "table" or seen[value] then
+                        return nil
+                    end
+                    seen[value] = true
+                    local copy = {}
+                    for key, item in pairs(value) do
+                        local key_kind = type(key)
+                        if key_kind == "string" or key_kind == "number" then
+                            local copied = snapshot(item)
+                            if copied ~= nil then copy[key] = copied end
+                        end
+                    end
+                    seen[value] = nil
+                    return copy
+                end
+                return snapshot(rawget(_G, "__smelt_state__")) or {}
+                "#,
+            )
+            .eval::<mlua::Value>();
+        value
+            .ok()
+            .and_then(|value| crate::lua::lua_to_serde(&self.lua, &value))
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
+    }
+
+    fn install_state_snapshot(&self, state: &serde_json::Value) -> LuaResult<()> {
+        let value = crate::lua::json_to_lua(&self.lua, state)?;
+        self.lua.globals().set("__smelt_state__", value)
+    }
+
+    /// Guard APIs whose immediate effects cannot be part of candidate
+    /// evaluation. Generation-owned registrations and reads remain available;
+    /// guarded functions become live automatically when the generation commits.
+    fn install_candidate_effect_guards(&mut self) -> LuaResult<()> {
+        const BLOCKED_NAMESPACES: &[&str] = &["smelt.clipboard", "smelt.log"];
+        const BLOCKED_FUNCTIONS: &[&str] = &[
+            "smelt.auth.managed_usage",
+            "smelt.auth.request",
+            "smelt.cmd.run",
+            "smelt.engine.ask",
+            "smelt.engine.ask_inherited",
+            "smelt.engine.cancel",
+            "smelt.engine.reload",
+            "smelt.engine.reload_when_idle",
+            "smelt.engine.submit_command",
+            "smelt.engine.submit_command_continuation",
+            "smelt.events.emit",
+            "smelt.files.accept",
+            "smelt.files.rescan",
+            "smelt.grep.run",
+            "smelt.http.cache.write",
+            "smelt.http.get",
+            "smelt.http.post",
+            "smelt.inspect.__open_url",
+            "smelt.inspect.__start",
+            "smelt.inspect.__stop",
+            "smelt.messages.append",
+            "smelt.messages.clear",
+            "smelt.messages.mark_read",
+            "smelt.fs.copy",
+            "smelt.fs.file_state.record_read",
+            "smelt.fs.file_state.record_read_with_mtime",
+            "smelt.fs.file_state.record_write",
+            "smelt.fs.mkdir",
+            "smelt.fs.mkdir_all",
+            "smelt.fs.mkdir_all_async",
+            "smelt.fs.remove_dir",
+            "smelt.fs.remove_dir_all",
+            "smelt.fs.remove_file",
+            "smelt.fs.rename",
+            "smelt.fs.try_flock",
+            "smelt.fs.write",
+            "smelt.fs.write_async",
+            "smelt.mode.cycle",
+            "smelt.mode.set",
+            "smelt.model.set",
+            "smelt.notebook.apply_edit",
+            "smelt.notebook.apply_edit_async",
+            "smelt.os.open_url",
+            "smelt.os.open_url_if_available",
+            "smelt.os.set_cwd",
+            "smelt.os.setenv",
+            "smelt.os.unsetenv",
+            "smelt.permissions.grant_session",
+            "smelt.permissions.sync",
+            "smelt.process.detach_foreground",
+            "smelt.process.kill",
+            "smelt.process.read_output",
+            "smelt.process.run",
+            "smelt.process.run_streaming",
+            "smelt.process.spawn_bg",
+            "smelt.process.stop",
+            "smelt.prompt.cursor",
+            "smelt.prompt.replace_range",
+            "smelt.prompt.set_text",
+            "smelt.quit",
+            "smelt.reasoning.cycle",
+            "smelt.reasoning.set",
+            "smelt.session._rewind_active_turn_if_clean",
+            "smelt.session.checkpoint",
+            "smelt.session.context_note",
+            "smelt.session.delete",
+            "smelt.session.enter_worktree",
+            "smelt.session.fork",
+            "smelt.session.load",
+            "smelt.session.reset",
+            "smelt.session.rewind_to",
+            "smelt.session.set_title_for_history",
+            "smelt.session.switch_cwd",
+            "smelt.session.title.set",
+            "smelt.signal.set",
+            "smelt.search.clear",
+            "smelt.state.__save",
+            "smelt.terminal.bell",
+            "smelt.terminal.osc9_notify",
+            "smelt.trust.mark",
+            "smelt.work.busy",
+        ];
+
+        let namespaces = self.lua.create_table()?;
+        for (index, path) in BLOCKED_NAMESPACES.iter().enumerate() {
+            namespaces.set(index + 1, *path)?;
+        }
+        let functions = self.lua.create_table()?;
+        for (index, path) in BLOCKED_FUNCTIONS.iter().enumerate() {
+            functions.set(index + 1, *path)?;
+        }
+        let install = self
+            .lua
+            .load(
+                r#"
+                return function(blocked_namespaces, blocked_functions)
+                    local state = { committed = false }
+                    local seen = {}
+
+                    local function resolve(path)
+                        local value = _G
+                        local owner = nil
+                        local key = nil
+                        for part in string.gmatch(path, "[^.]+") do
+                            owner = value
+                            key = part
+                            if type(owner) ~= "table" then return nil, nil end
+                            value = rawget(owner, key)
+                            if value == nil then return nil, nil end
+                        end
+                        return owner, key
+                    end
+
+                    local function guard(owner, key, path)
+                        local original = rawget(owner, key)
+                        if type(original) ~= "function" then return end
+                        rawset(owner, key, function(...)
+                            if not state.committed then
+                                error(path .. " is unavailable while loading a Lua candidate", 2)
+                            end
+                            return original(...)
+                        end)
+                    end
+
+                    local function guard_tree(value, path)
+                        if type(value) ~= "table" or seen[value] then return end
+                        seen[value] = true
+                        for key, child in pairs(value) do
+                            local child_path = path .. "." .. tostring(key)
+                            if type(child) == "function" then
+                                guard(value, key, child_path)
+                            elseif type(child) == "table" then
+                                guard_tree(child, child_path)
+                            end
+                        end
+                    end
+
+                    for _, path in ipairs(blocked_namespaces) do
+                        local owner, key = resolve(path)
+                        if owner then guard_tree(rawget(owner, key), path) end
+                    end
+                    for _, path in ipairs(blocked_functions) do
+                        local owner, key = resolve(path)
+                        if owner then guard(owner, key, path) end
+                    end
+                    return function() state.committed = true end
+                end
+                "#,
+            )
+            .eval::<mlua::Function>()?;
+        let commit: mlua::Function = install.call((namespaces, functions))?;
+        self.candidate_commits
+            .push(self.lua.create_registry_value(commit)?);
+        Ok(())
+    }
+
+    pub fn commit_candidate(&self) -> LuaResult<()> {
+        if self.candidate_commits.is_empty() {
+            return Err(LuaError::RuntimeError(
+                "Lua candidate effect guards are unavailable".to_string(),
+            ));
+        }
+        self.shared
+            .activate_generation_resources()
+            .map_err(LuaError::external)?;
+        for key in &self.candidate_commits {
+            let commit = self.lua.registry_value::<mlua::Function>(key)?;
+            commit.call::<()>(())?;
+        }
+        self.mark_running();
+        Ok(())
+    }
+
+    /// Retire a committed runtime after its replacement has loaded and
+    /// validated. External holders of the shared registries observe an empty
+    /// retired generation instead of dangling Lua handles.
+    pub fn retire(&mut self) {
+        if let Ok(mut tasks) = self.shared.tasks.lock() {
+            tasks.cancel_and_clear();
+        }
+        if let Ok(mut queue) = self.shared.task_inbox.lock() {
+            queue.clear();
+        }
+        if let Ok(mut queue) = self.shared.json_inbox.lock() {
+            queue.clear();
+        }
+        self.shared.clear_for_reload();
     }
 
     /// **Single ledger** of every Lua-side surface wiped at the top of a
@@ -583,6 +1104,7 @@ impl LuaRuntime {
     }
 
     pub fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
+        self.record_loaded_file(path.to_path_buf());
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
         // Push an unnamed loader frame; `smelt.plugin("name")` inside
@@ -599,7 +1121,7 @@ impl LuaRuntime {
         if self.load_error.is_some() {
             return;
         }
-        let dir = crate::config::config_dir().join("plugins");
+        let dir = self.load_paths.config_dir.join("plugins");
         for path in lua_files_in(&dir) {
             if let Err(e) = self.load_plugin_file(&path) {
                 self.load_error = Some(format!("{}: {e}", path.display()));
@@ -637,7 +1159,8 @@ impl LuaRuntime {
         state
     }
 
-    fn load_plugin_file(&self, path: &std::path::Path) -> LuaResult<()> {
+    fn load_plugin_file(&mut self, path: &std::path::Path) -> LuaResult<()> {
+        self.record_loaded_file(path.to_path_buf());
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read {}: {e}", path.display())))?;
         let name = path.display().to_string();
@@ -713,12 +1236,28 @@ impl LuaRuntime {
         }
     }
 
-    pub fn take_permission_rules(&self) -> Option<crate::permissions::rules::RawPerms> {
+    pub fn permission_rules_snapshot(&self) -> Option<crate::permissions::rules::RawPerms> {
         self.shared
             .permission_rules
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn lsp_config_snapshot(&self) -> crate::lsp::LspConfig {
+        self.shared
+            .lsp_config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn default_shell_snapshot(&self) -> Option<crate::lua::DefaultShell> {
+        self.shared
+            .default_shell
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     pub fn tool_defaults(&self) -> crate::permissions::rules::ToolDefaults {
@@ -2815,21 +3354,32 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
 }
 
 pub fn load_host_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    load_bootstrap_group(lua, HOST_BOOTSTRAP_FILES)
+    load_bootstrap_group_with_roots(lua, HOST_BOOTSTRAP_FILES, &module_overlay_roots(), None)
 }
 
 pub fn load_ui_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    load_bootstrap_group(lua, UI_BOOTSTRAP_FILES)
+    load_bootstrap_group_with_roots(lua, UI_BOOTSTRAP_FILES, &module_overlay_roots(), None)
 }
 
 pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    load_bootstrap_group(lua, BOOTSTRAP_FILES)
+    load_bootstrap_group_with_roots(lua, BOOTSTRAP_FILES, &module_overlay_roots(), None)
 }
 
-fn load_bootstrap_group(lua: &Lua, files: &[&str]) -> mlua::Result<()> {
+fn load_bootstrap_group_with_roots(
+    lua: &Lua,
+    files: &[&str],
+    roots: &[PathBuf],
+    loaded_files: Option<&Arc<Mutex<Vec<PathBuf>>>>,
+) -> mlua::Result<()> {
     for rel in files {
-        let (src, name) = read_bootstrap_source(rel)?;
-        lua.load(&src).set_name(name).exec()?;
+        let (source, name, path) = read_bootstrap_source_from_roots(rel, roots)?;
+        if let (Some(files), Some(path)) = (loaded_files, path) {
+            files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(path);
+        }
+        lua.load(&source).set_name(name).exec()?;
     }
     Ok(())
 }
@@ -2900,23 +3450,31 @@ fn write_dir_recursive(dir: &Dir<'_>, target: &std::path::Path) -> std::io::Resu
 /// autoloaded plugins. Returns `(source, chunk_name)`; the chunk name
 /// reflects where the source actually came from so Lua tracebacks
 /// point at the file you're editing.
+#[cfg(test)]
 fn read_bootstrap_source(rel: &str) -> mlua::Result<(String, String)> {
-    for root in module_overlay_roots() {
+    let (source, name, _) = read_bootstrap_source_from_roots(rel, &module_overlay_roots())?;
+    Ok((source, name))
+}
+
+fn read_bootstrap_source_from_roots(
+    rel: &str,
+    roots: &[PathBuf],
+) -> mlua::Result<(String, String, Option<PathBuf>)> {
+    for root in roots {
         let candidate = root.join("smelt").join(rel);
-        if let Ok(src) = std::fs::read_to_string(&candidate) {
+        if let Ok(source) = std::fs::read_to_string(&candidate) {
             let name = candidate.display().to_string();
-            return Ok((src, name));
+            return Ok((source, name, Some(candidate)));
         }
     }
     let file = EMBEDDED_LUA.get_file(rel).ok_or_else(|| {
         LuaError::RuntimeError(format!("missing embedded bootstrap chunk: {rel}"))
     })?;
-    let src = file
+    let source = file
         .contents_utf8()
         .ok_or_else(|| LuaError::RuntimeError(format!("bootstrap chunk not utf-8: {rel}")))?
         .to_string();
-    let name = format!("smelt/{rel}");
-    Ok((src, name))
+    Ok((source, format!("smelt/{rel}"), None))
 }
 
 fn embedded_lua_modules() -> impl Iterator<Item = (String, &'static str)> {
@@ -3003,17 +3561,23 @@ pub fn early_modules() -> Vec<String> {
     out
 }
 
-fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
-    register_module_searcher_with_roots(lua, module_overlay_roots())
-}
-
-fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaResult<()> {
+fn register_module_searcher_with_roots(
+    lua: &Lua,
+    roots: Vec<PathBuf>,
+    loaded_files: Option<Arc<Mutex<Vec<PathBuf>>>>,
+) -> LuaResult<()> {
     let modules: HashMap<String, &'static str> = embedded_lua_modules().collect();
     let searcher = lua.create_function(move |lua, module: String| {
         let rel = module_to_relpath(&module);
         for root in &roots {
             let path = root.join(&rel);
             if let Ok(source) = std::fs::read_to_string(&path) {
+                if let Some(files) = &loaded_files {
+                    files
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(path.clone());
+                }
                 let name = path.display().to_string();
                 let loader = lua.load(source).set_name(name).into_function()?;
                 // Push an unnamed loader frame so the required module
@@ -3116,13 +3680,6 @@ pub fn init_lua_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
     Some(base.join("smelt").join("init.lua"))
-}
-
-fn early_lua_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
-    Some(base.join("smelt").join("early.lua"))
 }
 
 fn build_tool_ctx(
@@ -3871,7 +4428,7 @@ mod tests {
 
         let lua = Lua::new();
         let roots = vec![tmp.path().to_path_buf()];
-        register_module_searcher_with_roots(&lua, roots).unwrap();
+        register_module_searcher_with_roots(&lua, roots, None).unwrap();
 
         let v: mlua::Table = lua
             .load("return require('smelt.dialogs.confirm')")

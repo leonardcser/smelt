@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 /// Two-way map between stable plugin-given names and runtime ids.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NamedSlots<V: Eq + Hash + Copy> {
     forward: HashMap<String, V>,
     reverse: HashMap<V, String>,
@@ -93,6 +93,13 @@ impl<V: Eq + Hash + Copy> NamedSlots<V> {
     /// Borrow the bound ids as a set for membership tests.
     pub fn ids_set(&self) -> std::collections::HashSet<V> {
         self.reverse.keys().copied().collect()
+    }
+
+    pub fn bindings(&self) -> Vec<(String, V)> {
+        self.forward
+            .iter()
+            .map(|(name, id)| (name.clone(), *id))
+            .collect()
     }
 }
 

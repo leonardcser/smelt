@@ -3,14 +3,14 @@
 use crate::fs::FlockGuard;
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
-use crate::lua::watchers::{WatcherEntry, WatcherState};
+use crate::lua::watchers::WatcherEntry;
 use crate::lua::LuaShared;
 use mlua::prelude::*;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::RecursiveMode;
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let fs = LuaMod::under(
@@ -559,47 +559,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     RecursiveMode::NonRecursive
                 };
                 let id = s.next_watcher_id.fetch_add(1, Ordering::Relaxed);
-                let state = Arc::new(Mutex::new(WatcherState::default()));
-                let state_clone = Arc::clone(&state);
-                let sink = s.resume_sink();
-                let watcher_result = RecommendedWatcher::new(
-                    move |res: notify::Result<notify::Event>| {
-                        let Ok(event) = res else { return };
-                        let payload = event_to_json(&event);
-                        // Single critical section: push the event, and if a
-                        // task is armed, drain everything in the same lock.
-                        // Decoupling the push from the drain creates a window
-                        // where __watch_arm could be re-entered and steal the
-                        // pending list out from under us - keep them atomic.
-                        let resume = {
-                            let Ok(mut st) = state_clone.lock() else {
-                                return;
-                            };
-                            if st.closed {
-                                return;
-                            }
-                            st.pending.push(payload);
-                            match st.armed.take() {
-                                Some(task_id) => Some((task_id, std::mem::take(&mut st.pending))),
-                                None => None,
-                            }
-                        };
-                        if let Some((task_id, drained)) = resume {
-                            sink.resolve_json(task_id, serde_json::Value::Array(drained));
-                        }
-                    },
-                    Config::default(),
-                );
-                let mut watcher = match watcher_result {
-                    Ok(w) => w,
-                    Err(err) => return Ok((None, Some(err.to_string()))),
-                };
-                if let Err(err) = watcher.watch(Path::new(&path), mode) {
-                    return Ok((None, Some(err.to_string())));
-                }
-                let entry = WatcherEntry {
-                    state,
-                    _watcher: watcher,
+                let entry = match WatcherEntry::new(
+                    PathBuf::from(path),
+                    mode,
+                    s.resume_sink(),
+                    s.external_effects_active(),
+                ) {
+                    Ok(entry) => entry,
+                    Err(error) => return Ok((None, Some(error))),
                 };
                 if let Ok(mut map) = s.watchers.lock() {
                     map.insert(id, entry);
@@ -690,68 +657,6 @@ fn classify_file_sample(sample: &[u8], has_more: bool) -> &'static str {
             Err(_) => "binary",
         }
     }
-}
-
-fn event_to_json(event: &notify::Event) -> serde_json::Value {
-    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
-    let (kind, detail) = match event.kind {
-        EventKind::Create(k) => (
-            "create",
-            Some(match k {
-                CreateKind::File => "file",
-                CreateKind::Folder => "folder",
-                CreateKind::Any => "any",
-                CreateKind::Other => "other",
-            }),
-        ),
-        EventKind::Modify(m) => match m {
-            ModifyKind::Name(RenameMode::From) => ("rename", Some("from")),
-            ModifyKind::Name(RenameMode::To) => ("rename", Some("to")),
-            ModifyKind::Name(RenameMode::Both) => ("rename", Some("both")),
-            ModifyKind::Name(_) => ("rename", None),
-            ModifyKind::Data(_) => ("modify", Some("data")),
-            ModifyKind::Metadata(_) => ("modify", Some("metadata")),
-            ModifyKind::Any => ("modify", Some("any")),
-            ModifyKind::Other => ("modify", Some("other")),
-        },
-        EventKind::Remove(k) => (
-            "remove",
-            Some(match k {
-                RemoveKind::File => "file",
-                RemoveKind::Folder => "folder",
-                RemoveKind::Any => "any",
-                RemoveKind::Other => "other",
-            }),
-        ),
-        EventKind::Access(a) => (
-            "access",
-            Some(match a {
-                AccessKind::Open(_) => "open",
-                AccessKind::Close(AccessMode::Write) => "close_write",
-                AccessKind::Close(_) => "close",
-                AccessKind::Read => "read",
-                AccessKind::Any => "any",
-                AccessKind::Other => "other",
-            }),
-        ),
-        EventKind::Other => ("other", None),
-        EventKind::Any => ("any", None),
-    };
-    let paths: Vec<String> = event
-        .paths
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    let mut obj = serde_json::Map::new();
-    obj.insert("kind".into(), serde_json::Value::String(kind.into()));
-    if let Some(d) = detail {
-        obj.insert("detail".into(), serde_json::Value::String(d.into()));
-    }
-    obj.insert(
-        "paths".into(),
-        serde_json::Value::Array(paths.into_iter().map(serde_json::Value::String).collect()),
-    );
-    serde_json::Value::Object(obj)
 }
 
 struct FlockHandle(RefCell<Option<FlockGuard>>);

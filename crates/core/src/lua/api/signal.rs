@@ -66,8 +66,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     use crate::signals::{LuaSignalValue, SubscriberKind};
     use std::rc::Rc;
 
-    let _ = shared;
-
     let m = LuaMod::under(
         lua,
         smelt,
@@ -83,66 +81,103 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |lua, name: LuaSignalName| -> LuaResult<mlua::Value> { signal_get(lua, &name.0) },
     )?;
 
-    m.fn_(
-        "set",
-        "Publish `value` for signal `name`.",
-        &["name", "value"],
-        |lua, (name, value): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
-            signal_set(lua, &name.0, value)
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "set",
+            "Publish `value` for signal `name`.",
+            &["name", "value"],
+            move |lua, (name, value): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
+                signal_set(lua, &name.0, value, shared.generation_id())
+            },
+        )?;
+    }
 
-    m.fn_(
-        "subscribe",
-        "Register `handler(value, previous)` for signal `name`. Returns a `Reg` whose `:remove()` drops the subscription.",
-        &["name", "handler"],
-        |lua,
-         (name, handler): (LuaSignalName, LuaCallback<(mlua::Value, mlua::Value), ()>)|
-         -> LuaResult<LuaReg> { signal_subscribe(lua, name.0, handler.into_inner()) },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "subscribe",
+            "Register `handler(value, previous)` for signal `name`. Returns a `Reg` whose `:remove()` drops the subscription.",
+            &["name", "handler"],
+            move |lua,
+                  (name, handler): (
+                LuaSignalName,
+                LuaCallback<(mlua::Value, mlua::Value), ()>,
+            )|
+                  -> LuaResult<LuaReg> {
+                signal_subscribe(
+                    lua,
+                    name.0,
+                    handler.into_inner(),
+                    shared.generation_id(),
+                )
+            },
+        )?;
+    }
 
-    m.fn_(
-        "new",
-        "Declare a signal named `name` with `initial` as its starting value. No-op if the signal already exists.",
-        &["name", "initial"],
-        |lua, (name, initial): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
-            let key = lua.create_registry_value(initial)?;
-            crate::host::try_with_core(|core| {
-                core.signals.declare_if_missing(name.0, LuaSignalValue { key });
-            });
-            Ok(())
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "new",
+            "Declare a signal named `name` with `initial` as its starting value. No-op if the signal already exists.",
+            &["name", "initial"],
+            move |lua, (name, initial): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
+                let key = lua.create_registry_value(initial)?;
+                let generation = shared.generation_id();
+                crate::host::try_with_core(|core| {
+                    core.signals.declare_if_missing_for_generation(
+                        name.0,
+                        LuaSignalValue { key },
+                        generation,
+                    );
+                });
+                Ok(())
+            },
+        )?;
+    }
 
-    m.fn_(
-        "glob",
-        "Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.",
-        &["pattern", "handler"],
-        |lua,
-         (pattern, handler): (String, LuaCallback<(String, mlua::Value, mlua::Value), ()>)|
-         -> LuaResult<LuaReg> {
-            let pat = glob::Pattern::new(&pattern)
-                .map_err(|e| LuaError::RuntimeError(format!("invalid glob `{pattern}`: {e}")))?;
-            let handle = LuaHandle::from_func(lua, handler.into_inner())?;
-            let id = crate::host::try_with_core(|core| {
-                core.signals
-                    .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(handle)))
-            })
-            .unwrap_or(0);
-            Ok(LuaReg::new(move || {
-                crate::host::try_with_core(|core| core.signals.unsubscribe_glob(id)).unwrap_or(false)
-            }))
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "glob",
+            "Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.",
+            &["pattern", "handler"],
+            move |lua,
+                  (pattern, handler): (
+                String,
+                LuaCallback<(String, mlua::Value, mlua::Value), ()>,
+            )|
+                  -> LuaResult<LuaReg> {
+                let pat = glob::Pattern::new(&pattern).map_err(|error| {
+                    LuaError::RuntimeError(format!("invalid glob `{pattern}`: {error}"))
+                })?;
+                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
+                let generation = shared.generation_id();
+                let id = crate::host::try_with_core(|core| {
+                    core.signals.glob_subscribe_for_generation(
+                        pat,
+                        SubscriberKind::Lua(Rc::new(handle)),
+                        generation,
+                    )
+                })
+                .unwrap_or(0);
+                Ok(LuaReg::new(move || {
+                    crate::host::try_with_core(|core| core.signals.unsubscribe_glob(id))
+                        .unwrap_or(false)
+                }))
+            },
+        )?;
+    }
 
     Ok(())
 }
 
-pub(super) fn subscribe_lua_signal(name: String, handle: LuaHandle) -> LuaReg {
+pub(super) fn subscribe_lua_signal(name: String, handle: LuaHandle, generation: u64) -> LuaReg {
     let sub_id = crate::host::try_with_core(|core| {
-        core.signals.subscribe_kind(
+        core.signals.subscribe_kind_for_generation(
             &name,
             crate::signals::SubscriberKind::Lua(std::rc::Rc::new(handle)),
+            generation,
         )
     })
     .flatten();
@@ -154,12 +189,15 @@ pub(super) fn subscribe_lua_signal(name: String, handle: LuaHandle) -> LuaReg {
     })
 }
 
-pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle) -> LuaReg {
+pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle, generation: u64) -> LuaReg {
     crate::host::try_with_core(|core| {
-        core.signals
-            .declare_if_missing(name.clone(), crate::signals::EventStub);
+        core.signals.declare_if_missing_for_generation(
+            name.clone(),
+            crate::signals::EventStub,
+            generation,
+        );
     });
-    subscribe_lua_signal(name, handle)
+    subscribe_lua_signal(name, handle, generation)
 }
 
 fn signal_get(lua: &Lua, name: &str) -> LuaResult<mlua::Value> {
@@ -169,18 +207,25 @@ fn signal_get(lua: &Lua, name: &str) -> LuaResult<mlua::Value> {
     )
 }
 
-fn signal_set(lua: &Lua, name: &str, value: mlua::Value) -> LuaResult<()> {
+fn signal_set(lua: &Lua, name: &str, value: mlua::Value, generation: u64) -> LuaResult<()> {
     let key = lua.create_registry_value(value)?;
     crate::host::try_with_core(|core| {
-        core.signals.set_dyn(
-            name,
-            std::rc::Rc::new(crate::signals::LuaSignalValue { key }),
-        )
+        if core.lua_generation == generation {
+            core.signals.set_dyn(
+                name,
+                std::rc::Rc::new(crate::signals::LuaSignalValue { key }),
+            );
+        }
     });
     Ok(())
 }
 
-fn signal_subscribe(lua: &Lua, name: String, handler: mlua::Function) -> LuaResult<LuaReg> {
+fn signal_subscribe(
+    lua: &Lua,
+    name: String,
+    handler: mlua::Function,
+    generation: u64,
+) -> LuaResult<LuaReg> {
     let handle = LuaHandle::from_func(lua, handler)?;
-    Ok(subscribe_lua_signal(name, handle))
+    Ok(subscribe_lua_signal(name, handle, generation))
 }

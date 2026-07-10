@@ -45,8 +45,6 @@ impl FromLua for LuaEventName {
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     use std::rc::Rc;
 
-    let _ = shared;
-
     let m = LuaMod::under(
         lua,
         smelt,
@@ -55,48 +53,75 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         Tier::Host,
     )?;
 
-    m.fn_(
-        "new",
-        "Declare an event named `event`. Existing signals are left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.",
-        &["event"],
-        |_, event: LuaEventName| -> LuaResult<()> {
-            crate::host::try_with_core(|core| {
-                core.signals.declare_if_missing(event.0, crate::signals::EventStub);
-            });
-            Ok(())
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "new",
+            "Declare an event named `event`. Existing signals are left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.",
+            &["event"],
+            move |_, event: LuaEventName| -> LuaResult<()> {
+                let generation = shared.generation_id();
+                crate::host::try_with_core(|core| {
+                    core.signals.declare_if_missing_for_generation(
+                        event.0,
+                        crate::signals::EventStub,
+                        generation,
+                    );
+                });
+                Ok(())
+            },
+        )?;
+    }
 
-    m.fn_(
-        "emit",
-        "Publish `payload` for the event named `event`. Custom events are declared automatically on first emit.",
-        &["event", "payload"],
-        |lua, (event, payload): (LuaEventName, mlua::Value)| -> LuaResult<()> {
-            let key = lua.create_registry_value(payload)?;
-            crate::host::try_with_core(|core| {
-                core.signals
-                    .declare_if_missing(event.0.clone(), crate::signals::EventStub);
-                core.signals
-                    .emit_dyn(&event.0, Rc::new(crate::signals::LuaSignalValue { key }));
-            });
-            Ok(())
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "emit",
+            "Publish `payload` for the event named `event`. Custom events are declared automatically on first emit.",
+            &["event", "payload"],
+            move |lua, (event, payload): (LuaEventName, mlua::Value)| -> LuaResult<()> {
+                let key = lua.create_registry_value(payload)?;
+                let generation = shared.generation_id();
+                crate::host::try_with_core(|core| {
+                    if core.lua_generation != generation {
+                        return;
+                    }
+                    core.signals.declare_if_missing_for_generation(
+                        event.0.clone(),
+                        crate::signals::EventStub,
+                        generation,
+                    );
+                    core.signals
+                        .emit_dyn(&event.0, Rc::new(crate::signals::LuaSignalValue { key }));
+                });
+                Ok(())
+            },
+        )?;
+    }
 
-    m.fn_(
-        "on",
-        "Register `handler(payload)` for the event named `event`. Custom events are declared automatically before subscribing. Returns a `Reg` whose `:remove()` unsubscribes.",
-        &["event", "handler"],
-        |lua, (event, handler): (LuaEventName, LuaCallback<mlua::Value, ()>)| -> LuaResult<LuaReg> {
-            let handler = handler.into_inner();
-            let wrapper = lua.create_function(move |_, args: mlua::MultiValue| {
-                let payload = args.into_iter().next().unwrap_or(mlua::Value::Nil);
-                handler.call::<()>(payload)
-            })?;
-            let handle = LuaHandle::from_func(lua, wrapper)?;
-            Ok(super::signal::subscribe_lua_event(event.0, handle))
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "on",
+            "Register `handler(payload)` for the event named `event`. Custom events are declared automatically before subscribing. Returns a `Reg` whose `:remove()` unsubscribes.",
+            &["event", "handler"],
+            move |lua,
+                  (event, handler): (LuaEventName, LuaCallback<mlua::Value, ()>)|
+                  -> LuaResult<LuaReg> {
+                let handler = handler.into_inner();
+                let wrapper = lua.create_function(move |_, args: mlua::MultiValue| {
+                    let payload = args.into_iter().next().unwrap_or(mlua::Value::Nil);
+                    handler.call::<()>(payload)
+                })?;
+                let handle = LuaHandle::from_func(lua, wrapper)?;
+                Ok(super::signal::subscribe_lua_event(
+                    event.0,
+                    handle,
+                    shared.generation_id(),
+                ))
+            },
+        )?;
+    }
 
     Ok(())
 }

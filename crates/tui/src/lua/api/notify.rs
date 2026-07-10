@@ -15,8 +15,11 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::messages::MessageKind;
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+use crate::lua::LuaShared;
+
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -28,33 +31,67 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "error",
         "Show an error toast (highlighted with the error color) and append the body to the message log. Pass `source` to tag the `/messages` entry (e.g. `\"upgrade\"`); defaults to `\"lua\"`.",
         &["msg", "source"],
-        |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
-            record_from_lua(MessageKind::Error, source, msg);
-            Ok(())
+        {
+            let shared = Arc::clone(shared);
+            move |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
+                record_from_lua(&shared, MessageKind::Error, source, msg);
+                Ok(())
+            }
         },
     )?;
     m.fn_(
         "warn",
         "Show a warning toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `\"lua\"`.",
         &["msg", "source"],
-        |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
-            record_from_lua(MessageKind::Warning, source, msg);
-            Ok(())
+        {
+            let shared = Arc::clone(shared);
+            move |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
+                record_from_lua(&shared, MessageKind::Warning, source, msg);
+                Ok(())
+            }
         },
     )?;
     m.fn_(
         "info",
         "Show an informational toast and append the body to the message log. Pass `source` to tag the `/messages` entry; defaults to `\"lua\"`.",
         &["msg", "source"],
-        |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
-            record_from_lua(MessageKind::Info, source, msg);
-            Ok(())
+        {
+            let shared = Arc::clone(shared);
+            move |_, (msg, source): (String, Option<String>)| -> LuaResult<()> {
+                record_from_lua(&shared, MessageKind::Info, source, msg);
+                Ok(())
+            }
         },
     )?;
     Ok(())
 }
 
-fn record_from_lua(kind: MessageKind, source: Option<String>, msg: String) {
+fn record_from_lua(
+    shared: &Arc<LuaShared>,
+    kind: MessageKind,
+    source: Option<String>,
+    msg: String,
+) {
     let source = source.unwrap_or_else(|| "lua".into());
-    crate::lua::with_app(|app| app.record_notice(kind, source, msg));
+    if !shared.core.external_effects_active() {
+        shared
+            .staged_notices
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push((kind, source, msg));
+    } else {
+        crate::lua::try_with_app(|app| app.record_notice(kind, source, msg));
+    }
+}
+
+pub(crate) fn commit_staged_notices(shared: &Arc<LuaShared>) {
+    let notices = std::mem::take(
+        &mut *shared
+            .staged_notices
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    for (kind, source, message) in notices {
+        crate::lua::try_with_app(|app| app.record_notice(kind, source, message));
+    }
 }

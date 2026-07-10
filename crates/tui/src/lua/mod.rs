@@ -300,14 +300,15 @@ pub(crate) struct PendingInvocation {
 pub(crate) struct LuaShared {
     pub(crate) core: Arc<smelt_core::lua::LuaShared>,
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
+    /// Last terminal title declaration made while this generation was a
+    /// candidate. `Some(None)` means clear the title at commit.
+    pub(crate) staged_terminal_title: Mutex<Option<Option<String>>>,
+    pub(crate) staged_notices: Mutex<Vec<(smelt_core::messages::MessageKind, String, String)>>,
 }
 
 impl Default for LuaShared {
     fn default() -> Self {
-        Self {
-            core: Arc::new(smelt_core::lua::LuaShared::default()),
-            pending_invocations: Mutex::new(Vec::new()),
-        }
+        Self::with_core(Arc::new(smelt_core::lua::LuaShared::default()))
     }
 }
 
@@ -319,10 +320,47 @@ impl std::ops::Deref for LuaShared {
 }
 
 impl LuaShared {
+    fn with_core(core: Arc<smelt_core::lua::LuaShared>) -> Self {
+        Self {
+            core,
+            pending_invocations: Mutex::new(Vec::new()),
+            staged_terminal_title: Mutex::new(None),
+            staged_notices: Mutex::new(Vec::new()),
+        }
+    }
+
     /// Clone the inner `Arc<smelt_core::lua::LuaShared>` for core API modules.
     pub(crate) fn core_arc(&self) -> Arc<smelt_core::lua::LuaShared> {
         Arc::clone(&self.core)
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LuaLoadManifest {
+    pub roots: Vec<std::path::PathBuf>,
+    pub files: Vec<std::path::PathBuf>,
+    pub target_cwd: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone)]
+pub struct ModeDeclarations {
+    pub cycle: Vec<protocol::AgentMode>,
+    pub behaviors: std::collections::HashMap<String, smelt_core::permissions::ModeBehavior>,
+}
+
+#[derive(Clone)]
+pub struct PermissionDeclarations {
+    pub rules: smelt_core::permissions::rules::RawPerms,
+    pub tool_defaults: smelt_core::permissions::rules::ToolDefaults,
+}
+
+#[derive(Clone)]
+pub struct LuaDesiredState {
+    pub config: smelt_core::config::Config,
+    pub modes: ModeDeclarations,
+    pub permissions: PermissionDeclarations,
+    pub lsp: smelt_core::lsp::LspConfig,
+    pub default_shell: Option<smelt_core::lua::DefaultShell>,
 }
 
 /// TUI-specific Lua runtime. Wraps [`smelt_core::lua::LuaRuntime`] and adds
@@ -350,19 +388,81 @@ impl LuaRuntime {
     /// Does not load `init.lua` - call [`LuaRuntime::load_autoload`] after
     /// startup snapshots are available so plugins see real data at registration time.
     pub fn new() -> Self {
-        let shared = Arc::new(LuaShared::default());
-        let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
+        Self::with_shared(Arc::new(LuaShared::default()))
+    }
 
+    fn with_shared(shared: Arc<LuaShared>) -> Self {
+        let core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
+        Self::with_core(core, shared, true)
+    }
+
+    fn with_core(
+        mut core: smelt_core::lua::LuaRuntime,
+        shared: Arc<LuaShared>,
+        load_bootstrap: bool,
+    ) -> Self {
         if core.load_error.is_none() {
-            if let Err(e) = Self::register_api(&core.lua, &shared) {
-                core.load_error = Some(e.to_string());
+            if let Err(error) = Self::register_api(&core.lua, &shared) {
+                core.load_error = Some(error.to_string());
             }
         }
         if core.load_error.is_none() {
-            core.enable_ui_bootstrap();
+            if load_bootstrap {
+                core.load_full_bootstrap();
+            } else {
+                core.enable_ui_bootstrap();
+            }
         }
-
         Self { core, shared }
+    }
+
+    /// Build a fresh candidate with generation-local registries and the
+    /// committed generation's session-long host services and launch inputs.
+    pub fn fresh_candidate(&self, target_cwd: Option<&std::path::Path>) -> Self {
+        let core_shared = Arc::new(smelt_core::lua::LuaShared::with_host_services(
+            self.shared.host_services(),
+        ));
+        core_shared.stage_external_effects();
+        let shared = Arc::new(LuaShared::with_core(core_shared));
+        let core = self.core.fresh_with_shared(shared.core_arc(), target_cwd);
+        let mut candidate = Self::with_core(core, shared, false);
+        candidate.core.inherit_launch_inputs(&self.core);
+        candidate
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub fn set_load_paths_for_harness(
+        &mut self,
+        config_dir: std::path::PathBuf,
+        runtime_override: Option<std::path::PathBuf>,
+        target_cwd: Option<std::path::PathBuf>,
+    ) {
+        self.core
+            .set_load_paths_for_harness(config_dir, runtime_override, target_cwd);
+    }
+
+    /// Validate and clone all Lua-owned declarations in one coherent snapshot.
+    pub fn snapshot_desired_state(&self) -> Result<LuaDesiredState, String> {
+        if let Some(error) = self.load_error() {
+            return Err(error.to_string());
+        }
+        Ok(self.collect_desired_state())
+    }
+
+    fn collect_desired_state(&self) -> LuaDesiredState {
+        LuaDesiredState {
+            config: self.to_config(),
+            modes: ModeDeclarations {
+                cycle: self.mode_names(),
+                behaviors: self.mode_behaviors(),
+            },
+            permissions: PermissionDeclarations {
+                rules: self.permission_rules_snapshot().unwrap_or_default(),
+                tool_defaults: self.tool_defaults(),
+            },
+            lsp: self.lsp_config_snapshot(),
+            default_shell: self.default_shell_snapshot(),
+        }
     }
 
     /// Register the full API surface (host + UiHost) and bundled bootstrap
@@ -370,8 +470,10 @@ impl LuaRuntime {
     /// Used by `gen-lua-docs` to harvest the doc registry.
     pub fn register_for_docs() -> mlua::Result<()> {
         let shared = Arc::new(LuaShared::default());
-        let core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
-        Self::register_api(&core.lua, &shared)
+        let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
+        Self::register_api(&core.lua, &shared)?;
+        core.load_full_bootstrap();
+        Ok(())
     }
 
     /// Borrow the shared state (e.g. to clone the `Arc` into tokio tasks).
@@ -639,6 +741,140 @@ impl LuaRuntime {
         })();
         if let Err(e) = result {
             self.record_error(format!("smelt.confirm.open: {e}"));
+        }
+    }
+}
+
+pub struct FailedLuaCandidate {
+    pub message: String,
+}
+
+pub struct LuaGeneration {
+    pub id: u64,
+    runtime: LuaRuntime,
+    desired: LuaDesiredState,
+    pub manifest: LuaLoadManifest,
+    pub project_trust: smelt_core::trust::TrustState,
+    warnings: Vec<String>,
+}
+
+impl LuaGeneration {
+    pub fn initial(
+        mut runtime: LuaRuntime,
+        target_cwd: Option<&std::path::Path>,
+        project_trust: smelt_core::trust::TrustState,
+    ) -> Self {
+        let manifest = LuaLoadManifest::discover(&runtime, target_cwd);
+        let desired = runtime.collect_desired_state();
+        let warnings = runtime.take_load_warnings();
+        Self {
+            id: 0,
+            runtime,
+            desired,
+            manifest,
+            project_trust,
+            warnings,
+        }
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub fn load_initial_for_harness(
+        &mut self,
+        target_cwd: Option<&std::path::Path>,
+    ) -> Option<String> {
+        let error = self.runtime.reload(target_cwd);
+        if error.is_none() {
+            self.desired = self.runtime.collect_desired_state();
+            self.manifest = LuaLoadManifest::discover(&self.runtime, target_cwd);
+            self.project_trust = target_cwd.map_or(
+                smelt_core::trust::TrustState::NoContent,
+                smelt_core::trust::project_trust_state,
+            );
+            self.runtime.mark_running();
+        }
+        error
+    }
+
+    pub fn load_candidate(
+        &self,
+        id: u64,
+        target_cwd: Option<&std::path::Path>,
+        wakeup: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> Result<Self, FailedLuaCandidate> {
+        let state = self.runtime.state_snapshot();
+        let mut runtime = self.runtime.fresh_candidate(target_cwd);
+        runtime.shared().set_generation_id(id);
+        runtime.set_wakeup_sender(wakeup);
+        if let Some(message) = runtime.reload_with_state(target_cwd, Some(&state)) {
+            return Err(FailedLuaCandidate { message });
+        }
+        let desired = runtime
+            .snapshot_desired_state()
+            .map_err(|message| FailedLuaCandidate { message })?;
+        let manifest = LuaLoadManifest::discover(&runtime, target_cwd);
+        let warnings = runtime.take_load_warnings();
+        let project_trust = target_cwd.map_or(smelt_core::trust::TrustState::NoContent, |cwd| {
+            smelt_core::trust::project_trust_state(cwd)
+        });
+        Ok(Self {
+            id,
+            runtime,
+            desired,
+            manifest,
+            project_trust,
+            warnings,
+        })
+    }
+
+    pub fn desired(&self) -> &LuaDesiredState {
+        &self.desired
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    pub fn activate(&self) -> Result<(), String> {
+        self.runtime
+            .commit_candidate()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn retire(&mut self) {
+        self.runtime.retire();
+    }
+}
+
+impl std::ops::Deref for LuaGeneration {
+    type Target = LuaRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for LuaGeneration {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
+impl LuaLoadManifest {
+    fn discover(runtime: &LuaRuntime, target_cwd: Option<&std::path::Path>) -> Self {
+        let mut roots = runtime.load_manifest_roots(target_cwd);
+        if let Some(parent) = runtime
+            .configured_init_lua_path()
+            .and_then(std::path::Path::parent)
+        {
+            roots.push(parent.to_path_buf());
+        }
+        roots.sort();
+        roots.dedup();
+
+        Self {
+            roots,
+            files: runtime.loaded_config_files(),
+            target_cwd: target_cwd.map(std::path::Path::to_path_buf),
         }
     }
 }

@@ -28,7 +28,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let config_json = lua_table_to_json(lua, &config);
                 let config = serde_json::from_value::<crate::lsp::LspConfig>(config_json)
                     .map_err(mlua::Error::external)?;
-                s.lsp.configure_detached(config);
+                *s.lsp_config
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = config;
                 Ok(())
             },
         )?;

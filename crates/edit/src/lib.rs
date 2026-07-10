@@ -199,6 +199,7 @@ pub struct Ui {
     named_bufs: NamedSlots<BufId>,
     named_wins: NamedSlots<WinId>,
     named_overlays: NamedSlots<OverlayId>,
+    lua_generation_names: Option<LuaGenerationNames>,
     /// `set_focus` pushes the outgoing focus here; overlay-close walks it back.
     focus_history: Vec<WinId>,
     focus: Option<WinId>,
@@ -276,9 +277,17 @@ impl DockedSurface {
 /// the previous frame, used to detect which side moved on which axis this
 /// frame. Each axis is leader-detected independently - a horizontal pan on
 /// one member mirrors only horizontally, leaving vertical positions untouched.
+#[derive(Clone)]
 struct ScrollGroup {
     members: Vec<WinId>,
     last: Vec<(RowIndex, u16)>,
+}
+
+#[derive(Clone, Default)]
+struct LuaGenerationNames {
+    bufs: std::collections::HashSet<String>,
+    wins: std::collections::HashSet<String>,
+    overlays: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -332,6 +341,7 @@ impl Ui {
             named_bufs: NamedSlots::new(),
             named_wins: NamedSlots::new(),
             named_overlays: NamedSlots::new(),
+            lua_generation_names: None,
             focus_history: Vec::new(),
             focus: None,
             capture: None,
@@ -343,6 +353,50 @@ impl Ui {
             scrollbar_drag: None,
             scroll_groups: Vec::new(),
         }
+    }
+
+    /// Clone value and view state for a candidate Lua generation without
+    /// copying callbacks. Rust callbacks cannot be cloned, and callbacks from
+    /// the committed Lua generation must remain live until the candidate
+    /// commits. They are merged explicitly at the commit boundary.
+    pub fn fork_for_lua_generation(&self) -> Self {
+        Self {
+            bufs: self.bufs.clone(),
+            wins: self.wins.clone(),
+            next_buf_id: self.next_buf_id,
+            next_win_id: self.next_win_id,
+            surface: self.surface.clone(),
+            callbacks: Callbacks::new(),
+            overlays: self.overlays.clone(),
+            next_overlay_id: self.next_overlay_id,
+            modals: self.modals.clone(),
+            next_modal_id: self.next_modal_id,
+            docked_surfaces: self.docked_surfaces.clone(),
+            next_docked_surface_id: self.next_docked_surface_id,
+            decorations: self.decorations.clone(),
+            next_decoration_id: self.next_decoration_id,
+            named_bufs: self.named_bufs.clone(),
+            named_wins: self.named_wins.clone(),
+            named_overlays: self.named_overlays.clone(),
+            lua_generation_names: Some(LuaGenerationNames::default()),
+            focus_history: self.focus_history.clone(),
+            focus: self.focus,
+            capture: self.capture,
+            last_click: self.last_click,
+            cursor_shape: self.cursor_shape,
+            drag_autoscroll_since: self.drag_autoscroll_since,
+            drag_autoscroll: self.drag_autoscroll,
+            chrome_drag: self.chrome_drag,
+            scrollbar_drag: self.scrollbar_drag,
+            scroll_groups: self.scroll_groups.clone(),
+        }
+    }
+
+    /// Preserve callbacks installed by Rust when replacing the committed Lua
+    /// generation. All Lua callbacks in `retired` are intentionally dropped.
+    pub fn merge_rust_callbacks_from(&mut self, retired: &mut Self) {
+        let callbacks = retired.callbacks.take_rust_callbacks();
+        self.callbacks.merge_rust_callbacks(callbacks);
     }
 
     /// Link `wins` into a single scroll-mirror group. Any existing groups that
@@ -678,15 +732,30 @@ impl Ui {
     }
 
     pub fn name_buf(&mut self, name: impl Into<String>, id: BufId) {
-        self.named_bufs.bind(name.into(), id);
+        let name = name.into();
+        if let Some(names) = &mut self.lua_generation_names {
+            names.bufs.insert(name.clone());
+        }
+        self.named_bufs.bind(name, id);
     }
 
     pub fn named_win(&self, name: &str) -> Option<WinId> {
         self.named_wins.lookup(name)
     }
 
+    pub fn touch_named_win(&mut self, name: &str) -> Option<WinId> {
+        if let Some(names) = &mut self.lua_generation_names {
+            names.wins.insert(name.to_string());
+        }
+        self.named_wins.lookup(name)
+    }
+
     pub fn name_win(&mut self, name: impl Into<String>, id: WinId) {
-        self.named_wins.bind(name.into(), id);
+        let name = name.into();
+        if let Some(names) = &mut self.lua_generation_names {
+            names.wins.insert(name.clone());
+        }
+        self.named_wins.bind(name, id);
     }
 
     pub fn named_overlay(&self, name: &str) -> Option<OverlayId> {
@@ -694,7 +763,11 @@ impl Ui {
     }
 
     pub fn name_overlay(&mut self, name: impl Into<String>, id: OverlayId) {
-        self.named_overlays.bind(name.into(), id);
+        let name = name.into();
+        if let Some(names) = &mut self.lua_generation_names {
+            names.overlays.insert(name.clone());
+        }
+        self.named_overlays.bind(name, id);
     }
 
     /// Counts of bound names per registry: `(bufs, wins, overlays)`.
@@ -717,18 +790,69 @@ impl Ui {
     // (to apply opts) in one go.
 
     pub fn lookup_named_buf_mut(&mut self, name: &str) -> Option<(BufId, &mut Buffer)> {
+        if let Some(names) = &mut self.lua_generation_names {
+            names.bufs.insert(name.to_string());
+        }
         let bid = self.named_bufs.lookup(name)?;
         let buf = self.bufs.get_mut(&bid)?;
         Some((bid, buf))
     }
 
     pub fn lookup_named_overlay_mut(&mut self, name: &str) -> Option<(OverlayId, &mut Overlay)> {
+        if let Some(names) = &mut self.lua_generation_names {
+            names.overlays.insert(name.to_string());
+        }
         let id = self.named_overlays.lookup(name)?;
         let ov = self
             .overlays
             .iter_mut()
             .find_map(|(oid, ov)| (*oid == id).then_some(ov))?;
         Some((id, ov))
+    }
+
+    /// Retire stable Lua resources that the candidate generation did not
+    /// re-declare. Re-declared resources retain their ids and view state.
+    pub fn finish_lua_generation(&mut self, lua_buf_threshold: u64) -> Vec<u64> {
+        let Some(names) = self.lua_generation_names.take() else {
+            return Vec::new();
+        };
+        let stale_overlays: Vec<_> = self
+            .named_overlays
+            .bindings()
+            .into_iter()
+            .filter_map(|(name, id)| (!names.overlays.contains(&name)).then_some(id))
+            .collect();
+        let stale_wins: Vec<_> = self
+            .named_wins
+            .bindings()
+            .into_iter()
+            .filter_map(|(name, id)| (!names.wins.contains(&name)).then_some(id))
+            .collect();
+        let stale_bufs: Vec<_> = self
+            .named_bufs
+            .bindings()
+            .into_iter()
+            .filter_map(|(name, id)| (!names.bufs.contains(&name)).then_some(id))
+            .collect();
+
+        let mut callback_ids = Vec::new();
+        for id in stale_overlays {
+            callback_ids.extend(self.overlay_close_tree(id));
+        }
+        for id in stale_wins {
+            callback_ids.extend(self.win_close(id));
+        }
+
+        let referenced: std::collections::HashSet<_> =
+            self.wins.values().map(|window| window.buf).collect();
+        for id in stale_bufs {
+            if id.0 >= lua_buf_threshold && !referenced.contains(&id) {
+                self.buf_destroy(id);
+            } else {
+                self.named_bufs.unbind_by_id(id);
+            }
+        }
+        callback_ids
     }
 
     /// Close every overlay whose id isn't in `named_overlays` and remove

@@ -126,6 +126,9 @@ pub struct TestAppBuilder {
     mode: AgentMode,
     mode_cycle: Option<Vec<AgentMode>>,
     init_lua: Option<std::path::PathBuf>,
+    lua_config_dir: Option<std::path::PathBuf>,
+    lua_runtime_override: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
     ephemeral: bool,
     model_available: bool,
 }
@@ -137,6 +140,9 @@ impl Default for TestAppBuilder {
             mode: AgentMode::normal(),
             mode_cycle: None,
             init_lua: None,
+            lua_config_dir: None,
+            lua_runtime_override: None,
+            cwd: None,
             ephemeral: false,
             model_available: true,
         }
@@ -164,6 +170,21 @@ impl TestAppBuilder {
     /// path again on every `reload_lua()`.
     pub fn with_init_lua(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.init_lua = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_lua_load_paths(
+        mut self,
+        config_dir: impl Into<std::path::PathBuf>,
+        runtime_override: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.lua_config_dir = Some(config_dir.into());
+        self.lua_runtime_override = runtime_override;
+        self
+    }
+
+    pub(crate) fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
         self
     }
 
@@ -253,6 +274,15 @@ impl TestAppBuilder {
 
         let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
         let home = engine::paths::home_dir();
+        let cwd = self.cwd.unwrap_or_else(|| home.join("cwd"));
+        let lua_config_dir = self
+            .lua_config_dir
+            .unwrap_or_else(smelt_core::config::config_dir);
+        lua.set_load_paths_for_harness(
+            lua_config_dir,
+            self.lua_runtime_override,
+            Some(cwd.clone()),
+        );
         let env = Arc::new(engine::env::RuntimeEnv::scripted(
             4242,
             home.clone(),
@@ -260,7 +290,7 @@ impl TestAppBuilder {
             home.join("state"),
             home.join("cache"),
             home.join("data"),
-            home.join("cwd"),
+            cwd,
             std::num::NonZeroUsize::new(1).unwrap(),
         ));
 
@@ -294,7 +324,7 @@ impl TestAppBuilder {
         // that storybook snapshots should not include.
         {
             let _guard = crate::lua::install_app_ptr(&mut app);
-            let _ = app.lua.reload(None);
+            let _ = app.lua.load_initial_for_harness(None);
             app.pending_history_appends.clear();
         }
 

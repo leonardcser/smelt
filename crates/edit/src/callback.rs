@@ -305,6 +305,60 @@ impl Callbacks {
         lua_ids
     }
 
+    /// Move the Rust-owned callbacks out of this registry, dropping every Lua
+    /// callback with the retired generation. Candidate registries start with no
+    /// callbacks and merge these back only after a successful commit.
+    pub(crate) fn take_rust_callbacks(&mut self) -> Self {
+        let mut callbacks = std::mem::take(self);
+        callbacks.keymaps.retain(|_, table| {
+            table.retain(|_, callback| matches!(callback, Callback::Rust(_)));
+            !table.is_empty()
+        });
+        callbacks.events.retain(|_, events| {
+            events.retain(|_, callbacks| {
+                callbacks.retain(|callback| matches!(callback, Callback::Rust(_)));
+                !callbacks.is_empty()
+            });
+            !events.is_empty()
+        });
+        callbacks
+            .key_fallback
+            .retain(|_, callback| matches!(callback, Callback::Rust(_)));
+        callbacks.scoped_keymaps.retain(|_, table| {
+            table.retain(|_, callback| matches!(callback, Callback::Rust(_)));
+            !table.is_empty()
+        });
+        callbacks
+    }
+
+    /// Merge callbacks owned by the Rust UI into a committed candidate.
+    /// Candidate keymaps win exact conflicts, matching registration against a
+    /// live UI, while Rust event callbacks retain their original first position.
+    pub(crate) fn merge_rust_callbacks(&mut self, callbacks: Self) {
+        for (win, table) in callbacks.keymaps {
+            let target = self.keymaps.entry(win).or_default();
+            for (key, callback) in table {
+                target.entry(key).or_insert(callback);
+            }
+        }
+        for (win, events) in callbacks.events {
+            let target_events = self.events.entry(win).or_default();
+            for (event, mut callbacks) in events {
+                callbacks.extend(target_events.remove(&event).unwrap_or_default());
+                target_events.insert(event, callbacks);
+            }
+        }
+        for (win, callback) in callbacks.key_fallback {
+            self.key_fallback.entry(win).or_insert(callback);
+        }
+        for (scope, table) in callbacks.scoped_keymaps {
+            let target = self.scoped_keymaps.entry(scope).or_default();
+            for (key, callback) in table {
+                target.entry(key).or_insert(callback);
+            }
+        }
+    }
+
     /// Register a per-window fallback key handler. Returns the displaced `Callback`, if any.
     #[must_use]
     pub(crate) fn set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {

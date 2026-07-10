@@ -133,7 +133,7 @@ impl SessionAccess {
 
 pub struct TuiApp {
     pub core: smelt_core::Core,
-    pub lua: crate::lua::LuaRuntime,
+    pub lua: crate::lua::LuaGeneration,
     pub(crate) session_document: TuiSessionDocument,
     pub(crate) document_render_cache: crate::app::document::DocumentRenderCache,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
@@ -143,6 +143,8 @@ pub struct TuiApp {
     pub(crate) input: PromptState,
     pub(crate) exec: Option<crate::commands::ExecHandle>,
     pub(crate) shell_panel: Option<ShellPanel>,
+    /// Wakeup transport shared with the currently committed Lua generation.
+    lua_wakeup_tx: tokio::sync::mpsc::UnboundedSender<()>,
     /// Wakeup from cross-thread tasks that pushed to the Lua inbox. Drains the inbox so parked coroutines resume.
     lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     /// Host-callback receiver from the engine task. Lives next to the
@@ -230,6 +232,9 @@ pub struct TuiApp {
     /// Whether the pending reload should also refresh prompt inputs such as
     /// AGENTS.md, skills, and `--system-prompt`.
     pub(crate) pending_lua_reload_refresh_agent_inputs: bool,
+    /// Last candidate failure shown to the user. Equal failures remain one
+    /// sticky diagnostic until a successful generation clears it.
+    pub(crate) lua_reload_failure: Option<String>,
     pub ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
     /// Timers + chord state observed and updated by event dispatch.
@@ -1411,7 +1416,12 @@ impl TuiApp {
         let (process_completion_tx, process_completion_rx) = tokio::sync::mpsc::unbounded_channel();
         core.processes.set_completion_sender(process_completion_tx);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
+        let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx.clone());
+        let lua = crate::lua::LuaGeneration::initial(
+            lua,
+            Some(std::path::Path::new(&cwd)),
+            project_trust.clone(),
+        );
         Self {
             core,
             lua,
@@ -1424,6 +1434,7 @@ impl TuiApp {
             input,
             exec: None,
             shell_panel: None,
+            lua_wakeup_tx,
             lua_wakeup_rx,
             host_rx,
             queued_inputs: InputQueues::default(),
@@ -1483,6 +1494,7 @@ impl TuiApp {
             auto_reload: None,
             pending_lua_reload: false,
             pending_lua_reload_refresh_agent_inputs: false,
+            lua_reload_failure: None,
             ui,
             well_known,
             timers: Timers {

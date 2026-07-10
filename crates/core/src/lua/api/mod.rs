@@ -177,7 +177,7 @@ pub fn register_host_api(
     spawn::register(lua, smelt, shared)?;
     state::register(lua, smelt)?;
     task::register(lua, smelt, shared)?;
-    timer::register(lua, smelt)?;
+    timer::register(lua, smelt, shared)?;
     tools::register(lua, smelt, shared)?;
     transcript::register(lua, smelt, shared)?;
     trust::register(lua, smelt)?;

@@ -3,6 +3,9 @@
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
+use std::sync::Arc;
+
+use crate::lua::LuaShared;
 
 const ESC: char = '\u{1b}';
 const BEL: char = '\u{7}';
@@ -76,7 +79,41 @@ fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+fn set_or_stage_title(shared: &Arc<LuaShared>, title: Option<String>) -> LuaResult<bool> {
+    if !shared.core.external_effects_active() {
+        *shared
+            .staged_terminal_title
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(title);
+        return Ok(true);
+    }
+
+    let sequence = title_sequence(title.as_deref());
+    if title.is_some() {
+        set_terminal_title(sequence.as_bytes())
+    } else {
+        clear_terminal_title(sequence.as_bytes())
+    }
+}
+
+pub(crate) fn commit_staged_title(shared: &Arc<LuaShared>) -> LuaResult<()> {
+    let title = shared
+        .staged_terminal_title
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(title) = title {
+        let sequence = title_sequence(title.as_deref());
+        if title.is_some() {
+            set_terminal_title(sequence.as_bytes())?;
+        } else {
+            clear_terminal_title(sequence.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -85,29 +122,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         Tier::UiHost,
     )?;
 
-    m.fn_(
-        "set_title",
-        "Set the terminal window/tab title using OSC 0. Pass nil to clear it. Control characters are stripped from titles before writing.",
-        &["title"],
-        |_, title: Option<String>| -> LuaResult<bool> {
-            let seq = title_sequence(title.as_deref());
-            if title.is_some() {
-                set_terminal_title(seq.as_bytes())
-            } else {
-                clear_terminal_title(seq.as_bytes())
-            }
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "set_title",
+            "Set the terminal window/tab title using OSC 0. Pass nil to clear it. Control characters are stripped from titles before writing.",
+            &["title"],
+            move |_, title: Option<String>| -> LuaResult<bool> {
+                set_or_stage_title(&shared, title)
+            },
+        )?;
+    }
 
-    m.fn_(
-        "clear_title",
-        "Clear the terminal window/tab title using OSC 0 with an empty payload.",
-        &[],
-        |_, ()| -> LuaResult<bool> {
-            let seq = title_sequence(None);
-            clear_terminal_title(seq.as_bytes())
-        },
-    )?;
+    {
+        let shared = Arc::clone(shared);
+        m.fn_(
+            "clear_title",
+            "Clear the terminal window/tab title using OSC 0 with an empty payload.",
+            &[],
+            move |_, ()| -> LuaResult<bool> { set_or_stage_title(&shared, None) },
+        )?;
+    }
 
     m.fn_(
         "bell",

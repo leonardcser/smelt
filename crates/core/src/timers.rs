@@ -14,6 +14,7 @@ pub(crate) type TimerId = u64;
 
 struct TimerEntry {
     id: TimerId,
+    generation: u64,
     deadline: Instant,
     period: Option<Duration>, // None = one-shot; Some(p) = re-arm with now+p
     handle: LuaHandle,
@@ -36,20 +37,47 @@ impl Timers {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn set(&mut self, delay: Duration, handle: LuaHandle) -> TimerId {
-        self.push(delay, None, handle)
+        self.set_for_generation(delay, handle, 0)
     }
 
+    pub(crate) fn set_for_generation(
+        &mut self,
+        delay: Duration,
+        handle: LuaHandle,
+        generation: u64,
+    ) -> TimerId {
+        self.push(delay, None, handle, generation)
+    }
+
+    #[cfg(test)]
     pub(crate) fn every(&mut self, period: Duration, handle: LuaHandle) -> TimerId {
-        self.push(period, Some(period), handle)
+        self.every_for_generation(period, handle, 0)
     }
 
-    fn push(&mut self, delay: Duration, period: Option<Duration>, handle: LuaHandle) -> TimerId {
+    pub(crate) fn every_for_generation(
+        &mut self,
+        period: Duration,
+        handle: LuaHandle,
+        generation: u64,
+    ) -> TimerId {
+        self.push(period, Some(period), handle, generation)
+    }
+
+    fn push(
+        &mut self,
+        delay: Duration,
+        period: Option<Duration>,
+        handle: LuaHandle,
+        generation: u64,
+    ) -> TimerId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let now = self.clock.instant_now();
         self.entries.push(TimerEntry {
             id,
+            generation,
             deadline: now + delay,
             period,
             handle,
@@ -85,7 +113,6 @@ impl Timers {
         due
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -93,13 +120,23 @@ impl Timers {
         self.entries.is_empty()
     }
 
+    pub fn contains_generation(&self, generation: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.generation == generation)
+    }
+
     pub fn next_deadline(&self) -> Option<Instant> {
         self.entries.iter().map(|e| e.deadline).min()
     }
 
-    /// Cancel every scheduled timer. Used by `/reload`.
+    /// Cancel every scheduled timer. Used during shutdown/reset.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    pub fn clear_generation(&mut self, generation: u64) {
+        self.entries.retain(|entry| entry.generation != generation);
     }
 }
 

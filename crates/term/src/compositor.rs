@@ -7,6 +7,7 @@ use std::io::Write;
 
 /// Double-buffered terminal renderer. Diffs `current` against `previous`
 /// and flushes only changed cells; `force_redraw` triggers a full repaint.
+#[derive(Clone)]
 pub struct Compositor {
     current: Grid,
     previous: Grid,

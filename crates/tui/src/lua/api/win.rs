@@ -929,7 +929,7 @@ pub(super) fn open_or_refresh(
             .flatten();
         // Named window already exists - refresh and return.
         if let Some(ref n) = name {
-            if let Some(existing) = app.ui.named_win(n) {
+            if let Some(existing) = app.ui.touch_named_win(n) {
                 if let Some(t) = opts {
                     apply_window_opts(app, existing, t);
                 }

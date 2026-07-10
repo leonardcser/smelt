@@ -8,6 +8,17 @@ enum LuaReloadKind {
     AutoConfig,
 }
 
+struct LuaTuiGeneration {
+    ui: crate::smelt_edit::Ui,
+    paint_registry: crate::lua::paint::PaintRegistry,
+    picker_state: std::collections::HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
+    placeholders: std::collections::HashMap<crate::smelt_edit::WinId, String>,
+    placeholder_opts:
+        std::collections::HashMap<crate::smelt_edit::WinId, crate::app::PlaceholderOpts>,
+    busy_stack: crate::app::BusyStack,
+    prompt_placeholder_display: Option<String>,
+}
+
 impl LuaReloadKind {
     fn refresh_agent_inputs(&self) -> bool {
         matches!(self, Self::Manual)
@@ -56,14 +67,21 @@ impl TuiApp {
         self.pending_lua_reload_refresh_agent_inputs = false;
         let err = self.bring_up_lua("reload", kind.refresh_agent_inputs());
         match err {
-            Some(e) => self.notify_error_sticky(format!("lua reload: {e}")),
-            None => self.notify("lua reloaded".into()),
+            Some(error) => {
+                let message = format!("lua reload: {error}");
+                if self.lua_reload_failure.as_deref() != Some(message.as_str()) {
+                    self.notify_error_sticky(message.clone());
+                }
+                self.lua_reload_failure = Some(message);
+            }
+            None if self.lua.warnings().is_empty() => {
+                self.lua_reload_failure = None;
+                self.notify("lua reloaded".into());
+            }
+            None => {
+                self.lua_reload_failure = None;
+            }
         }
-    }
-
-    pub(crate) fn reload_lua_dismissing_modal(&mut self) {
-        while self.close_active_modal() {}
-        self.reload_lua();
     }
 
     /// Mark a full reload for the next point where no turn or modal can hold
@@ -114,59 +132,99 @@ impl TuiApp {
         !self.prompt_input_is_busy() && self.ui.active_modal().is_none()
     }
 
-    /// Bring up (or rebuild) the Lua context. Single pipeline shared by
-    /// cold start (`kind = "launch"`), manual `/reload`, and auto-reload.
-    /// Plugin module bodies always run with the host pointer live and
-    /// `lifecycle.on("ready")` hooks fire on every bring-up so plugins
-    /// can rehydrate from `smelt.state` once per Lua-context init.
-    /// Rust-owned UI state (named overlays, wins, bufs, paint slots)
-    /// survives - plugins re-attach via `opts.name` and `smelt.state`.
+    /// Build and commit a fresh Lua generation. This pipeline is shared by
+    /// interactive launch, manual reload, and automatic config reload.
     ///
-    /// Phases:
-    /// 1. Pending JSON-backed `smelt.state.persistent` writes are flushed
-    ///    before timers are cleared so reload cannot drop debounced saves.
-    /// 2. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
-    ///    Lua handles (timers, anonymous paint, anonymous overlays/
-    ///    wins/bufs, picker state, busy stack).
-    /// 3. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
-    ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
-    /// 4. Manual reloads call [`Self::refresh_agent_inputs`] to re-read
-    ///    AGENTS.md, rebuild the [`engine::SkillLoader`], re-read
-    ///    `--system-prompt` when present, and ship the refreshed bundle via
-    ///    [`protocol::UiCommand::ReloadAgentConfig`]. Auto-reload skips this
-    ///    step so prompt-input edits stay explicit.
-    /// 5. [`Self::reconcile_mcp_servers`] reconciles MCP server state
-    ///    off-thread against the new `smelt.mcp.register` desired set.
-    /// 6. `smelt.lifecycle.on("ready", fn)` hooks drain with
-    ///    `ctx = { kind }` so hooks that need to distinguish cold start
-    ///    from reload can branch on it.
+    /// Candidate evaluation uses fresh Lua registries plus an isolated fork of
+    /// generation-owned TUI state. The committed runtime, resolved values,
+    /// callbacks, UI resources, managers, and ready hooks remain untouched when
+    /// loading or pure runtime resolution fails. On success the old generation
+    /// is retired, staged TUI state and declarations become live, synchronous
+    /// effects run in explicit order, and only then are `ready` hooks drained.
+    /// Manual reloads additionally refresh AGENTS.md, skills, and explicit
+    /// system-prompt inputs; automatic reloads leave those inputs unchanged.
     ///
-    /// Must be called inside an `install_app_ptr` scope. Returns the
-    /// Lua load error (if any) so the caller can render it however
-    /// makes sense for the phase.
+    /// Must be called inside an `install_app_ptr` scope. Returns a candidate
+    /// load or resolution error without changing the committed generation.
     pub(crate) fn bring_up_lua(
         &mut self,
         kind: &'static str,
         refresh_agent_inputs: bool,
     ) -> Option<String> {
         if kind == "reload" {
-            if let Some(err) = self.lua.flush_persistent_state() {
-                return Some(format!("flush persistent state: {err}"));
+            if let Some(error) = self.lua.flush_persistent_state() {
+                return Some(format!("flush persistent state: {error}"));
             }
         }
-        self.clear_tui_for_reload();
-        // Refresh stateful cells before ready hooks run so reloaded plugins
-        // see the live turn/busy state, not the previous main-loop tick.
-        self.publish_diff_signals();
-        let cwd = std::env::current_dir().ok();
-        let err = self.lua.reload(cwd.as_deref());
-        if err.is_none() {
-            self.reconcile_lua_runtime_config();
+
+        let cwd = self.core.env.cwd().clone();
+        let retired_generation = self.lua.id;
+        let candidate_id = retired_generation.wrapping_add(1);
+        let committed_tui = self.begin_lua_tui_candidate();
+        let candidate_result =
+            self.lua
+                .load_candidate(candidate_id, Some(&cwd), self.lua_wakeup_tx.clone());
+        let mut candidate_tui = self.finish_lua_tui_candidate(committed_tui);
+        let candidate = match candidate_result {
+            Ok(candidate) => candidate,
+            Err(failed) => {
+                self.discard_lua_candidate_resources(candidate_id);
+                return Some(failed.message);
+            }
+        };
+        let next_runtime = match self.resolve_lua_runtime_config(candidate.desired()) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                self.discard_lua_candidate_resources(candidate_id);
+                return Some(error);
+            }
+        };
+        for callback in candidate_tui
+            .ui
+            .finish_lua_generation(smelt_core::lua::LUA_BUF_ID_BASE)
+        {
+            candidate.remove_callback(callback);
         }
+        candidate_tui.paint_registry.finish_lua_generation();
+        candidate_tui
+            .picker_state
+            .retain(|win, _| candidate_tui.ui.win(*win).is_some());
+        candidate_tui
+            .placeholders
+            .retain(|win, _| candidate_tui.ui.win(*win).is_some());
+        candidate_tui
+            .placeholder_opts
+            .retain(|win, _| candidate_tui.ui.win(*win).is_some());
+        if let Err(error) = candidate.activate() {
+            self.discard_lua_candidate_resources(candidate_id);
+            return Some(format!("activate Lua candidate: {error}"));
+        }
+
+        self.core.signals.clear_lua_generation(retired_generation);
+        self.core.timers.clear_generation(retired_generation);
+        self.lua.retire();
+        self.commit_lua_tui_candidate(candidate_tui);
+        self.lua = candidate;
+        self.core.lua_generation = self.lua.id;
+        let lua_shared = std::sync::Arc::clone(self.lua.shared());
+        if let Err(error) = crate::lua::api::terminal::commit_staged_title(&lua_shared) {
+            self.notify_error_sticky(format!("terminal title: {error}"));
+        }
+        crate::lua::api::notify::commit_staged_notices(&lua_shared);
+        for warning in self.lua.warnings().to_vec() {
+            self.notify_warn(warning);
+        }
+        self.commit_lua_runtime_config(next_runtime);
+        self.publish_diff_signals();
         if refresh_agent_inputs {
             self.refresh_agent_inputs();
         }
         self.reconcile_mcp_servers();
+        self.lua
+            .shared()
+            .lsp
+            .configure_detached(self.lua.desired().lsp.clone());
+
         // Make layout geometry current before `ready` hooks open overlays or
         // query `Win:rect()`. Without this, cold-start hooks see the seed layout
         // until the first render, while resize/reload paths see the Lua layout.
@@ -176,10 +234,15 @@ impl TuiApp {
             t.set("kind", kind)?;
             Ok::<mlua::Value, mlua::Error>(mlua::Value::Table(t))
         });
-        for he in hook_errors {
-            self.notify_error_sticky(he);
+        for error in hook_errors {
+            self.notify_error_sticky(error);
         }
-        err
+        None
+    }
+
+    fn discard_lua_candidate_resources(&mut self, generation: u64) {
+        self.core.signals.clear_lua_generation(generation);
+        self.core.timers.clear_generation(generation);
     }
 
     /// Re-read filesystem-backed inputs that feed the agent's system prompt
@@ -197,68 +260,65 @@ impl TuiApp {
             .send(self.prompt_inputs.to_reload_command());
     }
 
-    fn reconcile_lua_runtime_config(&mut self) {
-        let desired = self.lua.to_config();
-        let available_models = desired.resolve_models();
-        let modes = self.lua.mode_names();
-        let selections = smelt_core::RuntimeSelections::default();
-        let resolved = smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
-            config: &desired,
+    fn resolve_lua_runtime_config(
+        &self,
+        desired: &crate::lua::LuaDesiredState,
+    ) -> Result<smelt_core::RuntimeState, String> {
+        let available_models = desired.config.resolve_models();
+        smelt_core::resolve_runtime(smelt_core::RuntimeInputs {
+            config: &desired.config,
             startup: &self.core.startup_overrides,
             available_models: &available_models,
-            registered_modes: &modes,
-            selections: &selections,
+            registered_modes: &desired.modes.cycle,
+            selections: &smelt_core::RuntimeSelections::default(),
             previous: Some(&self.core.config),
             headless: false,
-        });
-        match resolved {
-            Ok(mut next) if next != self.core.config => {
-                let old_settings = self.core.config.settings.clone();
-                let old_mode = self.core.config.mode.clone();
-                let old_reasoning = self.core.config.reasoning_effort;
-                let old_model = self.core.config.active_model().cloned();
-                next.revision = self.core.config.revision.wrapping_add(1);
-                self.core.config = next;
-                self.apply_settings_effects(&old_settings);
-                if self.core.config.mode != old_mode {
-                    self.core.signals.set_dyn(
-                        "agent_mode",
-                        std::rc::Rc::new(self.core.config.mode.as_str().to_string()),
-                    );
-                }
-                if self.core.config.reasoning_effort != old_reasoning {
-                    self.core.signals.set_dyn(
-                        "reasoning",
-                        std::rc::Rc::new(self.core.config.reasoning_effort.label().to_string()),
-                    );
-                }
-                if self.core.config.active_model() != old_model.as_ref() {
-                    self.core.signals.set_dyn(
-                        "model",
-                        std::rc::Rc::new(
-                            self.core
-                                .config
-                                .active_model()
-                                .map(|model| model.key.clone()),
-                        ),
-                    );
-                    self.refresh_context_window();
-                    self.warn_if_api_base_normalized();
-                }
+        })
+        .map_err(|error| format!("runtime config reconciliation failed: {error}"))
+    }
+
+    fn commit_lua_runtime_config(&mut self, mut next: smelt_core::RuntimeState) {
+        let old_settings = self.core.config.settings.clone();
+        let old_mode = self.core.config.mode.clone();
+        let old_reasoning = self.core.config.reasoning_effort;
+        let old_model = self.core.config.active_model().cloned();
+        let changed = next != self.core.config;
+        if changed {
+            next.revision = self.core.config.revision.wrapping_add(1);
+            self.core.config = next;
+            self.apply_settings_effects(&old_settings);
+            if self.core.config.mode != old_mode {
+                self.core.signals.set_dyn(
+                    "agent_mode",
+                    std::rc::Rc::new(self.core.config.mode.as_str().to_string()),
+                );
             }
-            Ok(_) => {}
-            Err(error) => {
-                self.notify_error_sticky(format!("runtime config reconciliation failed: {error}"))
+            if self.core.config.reasoning_effort != old_reasoning {
+                self.core.signals.set_dyn(
+                    "reasoning",
+                    std::rc::Rc::new(self.core.config.reasoning_effort.label().to_string()),
+                );
+            }
+            if self.core.config.active_model() != old_model.as_ref() {
+                self.core.signals.set_dyn(
+                    "model",
+                    std::rc::Rc::new(
+                        self.core
+                            .config
+                            .active_model()
+                            .map(|model| model.key.clone()),
+                    ),
+                );
+                self.refresh_context_window();
+                self.warn_if_api_base_normalized();
             }
         }
 
-        let raw_permissions = self.lua.take_permission_rules().unwrap_or_default();
-        let tool_defaults = self.lua.tool_defaults();
-        let mode_behaviors = self.lua.mode_behaviors();
+        let desired = self.lua.desired();
         let permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
-            &raw_permissions,
-            &tool_defaults,
-            mode_behaviors,
+            &desired.permissions.rules,
+            &desired.permissions.tool_defaults,
+            desired.modes.behaviors.clone(),
         )
         .with_runtime_state_from(self.core.permissions.as_ref());
         self.core.permissions = std::sync::Arc::new(permissions);
@@ -271,7 +331,7 @@ impl TuiApp {
     /// manager, so the engine's dispatch path picks up the new server
     /// set without further coordination.
     pub(crate) fn reconcile_mcp_servers(&mut self) {
-        let desired = self.lua.mcp_configs_snapshot();
+        let desired = self.lua.desired().config.mcp.clone();
         let Some(manager) = self.core.mcp.clone() else {
             return;
         };
@@ -280,39 +340,78 @@ impl TuiApp {
         });
     }
 
-    /// **Single ledger** of every TUI-side cache that holds Lua handles
-    /// or references resources reload will wipe. Add new caches here -
-    /// the reload integration tests assert each one is empty/refreshed
-    /// after a cycle.
-    fn clear_tui_for_reload(&mut self) {
-        self.core.signals.clear_lua_subscribers();
-        self.core.timers.clear();
-        // Window/event keymaps live on the UI tree, including named and
-        // built-in windows that survive reload. Drop their Lua handles before
-        // the runtime clears the callback registry so stale bindings cannot
-        // keep swallowing prompt keys after the new Lua context comes up.
-        for handle in self.ui.clear_lua_callbacks() {
-            self.lua.remove_callback(handle);
+    /// Replace live TUI generation projections with isolated candidate copies.
+    /// Candidate module bodies can freely refresh named buffers, windows,
+    /// overlays, paint slots, callbacks, and theme state without making those
+    /// changes observable before the Lua transaction commits.
+    fn begin_lua_tui_candidate(&mut self) -> LuaTuiGeneration {
+        let mut candidate_ui = self.ui.fork_for_lua_generation();
+        let _ = candidate_ui.reap_anonymous(smelt_core::lua::LUA_BUF_ID_BASE);
+        let candidate_paint_registry = self.paint_registry.fork_for_lua_generation();
+        let mut candidate_placeholders = self.placeholders.clone();
+        candidate_placeholders.retain(|win, _| candidate_ui.win(*win).is_some());
+        let mut candidate_placeholder_opts = self.placeholder_opts.clone();
+        candidate_placeholder_opts.retain(|win, _| candidate_ui.win(*win).is_some());
+        let prompt_placeholder_display = self
+            .prompt_placeholder_display
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+
+        LuaTuiGeneration {
+            ui: std::mem::replace(&mut self.ui, candidate_ui),
+            paint_registry: std::mem::replace(&mut self.paint_registry, candidate_paint_registry),
+            picker_state: std::mem::take(&mut self.picker_state),
+            placeholders: std::mem::replace(&mut self.placeholders, candidate_placeholders),
+            placeholder_opts: std::mem::replace(
+                &mut self.placeholder_opts,
+                candidate_placeholder_opts,
+            ),
+            busy_stack: std::mem::take(&mut self.busy_stack),
+            prompt_placeholder_display,
         }
-        // Anonymous paint slots get reaped; named slots survive with
-        // stable `PaintId`s so overlays/layouts referencing them keep
-        // working when the plugin re-registers in module body.
-        for handle in self.paint_registry.clear_anonymous() {
-            self.lua.remove_callback(handle);
+    }
+
+    /// Restore the committed TUI state after candidate evaluation and return
+    /// the isolated candidate state for either commit or discard.
+    fn finish_lua_tui_candidate(&mut self, committed: LuaTuiGeneration) -> LuaTuiGeneration {
+        let candidate_prompt_placeholder_display = self
+            .prompt_placeholder_display
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        *self
+            .prompt_placeholder_display
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            committed.prompt_placeholder_display.clone();
+
+        LuaTuiGeneration {
+            ui: std::mem::replace(&mut self.ui, committed.ui),
+            paint_registry: std::mem::replace(&mut self.paint_registry, committed.paint_registry),
+            picker_state: std::mem::replace(&mut self.picker_state, committed.picker_state),
+            placeholders: std::mem::replace(&mut self.placeholders, committed.placeholders),
+            placeholder_opts: std::mem::replace(
+                &mut self.placeholder_opts,
+                committed.placeholder_opts,
+            ),
+            busy_stack: std::mem::replace(&mut self.busy_stack, committed.busy_stack),
+            prompt_placeholder_display: candidate_prompt_placeholder_display,
         }
-        // `smelt.work.busy` tokens are Reg-managed but reload wipes
-        // the closures holding the Reg userdata before `:remove()` runs.
-        // Clear here to match the timers/cells idiom and avoid leaking
-        // entries until process exit.
-        self.busy_stack = crate::app::BusyStack::default();
-        // Anonymous overlays/wins/bufs from the previous cycle. Named
-        // resources (`opts.name = "..."`) survive - plugins recover
-        // them by re-passing the same name on re-open.
-        let dropped = self.ui.reap_anonymous(smelt_core::lua::LUA_BUF_ID_BASE);
-        for id in dropped {
-            self.lua.remove_callback(id);
-        }
-        self.picker_state.clear();
+    }
+
+    fn commit_lua_tui_candidate(&mut self, mut candidate: LuaTuiGeneration) {
+        candidate.ui.merge_rust_callbacks_from(&mut self.ui);
+        self.ui = candidate.ui;
+        self.paint_registry = candidate.paint_registry;
+        self.picker_state = candidate.picker_state;
+        self.placeholders = candidate.placeholders;
+        self.placeholder_opts = candidate.placeholder_opts;
+        self.busy_stack = candidate.busy_stack;
+        *self
+            .prompt_placeholder_display
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = candidate.prompt_placeholder_display;
     }
 
     pub(crate) fn rewind_active_user_turn_if_no_output(

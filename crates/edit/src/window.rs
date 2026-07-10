@@ -584,13 +584,14 @@ impl WindowSurface {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct WindowRangeLayers {
     search: Vec<SelectionRange>,
     selection: Vec<SelectionRange>,
     yank_flash: Vec<SelectionRange>,
 }
 
+#[derive(Clone)]
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,

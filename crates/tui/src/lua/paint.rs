@@ -52,6 +52,28 @@ impl Default for PaintRegistry {
 }
 
 impl PaintRegistry {
+    /// Preserve stable names and ids for a candidate generation without
+    /// carrying callback handles owned by the committed Lua runtime.
+    pub(crate) fn fork_for_lua_generation(&self) -> Self {
+        Self {
+            handles: HashMap::new(),
+            names: self.names.clone(),
+            next_id: AtomicU64::new(self.next_id.load(Ordering::Relaxed)),
+        }
+    }
+
+    pub(crate) fn finish_lua_generation(&mut self) {
+        let stale: Vec<_> = self
+            .names
+            .bindings()
+            .into_iter()
+            .filter_map(|(_, id)| (!self.handles.contains_key(&id)).then_some(id))
+            .collect();
+        for id in stale {
+            self.names.unbind_by_id(id);
+        }
+    }
+
     /// Register `handle_id` as a paint callback and return its stable
     /// `PaintId`. When `name` is `Some`, the slot survives `/reload`:
     /// a subsequent `register(.., Some(same_name))` reuses the existing
@@ -115,12 +137,10 @@ impl PaintRegistry {
         self.handles.keys().copied().collect()
     }
 
-    /// Drop every anonymous paint→handle mapping; preserve named slots
-    /// so their `PaintId`s stay stable across `/reload`. Used by
-    /// `TuiApp::clear_tui_for_reload`. Plugins re-register named slots
-    /// in module body; until they do, the slot's handle is stale and
-    /// `invoke_paint` skips it (the `LuaShared::callbacks` map is also
-    /// wiped on reload). Returns the released anonymous handle ids.
+    /// Drop every anonymous paint-to-handle mapping while preserving named
+    /// slot ids. The registry unit test uses this to verify the ownership rule;
+    /// production candidate generations use [`Self::fork_for_lua_generation`].
+    #[cfg(test)]
     pub(crate) fn clear_anonymous(&mut self) -> Vec<u64> {
         let mut released = Vec::new();
         let names = &self.names;

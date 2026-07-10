@@ -12,6 +12,7 @@ use crate::grid::{Grid, GridSlice};
 use crate::layout::{resolve_layout, LayoutTree, PaintId, Rect};
 use crate::paint_layout_tree;
 
+#[derive(Clone)]
 pub struct Surface {
     compositor: Compositor,
     layout: LayoutTree,

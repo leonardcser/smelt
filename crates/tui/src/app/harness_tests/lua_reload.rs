@@ -25,30 +25,474 @@ fn manual_lua_reload_success_notifies() {
 }
 
 #[test]
-#[ignore = "hot reload refactor characterization"]
 fn failed_lua_reload_preserves_the_committed_command_generation() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(
         &init,
         r#"
-        smelt.cmd.register("committed_command", {
-            run = function() _G.__committed_command_ran = true end,
-        })
+        local buffer = smelt.buf.new({ name = "phase3.transaction.buffer" })
+        buffer:source("committed")
+        smelt.cmd.register("committed_command", function()
+            _G.__committed_command_ran = true
+            _G.__committed_buffer_source = buffer:source()
+        end)
         "#,
     )
     .unwrap();
     let mut app = TestApp::builder().with_init_lua(&init).build();
     let command_names = app.app.lua.command_names_handle();
+    let committed_generation = app.app.lua.id;
+    let committed_runtime = app.app.core.config.clone();
     assert!(command_names.lock().unwrap().contains("committed_command"));
 
-    std::fs::write(&init, "this is not valid lua @@@").unwrap();
+    std::fs::write(
+        &init,
+        r#"
+        local buffer = smelt.buf.new({ name = "phase3.transaction.buffer" })
+        buffer:source("discarded")
+        smelt.settings.show_slug = false
+        smelt.signal.new("phase3_candidate_only", 1)
+        smelt.signal.subscribe("phase3_candidate_only", function() end)
+        smelt.timer.set(60000, function() end)
+        smelt.provider.register("discarded", {
+            type = "openai-compatible",
+            api_base = "https://discarded.invalid/v1",
+            models = { "discarded-model" },
+        })
+        smelt.lifecycle.on("ready", function()
+            error("discarded ready hook ran")
+        end)
+        error("candidate failed after declarations")
+        "#,
+    )
+    .unwrap();
     app.reload_lua();
 
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(app.app.core.config, committed_runtime);
+    assert!(!app
+        .app
+        .core
+        .timers
+        .contains_generation(committed_generation.wrapping_add(1)));
+    assert!(!app.app.core.signals.contains("phase3_candidate_only"));
     assert!(
         command_names.lock().unwrap().contains("committed_command"),
         "a failed candidate must leave the committed command callable"
     );
+    let committed_buffer = app
+        .app
+        .ui
+        .named_buf("phase3.transaction.buffer")
+        .expect("committed named buffer");
+    assert_eq!(
+        app.app.ui.buf(committed_buffer).unwrap().source(),
+        "committed"
+    );
+    assert!(app.app.lua.run_command("committed_command", None));
+    assert!(app.run_lua("assert(_G.__committed_command_ran == true)"));
+    let failure_message_count = app.app.lua.core_shared().messages.lock().unwrap().count();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert_eq!(
+        app.app.lua.core_shared().messages.lock().unwrap().count(),
+        failure_message_count,
+        "equal candidate failures should remain one sticky diagnostic"
+    );
+
+    std::fs::write(
+        &init,
+        r#"
+        smelt.cmd.register("replacement_command", function() end)
+        "#,
+    )
+    .unwrap();
+    app.reload_lua();
+
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    let replacement_names = app.app.lua.command_names_handle();
+    let replacement_names = replacement_names.lock().unwrap();
+    assert!(replacement_names.contains("replacement_command"));
+    assert!(!replacement_names.contains("committed_command"));
+}
+
+#[test]
+fn failed_candidate_rejects_external_effects_and_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    let immediate_effect = tmp.path().join("candidate-effect.txt");
+    let ready_effect = tmp.path().join("candidate-ready.txt");
+    std::fs::write(
+        &init,
+        r#"
+        smelt.cmd.register("committed_external_guard", function()
+            _G.__committed_external_guard = true
+        end)
+        "#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let committed_generation = app.app.lua.id;
+
+    let immediate_path = serde_json::to_string(&immediate_effect.to_string_lossy()).unwrap();
+    let ready_path = serde_json::to_string(&ready_effect.to_string_lossy()).unwrap();
+    std::fs::write(
+        &init,
+        format!(
+            r#"
+            smelt.notify.info("discarded candidate notice", "phase3-candidate")
+            smelt.lifecycle.on("ready", function()
+                smelt.fs.write({ready_path}, "ran")
+            end)
+            smelt.fs.write({immediate_path}, "must not run")
+            "#
+        ),
+    )
+    .unwrap();
+    app.reload_lua();
+
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(!immediate_effect.exists());
+    assert!(!ready_effect.exists());
+    assert!(app.app.lua.run_command("committed_external_guard", None));
+    assert!(app.run_lua("assert(_G.__committed_external_guard == true)"));
+    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    assert!(
+        messages
+            .entries()
+            .iter()
+            .all(|entry| entry.source != "phase3-candidate"),
+        "discarded candidate notices must not reach the live message log"
+    );
+    drop(messages);
+
+    std::fs::write(
+        &init,
+        format!(
+            r#"
+            smelt.cmd.register("recovered_external_guard", function() end)
+            smelt.notify.info("committed candidate notice", "phase3-committed")
+            smelt.lifecycle.on("ready", function()
+                smelt.fs.write({ready_path}, "ran")
+            end)
+            "#
+        ),
+    )
+    .unwrap();
+    app.reload_lua();
+
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert_eq!(std::fs::read_to_string(ready_effect).unwrap(), "ran");
+    assert!(app
+        .app
+        .lua
+        .core_shared()
+        .messages
+        .lock()
+        .unwrap()
+        .entries()
+        .iter()
+        .any(|entry| entry.source == "phase3-committed"));
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("recovered_external_guard"));
+}
+
+#[test]
+fn candidate_filesystem_watchers_activate_only_at_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"smelt.cmd.register("watcher_committed", function() end)"#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let committed_generation = app.app.lua.id;
+    let missing = tmp.path().join("missing");
+    let missing = serde_json::to_string(&missing.to_string_lossy()).unwrap();
+    std::fs::write(
+        &init,
+        format!(
+            r#"
+            smelt.fs.watch({missing}, function() end)
+            error("discard watcher candidate")
+            "#
+        ),
+    )
+    .unwrap();
+
+    app.reload_lua();
+
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("watcher_committed"));
+
+    let watched = tmp.path().join("watched");
+    std::fs::create_dir(&watched).unwrap();
+    let watched = serde_json::to_string(&watched.to_string_lossy()).unwrap();
+    std::fs::write(
+        &init,
+        format!(r#"smelt.fs.watch({watched}, function() end)"#),
+    )
+    .unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+}
+
+#[test]
+fn mcp_and_lsp_declarations_apply_only_after_candidate_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    let config = |name: &str, fail: bool| {
+        format!(
+            r#"
+            smelt.mcp.register("{name}", {{ command = {{ "cat" }} }})
+            smelt.lsp.configure({{
+                servers = {{
+                    ["{name}"] = {{ cmd = {{ "{name}-language-server" }} }},
+                }},
+            }})
+            {}
+            "#,
+            if fail {
+                "error('discard candidate')"
+            } else {
+                ""
+            }
+        )
+    };
+
+    std::fs::write(&init, config("committed", false)).unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.reload_lua();
+    let committed_generation = app.app.lua.id;
+    assert!(app.app.lua.desired().config.mcp.contains_key("committed"));
+    assert!(app
+        .app
+        .lua
+        .shared()
+        .lsp
+        .config_snapshot()
+        .servers
+        .contains_key("committed"));
+
+    std::fs::write(&init, config("discarded", true)).unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(app.app.lua.desired().config.mcp.contains_key("committed"));
+    let live_lsp = app.app.lua.shared().lsp.config_snapshot();
+    assert!(live_lsp.servers.contains_key("committed"));
+    assert!(!live_lsp.servers.contains_key("discarded"));
+
+    std::fs::write(&init, config("replacement", false)).unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert!(app.app.lua.desired().config.mcp.contains_key("replacement"));
+    let live_lsp = app.app.lua.shared().lsp.config_snapshot();
+    assert!(live_lsp.servers.contains_key("replacement"));
+    assert!(!live_lsp.servers.contains_key("committed"));
+}
+
+#[test]
+fn failed_early_lua_candidate_preserves_committed_generation_and_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"
+        smelt.cmd.register("early_phase_committed", function()
+            _G.__early_phase_committed = true
+        end)
+        "#,
+    )
+    .unwrap();
+    let config_dir = tmp.path().join("config");
+    let mut app = TestApp::builder()
+        .with_init_lua(&init)
+        .with_lua_load_paths(&config_dir, None)
+        .build();
+
+    let early = config_dir.join("early.lua");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        &early,
+        r#"
+        smelt.provider.register("early-provider", {
+            type = "openai-compatible",
+            api_base = "https://early.invalid/v1",
+            models = { "early-model" },
+        })
+        "#,
+    )
+    .unwrap();
+    app.reload_lua();
+    let committed_generation = app.app.lua.id;
+    assert!(app.app.lua.manifest.files.contains(&early));
+    assert!(app.app.lua.manifest.files.contains(&init));
+    assert!(app
+        .app
+        .core
+        .config
+        .available_models
+        .iter()
+        .any(|model| model.key == "early-provider/early-model"));
+
+    std::fs::write(&early, "this is not valid Lua @@@").unwrap();
+    app.reload_lua();
+
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(app.app.lua.run_command("early_phase_committed", None));
+    assert!(app.run_lua("assert(_G.__early_phase_committed == true)"));
+
+    std::fs::write(&early, "-- fixed\n").unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+}
+
+#[test]
+fn changed_early_launch_declarations_use_defaults_and_warn_for_restart() {
+    let config = tempfile::tempdir().unwrap();
+    let config_dir = config.path().join("smelt");
+    let mut app = TestApp::builder()
+        .with_lua_load_paths(&config_dir, None)
+        .build();
+    let early = config_dir.join("early.lua");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        &early,
+        r#"
+        smelt.cli.register_flag({
+            name = "phase3_new_flag",
+            kind = "string",
+            default = "candidate-default",
+        })
+        "#,
+    )
+    .unwrap();
+
+    app.reload_lua();
+
+    assert!(app.run_lua("assert(smelt.cli.get('phase3_new_flag') == 'candidate-default')"));
+    assert_eq!(app.app.lua.warnings().len(), 1);
+    assert!(app.app.lua.warnings()[0].contains("restart smelt"));
+}
+
+#[test]
+fn failed_candidate_at_each_filesystem_load_phase_recovers() {
+    let project = tempfile::tempdir().unwrap();
+    let smelt_dir = project.path().join(".smelt");
+    std::fs::create_dir_all(&smelt_dir).unwrap();
+    let project_init = smelt_dir.join("init.lua");
+    std::fs::write(
+        &project_init,
+        r#"smelt.cmd.register("phase3_project", function() end)"#,
+    )
+    .unwrap();
+
+    let init_dir = tempfile::tempdir().unwrap();
+    let init = init_dir.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"smelt.cmd.register("phase3_committed", function() end)"#,
+    )
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let config_dir = config.path().join("smelt");
+    let runtime = tempfile::tempdir().unwrap();
+    let runtime_smelt = runtime.path().join("smelt");
+    std::fs::create_dir_all(runtime_smelt.join("commands")).unwrap();
+    let mut app = TestApp::builder()
+        .with_init_lua(&init)
+        .with_lua_load_paths(&config_dir, Some(runtime.path().to_path_buf()))
+        .with_cwd(project.path())
+        .build();
+    smelt_core::trust::mark_trusted(project.path()).unwrap();
+    app.reload_lua();
+    let mut committed_generation = app.app.lua.id;
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("phase3_project"));
+
+    let global_plugin_dir = config_dir.join("plugins");
+    std::fs::create_dir_all(&global_plugin_dir).unwrap();
+    let global_plugin = global_plugin_dir.join("phase3_failure.lua");
+    std::fs::write(&global_plugin, "error('global plugin candidate failure')").unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("phase3_project"));
+    std::fs::remove_file(&global_plugin).unwrap();
+    app.reload_lua();
+    committed_generation = app.app.lua.id;
+
+    std::fs::write(&project_init, "this is not valid project Lua @@@").unwrap();
+    smelt_core::trust::mark_trusted(project.path()).unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("phase3_project"));
+    std::fs::write(
+        &project_init,
+        r#"smelt.cmd.register("phase3_project_recovered", function() end)"#,
+    )
+    .unwrap();
+    smelt_core::trust::mark_trusted(project.path()).unwrap();
+    app.reload_lua();
+    committed_generation = app.app.lua.id;
+
+    let autoload_override = runtime_smelt.join("commands/color.lua");
+    std::fs::write(&autoload_override, "error('autoload candidate failure')").unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    std::fs::write(&autoload_override, "return true\n").unwrap();
+    app.reload_lua();
+    committed_generation = app.app.lua.id;
+    assert!(app.app.lua.manifest.files.contains(&autoload_override));
+    std::fs::remove_file(&autoload_override).unwrap();
+
+    let bootstrap_override = runtime_smelt.join("_bootstrap.lua");
+    let bootstrap_effect = runtime.path().join("bootstrap-effect.txt");
+    let bootstrap_effect_json = serde_json::to_string(&bootstrap_effect.to_string_lossy()).unwrap();
+    std::fs::write(
+        &bootstrap_override,
+        format!(r#"smelt.fs.write({bootstrap_effect_json}, "must not run")"#),
+    )
+    .unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    assert!(!bootstrap_effect.exists());
+
+    std::fs::write(&bootstrap_override, "this is not valid bootstrap Lua @@@").unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation);
+    std::fs::remove_file(&bootstrap_override).unwrap();
+    app.reload_lua();
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
 }
 
 #[test]
@@ -1568,7 +2012,11 @@ fn direct_reload_clears_pending_scheduled_reload() {
     app.reload_lua();
 
     assert!(!app.pending_lua_reload());
-    assert_eq!(app.lua_int_global("reload_count"), Some(2));
+    assert_eq!(
+        app.lua_int_global("reload_count"),
+        Some(1),
+        "a committed reload installs a fresh Lua global environment"
+    );
 }
 
 #[test]
@@ -1697,6 +2145,52 @@ fn reload_lua_reaps_anonymous_overlay_keeps_named() {
         "anonymous overlay {} should be reaped",
         anon_id.0
     );
+}
+
+#[test]
+fn reload_lua_retires_named_resources_not_declared_by_the_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"
+        local buffer = smelt.buf.new({ name = "retired.buf" })
+        local window = smelt.win.new(buffer, { name = "retired.win" })
+        smelt.overlay.new({
+            name = "retired.overlay",
+            anchor = "screen_at",
+            corner = "nw",
+            row = 0,
+            col = 0,
+            width = 20,
+            height = 5,
+            layout = smelt.ui.layout.leaf(window),
+        })
+        smelt.paint.register(function() end, { name = "retired.paint" })
+        "#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let overlay = app
+        .app
+        .ui
+        .named_overlay("retired.overlay")
+        .expect("committed named overlay");
+    let paint = app
+        .app
+        .paint_registry
+        .id_by_name("retired.paint")
+        .expect("committed named paint");
+
+    std::fs::write(&init, "-- resource declarations removed\n").unwrap();
+    app.reload_lua();
+
+    assert!(app.app.ui.overlay(overlay).is_none());
+    assert!(app.app.ui.named_overlay("retired.overlay").is_none());
+    assert!(app.app.ui.named_win("retired.win").is_none());
+    assert!(app.app.ui.named_buf("retired.buf").is_none());
+    assert!(!app.app.paint_registry.contains(paint));
+    assert!(app.app.paint_registry.id_by_name("retired.paint").is_none());
 }
 
 #[test]
@@ -1962,9 +2456,8 @@ fn reload_clears_every_lua_surface() {
         app.app.reload_lua();
     }
 
-    // Post-reload: every "user-registered" surface is empty; named UI
-    // resources survive; anonymous ones are reaped; state slot for
-    // the dropped plugin is swept.
+    // Post-reload: every user-registered surface and UI resource from the
+    // dropped generation is gone, and its persistent state slot is swept.
     assert!(
         !shared.commands.lock().unwrap().contains_key("seed_cmd"),
         "user command cleared"
@@ -2027,8 +2520,8 @@ fn reload_clears_every_lua_surface() {
         "json_inbox drained"
     );
     assert!(
-        app.app.ui.named_overlay("seed.ov").is_some(),
-        "named overlay survives"
+        app.app.ui.named_overlay("seed.ov").is_none(),
+        "stale named overlay retired"
     );
     assert!(
         app.app.ui.overlay(anon_overlay).is_none(),
@@ -2094,8 +2587,8 @@ fn reload_lua_cancels_in_flight_tasks() {
     assert!(!completed, "cancelled task must not have run to completion");
 }
 
-#[test]
-fn reload_lua_via_engine_dismisses_open_modal() {
+#[tokio::test]
+async fn reload_lua_via_engine_dismisses_open_modal() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(
@@ -2138,6 +2631,8 @@ fn reload_lua_via_engine_dismisses_open_modal() {
             .exec()
             .expect("reload succeeds even with modal open");
     }
+    assert!(app.pending_lua_reload());
+    assert!(app.drain_idle_work());
     assert!(
         app.app.ui.active_modal().is_none(),
         "modal must be dismissed after reload"
@@ -2222,7 +2717,11 @@ fn scheduled_reload_runs_after_turn_is_idle() {
     }));
 
     assert!(!app.app.pending_lua_reload);
-    assert_eq!(app.lua_int_global("reload_count"), Some(2));
+    assert_eq!(
+        app.lua_int_global("reload_count"),
+        Some(1),
+        "scheduled reload commits a fresh Lua global environment"
+    );
 }
 
 #[test]

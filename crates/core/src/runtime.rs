@@ -34,6 +34,9 @@ impl FrontendKind {
 pub struct Core {
     pub config: RuntimeState,
     pub startup_overrides: StartupOverrides,
+    /// Identity of the committed Lua generation. Candidate callbacks compare
+    /// against this before performing runtime-only effects.
+    pub lua_generation: u64,
     pub session: Session,
     pub confirms: Confirms,
     pub clipboard: crate::Clipboard,
@@ -92,6 +95,7 @@ impl Core {
         Self {
             config,
             startup_overrides,
+            lua_generation: 0,
             session,
             confirms,
             clipboard,

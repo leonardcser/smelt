@@ -14,7 +14,7 @@ mod layout;
 mod metrics;
 mod model;
 mod notebook;
-mod notify;
+pub(crate) mod notify;
 mod overlay;
 pub(crate) mod overlay_layout;
 mod paint;
@@ -25,7 +25,7 @@ mod render;
 mod search;
 mod session;
 mod settings;
-mod terminal;
+pub(crate) mod terminal;
 mod text;
 pub(crate) mod theme;
 mod transcript;
@@ -101,7 +101,7 @@ impl LuaRuntime {
         dialog::register(lua, &smelt)?;
         overlay::register(lua, &smelt)?;
         picker::register(lua, &smelt)?;
-        notify::register(lua, &smelt)?;
+        notify::register(lua, &smelt, shared)?;
         work::register(lua, &smelt)?;
         prompt::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
@@ -123,7 +123,7 @@ impl LuaRuntime {
         permissions::register(lua, &smelt, shared)?;
         session::register(lua, &smelt)?;
         settings::register(lua, &smelt, shared)?;
-        terminal::register(lua, &smelt)?;
+        terminal::register(lua, &smelt, shared)?;
         transcript::register(lua, &smelt)?;
         vim::register(lua, &smelt)?;
 
@@ -198,13 +198,6 @@ impl LuaRuntime {
         )?;
 
         lua.globals().set("smelt", smelt)?;
-
-        // `smelt_core::LuaRuntime::with_shared` loaded the Host bootstrap on the
-        // initial Host-only table. This function replaces `smelt` with the full
-        // Host+UiHost table, so run the full bootstrap once against the table
-        // plugins will actually see.
-        smelt_core::lua::runtime::load_bootstrap_chunks(lua)?;
-
         Ok(())
     }
 }

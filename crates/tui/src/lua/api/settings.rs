@@ -65,6 +65,9 @@ fn apply_setting(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(key.clone(), parsed.clone());
+    if !shared.core.external_effects_active() {
+        return Ok(());
+    }
     crate::lua::try_with_app(|app| {
         let effective = app
             .core

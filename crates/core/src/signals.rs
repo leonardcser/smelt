@@ -6,7 +6,7 @@
 //! `mlua::Value` at drain time.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use protocol::{TokenUsage, TurnMeta};
@@ -32,11 +32,13 @@ pub enum SubscriberKind {
 
 struct Subscriber {
     id: SubscriptionId,
+    generation: u64,
     kind: SubscriberKind,
 }
 
 struct GlobSubscriber {
     id: SubscriptionId,
+    generation: u64,
     pattern: glob::Pattern,
     kind: SubscriberKind,
 }
@@ -44,6 +46,8 @@ struct GlobSubscriber {
 struct Slot {
     value: Rc<dyn Any>,
     subscribers: Vec<Subscriber>,
+    persistent: bool,
+    lua_generations: HashSet<u64>,
 }
 
 /// One queued callback inside a `PendingFire`. `is_glob` selects the call shape:
@@ -51,6 +55,7 @@ struct Slot {
 pub struct PendingCallback {
     pub kind: SubscriberKind,
     pub is_glob: bool,
+    generation: u64,
 }
 
 /// One queued notification: value snapshot, optional previous value, and subscriber callbacks.
@@ -134,20 +139,27 @@ impl Signals {
             Slot {
                 value: Rc::new(initial),
                 subscribers: Vec::new(),
+                persistent: true,
+                lua_generations: HashSet::new(),
             },
         );
     }
 
-    /// Declare a signal only when it does not already exist.
-    pub(crate) fn declare_if_missing<T: Any + 'static>(
+    pub(crate) fn declare_if_missing_for_generation<T: Any + 'static>(
         &mut self,
         name: impl Into<String>,
         initial: T,
+        generation: u64,
     ) {
-        self.slots.entry(name.into()).or_insert_with(|| Slot {
+        let slot = self.slots.entry(name.into()).or_insert_with(|| Slot {
             value: Rc::new(initial),
             subscribers: Vec::new(),
+            persistent: false,
+            lua_generations: HashSet::new(),
         });
+        if !slot.persistent {
+            slot.lua_generations.insert(generation);
+        }
     }
 
     fn callbacks_for(&self, name: &str, subscribers: &[Subscriber]) -> Vec<PendingCallback> {
@@ -156,6 +168,7 @@ impl Signals {
             .map(|s| PendingCallback {
                 kind: s.kind.clone(),
                 is_glob: false,
+                generation: s.generation,
             })
             .collect();
         for g in &self.glob_subs {
@@ -163,6 +176,7 @@ impl Signals {
                 callbacks.push(PendingCallback {
                     kind: g.kind.clone(),
                     is_glob: true,
+                    generation: g.generation,
                 });
             }
         }
@@ -183,6 +197,7 @@ impl Signals {
                 .map(|s| PendingCallback {
                     kind: s.kind.clone(),
                     is_glob: false,
+                    generation: s.generation,
                 })
                 .collect();
             (prev, snapshot, callbacks)
@@ -194,6 +209,7 @@ impl Signals {
                 callbacks.push(PendingCallback {
                     kind: g.kind.clone(),
                     is_glob: true,
+                    generation: g.generation,
                 });
             }
         }
@@ -228,15 +244,29 @@ impl Signals {
     }
 
     /// Subscribe to `name`. Returns `None` when the signal is undeclared.
+    #[cfg(test)]
     pub(crate) fn subscribe_kind(
         &mut self,
         name: &str,
         kind: SubscriberKind,
     ) -> Option<SubscriptionId> {
+        self.subscribe_kind_for_generation(name, kind, 0)
+    }
+
+    pub(crate) fn subscribe_kind_for_generation(
+        &mut self,
+        name: &str,
+        kind: SubscriberKind,
+        generation: u64,
+    ) -> Option<SubscriptionId> {
         let slot = self.slots.get_mut(name)?;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        slot.subscribers.push(Subscriber { id, kind });
+        slot.subscribers.push(Subscriber {
+            id,
+            generation,
+            kind,
+        });
         Some(id)
     }
 
@@ -252,14 +282,29 @@ impl Signals {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn glob_subscribe(
         &mut self,
         pattern: glob::Pattern,
         kind: SubscriberKind,
     ) -> SubscriptionId {
+        self.glob_subscribe_for_generation(pattern, kind, 0)
+    }
+
+    pub(crate) fn glob_subscribe_for_generation(
+        &mut self,
+        pattern: glob::Pattern,
+        kind: SubscriberKind,
+        generation: u64,
+    ) -> SubscriptionId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.glob_subs.push(GlobSubscriber { id, pattern, kind });
+        self.glob_subs.push(GlobSubscriber {
+            id,
+            generation,
+            pattern,
+            kind,
+        });
         id
     }
 
@@ -284,6 +329,10 @@ impl Signals {
         self.slots.keys().map(String::as_str)
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.slots.contains_key(name)
+    }
+
     /// Drop every Lua subscriber (direct + glob) plus queued fires.
     /// Dropping `pending` too prevents one stale post-reload firing.
     pub fn clear_lua_subscribers(&mut self) {
@@ -292,6 +341,24 @@ impl Signals {
         }
         self.glob_subs.clear();
         self.pending.clear();
+    }
+
+    /// Retire only subscriptions owned by one Lua generation.
+    pub fn clear_lua_generation(&mut self, generation: u64) {
+        for slot in self.slots.values_mut() {
+            slot.subscribers
+                .retain(|subscriber| subscriber.generation != generation);
+            slot.lua_generations.remove(&generation);
+        }
+        self.slots
+            .retain(|_, slot| slot.persistent || !slot.lua_generations.is_empty());
+        self.glob_subs
+            .retain(|subscriber| subscriber.generation != generation);
+        for fire in &mut self.pending {
+            fire.callbacks
+                .retain(|callback| callback.generation != generation);
+        }
+        self.pending.retain(|fire| !fire.callbacks.is_empty());
     }
 
     /// Publish `value` only when it differs from the current slot. Skips subscribers on no-op writes.

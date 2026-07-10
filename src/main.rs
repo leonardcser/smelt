@@ -824,6 +824,7 @@ async fn async_main() {
     if let Ok(mut map) = lua_runtime.core_shared().cli_flag_values.lock() {
         *map = lua_flag_values;
     }
+    lua_runtime.freeze_launch_inputs();
 
     if let Some(command) = args.command.take() {
         match command {
@@ -891,10 +892,14 @@ async fn async_main() {
     let env = Arc::new(engine::env::RuntimeEnv::snapshot());
     let project_trust = lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
-    let lua_permission_rules = lua_runtime.take_permission_rules();
+    let lua_permission_rules = lua_runtime.permission_rules_snapshot();
     let lua_tool_defaults = lua_runtime.tool_defaults();
     let lua_modes = lua_runtime.mode_names();
     let lua_mode_behaviors = lua_runtime.mode_behaviors();
+    lua_runtime
+        .core_shared()
+        .lsp
+        .configure_detached(lua_runtime.lsp_config_snapshot());
     if let Some(err) = lua_runtime.load_error() {
         eprintln!("warning: lua init: {err}");
     }
