@@ -19,6 +19,9 @@ set -o pipefail; cargo test -p smelt-tui --features harness double_esc 2>&1 | ta
 # format check
 set -o pipefail; cargo fmt -- --check 2>&1 | tail -120
 
+# then format
+set -o pipefail; cargo fmt 2>&1 | tail -120
+
 # lint
 set -o pipefail; cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings 2>&1 | tail -120
 
@@ -39,9 +42,9 @@ set -o pipefail; cargo test -p smelt-tui --test storybook_main --features harnes
 
 ### Branding and style
 
-Use `smelt` in lowercase for product copy, terminal titles, command output, docs,
-and UI labels. Use capitalized `Smelt` only when grammar requires a proper noun at
-the beginning of a sentence.
+Use `smelt` in lowercase for product copy, terminal titles, command output,
+docs, and UI labels. Use capitalized `Smelt` only when grammar requires a proper
+noun at the beginning of a sentence.
 
 ### Compatibility debt
 
