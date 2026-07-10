@@ -3,7 +3,10 @@ use super::*;
 impl LspManager {
     pub async fn dispatch_local(&self, operation: &str, args: Value) -> Result<Value, String> {
         match operation {
-            "status" => Ok(Value::String(self.status().await)),
+            "status" => {
+                let file_path = optional_string(&args, "file_path");
+                Ok(Value::String(self.status(file_path.as_deref()).await))
+            }
             "outline" => {
                 let file_path = required_string(&args, "file_path")?;
                 let symbol = optional_string(&args, "symbol");
@@ -132,11 +135,12 @@ impl LspManager {
         }
         let symbol = symbols.first().unwrap();
         Ok((
-            symbol
-                .get("file_path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("symbol has no file_path: {query}"))?
-                .to_string(),
+            absolute_path_string(
+                symbol
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("symbol has no file_path: {query}"))?,
+            ),
             symbol
                 .get("line")
                 .and_then(Value::as_u64)

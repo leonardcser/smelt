@@ -378,16 +378,17 @@ local function position_params(properties)
 end
 
 local function register_tool(name, description, properties, required)
+  local parameters = {
+    type = "object",
+    properties = properties,
+  }
+  if required and #required > 0 then parameters.required = required end
   add_reg(smelt.tools.register(smelt.tools._with_watchdog({
     name = name,
     description = description,
     permission_defaults = { normal = "allow", plan = "allow", apply = name == "rename_symbol" and "ask" or "allow" },
     effect = name == "rename_symbol" and "write" or "read",
-    parameters = {
-      type = "object",
-      properties = properties,
-      required = required or {},
-    },
+    parameters = parameters,
     summary = function(args)
       args = args or {}
       if args.file_path and args.file_path ~= "" then return smelt.path.display(args.file_path) end
@@ -467,7 +468,7 @@ function M.setup(opts)
 
   register_tool("find_definition", "Find the definition for the symbol at a source position.", position_params({}), { "file_path", "line", "column" })
 
-  register_tool("find_references", "Find semantic references to a symbol at a source position. Returns normalized locations with snippets by default, or raw language-server locations with raw=true.", position_params({
+  register_tool("find_references", "Find semantic references to a symbol at a source position. Returns normalized locations with snippets by default, or raw language-server locations with raw=true. Both modes honor limit and report truncation metadata.", position_params({
     include_declaration = { type = "boolean", description = "Include the defining declaration when supported. Defaults to false." },
     limit = { type = "integer", description = "Maximum locations to show. Defaults to 50 and is capped by the backend." },
     raw = { type = "boolean", description = "Return raw language-server locations instead of normalized locations. Defaults to false." },

@@ -183,13 +183,6 @@ pub(super) fn normalize_document_symbols(value: &Value) -> Vec<NormalizedSymbol>
     items.iter().filter_map(normalize_symbol).collect()
 }
 
-pub(super) fn count_symbols(symbols: &[NormalizedSymbol]) -> usize {
-    symbols
-        .iter()
-        .map(|symbol| 1 + count_symbols(&symbol.children))
-        .sum()
-}
-
 pub(super) fn count_compact_outline_symbols(symbols: &[CompactOutlineSymbol]) -> usize {
     symbols
         .iter()
@@ -197,6 +190,7 @@ pub(super) fn count_compact_outline_symbols(symbols: &[CompactOutlineSymbol]) ->
         .sum()
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct OutlineFilter<'a> {
     pub(super) symbol: Option<&'a str>,
     pub(super) kind: Option<&'a str>,
@@ -948,7 +942,6 @@ mod tests {
             },
         );
 
-        assert_eq!(count_symbols(&symbols), 3);
         assert_eq!(count_compact_outline_symbols(&outline), 2);
         assert_eq!(outline[0].name, "root");
         assert_eq!(outline[0].children.len(), 1);

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{timeout, Duration};
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -69,19 +69,58 @@ enum LspClientState {
     },
 }
 
-enum ClientForFile {
-    Ready(Arc<LspClient>),
-    NotReady(Value),
-}
-
 #[derive(Default)]
 pub struct LspManager {
     servers: StdMutex<HashMap<String, ServerEntry>>,
 }
 
 type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
-type DiagnosticsByUri = Arc<Mutex<HashMap<String, Value>>>;
+type DiagnosticsByUri = Arc<DiagnosticsStore>;
 type StderrTail = Arc<Mutex<VecDeque<String>>>;
+
+struct DiagnosticsStore {
+    state: Mutex<DiagnosticsState>,
+    updates: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct DiagnosticsState {
+    generation: u64,
+    by_uri: HashMap<String, DiagnosticEntry>,
+}
+
+struct DiagnosticEntry {
+    generation: u64,
+    published_at: Instant,
+    value: Value,
+}
+
+const DIAGNOSTICS_SETTLE: Duration = Duration::from_millis(500);
+const WORKSPACE_PROGRESS_SETTLE: Duration = Duration::from_millis(100);
+
+#[derive(Clone)]
+struct WorkspaceProgressTracker {
+    updates: watch::Sender<WorkspaceProgressState>,
+}
+
+#[derive(Clone)]
+struct WorkspaceProgressState {
+    initialized_at: Instant,
+    seen: bool,
+    server_quiescent: Option<bool>,
+    active: HashMap<String, String>,
+    last_update: Instant,
+}
+
+struct OpenDocument {
+    version: i32,
+    text: String,
+}
+
+struct SyncedDocument {
+    text: String,
+    changed: bool,
+}
 
 struct LspClient {
     name: String,
@@ -89,13 +128,254 @@ struct LspClient {
     stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingRequests,
     diagnostics: DiagnosticsByUri,
-    document_versions: Mutex<HashMap<String, i32>>,
+    workspace_progress: WorkspaceProgressTracker,
+    documents: Mutex<HashMap<String, OpenDocument>>,
     request_timeout_ms: u64,
     init_timeout_ms: u64,
     initialization_options: Value,
     config: LspServerConfig,
     next_id: AtomicU64,
     _child: Mutex<Child>,
+}
+
+impl DiagnosticsStore {
+    fn new() -> Self {
+        let (updates, _) = watch::channel(0);
+        Self {
+            state: Mutex::new(DiagnosticsState::default()),
+            updates,
+        }
+    }
+
+    async fn generation(&self, uri: &str) -> u64 {
+        self.state
+            .lock()
+            .await
+            .by_uri
+            .get(uri)
+            .map_or(0, |entry| entry.generation)
+    }
+
+    async fn current(&self, uri: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .await
+            .by_uri
+            .get(uri)
+            .map(|entry| entry.value.clone())
+    }
+
+    async fn publish(&self, uri: String, value: Value) {
+        let generation = {
+            let mut state = self.state.lock().await;
+            state.generation += 1;
+            let generation = state.generation;
+            state.by_uri.insert(
+                uri,
+                DiagnosticEntry {
+                    generation,
+                    published_at: Instant::now(),
+                    value,
+                },
+            );
+            generation
+        };
+        self.updates.send_replace(generation);
+    }
+
+    async fn wait_for_update(&self, uri: &str, after: u64, wait: Duration) -> Value {
+        let mut updates = self.updates.subscribe();
+        let deadline = Instant::now() + wait;
+        loop {
+            let settle_deadline = self
+                .state
+                .lock()
+                .await
+                .by_uri
+                .get(uri)
+                .filter(|entry| entry.generation > after)
+                .map(|entry| entry.published_at + DIAGNOSTICS_SETTLE);
+            let now = Instant::now();
+            if now >= deadline || settle_deadline.is_some_and(|settle| now >= settle) {
+                return self.current(uri).await.unwrap_or_else(|| json!([]));
+            }
+            let next_deadline = settle_deadline.map_or(deadline, |settle| settle.min(deadline));
+            let _ = timeout(next_deadline - now, updates.changed()).await;
+        }
+    }
+
+    async fn snapshot(&self) -> serde_json::Map<String, Value> {
+        self.state
+            .lock()
+            .await
+            .by_uri
+            .iter()
+            .map(|(uri, entry)| (uri.clone(), entry.value.clone()))
+            .collect()
+    }
+}
+
+impl WorkspaceProgressTracker {
+    fn new() -> Self {
+        let now = Instant::now();
+        let (updates, _) = watch::channel(WorkspaceProgressState {
+            initialized_at: now,
+            seen: false,
+            server_quiescent: None,
+            active: HashMap::new(),
+            last_update: now,
+        });
+        Self { updates }
+    }
+
+    fn mark_initialized(&self) {
+        self.updates.send_modify(|state| {
+            let now = Instant::now();
+            state.initialized_at = now;
+            state.last_update = now;
+        });
+    }
+
+    fn record(&self, message: &Value) {
+        let Some(params) = message.get("params") else {
+            return;
+        };
+        if message.get("method").and_then(Value::as_str) == Some("experimental/serverStatus") {
+            let Some(quiescent) = params.get("quiescent").and_then(Value::as_bool) else {
+                return;
+            };
+            self.updates.send_modify(|state| {
+                state.server_quiescent = Some(quiescent);
+                state.last_update = Instant::now();
+            });
+            return;
+        }
+        let Some(token) = params.get("token").and_then(progress_token) else {
+            return;
+        };
+        let Some(value) = params.get("value") else {
+            return;
+        };
+        match value.get("kind").and_then(Value::as_str) {
+            Some("begin") => {
+                let Some(title) = value.get("title").and_then(Value::as_str) else {
+                    return;
+                };
+                if !progress_blocks_workspace(title) {
+                    return;
+                }
+                self.updates.send_modify(|state| {
+                    state.seen = true;
+                    state.active.insert(token, title.to_string());
+                    state.last_update = Instant::now();
+                });
+            }
+            Some("end") => {
+                self.updates.send_if_modified(|state| {
+                    if state.active.remove(&token).is_none() {
+                        return false;
+                    }
+                    state.last_update = Instant::now();
+                    true
+                });
+            }
+            _ => {}
+        }
+    }
+
+    async fn wait_until_ready(
+        &self,
+        startup_timeout: Duration,
+        progress_start_grace: Duration,
+    ) -> Result<(), String> {
+        let mut updates = self.updates.subscribe();
+        loop {
+            let state = updates.borrow().clone();
+            let now = Instant::now();
+            if state.server_quiescent == Some(true) {
+                return Ok(());
+            }
+
+            let loading = state.server_quiescent == Some(false) || !state.active.is_empty();
+            if loading {
+                let startup_deadline = state.initialized_at + startup_timeout;
+                if now >= startup_deadline {
+                    let mut active = state.active.values().cloned().collect::<Vec<_>>();
+                    if state.server_quiescent == Some(false) && active.is_empty() {
+                        active.push("server workspace status".into());
+                    }
+                    active.sort();
+                    active.dedup();
+                    return Err(format!(
+                        "LSP workspace is still loading after {}ms: {}",
+                        startup_timeout.as_millis(),
+                        active.join(", ")
+                    ));
+                }
+                let _ = timeout(startup_deadline - now, updates.changed()).await;
+                continue;
+            }
+
+            if !state.seen {
+                let grace_deadline = state.initialized_at + progress_start_grace;
+                if now >= grace_deadline {
+                    return Ok(());
+                }
+                if timeout(grace_deadline - now, updates.changed())
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            let settle_deadline = state.last_update + WORKSPACE_PROGRESS_SETTLE;
+            if now >= settle_deadline {
+                return Ok(());
+            }
+            let _ = timeout(settle_deadline - now, updates.changed()).await;
+        }
+    }
+
+    fn status(&self, progress_start_grace: Duration) -> Vec<String> {
+        let state = self.updates.borrow();
+        if state.server_quiescent == Some(true) {
+            return vec!["  workspace: ready".into()];
+        }
+        if state.server_quiescent == Some(false) || !state.active.is_empty() {
+            let mut lines = vec!["  workspace: loading".into()];
+            let mut active = state.active.values().cloned().collect::<Vec<_>>();
+            active.sort();
+            active.dedup();
+            if !active.is_empty() {
+                lines.push(format!("  progress: {}", active.join(", ")));
+            }
+            return lines;
+        }
+        if !state.seen {
+            if state.initialized_at.elapsed() < progress_start_grace {
+                return vec!["  workspace: detecting load progress".into()];
+            }
+            return Vec::new();
+        }
+        vec!["  workspace: ready".into()]
+    }
+}
+
+fn progress_token(value: &Value) -> Option<String> {
+    match value {
+        Value::String(token) => Some(token.clone()),
+        Value::Number(token) => Some(token.to_string()),
+        _ => None,
+    }
+}
+
+fn progress_blocks_workspace(title: &str) -> bool {
+    let title = title.to_ascii_lowercase();
+    ["index", "load", "project", "scan", "workspace", "initializ"]
+        .iter()
+        .any(|word| title.contains(word))
 }
 
 fn default_init_timeout_ms() -> u64 {
@@ -187,7 +467,12 @@ impl LspManager {
         }
     }
 
-    pub async fn status(&self) -> String {
+    pub async fn status(&self, file_path: Option<&str>) -> String {
+        let file_error = if let Some(file_path) = file_path {
+            self.initialized_client_for_file(file_path).await.err()
+        } else {
+            None
+        };
         let entries: Vec<_> = {
             let servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
             let mut entries: Vec<_> = servers
@@ -215,6 +500,9 @@ impl LspManager {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        if let Some(error) = file_error {
+            lines.push(format!("Requested file error: {error}"));
+        }
         for (name, config, clients) in entries {
             lines.push(format!("{name}: {}", config.cmd.join(" ")));
             if clients.is_empty() {
@@ -229,10 +517,7 @@ impl LspManager {
     }
 
     pub async fn document_symbols(&self, file_path: &str) -> Result<Value, String> {
-        let client = match self.client_for_file(file_path).await? {
-            ClientForFile::Ready(client) => client,
-            ClientForFile::NotReady(value) => return Ok(value),
-        };
+        let client = self.client_for_file(file_path).await?;
         client.sync_document(file_path).await?;
         request_document_symbols(&client, file_path).await
     }
@@ -243,19 +528,14 @@ impl LspManager {
             return Ok(raw_symbols);
         }
         let symbols = normalize_document_symbols(&raw_symbols);
-        let total = count_symbols(&symbols);
+        let filter = OutlineFilter {
+            symbol: options.symbol,
+            kind: options.kind,
+            name_contains: options.name_contains,
+            max_depth: options.max_depth,
+        };
         let limit = bounded_limit(options.max_symbols, 200, 500);
-        let mut remaining = limit;
-        let compact_symbols = compact_outline_symbols_filtered(
-            &symbols,
-            &mut remaining,
-            OutlineFilter {
-                symbol: options.symbol,
-                kind: options.kind,
-                name_contains: options.name_contains,
-                max_depth: options.max_depth,
-            },
-        );
+        let (total, compact_symbols) = limited_outline_symbols(&symbols, filter, limit);
         let shown = count_compact_outline_symbols(&compact_symbols);
         Ok(json!({
             "file_path": display_path(&absolute_path_string(options.file_path)),
@@ -289,9 +569,7 @@ impl LspManager {
         for (server, client) in clients {
             let query = query.to_string();
             handles.push(tokio::spawn(async move {
-                let result = client
-                    .request("workspace/symbol", json!({ "query": query }))
-                    .await;
+                let result = client.request_workspace_symbols(&query).await;
                 (server, result)
             }));
         }
@@ -341,11 +619,8 @@ impl LspManager {
         column: u64,
         depth: u64,
     ) -> Result<Value, String> {
-        let client = match self.client_for_file(file_path).await? {
-            ClientForFile::Ready(client) => client,
-            ClientForFile::NotReady(value) => return Ok(value),
-        };
-        let text = client.sync_document(file_path).await?;
+        let client = self.client_for_file(file_path).await?;
+        let text = client.sync_document(file_path).await?.text;
         let params = text_position_params(file_path, &text, line, column)?;
         let hover_params = params.clone();
         let definition_params = params.clone();
@@ -442,11 +717,8 @@ impl LspManager {
         line: u64,
         column: u64,
     ) -> Result<Value, String> {
-        let client = match self.client_for_file(file_path).await? {
-            ClientForFile::Ready(client) => client,
-            ClientForFile::NotReady(value) => return Ok(value),
-        };
-        let text = client.sync_document(file_path).await?;
+        let client = self.client_for_file(file_path).await?;
+        let text = client.sync_document(file_path).await?.text;
         let raw = client
             .request(
                 "textDocument/definition",
@@ -473,16 +745,13 @@ impl LspManager {
         column: u64,
         options: ReferenceOptions,
     ) -> Result<Value, String> {
-        let client = match self.client_for_file(file_path).await? {
-            ClientForFile::Ready(client) => client,
-            ClientForFile::NotReady(value) => return Ok(value),
-        };
-        let text = client.sync_document(file_path).await?;
+        let client = self.client_for_file(file_path).await?;
+        let text = client.sync_document(file_path).await?.text;
         let mut params = text_position_params(file_path, &text, line, column)?;
         params["context"] = json!({ "includeDeclaration": options.include_declaration });
         let raw_refs = client.request("textDocument/references", params).await?;
         if options.raw {
-            return Ok(raw_refs);
+            return Ok(raw_location_summary(raw_refs, options.limit));
         }
         Ok(location_summary(
             &raw_refs,
@@ -499,14 +768,25 @@ impl LspManager {
 
     pub async fn diagnostics(&self, file_path: Option<&str>) -> Result<Value, String> {
         if let Some(path) = file_path {
-            let client = match self.client_for_file(path).await? {
-                ClientForFile::Ready(client) => client,
-                ClientForFile::NotReady(value) => return Ok(value),
-            };
-            client.sync_document(path).await?;
+            let client = self.client_for_file(path).await?;
             let uri = file_uri(path)?;
-            let diagnostics = client.diagnostics.lock().await;
-            return Ok(diagnostics.get(&uri).cloned().unwrap_or_else(|| json!([])));
+            let generation = client.diagnostics.generation(&uri).await;
+            let synced = client.sync_document(path).await?;
+            if !synced.changed {
+                return Ok(client
+                    .diagnostics
+                    .current(&uri)
+                    .await
+                    .unwrap_or_else(|| json!([])));
+            }
+            return Ok(client
+                .diagnostics
+                .wait_for_update(
+                    &uri,
+                    generation,
+                    Duration::from_millis(client.config.startup_wait_ms),
+                )
+                .await);
         }
 
         let slots: Vec<_> = {
@@ -522,10 +802,7 @@ impl LspManager {
                 Some(client) => client,
                 None => continue,
             };
-            let diagnostics = client.diagnostics.lock().await;
-            for (uri, value) in diagnostics.iter() {
-                out.insert(uri.clone(), value.clone());
-            }
+            out.extend(client.diagnostics.snapshot().await);
         }
         Ok(Value::Object(out))
     }
@@ -538,11 +815,8 @@ impl LspManager {
         new_name: &str,
         apply: bool,
     ) -> Result<Value, String> {
-        let client = match self.client_for_file(file_path).await? {
-            ClientForFile::Ready(client) => client,
-            ClientForFile::NotReady(value) => return Ok(value),
-        };
-        let text = client.sync_document(file_path).await?;
+        let client = self.client_for_file(file_path).await?;
+        let text = client.sync_document(file_path).await?.text;
         let mut params = text_position_params(file_path, &text, line, column)?;
         params["newName"] = json!(new_name);
         let edit = client.request("textDocument/rename", params).await?;
@@ -637,7 +911,13 @@ impl LspManager {
         Ok(clients)
     }
 
-    async fn client_for_file(&self, file_path: &str) -> Result<ClientForFile, String> {
+    async fn client_for_file(&self, file_path: &str) -> Result<Arc<LspClient>, String> {
+        let client = self.initialized_client_for_file(file_path).await?;
+        client.wait_for_workspace_ready().await?;
+        Ok(client)
+    }
+
+    async fn initialized_client_for_file(&self, file_path: &str) -> Result<Arc<LspClient>, String> {
         let file = PathBuf::from(file_path);
         let (server_name, slot) = {
             let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
@@ -656,13 +936,9 @@ impl LspManager {
                 .clone();
             (server_name, slot)
         };
-        Ok(match slot.wait_ready().await {
-            Ok(client) => ClientForFile::Ready(client),
-            Err(value) => {
-                let mut value = value;
-                value["server"] = json!(server_name);
-                ClientForFile::NotReady(value)
-            }
+        slot.wait_ready().await.map_err(|mut value| {
+            value["server"] = json!(server_name);
+            value.to_string()
         })
     }
 }
@@ -674,6 +950,22 @@ pub(crate) struct OutlineOptions<'a> {
     pub(crate) kind: Option<&'a str>,
     pub(crate) name_contains: Option<&'a str>,
     pub(crate) max_depth: Option<usize>,
+}
+
+fn limited_outline_symbols(
+    symbols: &[NormalizedSymbol],
+    filter: OutlineFilter<'_>,
+    limit: usize,
+) -> (usize, Vec<CompactOutlineSymbol>) {
+    let mut remaining = usize::MAX;
+    let all_symbols = compact_outline_symbols_filtered(symbols, &mut remaining, filter);
+    let total = count_compact_outline_symbols(&all_symbols);
+    if total <= limit {
+        return (total, all_symbols);
+    }
+    let mut remaining = limit;
+    let symbols = compact_outline_symbols_filtered(symbols, &mut remaining, filter);
+    (total, symbols)
 }
 
 pub(crate) struct ReferenceOptions {
@@ -691,6 +983,26 @@ struct SymbolPosition<'a> {
 struct LocationSummaryOptions<'a> {
     limit: usize,
     symbol: Option<SymbolPosition<'a>>,
+}
+
+fn raw_location_summary(locations: Value, requested_limit: usize) -> Value {
+    let mut locations = match locations {
+        Value::Array(locations) => locations,
+        Value::Null => Vec::new(),
+        location => vec![location],
+    };
+    let total = locations.len();
+    let limit = bounded_limit(requested_limit, 50, 200);
+    locations.truncate(limit);
+    json!({
+        "raw": true,
+        "total": total,
+        "limit": limit,
+        "truncated": total > locations.len(),
+        "shown": locations.len(),
+        "omitted": total.saturating_sub(locations.len()),
+        "locations": locations,
+    })
 }
 
 fn location_summary(locations: &Value, options: LocationSummaryOptions<'_>) -> Value {
@@ -821,9 +1133,14 @@ impl LspClientSlot {
                     lines.push("  state: starting".into());
                     lines.push(format!("  elapsed: {}ms", started.elapsed().as_millis()));
                 }
-                LspClientState::Ready { init_ms, .. } => {
+                LspClientState::Ready { client, init_ms } => {
                     lines.push("  state: ready".into());
                     lines.push(format!("  initialized_in: {init_ms}ms"));
+                    lines.extend(
+                        client
+                            .workspace_progress
+                            .status(Duration::from_millis(client.config.startup_wait_ms)),
+                    );
                 }
                 LspClientState::Failed { started, error } => {
                     lines.push("  state: failed".into());
@@ -890,13 +1207,15 @@ impl LspClient {
             .stderr
             .take()
             .ok_or("language server stderr unavailable")?;
+        let workspace_progress = WorkspaceProgressTracker::new();
         let client = Arc::new(Self {
             name,
             root,
             stdin: Arc::new(Mutex::new(stdin)),
             pending: Arc::new(Mutex::new(HashMap::new())),
-            diagnostics: Arc::new(Mutex::new(HashMap::new())),
-            document_versions: Mutex::new(HashMap::new()),
+            diagnostics: Arc::new(DiagnosticsStore::new()),
+            workspace_progress: workspace_progress.clone(),
+            documents: Mutex::new(HashMap::new()),
             request_timeout_ms: config.request_timeout_ms,
             init_timeout_ms: config.init_timeout_ms,
             initialization_options: config.initialization_options.clone(),
@@ -910,6 +1229,7 @@ impl LspClient {
             client.stdin.clone(),
             client.pending.clone(),
             client.diagnostics.clone(),
+            workspace_progress,
             config.settings.clone(),
         );
         client.initialize().await?;
@@ -939,29 +1259,50 @@ impl LspClient {
                         "workspace": {
                             "symbol": {},
                             "workspaceEdit": { "documentChanges": true }
-                        }
+                        },
+                        "window": { "workDoneProgress": true },
+                        "experimental": { "serverStatusNotification": true }
                     },
                     "initializationOptions": self.initialization_options.clone()
                 }),
                 Duration::from_millis(self.init_timeout_ms),
             )
             .await?;
+        self.workspace_progress.mark_initialized();
         self.notify("initialized", json!({})).await?;
         Ok(result).map(|_| ())
     }
 
-    async fn sync_document(&self, file_path: &str) -> Result<String, String> {
+    async fn sync_document(&self, file_path: &str) -> Result<SyncedDocument, String> {
         let uri = file_uri(file_path)?;
         let text = tokio::fs::read_to_string(file_path)
             .await
             .map_err(|e| format!("read {}: {e}", file_path))?;
-        let version = {
-            let mut versions = self.document_versions.lock().await;
-            let version = versions
-                .entry(uri.clone())
-                .and_modify(|v| *v += 1)
-                .or_insert(1);
-            *version
+        let (version, previous_text) = {
+            let mut documents = self.documents.lock().await;
+            match documents.get_mut(&uri) {
+                Some(document) if document.text == text => {
+                    return Ok(SyncedDocument {
+                        text,
+                        changed: false,
+                    });
+                }
+                Some(document) => {
+                    document.version += 1;
+                    let previous_text = std::mem::replace(&mut document.text, text.clone());
+                    (document.version, Some(previous_text))
+                }
+                None => {
+                    documents.insert(
+                        uri.clone(),
+                        OpenDocument {
+                            version: 1,
+                            text: text.clone(),
+                        },
+                    );
+                    (1, None)
+                }
+            }
         };
 
         let result = if version == 1 {
@@ -989,15 +1330,38 @@ impl LspClient {
         };
 
         if let Err(err) = result {
-            let mut versions = self.document_versions.lock().await;
+            let mut documents = self.documents.lock().await;
             if version == 1 {
-                versions.remove(&uri);
-            } else if let Some(current) = versions.get_mut(&uri) {
-                *current -= 1;
+                documents.remove(&uri);
+            } else if let (Some(document), Some(previous_text)) =
+                (documents.get_mut(&uri), previous_text)
+            {
+                if document.version == version {
+                    document.version -= 1;
+                    document.text = previous_text;
+                }
             }
             return Err(err);
         }
-        Ok(text)
+        Ok(SyncedDocument {
+            text,
+            changed: true,
+        })
+    }
+
+    async fn wait_for_workspace_ready(&self) -> Result<(), String> {
+        self.workspace_progress
+            .wait_until_ready(
+                Duration::from_millis(self.init_timeout_ms),
+                Duration::from_millis(self.config.startup_wait_ms),
+            )
+            .await
+    }
+
+    async fn request_workspace_symbols(&self, query: &str) -> Result<Value, String> {
+        self.wait_for_workspace_ready().await?;
+        self.request("workspace/symbol", json!({ "query": query }))
+            .await
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -1102,6 +1466,7 @@ fn spawn_reader(
     stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingRequests,
     diagnostics: DiagnosticsByUri,
+    workspace_progress: WorkspaceProgressTracker,
     settings: Value,
 ) {
     tokio::spawn(async move {
@@ -1151,6 +1516,11 @@ fn spawn_reader(
                     };
                     let _ = tx.send(result);
                 }
+            } else if matches!(
+                msg.get("method").and_then(Value::as_str),
+                Some("$/progress" | "experimental/serverStatus")
+            ) {
+                workspace_progress.record(&msg);
             } else if msg.get("method").and_then(Value::as_str)
                 == Some("textDocument/publishDiagnostics")
             {
@@ -1160,7 +1530,7 @@ fn spawn_reader(
                             .get("diagnostics")
                             .cloned()
                             .unwrap_or_else(|| json!([]));
-                        diagnostics.lock().await.insert(uri.to_string(), value);
+                        diagnostics.publish(uri.to_string(), value).await;
                     }
                 }
             }
@@ -1487,6 +1857,325 @@ fn utf16_col_to_byte(line: &str, col: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, Write};
+
+    fn progress_message(token: &str, kind: &str, title: Option<&str>) -> Value {
+        let mut value = json!({ "kind": kind });
+        if let Some(title) = title {
+            value["title"] = json!(title);
+        }
+        json!({
+            "jsonrpc": "2.0",
+            "method": "$/progress",
+            "params": { "token": token, "value": value }
+        })
+    }
+
+    fn server_status(quiescent: bool) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "experimental/serverStatus",
+            "params": { "health": "ok", "quiescent": quiescent }
+        })
+    }
+
+    fn read_fake_lsp_message(reader: &mut impl BufRead) -> Option<Value> {
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse::<usize>().ok();
+            }
+        }
+        let mut body = vec![0; content_length?];
+        reader.read_exact(&mut body).ok()?;
+        serde_json::from_slice(&body).ok()
+    }
+
+    fn write_fake_lsp_message(message: &Value) {
+        let body = serde_json::to_vec(message).unwrap();
+        let mut stdout = std::io::stdout().lock();
+        write!(stdout, "\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+        stdout.write_all(&body).unwrap();
+        stdout.flush().unwrap();
+    }
+
+    fn fake_workspace_symbol_response(request: &Value, uri: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": [{
+                "name": "ReadySymbol",
+                "kind": 23,
+                "location": {
+                    "uri": uri,
+                    "range": {
+                        "start": { "line": 2, "character": 4 },
+                        "end": { "line": 2, "character": 15 }
+                    }
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn fake_workspace_loading_lsp_server_process() {
+        let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
+        let Some(initialize) = read_fake_lsp_message(&mut stdin) else {
+            return;
+        };
+        assert_eq!(initialize["method"], "initialize");
+        assert_eq!(
+            initialize["params"]["capabilities"]["window"]["workDoneProgress"],
+            true
+        );
+        assert_eq!(
+            initialize["params"]["capabilities"]["experimental"]["serverStatusNotification"],
+            true
+        );
+        write_fake_lsp_message(&json!({
+            "jsonrpc": "2.0",
+            "id": initialize["id"],
+            "result": { "capabilities": { "workspaceSymbolProvider": true } }
+        }));
+
+        let initialized = read_fake_lsp_message(&mut stdin).unwrap();
+        assert_eq!(initialized["method"], "initialized");
+        write_fake_lsp_message(&server_status(false));
+
+        let loading_started = Instant::now();
+        let ready = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            write_fake_lsp_message(&server_status(true));
+        });
+        let request = read_fake_lsp_message(&mut stdin).unwrap();
+        assert!(
+            loading_started.elapsed() >= Duration::from_millis(80),
+            "workspace/symbol was sent while the server was loading"
+        );
+        ready.join().unwrap();
+        assert_eq!(request["method"], "workspace/symbol");
+        let path = std::env::current_dir().unwrap().join("src/app_config.rs");
+        let uri = path_to_uri(&path).unwrap();
+        write_fake_lsp_message(&fake_workspace_symbol_response(&request, &uri));
+
+        while let Some(request) = read_fake_lsp_message(&mut stdin) {
+            let method = request.get("method").and_then(Value::as_str).unwrap();
+            let result = match method {
+                "workspace/symbol" => {
+                    write_fake_lsp_message(&fake_workspace_symbol_response(&request, &uri));
+                    continue;
+                }
+                "textDocument/didOpen" | "textDocument/didChange" => continue,
+                "textDocument/hover" => json!({ "contents": "ReadySymbol hover" }),
+                "textDocument/definition" => json!([]),
+                "textDocument/typeDefinition" => json!([]),
+                "textDocument/implementation" => json!([]),
+                "textDocument/documentSymbol" => json!([]),
+                "shutdown" => Value::Null,
+                "exit" => return,
+                other => panic!("unexpected fake LSP request: {other}"),
+            };
+            write_fake_lsp_message(&json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": result,
+            }));
+            if method == "shutdown" {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn first_workspace_symbol_query_waits_for_server_readiness() {
+        let executable = std::env::current_exe().unwrap();
+        let manager = LspManager::default();
+        manager
+            .configure(LspConfig {
+                servers: HashMap::from([(
+                    "fake".to_string(),
+                    LspServerConfig {
+                        cmd: vec![
+                            executable.display().to_string(),
+                            "--exact".into(),
+                            "lsp::tests::fake_workspace_loading_lsp_server_process".into(),
+                            "--nocapture".into(),
+                            "--test-threads=1".into(),
+                        ],
+                        extensions: vec!["rs".into()],
+                        language_id: Some("rust".into()),
+                        root_markers: Vec::new(),
+                        init_timeout_ms: 2_000,
+                        request_timeout_ms: 2_000,
+                        startup_wait_ms: 1_000,
+                        initialization_options: Value::Null,
+                        settings: Value::Null,
+                    },
+                )]),
+            })
+            .await;
+
+        let result = manager
+            .workspace_symbols("ReadySymbol", Some("struct"), None, 20, true)
+            .await
+            .unwrap();
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["symbols"][0]["name"], "ReadySymbol");
+        assert_eq!(result["symbols"][0]["file_path"], "src/app_config.rs");
+
+        let inspected = manager
+            .dispatch_local(
+                "inspect_symbol",
+                json!({ "query": "ReadySymbol", "exact": true, "depth": 0 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(inspected["position"]["file_path"], "src/app_config.rs");
+        assert_eq!(inspected["hover"], "ReadySymbol hover");
+        manager.shutdown_all().await;
+    }
+
+    #[test]
+    fn filtered_outline_totals_only_visible_symbols() {
+        let symbols = normalize_document_symbols(&json!([
+            {
+                "name": "Wanted",
+                "kind": 23,
+                "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 0 } },
+                "selectionRange": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 6 } }
+            },
+            {
+                "name": "Ignored",
+                "kind": 23,
+                "range": { "start": { "line": 4, "character": 0 }, "end": { "line": 6, "character": 0 } },
+                "selectionRange": { "start": { "line": 4, "character": 0 }, "end": { "line": 4, "character": 7 } }
+            }
+        ]));
+        let (total, visible) = limited_outline_symbols(
+            &symbols,
+            OutlineFilter {
+                symbol: Some("Wanted"),
+                kind: Some("struct"),
+                name_contains: None,
+                max_depth: None,
+            },
+            20,
+        );
+
+        assert_eq!(total, 1);
+        assert_eq!(count_compact_outline_symbols(&visible), 1);
+    }
+
+    #[test]
+    fn raw_reference_results_honor_the_requested_limit() {
+        let result = raw_location_summary(json!([{"id": 1}, {"id": 2}, {"id": 3}]), 2);
+
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["shown"], 2);
+        assert_eq!(result["omitted"], 1);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["locations"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_wait_for_a_fresh_publication() {
+        let diagnostics = Arc::new(DiagnosticsStore::new());
+        let generation = diagnostics.generation("file:///test.rs").await;
+        let publisher = diagnostics.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            publisher.publish("file:///test.rs".into(), json!([])).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            publisher
+                .publish("file:///test.rs".into(), json!([{"message": "broken"}]))
+                .await;
+        });
+
+        let result = diagnostics
+            .wait_for_update("file:///test.rs", generation, Duration::from_secs(1))
+            .await;
+        assert_eq!(result[0]["message"], "broken");
+    }
+
+    #[test]
+    fn workspace_progress_tracks_loading_work_only() {
+        let tracker = WorkspaceProgressTracker::new();
+        tracker.record(&progress_message("check", "begin", Some("cargo check")));
+        assert!(!tracker.updates.borrow().seen);
+
+        tracker.record(&progress_message("roots", "begin", Some("Roots Scanned")));
+        assert!(tracker.updates.borrow().seen);
+        assert_eq!(
+            tracker
+                .updates
+                .borrow()
+                .active
+                .get("roots")
+                .map(String::as_str),
+            Some("Roots Scanned")
+        );
+
+        tracker.record(&progress_message("roots", "end", None));
+        assert!(tracker.updates.borrow().active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_progress_waits_for_loading_to_finish() {
+        let tracker = WorkspaceProgressTracker::new();
+        tracker.mark_initialized();
+        tracker.record(&progress_message("index", "begin", Some("Indexing")));
+        let completion = tracker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            completion.record(&progress_message("index", "end", None));
+        });
+
+        tracker
+            .wait_until_ready(Duration::from_secs(1), Duration::from_millis(10))
+            .await
+            .unwrap();
+        assert!(tracker.updates.borrow().active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_progress_uses_server_quiescence_when_available() {
+        let tracker = WorkspaceProgressTracker::new();
+        tracker.mark_initialized();
+        tracker.record(&server_status(false));
+        let completion = tracker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            completion.record(&server_status(true));
+        });
+
+        tracker
+            .wait_until_ready(Duration::from_secs(1), Duration::from_millis(1))
+            .await
+            .unwrap();
+        assert_eq!(tracker.updates.borrow().server_quiescent, Some(true));
+    }
+
+    #[tokio::test]
+    async fn workspace_progress_timeout_is_an_error_not_an_empty_result() {
+        let tracker = WorkspaceProgressTracker::new();
+        tracker.mark_initialized();
+        tracker.record(&progress_message("index", "begin", Some("Indexing")));
+
+        let error = tracker
+            .wait_until_ready(Duration::from_millis(10), Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        assert!(error.contains("still loading"));
+        assert!(error.contains("Indexing"));
+    }
 
     fn test_server(cmd: &str, language_id: &str, extensions: &[&str]) -> ServerEntry {
         ServerEntry {

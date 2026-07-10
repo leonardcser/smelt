@@ -669,6 +669,29 @@ fn lsp_plugin_registers_agent_friendly_semantic_tools() {
     assert!(refs.description.contains("normalized locations"));
     assert!(refs.parameters["properties"].get("raw").is_some());
     assert!(refs.parameters["properties"].get("group_by").is_none());
+
+    for (name, required) in [
+        ("language_server_status", serde_json::Value::Null),
+        (
+            "find_definition",
+            serde_json::json!(["file_path", "line", "column"]),
+        ),
+        ("diagnostics", serde_json::Value::Null),
+        (
+            "preview_rename",
+            serde_json::json!(["file_path", "line", "column", "new_name"]),
+        ),
+        (
+            "rename_symbol",
+            serde_json::json!(["file_path", "line", "column", "new_name"]),
+        ),
+    ] {
+        let tool = defs
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap_or_else(|| panic!("{name} tool"));
+        assert_eq!(tool.parameters["required"], required, "{name}");
+    }
 }
 
 #[test]

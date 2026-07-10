@@ -299,6 +299,7 @@ fn daemon_key(root: &Path, config: &LspConfig) -> Result<String, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let stable = serde_json::json!({
+        "executable": daemon_executable_identity()?,
         "root": root,
         "servers": servers,
     });
@@ -308,6 +309,24 @@ fn daemon_key(root: &Path, config: &LspConfig) -> Result<String, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>())
+}
+
+#[cfg(unix)]
+fn daemon_executable_identity() -> Result<Value, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = std::env::current_exe().map_err(|err| format!("resolve smelt executable: {err}"))?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|err| format!("read smelt executable metadata {}: {err}", path.display()))?;
+    Ok(serde_json::json!({
+        "path": canonicalize_lossy(path),
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "size": metadata.size(),
+        "modified_seconds": metadata.mtime(),
+        "modified_nanoseconds": metadata.mtime_nsec(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 #[cfg(unix)]
