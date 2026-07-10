@@ -34,7 +34,9 @@ app_story!(bash_permission_dialog, |ctx| {
 
 app_story!(bash_permission_preserves_reasoning_context, |ctx| {
     ctx.set_viewport(80, 22);
-    ctx.engine(EngineEvent::Thinking {
+    ctx.engine(EngineEvent::Reasoning {
+        kind: protocol::ReasoningKind::Raw,
+        title: None,
         content: "I need to inspect the generated fixtures before choosing an implementation.\n\nThe temporary directory should reveal whether reusable outputs already exist.".into(),
     });
     ctx.run_lua("smelt.transcript.fold_all('open')");
