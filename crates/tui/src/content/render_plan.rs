@@ -958,6 +958,17 @@ fn selector_matches(
     {
         return false;
     }
+    if !spec.selector.names.is_empty()
+        && history.tool_name(id).is_none_or(|name| {
+            !spec
+                .selector
+                .names
+                .iter()
+                .any(|candidate| candidate == name)
+        })
+    {
+        return false;
+    }
     if let Some(terminal) = spec.selector.terminal {
         let terminal_state = history
             .tool_call_id(id)
@@ -1185,6 +1196,7 @@ mod tests {
             selector: smelt_core::lua::TranscriptGroupSelector {
                 kind: Some("process_status".into()),
                 name: None,
+                names: Vec::new(),
                 terminal: None,
                 fields: vec![smelt_core::lua::TranscriptGroupFieldMatch {
                     field: "event".into(),
@@ -1208,6 +1220,44 @@ mod tests {
             RenderNode::Block { block_index: 2, .. }
         ));
     }
+
+    #[test]
+    fn tool_name_sets_group_mixed_adjacent_tools() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        for name in ["read_file", "grep", "outline", "edit_file"] {
+            transcript.push(Block::ToolCall {
+                call_id: format!("call-{name}"),
+                name: name.into(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new(),
+            });
+        }
+        let spec = TranscriptGroupSpec {
+            name: "explore".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: Some("collapsed".into()),
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("tool".into()),
+                name: None,
+                names: vec!["read_file".into(), "grep".into(), "outline".into()],
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+
+        let plan = RenderPlan::for_history_with_groups(&transcript.history, &[spec], 1, None);
+
+        assert!(matches!(
+            plan.nodes.as_slice(),
+            [RenderNode::Group(group), RenderNode::Block { block_index: 3, .. }]
+                if group.name == "explore" && group.child_range == (0..3)
+        ));
+    }
+
     #[test]
     fn lower_priority_group_can_match_when_higher_priority_run_is_below_min() {
         let mut transcript = smelt_core::content::transcript::Transcript::new();
@@ -1228,6 +1278,7 @@ mod tests {
             selector: smelt_core::lua::TranscriptGroupSelector {
                 kind: Some("assistant".into()),
                 name: None,
+                names: Vec::new(),
                 terminal: None,
                 fields: Vec::new(),
             },
@@ -1243,6 +1294,7 @@ mod tests {
             selector: smelt_core::lua::TranscriptGroupSelector {
                 kind: Some("assistant".into()),
                 name: None,
+                names: Vec::new(),
                 terminal: None,
                 fields: Vec::new(),
             },
@@ -1340,6 +1392,7 @@ mod tests {
             selector: smelt_core::lua::TranscriptGroupSelector {
                 kind: Some("assistant".into()),
                 name: None,
+                names: Vec::new(),
                 terminal: None,
                 fields: Vec::new(),
             },
@@ -1383,6 +1436,7 @@ mod tests {
             selector: smelt_core::lua::TranscriptGroupSelector {
                 kind: Some("assistant".into()),
                 name: None,
+                names: Vec::new(),
                 terminal: None,
                 fields: Vec::new(),
             },

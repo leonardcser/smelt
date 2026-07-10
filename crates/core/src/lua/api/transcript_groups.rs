@@ -92,6 +92,30 @@ fn set_selector_field(
     Ok(())
 }
 
+fn parse_selector_names(table: &mlua::Table) -> LuaResult<Vec<String>> {
+    let Some(values) = table.get::<Option<mlua::Table>>("names")? else {
+        return Ok(Vec::new());
+    };
+    let mut names = Vec::new();
+    for value in values.sequence_values::<String>() {
+        let name = value?;
+        if name.is_empty() {
+            return Err(mlua::Error::external(
+                "selector.names entries must be non-empty",
+            ));
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return Err(mlua::Error::external(
+            "selector.names must be a non-empty array of strings",
+        ));
+    }
+    Ok(names)
+}
+
 fn parse_selector(table: mlua::Table) -> LuaResult<TranscriptGroupSelector> {
     let mut fields = Vec::new();
     for field in ["event", "event_type", "process_id", "exit_code"] {
@@ -118,19 +142,28 @@ fn parse_selector(table: mlua::Table) -> LuaResult<TranscriptGroupSelector> {
             )?;
         }
     }
+    let name = optional_non_empty_string(&table, "name", "selector.name")?;
+    let names = parse_selector_names(&table)?;
+    if name.is_some() && !names.is_empty() {
+        return Err(mlua::Error::external(
+            "selector.name and selector.names cannot both be set",
+        ));
+    }
     let selector = TranscriptGroupSelector {
         kind: optional_non_empty_string(&table, "kind", "selector.kind")?,
-        name: optional_non_empty_string(&table, "name", "selector.name")?,
+        name,
+        names,
         terminal: table.get("terminal")?,
         fields,
     };
     if selector.kind.is_none()
         && selector.name.is_none()
+        && selector.names.is_empty()
         && selector.terminal.is_none()
         && selector.fields.is_empty()
     {
         return Err(mlua::Error::external(
-            "selector must set at least one of kind, name, terminal, or fields",
+            "selector must set at least one of kind, name, names, terminal, or fields",
         ));
     }
     Ok(selector)
@@ -221,6 +254,13 @@ fn spec_to_lua(lua: &Lua, spec: &TranscriptGroupSpec) -> LuaResult<mlua::Table> 
     let selector = lua.create_table()?;
     selector.set("kind", spec.selector.kind.clone())?;
     selector.set("name", spec.selector.name.clone())?;
+    if !spec.selector.names.is_empty() {
+        let names = lua.create_table()?;
+        for (i, name) in spec.selector.names.iter().enumerate() {
+            names.set(i + 1, name.as_str())?;
+        }
+        selector.set("names", names)?;
+    }
     selector.set("terminal", spec.selector.terminal)?;
     if !spec.selector.fields.is_empty() {
         let fields = lua.create_table()?;

@@ -6,29 +6,16 @@ use serde_json::json;
 
 use crate::app_story;
 
-app_story!(read_file_tool_group_states, |ctx| {
-    ctx.set_viewport(72, 16);
+app_story!(explore_tool_group_states, |ctx| {
+    ctx.set_viewport(90, 24);
+    ctx.run_lua("require('smelt.plugins.lsp').setup({ servers = {} })");
     ctx.tool_call(
         "read_file",
         &[("file_path", json!("src/lib.rs"))],
         "pub mod api;\npub mod runtime;\n",
         Some(3),
     );
-    ctx.tool_call(
-        "read_file",
-        &[("file_path", json!("src/main.rs"))],
-        "fn main() {\n    smelt::run();\n}\n",
-        Some(4),
-    );
-    ctx.assert_snapshot_named("collapsed");
-
-    ctx.run_lua("smelt.transcript.fold_all('open')");
-    ctx.assert_snapshot_named("expanded");
-});
-
-app_story!(grep_tool_group_states, |ctx| {
-    ctx.set_viewport(78, 18);
-    ctx.tool_call(
+    ctx.tool_call_with_metadata(
         "grep",
         &[
             ("pattern", json!("render_group")),
@@ -36,26 +23,9 @@ app_story!(grep_tool_group_states, |ctx| {
             ("output_mode", json!("files_with_matches")),
         ],
         "crates/tui/src/content/display_layout.rs\ncrates/tui/src/content/render_plan.rs",
+        json!({ "display_count": { "value": 2, "unit": "file" } }),
         Some(8),
     );
-    ctx.tool_call(
-        "grep",
-        &[
-            ("pattern", json!("ViewState")),
-            ("path", json!("crates/core/src")),
-            ("output_mode", json!("files_with_matches")),
-        ],
-        "crates/core/src/transcript_model.rs\ncrates/core/src/lua/runtime.rs",
-        Some(9),
-    );
-    ctx.assert_snapshot_named("collapsed");
-
-    ctx.run_lua("smelt.transcript.fold_all('open')");
-    ctx.assert_snapshot_named("expanded");
-});
-
-app_story!(glob_tool_group_states, |ctx| {
-    ctx.set_viewport(84, 18);
     ctx.tool_call_with_metadata(
         "glob",
         &[
@@ -67,14 +37,16 @@ app_story!(glob_tool_group_states, |ctx| {
         Some(5),
     );
     ctx.tool_call_with_metadata(
-        "glob",
+        "outline",
         &[
-            ("pattern", json!("**/*.lua")),
-            ("path", json!("runtime/lua/smelt")),
+            ("file_path", json!("crates/tui/src/app.rs")),
+            ("kind", json!("function")),
+            ("name_contains", json!("render")),
+            ("max_depth", json!(2)),
         ],
-        "runtime/lua/smelt/tools/bash.lua\nruntime/lua/smelt/tools/glob.lua",
-        json!({ "display_count": { "value": 2, "unit": "file" } }),
-        Some(6),
+        "2 symbols\n- fn render 40:1-72:2\n- fn render_prompt 74:1-91:2",
+        json!({ "display_count": { "value": 2, "unit": "symbol" } }),
+        Some(7),
     );
     ctx.assert_snapshot_named("collapsed");
 

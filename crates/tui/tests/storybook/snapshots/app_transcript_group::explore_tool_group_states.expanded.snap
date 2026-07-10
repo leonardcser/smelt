@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 607
+expression: frame.text()
+---
+* read_file src/lib.rs
+  2 lines
+
+* grep render_group in crates/tui/src
+  2 files
+
+* glob **/*.rs in crates/tui/src
+  3 files
+
+* outline crates/tui/src/app.rs, function containing "render", depth 2
+  2 symbols
+
+
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                         1:1 100%

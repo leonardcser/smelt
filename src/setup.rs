@@ -495,11 +495,7 @@ fn default_config_lua() -> String {
     lua.push_str("      edit_file = \"collapsed\",\n");
     lua.push_str("      edit_notebook = \"expanded\",\n");
     lua.push_str("    },\n");
-    lua.push_str("    groups = {\n");
-    lua.push_str("      read_file_batch = \"collapsed\",\n");
-    lua.push_str("      grep_batch = \"collapsed\",\n");
-    lua.push_str("      glob_batch = \"collapsed\",\n");
-    lua.push_str("    },\n");
+    lua.push_str("    groups = { explore = \"collapsed\" },\n");
     lua.push_str("  },\n");
     lua.push_str("  limits = {\n");
     lua.push_str("    tool_rows = 20,\n");

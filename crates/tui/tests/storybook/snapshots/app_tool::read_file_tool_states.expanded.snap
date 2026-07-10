@@ -1,12 +1,12 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 464
+assertion_line: 607
 expression: frame.text()
 ---
-* read_file ×3 (1 error)
-  pending.rs
-  src/main.rs
-  missing.rs
+* explore ×3 (1 error)
+  read_file pending.rs
+  read_file src/main.rs
+  read_file missing.rs
 
 
 

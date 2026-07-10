@@ -9,6 +9,14 @@ local state = {
   regs = {},
 }
 
+local COLLAPSED_TOOLS = {
+  "outline",
+  "find_symbol",
+  "inspect_symbol",
+  "inspect_symbol_at",
+  "find_references",
+}
+
 local function add_reg(reg)
   if reg then table.insert(state.regs, reg) end
 end
@@ -92,6 +100,19 @@ local function plural(n, word)
   return tostring(n or 0) .. " " .. word .. "s"
 end
 
+local function count_text(shown, word, omitted)
+  local text = plural(shown, word)
+  if omitted and omitted > 0 then text = text .. " shown (" .. omitted .. " omitted)" end
+  return text
+end
+
+local function with_display_count(content, value, unit)
+  return {
+    content = content,
+    metadata = { display_count = { value = value or 0, unit = unit } },
+  }
+end
+
 local function format_kind(kind)
   if kind == "function" then return "fn" end
   return kind or "symbol"
@@ -149,6 +170,7 @@ local function append_locations(lines, title, locations)
     return
   end
   local count = table_len(locations)
+  if count == 0 then return end
   table.insert(lines, title .. ": " .. plural(count, "location"))
   for _, loc in ipairs(locations or {}) do
     table.insert(lines, "- " .. (loc_line(loc) or tostring(loc)))
@@ -159,9 +181,9 @@ local function outline_range(symbol)
   if not symbol.line then return "" end
   local start_text = string.format("%s:%s", symbol.line, symbol.column or 1)
   if symbol.end_line then
-    return string.format(" @ %s-%s:%s", start_text, symbol.end_line, symbol.end_column or 1)
+    return string.format(" %s-%s:%s", start_text, symbol.end_line, symbol.end_column or 1)
   end
-  return " @ " .. start_text
+  return " " .. start_text
 end
 
 local function format_outline_tree(lines, symbols, indent)
@@ -171,26 +193,11 @@ local function format_outline_tree(lines, symbols, indent)
   end
 end
 
-local function append_active_filters(lines, filters)
-  if type(filters) ~= "table" then return end
-  local parts = {}
-  for _, key in ipairs({ "symbol", "kind", "name_contains", "max_depth" }) do
-    local value = filters[key]
-    if value ~= nil and value ~= "" then table.insert(parts, key .. "=" .. tostring(value)) end
-  end
-  if #parts > 0 then table.insert(lines, "Filters: " .. table.concat(parts, ", ")) end
-end
-
-local function format_outline(result, args)
-  if result == nil then
-    local path = (args and args.file_path) or "<unknown>"
-    if type(path) == "string" then path = display_path(path) end
-    return "Outline: " .. tostring(path) .. "\nSymbols: 0 shown of 0"
-  end
+local function format_outline(result)
+  if result == nil then return "0 symbols" end
   if type(result) ~= "table" or type(result.symbols) ~= "table" then return nil end
-  local lines = { "Outline: " .. tostring(result.file_path or "<unknown>") }
-  table.insert(lines, string.format("Symbols: %s shown of %s%s", result.shown or table_len(result.symbols), result.total or table_len(result.symbols), (result.omitted and result.omitted > 0) and (" (" .. result.omitted .. " omitted)") or ""))
-  append_active_filters(lines, result.filters)
+  local shown = result.shown or table_len(result.symbols)
+  local lines = { count_text(shown, "symbol", result.omitted) }
   format_outline_tree(lines, result.symbols, 0)
   return table.concat(lines, "\n")
 end
@@ -205,10 +212,8 @@ local function append_messages(lines, title, items)
 end
 
 local function format_symbol_results(result)
-  local lines = { string.format("Symbols matching %q: %s shown of %s%s", result.query or "", result.shown or table_len(result.symbols), result.total or table_len(result.symbols), (result.omitted and result.omitted > 0) and (" (" .. result.omitted .. " omitted)") or "") }
-  if result.truncated then table.insert(lines, "Truncated at limit: " .. tostring(result.limit or "?")) end
-  if result.kind then table.insert(lines, "Kind: " .. tostring(result.kind)) end
-  if result.path_glob then table.insert(lines, "Path glob: " .. tostring(result.path_glob)) end
+  local shown = result.shown or table_len(result.symbols)
+  local lines = { count_text(shown, "symbol", result.omitted) }
   for _, symbol in ipairs(result.symbols or {}) do
     local path = symbol.file_path or "<unknown>"
     local at = string.format("%s:%s:%s", path, symbol.line or "?", symbol.column or "?")
@@ -218,14 +223,14 @@ local function format_symbol_results(result)
     if symbol.detail then table.insert(lines, "  " .. symbol.detail) end
     if symbol.container_name then table.insert(lines, "  in " .. symbol.container_name) end
   end
-  append_messages(lines, "Errors", result.errors)
+  append_messages(lines, "errors", result.errors)
   return table.concat(lines, "\n")
 end
 
 local function format_references(result)
   if type(result) ~= "table" or not result.locations then return nil end
-  local sym = result.symbol or {}
-  local lines = { string.format("References for %s:%s:%s: %s total, %s shown%s", sym.file_path or "<unknown>", sym.line or "?", sym.column or "?", result.total or 0, result.shown or 0, (result.omitted and result.omitted > 0) and (", " .. result.omitted .. " omitted") or "") }
+  local shown = result.shown or table_len(result.locations)
+  local lines = { count_text(shown, "reference", result.omitted) }
   for _, loc in ipairs(result.locations or {}) do
     table.insert(lines, "- " .. (loc_line(loc) or tostring(loc)))
   end
@@ -234,7 +239,8 @@ end
 
 local function format_locations(title, result)
   if type(result) ~= "table" or not result.locations then return nil end
-  local lines = { string.format("%s: %s total, %s shown%s", title, result.total or 0, result.shown or 0, (result.omitted and result.omitted > 0) and (", " .. result.omitted .. " omitted") or "") }
+  local shown = result.shown or table_len(result.locations)
+  local lines = { count_text(shown, title, result.omitted) }
   for _, loc in ipairs(result.locations or {}) do
     table.insert(lines, "- " .. (loc_line(loc) or tostring(loc)))
   end
@@ -250,25 +256,25 @@ local function format_outline_context(context)
 end
 
 local function format_inspect(result)
-  local pos = result.position or {}
-  local lines = { string.format("Symbol at %s:%s:%s", pos.file_path or "<unknown>", pos.line or "?", pos.column or "?") }
+  local lines = {}
   if type(result.enclosing_symbol) == "table" then
-    table.insert(lines, "Enclosing: " .. format_kind(result.enclosing_symbol.kind) .. " " .. (result.enclosing_symbol.name or "<anonymous>"))
+    table.insert(lines, "enclosing: " .. format_kind(result.enclosing_symbol.kind) .. " " .. (result.enclosing_symbol.name or "<anonymous>"))
   elseif result.enclosing_symbol then
-    table.insert(lines, "Enclosing: " .. format_symbol_label(result.enclosing_symbol))
+    table.insert(lines, "enclosing: " .. format_symbol_label(result.enclosing_symbol))
   end
   local context = format_outline_context(result.outline_context)
-  if context ~= "" then table.insert(lines, "Outline: " .. context) end
+  if context ~= "" then table.insert(lines, "outline: " .. context) end
   if type(result.hover) == "string" and result.hover ~= "" then
-    table.insert(lines, "\nHover:\n" .. result.hover)
+    table.insert(lines, "hover:\n" .. result.hover)
   elseif type(result.hover) == "table" and result.hover.error then
-    table.insert(lines, "\nHover: " .. tostring(result.hover.error))
+    table.insert(lines, "hover: " .. tostring(result.hover.error))
   end
-  append_locations(lines, "\nDefinitions", result.definitions)
-  append_locations(lines, "Type definitions", result.type_definitions)
-  append_locations(lines, "Implementations", result.implementations)
+  append_locations(lines, "definitions", result.definitions)
+  append_locations(lines, "type definitions", result.type_definitions)
+  append_locations(lines, "implementations", result.implementations)
   local refs = format_references(result.references)
-  if refs then table.insert(lines, "\n" .. refs) end
+  if refs then table.insert(lines, refs) end
+  if #lines == 0 then return "no symbol details" end
   return table.concat(lines, "\n")
 end
 
@@ -286,27 +292,31 @@ local function append_diagnostic(lines, diag, path)
   table.insert(lines, string.format("- %s%s %s:%s:%s - %s", severity_name(diag.severity), source, path or "<unknown>", line, col, diag.message or ""))
 end
 
+local function diagnostic_count(result)
+  if is_array(result) then return #result end
+  local count = 0
+  for _, diagnostics in pairs(result or {}) do count = count + table_len(diagnostics) end
+  return count
+end
+
 local function format_diagnostics(result, args)
-  local lines = { "Diagnostics" }
+  local count = diagnostic_count(result)
+  if count == 0 then return "no diagnostics" end
+  local lines = { plural(count, "diagnostic") }
   if is_array(result) then
-    if #result == 0 then return "Diagnostics: none" end
     for _, diag in ipairs(result) do append_diagnostic(lines, diag, args and args.file_path) end
   else
-    local any = false
     for uri, diagnostics in pairs(result or {}) do
-      for _, diag in ipairs(diagnostics or {}) do
-        any = true
-        append_diagnostic(lines, diag, uri)
-      end
+      for _, diag in ipairs(diagnostics or {}) do append_diagnostic(lines, diag, uri) end
     end
-    if not any then return "Diagnostics: none" end
   end
   return table.concat(lines, "\n")
 end
 
 local function format_rename(result)
   local summary = result.summary or {}
-  local lines = { string.format("Rename %s. %s affected.", result.applied and "applied" or "preview", plural(summary.file_count or table_len(summary.files), "file")) }
+  local action = result.applied and "applied" or "preview"
+  local lines = { string.format("%s across %s", action, plural(summary.file_count or table_len(summary.files), "file")) }
   for _, file in ipairs(summary.files or {}) do
     local path = file.uri or file.file_path or "<unknown>"
     if type(path) == "string" and path:match("^file://") then path = file_uri_to_path(path) end
@@ -318,20 +328,29 @@ end
 
 local function format_structured_result(name, args, result)
   if name == "outline" then
-    local formatted = format_outline(result, args)
-    if formatted then return { content = formatted } end
+    local formatted = format_outline(result)
+    if formatted then
+      local shown = type(result) == "table" and (result.shown or table_len(result.symbols)) or 0
+      return with_display_count(formatted, shown, "symbol")
+    end
   end
-  if name == "find_symbol" and type(result) == "table" then return { content = format_symbol_results(result) } end
-  if (name == "inspect_symbol" or name == "inspect_symbol_at") and type(result) == "table" then return { content = format_inspect(result) } end
+  if name == "find_symbol" and type(result) == "table" then
+    return with_display_count(format_symbol_results(result), result.shown or table_len(result.symbols), "symbol")
+  end
+  if (name == "inspect_symbol" or name == "inspect_symbol_at") and type(result) == "table" then
+    return with_display_count(format_inspect(result), 1, "symbol")
+  end
   if name == "find_references" and not (args and args.raw) then
     local formatted = format_references(result)
-    if formatted then return { content = formatted } end
+    if formatted then return with_display_count(formatted, result.shown or table_len(result.locations), "reference") end
   end
   if name == "find_definition" then
-    local formatted = format_locations("Definitions", result)
-    if formatted then return { content = formatted } end
+    local formatted = format_locations("definition", result)
+    if formatted then return with_display_count(formatted, result.shown or table_len(result.locations), "definition") end
   end
-  if name == "diagnostics" then return { content = format_diagnostics(result, args) } end
+  if name == "diagnostics" then
+    return with_display_count(format_diagnostics(result, args), diagnostic_count(result), "diagnostic")
+  end
   if (name == "preview_rename" or name == "rename_symbol") and type(result) == "table" then return { content = format_rename(result) } end
   return format_json_result(result)
 end
@@ -377,6 +396,72 @@ local function position_params(properties)
   return properties
 end
 
+local function quoted(value)
+  return string.format("%q", tostring(value))
+end
+
+local function position_summary(args, ctx)
+  local path = smelt.tools.path_summary(args.file_path or "", ctx)
+  if path == "" then return "" end
+  if args.line then path = path .. ":" .. tostring(args.line) end
+  if args.column then path = path .. ":" .. tostring(args.column) end
+  return path
+end
+
+local function outline_summary(args, ctx)
+  local parts = {}
+  local path = smelt.tools.path_summary(args.file_path or "", ctx)
+  if path ~= "" then parts[#parts + 1] = path end
+  if args.symbol and args.symbol ~= "" then
+    parts[#parts + 1] = "symbol " .. quoted(args.symbol)
+  elseif args.kind and args.kind ~= "" and args.name_contains and args.name_contains ~= "" then
+    parts[#parts + 1] = tostring(args.kind) .. " containing " .. quoted(args.name_contains)
+  else
+    if args.kind and args.kind ~= "" then parts[#parts + 1] = tostring(args.kind) end
+    if args.name_contains and args.name_contains ~= "" then parts[#parts + 1] = "containing " .. quoted(args.name_contains) end
+  end
+  if args.max_depth ~= nil then parts[#parts + 1] = "depth " .. tostring(args.max_depth) end
+  return table.concat(parts, ", ")
+end
+
+local function tool_summary(name, args, ctx)
+  args = args or {}
+  if name == "outline" then return outline_summary(args, ctx) end
+  if name == "find_symbol" or name == "inspect_symbol" then
+    local parts = { tostring(args.query or "") }
+    if args.kind and args.kind ~= "" then parts[#parts + 1] = tostring(args.kind) end
+    if args.path_glob and args.path_glob ~= "" then parts[#parts + 1] = tostring(args.path_glob) end
+    return table.concat(parts, ", ")
+  end
+  local summary = position_summary(args, ctx)
+  if summary ~= "" and args.new_name and args.new_name ~= "" then
+    summary = summary .. " to " .. quoted(args.new_name)
+  end
+  if summary ~= "" then return summary end
+  return args.query or ""
+end
+
+local function configure_transcript_defaults()
+  if smelt.settings and type(smelt.settings.transcript) == "table" then
+    local transcript = smelt.settings.transcript
+    if type(transcript.view) ~= "table" then transcript.view = {} end
+    if type(transcript.view.tools) ~= "table" then transcript.view.tools = {} end
+    for _, name in ipairs(COLLAPSED_TOOLS) do
+      if transcript.view.tools[name] == nil then transcript.view.tools[name] = "collapsed" end
+    end
+  end
+
+  local defaults = smelt.transcript and smelt.transcript.defaults
+  if not defaults or type(defaults.__tool_collapsed_details) ~= "table" then return end
+  for _, name in ipairs(COLLAPSED_TOOLS) do
+    defaults.__tool_collapsed_details[name] = function(block)
+      local metadata = block.output and block.output.metadata
+      if type(metadata) ~= "table" or type(metadata.display_count) ~= "table" then return nil end
+      return defaults.display_count_text(block)
+    end
+  end
+end
+
 local function register_tool(name, description, properties, required)
   local parameters = {
     type = "object",
@@ -389,11 +474,8 @@ local function register_tool(name, description, properties, required)
     permission_defaults = { normal = "allow", plan = "allow", apply = name == "rename_symbol" and "ask" or "allow" },
     effect = name == "rename_symbol" and "write" or "read",
     parameters = parameters,
-    summary = function(args)
-      args = args or {}
-      if args.file_path and args.file_path ~= "" then return smelt.path.display(args.file_path) end
-      if args.query and args.query ~= "" then return args.query end
-      return ""
+    summary = function(args, ctx)
+      return tool_summary(name, args, ctx)
     end,
     paths_for_workspace = function(args)
       local p = (args and args.file_path) or ""
@@ -432,6 +514,7 @@ function M.setup(opts)
 
   patch_existing_tools()
   add_guidance()
+  configure_transcript_defaults()
 
   register_tool("language_server_status", "Debug language server configuration, startup state, project roots, and stderr.", {
     file_path = path_param("Optional source file used to infer the language server."),

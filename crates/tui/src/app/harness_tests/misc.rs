@@ -4,7 +4,6 @@ use crate::app::transcript_scroll_trace::{
     TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
     TranscriptScrollTraceFrame, TranscriptTraceAnchor,
 };
-use crate::content::render_plan::RenderNodeId;
 use crate::smelt_edit::RowIndex;
 
 #[test]
@@ -2143,12 +2142,10 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
     );
 }
 
-fn visible_anchor_order(frame: &TranscriptScrollTraceFrame) -> Option<(u8, u64, u64)> {
-    let anchor = frame.first_visible_content_anchor?;
-    match anchor.node_id {
-        RenderNodeId::Block(id) => Some((0, id.get(), anchor.row_offset)),
-        RenderNodeId::Group(id) => Some((1, id, anchor.row_offset)),
-    }
+fn visible_anchor_order(frame: &TranscriptScrollTraceFrame) -> Option<u64> {
+    frame
+        .first_visible_content_anchor
+        .map(|anchor| anchor.virtual_row)
 }
 
 fn assert_monotonic_visible_anchors(frames: &[TranscriptScrollTraceFrame], upward: bool) {

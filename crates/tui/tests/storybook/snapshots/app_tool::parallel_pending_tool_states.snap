@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 464
+assertion_line: 607
 expression: frame.text()
 ---
-* read_file ×2
-  a.rs
-  b.rs
+* explore ×2
+  read_file a.rs
+  read_file b.rs
 
 
 

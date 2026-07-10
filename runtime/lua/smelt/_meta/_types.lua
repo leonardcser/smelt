@@ -688,7 +688,8 @@
 --- Group selector declared through `smelt.transcript.groups.register`.
 ---@class smelt.transcript.GroupSelector
 ---@field kind? string Match block kind.
----@field name? string Match tool name for tool blocks.
+---@field name? string Match one tool name for tool blocks.
+---@field names? string[] Match any listed tool name for tool blocks. Cannot be combined with `name`.
 ---@field terminal? boolean Match terminal/non-terminal blocks.
 ---@field event? string Match typed process status event type.
 ---@field event_type? string Alias for `event`.

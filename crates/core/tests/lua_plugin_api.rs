@@ -521,12 +521,14 @@ fn lsp_plugin_formats_semantic_results_as_text() {
     };
 
     assert!(!is_error);
-    assert!(content.contains("Outline: /tmp/example.rs"));
-    assert!(content.contains("Filters: max_depth=1"));
-    assert!(content.contains("- fn outer @ 3:1"));
-    assert!(content.contains("  - method inner @ 5:3"));
-    assert!(!content.contains("\"symbols\""));
-    assert!(metadata.is_none() || metadata == Some(serde_json::Value::Null));
+    assert_eq!(content, "2 symbols\n- fn outer 3:1\n  - method inner 5:3");
+    assert!(!content.contains("/tmp/example.rs"));
+    assert_eq!(
+        metadata,
+        Some(serde_json::json!({
+            "display_count": { "value": 2, "unit": "symbol" }
+        }))
+    );
 }
 
 #[test]
@@ -593,8 +595,7 @@ fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
     };
 
     assert!(!is_error);
-    assert!(content.contains("Outline: /tmp/empty.rs"));
-    assert!(content.contains("Symbols: 0 shown of 0"));
+    assert_eq!(content, "0 symbols");
 }
 
 #[test]
@@ -773,10 +774,15 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
     };
 
     assert!(!is_error);
-    assert!(content.contains("References for /tmp/example.rs:10:4: 2 total, 2 shown"));
+    assert!(content.starts_with("2 references\n"));
     assert!(content.contains("/tmp/example.rs:12:8 - call_site()"));
-    assert!(!content.contains("\"locations\""));
-    assert!(metadata.is_none() || metadata == Some(serde_json::Value::Null));
+    assert!(!content.contains("References for"));
+    assert_eq!(
+        metadata,
+        Some(serde_json::json!({
+            "display_count": { "value": 2, "unit": "reference" }
+        }))
+    );
 }
 
 #[test]

@@ -981,7 +981,8 @@ Group selector declared through `smelt.transcript.groups.register`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `kind` | `string` |  | Match block kind. |
-| `name` | `string` |  | Match tool name for tool blocks. |
+| `name` | `string` |  | Match one tool name for tool blocks. |
+| `names` | `string[]` |  | Match any listed tool name for tool blocks. Cannot be combined with `name`. |
 | `terminal` | `boolean` |  | Match terminal/non-terminal blocks. |
 | `event` | `string` |  | Match typed process status event type. |
 | `event_type` | `string` |  | Alias for `event`. |

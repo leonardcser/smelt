@@ -498,6 +498,18 @@ app_story!(lsp_tool_states, |ctx| {
     ctx.set_viewport(96, 86);
     ctx.run_lua("require('smelt.plugins.lsp').setup({ servers = {} })");
     ctx.tool_call_with_metadata(
+        "outline",
+        &[
+            ("file_path", json!("crates/core/src/lsp.rs")),
+            ("kind", json!("function")),
+            ("name_contains", json!("request")),
+            ("max_depth", json!(2)),
+        ],
+        "2 symbols\n- fn request 70:1-92:2\n- fn request_symbol 94:1-126:2",
+        json!({ "display_count": { "value": 2, "unit": "symbol" } }),
+        Some(4),
+    );
+    ctx.tool_call_with_metadata(
         "language_server_status",
         &[("file_path", json!("crates/core/src/lsp.rs"))],
         r#"{
@@ -519,16 +531,8 @@ app_story!(lsp_tool_states, |ctx| {
             ("line", json!(111)),
             ("column", json!(12)),
         ],
-        r#"[
-  {
-    "uri": "file:///repo/smelt/crates/core/src/lsp.rs",
-    "range": {
-      "start": { "line": 70, "character": 11 },
-      "end": { "line": 70, "character": 21 }
-    }
-  }
-]"#,
-        json!({ "syntax": "json" }),
+        "1 definition\n- crates/core/src/lsp.rs:71:12",
+        json!({ "display_count": { "value": 1, "unit": "definition" } }),
         Some(9),
     );
     ctx.tool_call_with_metadata(
@@ -539,32 +543,15 @@ app_story!(lsp_tool_states, |ctx| {
             ("column", json!(12)),
             ("include_declaration", json!(false)),
         ],
-        r#"[
-  {
-    "uri": "file:///repo/smelt/crates/core/src/lua/api/lsp.rs",
-    "range": {
-      "start": { "line": 43, "character": 22 },
-      "end": { "line": 43, "character": 32 }
-    }
-  }
-]"#,
-        json!({ "syntax": "json" }),
+        "1 reference\n- crates/core/src/lua/api/lsp.rs:44:23",
+        json!({ "display_count": { "value": 1, "unit": "reference" } }),
         Some(27),
     );
     ctx.tool_call_with_metadata(
         "diagnostics",
         &[("file_path", json!("crates/core/src/lsp.rs"))],
-        r#"[
-  {
-    "range": {
-      "start": { "line": 210, "character": 8 },
-      "end": { "line": 210, "character": 17 }
-    },
-    "severity": 2,
-    "message": "unused variable: settings"
-  }
-]"#,
-        json!({ "syntax": "json" }),
+        "1 diagnostic\n- warning crates/core/src/lsp.rs:211:9 - unused variable: settings",
+        json!({ "display_count": { "value": 1, "unit": "diagnostic" } }),
         Some(6),
     );
     ctx.tool_call_with_metadata(
@@ -575,20 +562,8 @@ app_story!(lsp_tool_states, |ctx| {
             ("column", json!(12)),
             ("new_name", json!("manager")),
         ],
-        r#"{
-  "changes": {
-    "file:///repo/smelt/crates/core/src/lsp.rs": [
-      {
-        "range": {
-          "start": { "line": 111, "character": 11 },
-          "end": { "line": 111, "character": 21 }
-        },
-        "newText": "manager"
-      }
-    ]
-  }
-}"#,
-        json!({ "syntax": "json" }),
+        "preview across 1 file\n- crates/core/src/lsp.rs (1 edit)",
+        json!({}),
         Some(15),
     );
     ctx.tool_call_with_metadata(
@@ -599,15 +574,11 @@ app_story!(lsp_tool_states, |ctx| {
             ("column", json!(12)),
             ("new_name", json!("manager")),
         ],
-        r#"{
-  "applied": true,
-  "files": ["/repo/smelt/crates/core/src/lsp.rs"],
-  "edits": 1
-}"#,
-        json!({ "syntax": "json" }),
+        "applied across 1 file\n- crates/core/src/lsp.rs (1 edit)",
+        json!({}),
         Some(21),
     );
-    ctx.assert_snapshot_named("expanded");
+    ctx.assert_snapshot_named("defaults");
     ctx.run_lua("smelt.transcript.fold_all('close')");
     ctx.assert_snapshot_named("collapsed");
 });

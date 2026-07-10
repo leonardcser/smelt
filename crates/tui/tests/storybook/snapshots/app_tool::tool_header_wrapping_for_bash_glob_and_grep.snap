@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 607
 expression: frame.text()
 ---
 * bash cargo test -p smelt-tui content::display_renderers::la
@@ -7,14 +8,14 @@ expression: frame.text()
   d_rows
   test result: ok
 
-* glob crates/tui/tests/storybook/snapshots/app_tool::*.snap
-       in /Users/leo/dev/rust/smelt/.worktrees/transcript-lay
-       out-rewrite
-  2 files
+* explore ×2
+  glob crates/tui/tests/storybook/snapshots/app_tool::*.snap
+  in /Users/leo/dev/rust/smelt/.worktrees/transcript-layout-r
+  ewrite
+  grep "wrap_fragments_with_widths|continuation_indent|ToolSu
+  mmaryResolver" in crates/tui/src crates/buffer/src
 
-* grep wrap_fragments_with_widths|continuation_indent|ToolSum
-       maryResolver in crates/tui/src crates/buffer/src
-  3 files
+
 
 ─ ✿ working… ─────────────────────────────────────────────────
 

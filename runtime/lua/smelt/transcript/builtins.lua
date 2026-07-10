@@ -85,9 +85,25 @@ end
 
 local function glob_label(child)
   local args = child.args or {}
-  local label = args.pattern or child.summary_text or "glob"
+  local label = args.pattern or child.summary_text or ""
   if args.path and args.path ~= "" then label = label .. " in " .. (display_path(args.path) or tostring(args.path)) end
   return label
+end
+
+local function explore_label(child)
+  local label
+  if child.name == "read_file" then
+    label = read_file_label(child)
+  elseif child.name == "grep" then
+    label = grep_label(child)
+  elseif child.name == "glob" then
+    label = glob_label(child)
+  else
+    label = child.summary_text or ""
+  end
+  local name = child.name or "tool"
+  if label == "" or label == name then return name end
+  return name .. " " .. label
 end
 
 local function render_compact_group_list(group, label)
@@ -190,46 +206,29 @@ function M.register()
   })
 
   smelt.transcript.groups.register({
-    name = "read_file_batch",
-    cache_key = "smelt.transcript.group.read_file_batch:v1",
+    name = "explore",
+    cache_key = "smelt.transcript.group.explore:v1",
     priority = BUILTIN_GROUP_PRIORITY,
     min = 2,
     default_view = "collapsed",
-    selector = { kind = "tool", name = "read_file" },
+    selector = {
+      kind = "tool",
+      names = {
+        "read_file",
+        "grep",
+        "glob",
+        "outline",
+        "find_symbol",
+        "inspect_symbol",
+        "inspect_symbol_at",
+        "find_definition",
+        "find_references",
+      },
+    },
     render = function(group, ctx)
       return render_terminal_tool_group(group, ctx, {
-        name = "read_file",
-        label = read_file_label,
-      })
-    end,
-  })
-
-  smelt.transcript.groups.register({
-    name = "grep_batch",
-    cache_key = "smelt.transcript.group.grep_batch:v1",
-    priority = BUILTIN_GROUP_PRIORITY,
-    min = 2,
-    default_view = "collapsed",
-    selector = { kind = "tool", name = "grep" },
-    render = function(group, ctx)
-      return render_terminal_tool_group(group, ctx, {
-        name = "grep",
-        label = grep_label,
-      })
-    end,
-  })
-
-  smelt.transcript.groups.register({
-    name = "glob_batch",
-    cache_key = "smelt.transcript.group.glob_batch:v1",
-    priority = BUILTIN_GROUP_PRIORITY,
-    min = 2,
-    default_view = "collapsed",
-    selector = { kind = "tool", name = "glob" },
-    render = function(group, ctx)
-      return render_terminal_tool_group(group, ctx, {
-        name = "glob",
-        label = glob_label,
+        name = "explore",
+        label = explore_label,
       })
     end,
   })

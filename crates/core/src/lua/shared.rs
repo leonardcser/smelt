@@ -106,6 +106,7 @@ pub struct TranscriptGroupSpec {
 pub struct TranscriptGroupSelector {
     pub kind: Option<String>,
     pub name: Option<String>,
+    pub names: Vec<String>,
     pub terminal: Option<bool>,
     pub fields: Vec<TranscriptGroupFieldMatch>,
 }

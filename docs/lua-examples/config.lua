@@ -124,11 +124,7 @@ smelt.settings.transcript = {
       edit_file = "collapsed",
       edit_notebook = "expanded",
     },
-    groups = {
-      read_file_batch = "collapsed",
-      grep_batch = "collapsed",
-      glob_batch = "collapsed",
-    },
+    groups = { explore = "collapsed" },
   },
   limits = {
     tool_rows = 20,

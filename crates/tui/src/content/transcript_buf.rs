@@ -4318,7 +4318,7 @@ mod tests {
     }
 
     #[test]
-    fn built_in_read_file_group_replaces_adjacent_terminal_calls() {
+    fn built_in_explore_group_replaces_adjacent_terminal_calls() {
         let lua = test_lua();
         install_read_file_renderer(&lua);
         let mut transcript = Transcript::new();
@@ -4345,18 +4345,18 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "read_file_batch" && group.child_ids.len() == 2
+            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "explore" && group.child_ids.len() == 2
         ));
         assert!(
-            rows.iter().any(|line| line == "* read_file ×2"),
+            rows.iter().any(|line| line == "* explore ×2"),
             "rows: {rows:?}"
         );
         assert!(rows
             .iter()
-            .any(|line| line == "  crates/core/src/transcript_model.rs"));
+            .any(|line| line == "  read_file crates/core/src/transcript_model.rs"));
         assert!(rows
             .iter()
-            .any(|line| line == "  crates/tui/src/content/display_layout.rs"));
+            .any(|line| line == "  read_file crates/tui/src/content/display_layout.rs"));
 
         let group_id = projection.render_plan.nodes[0].id();
         assert!(projection.fold_node(&transcript.history, group_id, FoldAction::Open));
@@ -4381,7 +4381,7 @@ mod tests {
             },
         ));
         let collapsed = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
-        assert!(collapsed.iter().any(|line| line == "* read_file ×2"));
+        assert!(collapsed.iter().any(|line| line == "* explore ×2"));
         assert!(!collapsed.iter().any(|line| line == "  2 lines"));
     }
 
@@ -4406,12 +4406,13 @@ mod tests {
 
         let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
-        assert!(rows.iter().any(|line| line == "* read_file ×6"));
+        assert!(rows.iter().any(|line| line == "* explore ×6"));
         assert!(rows.iter().any(|line| line == "  … 1 above"));
-        assert!(!rows.iter().any(|line| line == "  file-1.rs"));
+        assert!(!rows.iter().any(|line| line == "  read_file file-1.rs"));
         for i in 2..=6 {
             assert!(
-                rows.iter().any(|line| line == &format!("  file-{i}.rs")),
+                rows.iter()
+                    .any(|line| line == &format!("  read_file file-{i}.rs")),
                 "rows: {rows:?}"
             );
         }
@@ -4447,7 +4448,7 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "read_file_batch" && group.child_ids.as_slice() == [first, second]
+            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "explore" && group.child_ids.as_slice() == [first, second]
         ));
         assert_eq!(layout.len(), 2);
         assert_eq!(layout[0].0, first);
@@ -4462,9 +4463,17 @@ mod tests {
     }
 
     #[test]
-    fn built_in_grep_and_glob_groups_stay_separate() {
+    fn built_in_explore_group_mixes_adjacent_tools() {
         let lua = test_lua();
         let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "src/lib.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "src/lib.rs")]),
+        );
         push_named_tool(
             &mut transcript,
             "grep-1",
@@ -4475,17 +4484,6 @@ mod tests {
         );
         push_named_tool(
             &mut transcript,
-            "grep-2",
-            "grep",
-            "ViewState",
-            ToolStatus::Ok,
-            tool_args(&[("pattern", "ViewState")]),
-        );
-        transcript.push(Block::Text {
-            content: "between".into(),
-        });
-        push_named_tool(
-            &mut transcript,
             "glob-1",
             "glob",
             "**/*.rs",
@@ -4494,11 +4492,11 @@ mod tests {
         );
         push_named_tool(
             &mut transcript,
-            "glob-2",
-            "glob",
-            "runtime/lua/**/*.lua",
+            "outline-1",
+            "outline",
+            "src/lib.rs",
             ToolStatus::Ok,
-            tool_args(&[("pattern", "runtime/lua/**/*.lua")]),
+            tool_args(&[("file_path", "src/lib.rs")]),
         );
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
@@ -4507,21 +4505,18 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [
-                crate::content::render_plan::RenderNode::Group(first_group),
-                crate::content::render_plan::RenderNode::Block { .. },
-                crate::content::render_plan::RenderNode::Group(second_group),
-            ] if first_group.name == "grep_batch" && first_group.child_ids.len() == 2 && second_group.name == "glob_batch" && second_group.child_ids.len() == 2
+            [crate::content::render_plan::RenderNode::Group(group)]
+                if group.name == "explore" && group.child_ids.len() == 4
         ));
-        assert!(rows.iter().any(|line| line == "* grep ×2"));
-        assert!(rows.iter().any(|line| line == "  \"RenderNode\""));
-        assert!(rows.iter().any(|line| line == "between"));
-        assert!(rows.iter().any(|line| line == "* glob ×2"));
-        assert!(rows.iter().any(|line| line == "  **/*.rs"));
+        assert!(rows.iter().any(|line| line == "* explore ×4"));
+        assert!(rows.iter().any(|line| line == "  read_file src/lib.rs"));
+        assert!(rows.iter().any(|line| line == "  grep \"RenderNode\""));
+        assert!(rows.iter().any(|line| line == "  glob **/*.rs"));
+        assert!(rows.iter().any(|line| line == "  outline src/lib.rs"));
     }
 
     #[test]
-    fn built_in_tool_groups_include_pending_calls_without_mixing_tools() {
+    fn built_in_explore_group_includes_mixed_pending_calls() {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         push_named_tool(
@@ -4563,13 +4558,10 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [
-                crate::content::render_plan::RenderNode::Block { .. },
-                crate::content::render_plan::RenderNode::Block { .. },
-                crate::content::render_plan::RenderNode::Group(group),
-            ] if group.name == "read_file_batch" && group.child_ids.len() == 2
+            [crate::content::render_plan::RenderNode::Group(group)]
+                if group.name == "explore" && group.child_ids.len() == 4
         ));
-        assert!(rows.iter().any(|line| line.starts_with("* read_file ×2")));
+        assert!(rows.iter().any(|line| line.starts_with("* explore ×4")));
     }
 
     #[test]
@@ -4607,14 +4599,14 @@ mod tests {
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
-            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "read_file_batch" && group.child_ids.len() == 3
+            [crate::content::render_plan::RenderNode::Group(group)] if group.name == "explore" && group.child_ids.len() == 3
         ));
         assert!(
             rows.iter()
-                .any(|line| line == "* read_file ×3 (1 error, 1 denied)"),
+                .any(|line| line == "* explore ×3 (1 error, 1 denied)"),
             "rows: {rows:?}"
         );
-        assert!(rows.iter().any(|line| line == "  err.rs"));
+        assert!(rows.iter().any(|line| line == "  read_file err.rs"));
     }
 
     #[test]

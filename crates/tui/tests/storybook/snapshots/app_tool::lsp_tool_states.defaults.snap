@@ -7,31 +7,31 @@ expression: frame.text()
   2 symbols
 
 * language_server_status crates/core/src/lsp.rs
+  {
+    "servers": [
+      {
+        "name": "rust",
+        "state": "ready",
+        "root": "/repo/smelt"
+      }
+    ]
+  }
 
 * explore ×2
   find_definition crates/core/src/lsp.rs:111:12
   find_references crates/core/src/lsp.rs:111:12
 
 * diagnostics crates/core/src/lsp.rs
+  1 diagnostic
+  - warning crates/core/src/lsp.rs:211:9 - unused variable: settings
 
 * preview_rename crates/core/src/lsp.rs:111:12 to "manager"
+  preview across 1 file
+  - crates/core/src/lsp.rs (1 edit)
 
 * rename_symbol crates/core/src/lsp.rs:111:12 to "manager"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  applied across 1 file
+  - crates/core/src/lsp.rs (1 edit)
 
 
 

@@ -3466,7 +3466,7 @@ mod tests {
                   name = "tool_batch",
                   cache_key = "v2",
                   priority = 10,
-                  selector = { kind = "tool", terminal = true },
+                  selector = { kind = "tool", names = { "read_file", "grep", "glob" }, terminal = true },
                   render = function(group, ctx) return smelt.layout.empty() end,
                 })
                 "#,
@@ -3481,6 +3481,15 @@ mod tests {
         assert_eq!(specs[0].priority, 10);
         assert_eq!(specs[0].min, 2);
         assert_eq!(specs[0].selector.kind.as_deref(), Some("tool"));
+        assert_eq!(
+            specs[0]
+                .selector
+                .names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["read_file", "grep", "glob"]
+        );
         assert_eq!(specs[0].selector.terminal, Some(true));
         assert_eq!(specs[1].name, "low");
         assert!(rt.transcript_group_generation() >= 3);
