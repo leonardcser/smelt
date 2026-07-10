@@ -1063,37 +1063,27 @@ pub struct SessionHeader {
 }
 
 pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
-    let session_dir = dir_for(session);
-    if create_private_dir_all(&session_dir).is_err() {
-        return;
-    }
-    let blob_dir = session_dir.join("blobs");
-    if create_private_dir_all(&blob_dir).is_err() {
-        return;
-    }
-    let url_to_blob = store.save_blobs(&blob_dir);
-    save_with_blobs(session, &url_to_blob);
-}
-
-/// Write the canonical SQLite session store. Assumes blobs are already flushed.
-/// Safe to call from a background thread.
-pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
-    if let Err(err) = save_with_blobs_result(session, url_to_blob) {
+    if let Err(err) = save_result(session, store) {
         eprintln!("smelt: failed to save session {}: {err}", session.id);
     }
 }
 
-pub fn save_with_blobs_result(
+pub fn save_result(
     session: &Session,
-    url_to_blob: &std::collections::HashMap<String, String>,
+    store: &crate::attachment::AttachmentStore,
 ) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
-    save_with_blobs_result_with_history_start(session, url_to_blob, 0)
+    let blobs = store.image_blobs();
+    let url_to_blob = blobs
+        .iter()
+        .map(|(filename, data_url)| (data_url.clone(), format!("blob:{filename}")))
+        .collect();
+    save_with_blob_payloads_result(session, &url_to_blob, &blobs)
 }
 
-pub fn save_with_blobs_result_with_history_start(
+fn save_with_blob_payloads_result(
     session: &Session,
     url_to_blob: &std::collections::HashMap<String, String>,
-    history_start_idx: usize,
+    blobs: &[(String, String)],
 ) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
     let session_dir = dir_for(session);
@@ -1113,7 +1103,7 @@ pub fn save_with_blobs_result_with_history_start(
     let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
     let base_descriptor_len = writer.transcript_descriptor_count()? as u64;
     let history_len = session_out.history.len();
-    let history_start_idx = history_start_idx.min(history_len);
+    let history_start_idx = 0;
     let command = smelt_store::SessionCommit {
         session_id: session_out.id.clone(),
         save_id: smelt_store::SaveId::ZERO,
@@ -1133,9 +1123,28 @@ pub fn save_with_blobs_result_with_history_start(
         )?,
         descriptors: None,
     };
-    let receipt = writer
-        .commit_session(&command)
-        .map_err(session_commit_failure_to_store_error)?;
+    let blobs = blobs
+        .iter()
+        .map(|(filename, data_url)| smelt_store::SessionBlob {
+            filename: filename.clone(),
+            bytes: data_url.as_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let outcome = writer
+        .commit_session_with_blobs(&command, &blobs)
+        .map_err(|err| match err {
+            smelt_store::SessionWriteFailure::Stage(err) => err,
+            smelt_store::SessionWriteFailure::Commit(err) => {
+                session_commit_failure_to_store_error(err)
+            }
+        })?;
+    let receipt = outcome.receipt;
+    if let Some(err) = outcome.deferred_blob_error {
+        eprintln!(
+            "smelt: deferred blob publication for session {}: {err}",
+            session_out.id
+        );
+    }
     if let Err(err) = refresh_derived_files(&session_dir) {
         eprintln!(
             "smelt: failed to refresh derived files for session {}: {err}",
@@ -3523,6 +3532,33 @@ mod tests {
             },
             _ => panic!("expected user/system item"),
         }
+    }
+
+    #[test]
+    fn save_stages_attachment_with_canonical_commit_and_round_trips() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let data_url = "data:image/png;base64,AAAA";
+        let mut session = Session::new(1, PathBuf::from("/tmp"));
+        session.id = TEST_SESSION_ID.into();
+        session.history = vec![image_item(data_url)];
+        let mut attachments = crate::attachment::AttachmentStore::new();
+        attachments.insert_image("attachment.png".into(), data_url.into());
+
+        save(&session, &attachments);
+
+        let session_dir = dir_for(&session);
+        let blob_files = fs::read_dir(session_dir.join("blobs"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(blob_files.len(), 1);
+        assert_eq!(fs::read_to_string(blob_files[0].path()).unwrap(), data_url);
+        let reader = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
+        let stored = reader.read_history_items_range(0..1).unwrap();
+        assert!(first_image_url(&stored[0]).starts_with("blob:"));
+        let loaded = load_full_result(TEST_SESSION_ID).unwrap().unwrap();
+        assert_eq!(first_image_url(&loaded.history[0]), data_url);
     }
 
     #[test]

@@ -1,11 +1,14 @@
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 
+#[cfg(test)]
+use crate::blob_staging::BLOB_STAGING_DIR;
+use crate::blob_staging::{recover_blob_staging, stage_session_blobs, SessionBlob};
 use crate::db::SessionDb;
 use crate::{
     ObjectMeta, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
@@ -260,8 +263,21 @@ impl SessionReader {
 }
 
 #[derive(Debug)]
+pub struct SessionCommitOutcome {
+    pub receipt: SaveReceipt,
+    pub deferred_blob_error: Option<StoreError>,
+}
+
+#[derive(Debug)]
+pub enum SessionWriteFailure {
+    Stage(StoreError),
+    Commit(SessionCommitFailure),
+}
+
+#[derive(Debug)]
 pub struct OwnedSessionWriter {
     session_id: String,
+    session_dir: PathBuf,
     db: SessionDb,
     owner: WriterOwner,
     token: Option<String>,
@@ -270,15 +286,23 @@ pub struct OwnedSessionWriter {
 
 impl OwnedSessionWriter {
     pub fn open(session_dir: impl AsRef<Path>, session_id: impl Into<String>) -> Result<Self> {
-        let session_dir = session_dir.as_ref();
+        let session_dir = session_dir.as_ref().to_path_buf();
         let session_id = session_id.into();
-        let lock = SessionLock::acquire(session_dir)?;
+        let lock = SessionLock::acquire(&session_dir)?;
         let db = SessionDb::open(session_dir.join("session.db"))?;
         let token = random_token()?;
         let owner = current_writer_owner();
         db.claim_writer_owner(&token, &owner)?;
+        let recovery = db
+            .last_session_commit_fingerprint()
+            .and_then(|fingerprint| recover_blob_staging(&session_dir, fingerprint.as_deref()));
+        if let Err(err) = recovery {
+            let _ = db.release_writer_owner(&token);
+            return Err(err);
+        }
         Ok(Self {
             session_id,
+            session_dir,
             db,
             owner,
             token: Some(token),
@@ -310,6 +334,43 @@ impl OwnedSessionWriter {
         &self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+        self.recover_staged_blobs()
+            .map_err(session_commit_failure_from_blob_error)?;
+        self.commit_canonical(command)
+    }
+
+    pub fn commit_session_with_blobs(
+        &self,
+        command: &SessionCommit,
+        blobs: &[SessionBlob],
+    ) -> std::result::Result<SessionCommitOutcome, SessionWriteFailure> {
+        self.recover_staged_blobs()
+            .map_err(SessionWriteFailure::Stage)?;
+        let fingerprint =
+            crate::db::session_commit_fingerprint(command).map_err(SessionWriteFailure::Stage)?;
+        let staging_token = random_token().map_err(SessionWriteFailure::Stage)?;
+        let staged = stage_session_blobs(&self.session_dir, &fingerprint, &staging_token, blobs)
+            .map_err(SessionWriteFailure::Stage)?;
+        let receipt = match self.commit_canonical(command) {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                if let Some(staged) = staged {
+                    staged.abandon();
+                }
+                return Err(SessionWriteFailure::Commit(err));
+            }
+        };
+        let deferred_blob_error = staged.and_then(|staged| staged.publish().err());
+        Ok(SessionCommitOutcome {
+            receipt,
+            deferred_blob_error,
+        })
+    }
+
+    fn commit_canonical(
+        &self,
+        command: &SessionCommit,
+    ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         if command.session_id != self.session_id || command.state.id != self.session_id {
             return Err(SessionCommitFailure::SessionMismatch {
                 expected: self.session_id.clone(),
@@ -317,6 +378,11 @@ impl OwnedSessionWriter {
             });
         }
         self.db.commit_session_owned(self.token(), command)
+    }
+
+    fn recover_staged_blobs(&self) -> Result<()> {
+        let fingerprint = self.db.last_session_commit_fingerprint()?;
+        recover_blob_staging(&self.session_dir, fingerprint.as_deref())
     }
 
     pub fn append_request_attempt(
@@ -448,6 +514,12 @@ impl SessionMaintenance {
     }
 }
 
+fn session_commit_failure_from_blob_error(err: StoreError) -> SessionCommitFailure {
+    SessionCommitFailure::Integrity {
+        message: format!("prepare staged session blobs: {err}"),
+    }
+}
+
 #[derive(Debug)]
 struct SessionLock {
     _file: File,
@@ -568,6 +640,44 @@ fn process_start_id() -> String {
 mod tests {
     use super::*;
 
+    fn empty_commit(session_id: &str, save_id: u64, base_revision: u64) -> SessionCommit {
+        SessionCommit {
+            session_id: session_id.into(),
+            save_id: crate::SaveId::new(save_id),
+            base_revision: crate::Revision::new(base_revision),
+            base_history_len: crate::HistoryLen::ZERO,
+            base_descriptor_len: crate::DescriptorLen::ZERO,
+            state: SessionState {
+                id: session_id.into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: None,
+                reasoning_effort: None,
+                model: None,
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: base_revision,
+                history_len: 0,
+                created_at: 1,
+                updated_at: 1,
+            },
+            history: crate::HistorySuffix {
+                start: crate::HistoryIndex::ZERO,
+                final_len: crate::HistoryLen::ZERO,
+                items: Vec::new(),
+            },
+            side_tables: crate::SideTableSuffixes::default(),
+            descriptors: None,
+        }
+    }
+
     #[test]
     fn clean_release_clears_owner_and_allows_reacquisition() {
         let root = tempfile::tempdir().unwrap();
@@ -628,6 +738,146 @@ mod tests {
     }
 
     #[test]
+    fn opening_writer_cleans_abandoned_blob_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let blobs = vec![SessionBlob {
+            filename: "attachment.png".into(),
+            bytes: b"attachment".to_vec(),
+        }];
+        let staged = stage_session_blobs(&session_dir, &"a".repeat(64), &"b".repeat(64), &blobs)
+            .unwrap()
+            .unwrap();
+        assert!(staged.path().join("attachment.png").is_file());
+        drop(staged);
+        writer.release().unwrap();
+
+        let replacement = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        assert_eq!(
+            fs::read_dir(session_dir.join(BLOB_STAGING_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+        drop(replacement);
+    }
+
+    #[test]
+    fn failed_commit_discards_staged_blobs() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let command = empty_commit("session", 1, 9);
+        let blobs = vec![SessionBlob {
+            filename: "attachment.png".into(),
+            bytes: b"attachment".to_vec(),
+        }];
+
+        assert!(matches!(
+            writer.commit_session_with_blobs(&command, &blobs),
+            Err(SessionWriteFailure::Commit(
+                SessionCommitFailure::StaleRevision { .. }
+            ))
+        ));
+        assert!(!session_dir.join("blobs/attachment.png").exists());
+        assert_eq!(
+            fs::read_dir(session_dir.join(BLOB_STAGING_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn committed_blob_staging_recovers_after_deferred_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        fs::write(session_dir.join("blobs"), b"publication blocker").unwrap();
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let command = empty_commit("session", 1, 0);
+        let blobs = vec![SessionBlob {
+            filename: "attachment.png".into(),
+            bytes: b"attachment".to_vec(),
+        }];
+
+        let outcome = writer.commit_session_with_blobs(&command, &blobs).unwrap();
+        assert!(outcome.deferred_blob_error.is_some());
+        assert_eq!(outcome.receipt.revision, crate::Revision::new(1));
+        assert_eq!(
+            fs::read_dir(session_dir.join(BLOB_STAGING_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let staging_root = session_dir.join(BLOB_STAGING_DIR);
+            let staging_dir = fs::read_dir(&staging_root)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            assert_eq!(
+                fs::metadata(staging_root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&staging_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(staging_dir.join("attachment.png"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        writer.release().unwrap();
+
+        fs::remove_file(session_dir.join("blobs")).unwrap();
+        let replacement = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        assert_eq!(
+            fs::read(session_dir.join("blobs/attachment.png")).unwrap(),
+            b"attachment"
+        );
+        assert_eq!(
+            fs::read_dir(session_dir.join(BLOB_STAGING_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+        drop(replacement);
+    }
+
+    #[test]
+    fn staged_blobs_reject_paths_outside_the_blob_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let command = empty_commit("session", 1, 0);
+        let blobs = vec![SessionBlob {
+            filename: "../escape".into(),
+            bytes: b"attachment".to_vec(),
+        }];
+
+        assert!(matches!(
+            writer.commit_session_with_blobs(&command, &blobs),
+            Err(SessionWriteFailure::Stage(StoreError::Integrity(_)))
+        ));
+        assert!(!root.path().join("escape").exists());
+        assert!(writer.session_state().unwrap().is_none());
+    }
+
+    #[test]
     fn stale_writer_token_cannot_commit_or_append_request_audit() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("session");
@@ -677,41 +927,7 @@ mod tests {
             Err(StoreError::OwnershipLost)
         ));
 
-        let command = SessionCommit {
-            session_id: "session".into(),
-            save_id: crate::SaveId::new(1),
-            base_revision: crate::Revision::ZERO,
-            base_history_len: crate::HistoryLen::ZERO,
-            base_descriptor_len: crate::DescriptorLen::ZERO,
-            state: SessionState {
-                id: "session".into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                parent_id: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 0,
-                history_len: 0,
-                created_at: 1,
-                updated_at: 1,
-            },
-            history: crate::HistorySuffix {
-                start: crate::HistoryIndex::ZERO,
-                final_len: crate::HistoryLen::ZERO,
-                items: Vec::new(),
-            },
-            side_tables: crate::SideTableSuffixes::default(),
-            descriptors: None,
-        };
+        let command = empty_commit("session", 1, 0);
         assert_eq!(
             writer.commit_session(&command),
             Err(SessionCommitFailure::OwnershipLost)

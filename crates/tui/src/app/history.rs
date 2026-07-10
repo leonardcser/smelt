@@ -2907,7 +2907,7 @@ mod checkpoint_tests {
             assistant("history only assistant 1"),
             user("history only user 2"),
         ];
-        session::save_with_blobs_result(&saved, &std::collections::HashMap::new())
+        session::save_result(&saved, &smelt_core::attachment::AttachmentStore::new())
             .expect("save history-only session fixture");
 
         {

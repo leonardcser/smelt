@@ -44,7 +44,10 @@ pub(crate) struct PersistFailure {
 
 #[derive(Clone, Debug)]
 pub(crate) enum SessionBackendEvent {
-    Saved(smelt_store::SaveReceipt),
+    Saved {
+        receipt: smelt_store::SaveReceipt,
+        warning: Option<String>,
+    },
     Failed(PersistFailure),
     RequestAuditFailed(PersistRequestAuditFailure),
 }
@@ -159,7 +162,7 @@ enum SessionBackendState {
     },
     Owned {
         session_id: smelt_core::session_id::SessionId,
-        writer: smelt_store::OwnedSessionWriter,
+        writer: Box<smelt_store::OwnedSessionWriter>,
     },
 }
 
@@ -190,7 +193,10 @@ impl SessionBackend {
             .map_err(|err| format!("create session directory: {err}"))?;
         match smelt_store::OwnedSessionWriter::open(&session_dir, session_id.as_str()) {
             Ok(writer) => {
-                self.state = SessionBackendState::Owned { session_id, writer };
+                self.state = SessionBackendState::Owned {
+                    session_id,
+                    writer: Box::new(writer),
+                };
                 Ok(())
             }
             Err(err) => {
@@ -237,7 +243,7 @@ impl SessionBackend {
     fn release(&mut self) -> Result<(), String> {
         match std::mem::replace(&mut self.state, SessionBackendState::Closed) {
             SessionBackendState::Owned { writer, .. } => {
-                writer.release().map_err(|err| err.to_string())
+                (*writer).release().map_err(|err| err.to_string())
             }
             SessionBackendState::Closed | SessionBackendState::ReadOnly { .. } => Ok(()),
         }
@@ -275,13 +281,21 @@ fn worker_loop(rx: Receiver<SessionBackendCommand>, reports: Sender<SessionBacke
     let _ = backend.release();
 }
 
+struct PersistSuccess {
+    receipt: smelt_store::SaveReceipt,
+    warning: Option<String>,
+}
+
 fn report_save_result(
-    result: Result<smelt_store::SaveReceipt, PersistWriteError>,
+    result: Result<PersistSuccess, PersistWriteError>,
     req: &PersistRequest,
     reports: &Sender<SessionBackendEvent>,
 ) {
     let report = match result {
-        Ok(receipt) => SessionBackendEvent::Saved(receipt),
+        Ok(success) => SessionBackendEvent::Saved {
+            receipt: success.receipt,
+            warning: success.warning,
+        },
         Err(err) => SessionBackendEvent::Failed(PersistFailure {
             save_id: req.command.save_id.get(),
             session_id: req.command.session_id.clone(),
@@ -424,7 +438,7 @@ fn write(
     req: &PersistRequest,
     writer: &smelt_store::OwnedSessionWriter,
     session_dir: &Path,
-) -> Result<smelt_store::SaveReceipt, PersistWriteError> {
+) -> Result<PersistSuccess, PersistWriteError> {
     let _perf = smelt_perf::perf::begin("persist:write");
     smelt_perf::perf::record_value(
         "persist:write:history_items",
@@ -438,15 +452,37 @@ fn write(
         .map_or(0, |descriptors| descriptors.records.len() as u64);
     smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
 
-    let blob_dir = session_dir.join("blobs");
-    let url_to_blob = write_blobs(&blob_dir, &req.blobs).map_err(persist_write_error)?;
+    let url_to_blob = req
+        .blobs
+        .iter()
+        .map(|blob| (blob.data_url.clone(), format!("blob:{}", blob.filename)))
+        .collect();
     let mut command = req.command.clone();
-    if !url_to_blob.is_empty() {
-        smelt_core::session::externalize_blobs(&mut command.history.items, &url_to_blob);
-    }
-    let receipt = writer
-        .commit_session(&command)
-        .map_err(PersistWriteError::Commit)?;
+    smelt_core::session::externalize_blobs(&mut command.history.items, &url_to_blob);
+    let staged_blobs = req
+        .blobs
+        .iter()
+        .map(|blob| smelt_store::SessionBlob {
+            filename: blob.filename.clone(),
+            bytes: blob.data_url.as_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let outcome = writer
+        .commit_session_with_blobs(&command, &staged_blobs)
+        .map_err(|err| match err {
+            smelt_store::SessionWriteFailure::Stage(err) => {
+                persist_write_error(format!("stage session blobs: {err}"))
+            }
+            smelt_store::SessionWriteFailure::Commit(err) => PersistWriteError::Commit(err),
+        })?;
+    let receipt = outcome.receipt;
+    let warning = outcome.deferred_blob_error.map(|err| {
+        smelt_perf::perf::record_value("persist:write:blob_publish_deferred", 1);
+        format!(
+            "session {} was saved, but attachment publication was deferred: {err}",
+            receipt.session_id
+        )
+    });
     record_save_receipt(&receipt);
     let (descriptor_start_idx, descriptor_records) = command
         .descriptors
@@ -462,7 +498,7 @@ fn write(
             receipt.session_id
         );
     }
-    Ok(receipt)
+    Ok(PersistSuccess { receipt, warning })
 }
 
 fn write_request_audit(
@@ -473,26 +509,6 @@ fn write_request_audit(
     writer
         .append_request_attempt(&req.entry, req.payload_mode)
         .map_err(|err| err.to_string())
-}
-
-fn write_blobs(
-    blob_dir: &std::path::Path,
-    blobs: &[Blob],
-) -> Result<std::collections::HashMap<String, String>, String> {
-    use std::collections::HashMap;
-    let mut url_to_blob = HashMap::new();
-    if blobs.is_empty() {
-        return Ok(url_to_blob);
-    }
-    smelt_core::session::create_private_dir_all(blob_dir)
-        .map_err(|err| format!("create blob directory: {err}"))?;
-    for b in blobs {
-        let path: PathBuf = blob_dir.join(&b.filename);
-        smelt_core::session::write_private_file(&path, b.data_url.as_bytes())
-            .map_err(|err| format!("write blob {}: {err}", b.filename))?;
-        url_to_blob.insert(b.data_url.clone(), format!("blob:{}", b.filename));
-    }
-    Ok(url_to_blob)
 }
 
 #[cfg(any(test, feature = "harness"))]
@@ -598,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_commit_currently_leaves_published_directory_and_attachment_blob() {
+    fn failed_commit_does_not_publish_attachment_or_session_state() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("session-a");
         std::fs::create_dir(&session_dir).unwrap();
@@ -618,13 +634,39 @@ mod tests {
             session_dir.join("session.db").is_file(),
             "database creation publishes the destination before a valid first commit"
         );
-        assert_eq!(
-            std::fs::read_to_string(session_dir.join("blobs/attachment.png")).unwrap(),
-            "data:image/png;base64,AAAA",
-            "attachment is written before the failed canonical transaction"
+        assert!(
+            !session_dir.join("blobs/attachment.png").exists(),
+            "failed canonical transaction must not publish its attachment"
         );
+        let staging_root = session_dir.join(".blob-staging");
+        if staging_root.exists() {
+            assert_eq!(std::fs::read_dir(staging_root).unwrap().count(), 0);
+        }
         let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
         assert!(db.session_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn deferred_blob_publication_returns_success_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-a");
+        std::fs::create_dir(&session_dir).unwrap();
+        std::fs::write(session_dir.join("blobs"), "publication blocker").unwrap();
+        let request = PersistRequest {
+            command: commit("session-a", 0),
+            blobs: vec![Blob {
+                filename: "attachment.png".into(),
+                data_url: "data:image/png;base64,AAAA".into(),
+            }],
+        };
+        let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+
+        let success = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
+
+        assert_eq!(success.receipt.revision.get(), 1);
+        assert!(success
+            .warning
+            .is_some_and(|warning| warning.contains("attachment publication was deferred")));
     }
 
     #[test]
@@ -638,9 +680,9 @@ mod tests {
         };
         let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
-        let receipt = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
+        let success = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
 
-        assert_eq!(receipt.revision.get(), 1);
+        assert_eq!(success.receipt.revision.get(), 1);
         assert!(session_dir.join("meta.json").is_dir());
         let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
         assert_eq!(db.session_state().unwrap().unwrap().history_len, 1);

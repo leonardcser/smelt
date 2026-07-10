@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -44,6 +45,14 @@ impl Default for OpenOptions {
             object_compression: ObjectCompression::default(),
         }
     }
+}
+
+const LAST_SESSION_COMMIT_KEY: &str = "last_session_commit";
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistedSessionCommit {
+    fingerprint: String,
+    receipt: SaveReceipt,
 }
 
 #[derive(Debug)]
@@ -164,6 +173,10 @@ impl SessionDb {
 
     pub fn writer_owner(&self) -> Result<Option<WriterOwner>> {
         meta::writer_owner(&self.conn)
+    }
+
+    pub(crate) fn last_session_commit_fingerprint(&self) -> Result<Option<String>> {
+        Ok(persisted_session_commit(&self.conn)?.map(|commit| commit.fingerprint))
     }
 
     pub(crate) fn claim_writer_owner(&self, token: &str, owner: &WriterOwner) -> Result<()> {
@@ -789,6 +802,13 @@ fn commit_session_in_transaction(
     if let Some(token) = owner_token {
         meta::verify_writer_owner(conn, token).map_err(session_commit_failure_from_store_error)?;
     }
+    let fingerprint =
+        session_commit_fingerprint(command).map_err(session_commit_failure_from_store_error)?;
+    if let Some(receipt) = idempotent_session_commit_receipt(conn, &fingerprint)
+        .map_err(session_commit_failure_from_store_error)?
+    {
+        return Ok(receipt);
+    }
     let current_state =
         meta::session_state(conn).map_err(session_commit_failure_from_store_error)?;
     if command.state.id != command.session_id {
@@ -893,14 +913,44 @@ fn commit_session_in_transaction(
 
     let descriptor_len = history::transcript_descriptor_count(conn)
         .map_err(session_commit_failure_from_store_error)? as u64;
-    Ok(SaveReceipt {
+    let receipt = SaveReceipt {
         session_id: command.session_id.clone(),
         save_id: command.save_id,
         previous_revision: current_revision.into(),
         revision: report.revision.into(),
         history_len: command.history.final_len,
         descriptor_len: descriptor_len.into(),
-    })
+    };
+    let persisted = PersistedSessionCommit {
+        fingerprint,
+        receipt: receipt.clone(),
+    };
+    let persisted = serde_json::to_string(&persisted)
+        .map_err(StoreError::from)
+        .map_err(session_commit_failure_from_store_error)?;
+    meta::set_meta(conn, LAST_SESSION_COMMIT_KEY, &persisted)
+        .map_err(session_commit_failure_from_store_error)?;
+    Ok(receipt)
+}
+
+pub(crate) fn session_commit_fingerprint(command: &SessionCommit) -> Result<String> {
+    let bytes = serde_json::to_vec(command)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn persisted_session_commit(conn: &Connection) -> Result<Option<PersistedSessionCommit>> {
+    meta::meta(conn, LAST_SESSION_COMMIT_KEY)?
+        .map(|persisted| serde_json::from_str(&persisted).map_err(Into::into))
+        .transpose()
+}
+
+fn idempotent_session_commit_receipt(
+    conn: &Connection,
+    fingerprint: &str,
+) -> Result<Option<SaveReceipt>> {
+    Ok(persisted_session_commit(conn)?
+        .filter(|persisted| persisted.fingerprint == fingerprint)
+        .map(|persisted| persisted.receipt))
 }
 
 fn validate_side_table_suffixes(
@@ -1518,9 +1568,10 @@ mod tests {
     }
 
     #[test]
-    fn commit_session_creates_history_and_descriptor_receipt() {
+    fn commit_session_is_idempotent_for_the_same_command() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let path = dir.path().join("session.db");
+        let db = SessionDb::open(&path).unwrap();
         let history = protocol::HistoryItem::user(protocol::Content::text("hello"));
         let command = SessionCommit {
             session_id: "typed-commit".into(),
@@ -1542,7 +1593,11 @@ mod tests {
         };
 
         let receipt = db.commit_session(&command).unwrap();
+        drop(db);
+        let db = SessionDb::open(&path).unwrap();
+        let repeated = db.commit_session(&command).unwrap();
 
+        assert_eq!(repeated, receipt);
         assert_eq!(receipt.previous_revision, crate::Revision::ZERO);
         assert_eq!(receipt.revision, crate::Revision::new(1));
         assert_eq!(receipt.history_len, HistoryLen::new(1));

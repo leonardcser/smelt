@@ -2180,8 +2180,11 @@ impl TuiApp {
     pub(crate) fn drain_persist_reports(&mut self) {
         for report in self.persister.drain_reports() {
             match report {
-                crate::persist::SessionBackendEvent::Saved(receipt) => {
-                    self.ack_persist_save(receipt)
+                crate::persist::SessionBackendEvent::Saved { receipt, warning } => {
+                    self.ack_persist_save(receipt);
+                    if let Some(warning) = warning {
+                        self.notify_warn(warning);
+                    }
                 }
                 crate::persist::SessionBackendEvent::Failed(err) => self.fail_persist_save(err),
                 crate::persist::SessionBackendEvent::RequestAuditFailed(err) => {

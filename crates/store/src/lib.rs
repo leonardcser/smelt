@@ -1,4 +1,5 @@
 mod access;
+mod blob_staging;
 mod compression;
 mod db;
 mod error;
@@ -11,7 +12,11 @@ mod schema;
 mod session_commit;
 mod session_snapshot;
 
-pub use access::{OwnedSessionWriter, SessionMaintenance, SessionReader};
+pub use access::{
+    OwnedSessionWriter, SessionCommitOutcome, SessionMaintenance, SessionReader,
+    SessionWriteFailure,
+};
+pub use blob_staging::SessionBlob;
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
     DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
