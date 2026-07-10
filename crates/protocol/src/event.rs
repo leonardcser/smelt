@@ -197,6 +197,115 @@ pub enum ReasoningKind {
     Raw,
 }
 
+/// A boundary in canonical session history. This must never be confused with
+/// an index into the model-visible projection, which may contain synthetic
+/// checkpoint items and omit compacted canonical history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CanonicalHistoryIndex(usize);
+
+impl CanonicalHistoryIndex {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A boundary in the engine's model-visible history projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModelHistoryIndex(usize);
+
+impl ModelHistoryIndex {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// Mapping from model-visible history boundaries to canonical session history.
+/// `model_prefix_len` synthetic model items stand in for the canonical prefix
+/// ending at `canonical_start`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelHistoryCoordinates {
+    model_prefix_len: usize,
+    canonical_start: CanonicalHistoryIndex,
+}
+
+impl ModelHistoryCoordinates {
+    pub const fn canonical() -> Self {
+        Self {
+            model_prefix_len: 0,
+            canonical_start: CanonicalHistoryIndex::ZERO,
+        }
+    }
+
+    pub const fn projected(model_prefix_len: usize, canonical_start: usize) -> Self {
+        Self {
+            model_prefix_len,
+            canonical_start: CanonicalHistoryIndex::new(canonical_start),
+        }
+    }
+
+    pub const fn model_prefix_len(self) -> usize {
+        self.model_prefix_len
+    }
+
+    pub const fn canonical_start(self) -> CanonicalHistoryIndex {
+        self.canonical_start
+    }
+
+    pub fn canonical_index(self, model_index: ModelHistoryIndex) -> CanonicalHistoryIndex {
+        CanonicalHistoryIndex::new(
+            self.canonical_start
+                .get()
+                .saturating_add(model_index.get().saturating_sub(self.model_prefix_len)),
+        )
+    }
+
+    pub fn canonical_delta(
+        self,
+        model_first_index: ModelHistoryIndex,
+        items: Vec<crate::history::HistoryItem>,
+    ) -> CanonicalHistoryDelta {
+        let model_first_index = model_first_index
+            .get()
+            .max(self.model_prefix_len)
+            .min(items.len());
+        CanonicalHistoryDelta {
+            first_index: self.canonical_index(ModelHistoryIndex::new(model_first_index)),
+            items: items.into_iter().skip(model_first_index).collect(),
+        }
+    }
+}
+
+/// Canonical history replacement beginning at `first_index`. Appends are the
+/// common case, while snapshots replace the canonical suffix from this boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalHistoryDelta {
+    pub first_index: CanonicalHistoryIndex,
+    pub items: Vec<crate::history::HistoryItem>,
+}
+
+impl CanonicalHistoryDelta {
+    pub fn new(first_index: usize, items: Vec<crate::history::HistoryItem>) -> Self {
+        Self {
+            first_index: CanonicalHistoryIndex::new(first_index),
+            items,
+        }
+    }
+}
+
 /// Events emitted by the engine. The UI consumes these to update its display.
 ///
 /// Most variants are fire-and-forget. The exception is `RequestPermission`,
@@ -358,39 +467,28 @@ pub enum EngineEvent {
         error: Option<EngineAskError>,
     },
 
-    /// Append-only committed history delta. This is the bounded hot path for
-    /// normal user, assistant, and note appends; replacements and rewinds still
-    /// use `HistoryUpdated` snapshots until they get typed deltas of their own.
+    /// Append-only committed history delta. The boundary is always canonical,
+    /// even when the provider is operating on compacted model-visible history.
     HistoryAppended {
         turn_id: u64,
-        /// Public history index where `items` begin in the engine's model-visible history.
-        first_index: usize,
-        items: Vec<crate::history::HistoryItem>,
+        delta: CanonicalHistoryDelta,
     },
 
-    /// Atomic snapshot of the engine's committed history. Fires after each
-    /// non-append step that mutates `Vec<HistoryItem>`. By construction every
-    /// `HistoryItem::Assistant` carries paired `ToolInvocation`s for the
-    /// tool_calls it emitted - there is no in-flight state to worry about.
+    /// Canonical suffix replacement after a non-append engine history change.
+    /// Synthetic checkpoint items are never included in this payload.
     HistoryUpdated {
         turn_id: u64,
-        /// First public history index that may differ from the previous UI snapshot.
-        /// Consumers can treat the prefix below this index as unchanged without
-        /// comparing every row in large sessions.
-        first_changed_index: usize,
-        history: Vec<crate::history::HistoryItem>,
+        update: CanonicalHistoryDelta,
     },
 
     /// The agent turn completed (successfully or after cancellation).
     TurnComplete {
         turn_id: u64,
-        /// First public history index that may differ from the previous UI snapshot.
-        first_changed_index: usize,
-        /// Final public history snapshot when completion must repair or persist
-        /// state that may have missed prior deltas. Normal append-only turns use
-        /// `HistoryAppended` and leave this absent.
+        /// Final canonical suffix replacement when completion must repair or
+        /// persist state that may have missed prior deltas. Normal append-only
+        /// turns use `HistoryAppended` and leave this absent.
         #[serde(skip_serializing_if = "Option::is_none", default)]
-        history: Option<Vec<crate::history::HistoryItem>>,
+        history: Option<CanonicalHistoryDelta>,
         meta: Option<TurnMeta>,
     },
 
@@ -489,18 +587,32 @@ impl StartTurnInput {
 /// items explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelHistorySource {
-    Items(Vec<crate::history::HistoryItem>),
+    Items {
+        items: Vec<crate::history::HistoryItem>,
+        coordinates: ModelHistoryCoordinates,
+    },
     Store {
         prefix: Vec<crate::history::HistoryItem>,
         first_live_index: usize,
         end_index: usize,
         suffix: Vec<crate::history::HistoryItem>,
+        coordinates: ModelHistoryCoordinates,
     },
 }
 
 impl ModelHistorySource {
     pub fn items(items: Vec<crate::history::HistoryItem>) -> Self {
-        Self::Items(items)
+        Self::Items {
+            items,
+            coordinates: ModelHistoryCoordinates::canonical(),
+        }
+    }
+
+    pub fn projected_items(
+        items: Vec<crate::history::HistoryItem>,
+        coordinates: ModelHistoryCoordinates,
+    ) -> Self {
+        Self::Items { items, coordinates }
     }
 
     pub fn store(
@@ -508,11 +620,13 @@ impl ModelHistorySource {
         first_live_index: usize,
         end_index: usize,
     ) -> Self {
+        let coordinates = ModelHistoryCoordinates::projected(prefix.len(), first_live_index);
         Self::Store {
             prefix,
             first_live_index,
             end_index,
             suffix: Vec::new(),
+            coordinates,
         }
     }
 
@@ -521,34 +635,45 @@ impl ModelHistorySource {
         first_live_index: usize,
         end_index: usize,
         suffix: Vec<crate::history::HistoryItem>,
+        canonical_start: usize,
     ) -> Self {
+        let coordinates = ModelHistoryCoordinates::projected(prefix.len(), canonical_start);
         Self::Store {
             prefix,
             first_live_index,
             end_index,
             suffix,
+            coordinates,
         }
     }
 
     pub fn requested_len(&self) -> usize {
         match self {
-            Self::Items(items) => items.len(),
+            Self::Items { items, .. } => items.len(),
             Self::Store {
                 prefix,
                 first_live_index,
                 end_index,
                 suffix,
+                ..
             } => end_index
                 .saturating_sub(*first_live_index)
                 .saturating_add(prefix.len())
                 .saturating_add(suffix.len()),
         }
     }
+
+    pub fn coordinates(&self) -> ModelHistoryCoordinates {
+        match self {
+            Self::Items { coordinates, .. } => *coordinates,
+            Self::Store { coordinates, .. } => *coordinates,
+        }
+    }
 }
 
 impl Default for ModelHistorySource {
     fn default() -> Self {
-        Self::Items(Vec::new())
+        Self::items(Vec::new())
     }
 }
 
@@ -727,6 +852,32 @@ pub enum UiCommand {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn projected_model_history_boundaries_map_to_canonical_history() {
+        let coordinates = ModelHistoryCoordinates::projected(1, 24);
+
+        assert_eq!(
+            coordinates.canonical_index(ModelHistoryIndex::new(0)).get(),
+            24
+        );
+        assert_eq!(
+            coordinates.canonical_index(ModelHistoryIndex::new(1)).get(),
+            24
+        );
+        assert_eq!(
+            coordinates.canonical_index(ModelHistoryIndex::new(2)).get(),
+            25
+        );
+    }
+
+    #[test]
+    fn projected_items_preserve_explicit_coordinates() {
+        let coordinates = ModelHistoryCoordinates::projected(1, 24);
+        let source = ModelHistorySource::projected_items(Vec::new(), coordinates);
+
+        assert_eq!(source.coordinates(), coordinates);
+    }
 
     // ---- ToolExecutionMode defaults + rename ----
 

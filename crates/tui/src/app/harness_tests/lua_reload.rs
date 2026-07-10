@@ -422,8 +422,10 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
-        history: Some(completed_history.clone()),
+        history: Some(protocol::CanonicalHistoryDelta::new(
+            0,
+            completed_history.clone(),
+        )),
         meta: None,
     }));
     assert_eq!(app.app.core.session.current_context_tokens(), Some(123));
@@ -434,8 +436,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     app.start_turn(2);
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryUpdated {
         turn_id: 2,
-        first_changed_index: 1,
-        history: in_flight_history,
+        update: protocol::CanonicalHistoryDelta::new(0, in_flight_history),
     }));
 
     assert_eq!(app.app.core.session.current_context_tokens(), None);
@@ -2105,7 +2106,6 @@ fn scheduled_reload_runs_after_turn_is_idle() {
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
         history: None,
         meta: None,
     }));

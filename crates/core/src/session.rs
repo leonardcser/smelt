@@ -656,7 +656,7 @@ impl Session {
             if update_context_token_history_len && self.context_tokens.is_some() {
                 self.context_tokens_history_len = Some(history_len);
             }
-            self.snapshot_context();
+            self.snapshot_context_at(history_len);
         }
     }
 
@@ -733,9 +733,10 @@ impl Session {
     }
 
     pub fn prune_context_snapshots(&mut self, hist_idx: usize) {
+        let checkpoint_fallback = self.clear_checkpoint_for_rewind(hist_idx, true);
         self.context_snapshots.truncate_after(hist_idx);
-        if !self.context_snapshots.is_empty() {
-            self.restore_context_tokens_after_rewind(hist_idx, None);
+        if !self.context_snapshots.is_empty() || checkpoint_fallback.is_some() {
+            self.restore_context_tokens_after_rewind(hist_idx, checkpoint_fallback);
         } else if self
             .context_tokens_history_len
             .is_some_and(|len| len > hist_idx)
@@ -796,14 +797,11 @@ impl Session {
         hist_idx: usize,
         keep_checkpoint_at_boundary: bool,
     ) -> Option<(Option<u32>, Option<usize>)> {
-        if keep_checkpoint_at_boundary {
-            return None;
-        }
-        if self
-            .checkpoint
-            .as_ref()
-            .is_none_or(|cp| cp.first_live_index < hist_idx)
-        {
+        let should_clear = self.checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.first_live_index > hist_idx
+                || (!keep_checkpoint_at_boundary && checkpoint.first_live_index == hist_idx)
+        });
+        if !should_clear {
             return None;
         }
         self.checkpoint.take().map(|cp| {
@@ -925,26 +923,6 @@ impl Session {
         }
 
         (first_live_message_index == message_index).then_some(self.history.len())
-    }
-
-    pub fn merge_model_history_snapshot(
-        &mut self,
-        summary_prefix: &str,
-        history: Vec<HistoryItem>,
-    ) {
-        let Some(cp) = self.checkpoint.clone() else {
-            self.history = history;
-            return;
-        };
-        let mut incoming = history;
-        if incoming
-            .first()
-            .is_some_and(|item| is_context_checkpoint_summary(item, summary_prefix))
-        {
-            incoming.remove(0);
-        }
-        self.history.truncate(cp.first_live_index);
-        self.history.extend(incoming);
     }
 
     pub fn clear_checkpoint_if_rewound_to(&mut self, hist_idx: usize) {
@@ -1138,6 +1116,7 @@ pub fn save_with_blobs_result_with_history_start(
         side_tables: store_side_table_suffixes_from_session_at(
             session_out.as_ref(),
             history_start_idx,
+            history_len,
         )?,
         descriptors: None,
     };
@@ -1168,8 +1147,16 @@ pub fn store_snapshot_from_session(
             history_start_idx,
             session.history.len(),
         )?,
-        metadata_snapshots: snapshot_values_from(&session.metadata_snapshots, history_start_idx)?,
-        context_snapshots: snapshot_values_from(&session.context_snapshots, history_start_idx)?,
+        metadata_snapshots: snapshot_values_from(
+            &session.metadata_snapshots,
+            history_start_idx,
+            session.history.len(),
+        )?,
+        context_snapshots: snapshot_values_from(
+            &session.context_snapshots,
+            history_start_idx,
+            session.history.len(),
+        )?,
     })
 }
 
@@ -1177,28 +1164,31 @@ pub fn store_side_table_suffixes_from_session(
     session: &Session,
     history_start_idx: usize,
 ) -> Result<smelt_store::SideTableSuffixes, smelt_store::StoreError> {
-    let start_idx = history_start_idx.min(session.history.len());
-    store_side_table_suffixes_from_session_at(session, start_idx)
+    store_side_table_suffixes_from_session_at(session, history_start_idx, session.history.len())
 }
 
 pub fn store_side_table_suffixes_from_session_at(
     session: &Session,
     history_start_idx: usize,
+    history_len: usize,
 ) -> Result<smelt_store::SideTableSuffixes, smelt_store::StoreError> {
+    let history_start_idx = history_start_idx.min(history_len);
     Ok(smelt_store::SideTableSuffixes {
         start: smelt_store::HistoryIndex::new(history_start_idx as u64),
         turn_metas: typed_store_values(turn_meta_values_from(
             &session.turn_metas,
             history_start_idx,
-            session.history.len(),
+            history_len,
         )?),
         metadata_snapshots: typed_store_values(snapshot_values_from(
             &session.metadata_snapshots,
             history_start_idx,
+            history_len,
         )?),
         context_snapshots: typed_store_values(snapshot_values_from(
             &session.context_snapshots,
             history_start_idx,
+            history_len,
         )?),
     })
 }
@@ -1306,6 +1296,13 @@ fn turn_meta_values_from<T: Serialize>(
     history_start_idx: usize,
     history_len: usize,
 ) -> Result<Vec<(u64, Value)>, smelt_store::StoreError> {
+    if let Some((idx, _)) = snapshots.iter().find(|(idx, _)| *idx > history_len) {
+        return Err(smelt_store::StoreError::Integrity(format!(
+            "turn metadata index {idx} must be at or before final history length {history_len}"
+        )));
+    }
+    // A turn completed exactly at the current boundary remains staged until a
+    // subsequent history item makes it a valid `turn_idx` row in the store.
     snapshots
         .iter()
         .filter(|(idx, _)| *idx >= history_start_idx && *idx < history_len)
@@ -1316,12 +1313,20 @@ fn turn_meta_values_from<T: Serialize>(
 fn snapshot_values_from<T: Serialize>(
     snapshots: &HistorySnapshots<T>,
     history_start_idx: usize,
+    history_len: usize,
 ) -> Result<Vec<(u64, Value)>, smelt_store::StoreError> {
-    snapshots
-        .iter()
-        .filter(|(idx, _)| *idx >= history_start_idx)
-        .map(|(idx, value)| Ok((*idx as u64, serde_json::to_value(value)?)))
-        .collect()
+    let mut values = Vec::new();
+    for (idx, value) in snapshots.iter() {
+        if *idx > history_len {
+            return Err(smelt_store::StoreError::Integrity(format!(
+                "snapshot index {idx} must be at or before final history length {history_len}"
+            )));
+        }
+        if *idx >= history_start_idx {
+            values.push((*idx as u64, serde_json::to_value(value)?));
+        }
+    }
+    Ok(values)
 }
 
 /// Write `contents` to `path` atomically via a tmp file + rename.
@@ -2271,7 +2276,21 @@ mod tests {
         assert_eq!(session.turn_metas.len(), 1);
         assert_eq!(session.turn_metas[0].0, 7);
         assert_eq!(session.context_tokens_history_len, Some(7));
-        assert!(session.context_snapshots.iter().any(|(idx, _)| *idx == 1));
+        assert!(session.context_snapshots.iter().any(|(idx, _)| *idx == 7));
+    }
+
+    #[test]
+    fn side_table_suffix_rejects_snapshots_past_final_history_len() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user_item("hello")];
+        session.snapshot_context_at(1);
+        session.snapshot_context_at(24);
+
+        let err = store_side_table_suffixes_from_session_at(&session, 0, 1).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("snapshot index 24 must be at or before final history length 1"));
     }
 
     #[test]
@@ -2375,13 +2394,16 @@ mod tests {
                 first_live_index,
                 end_index,
                 suffix,
+                ..
             } => {
                 assert_eq!(prefix.len(), 1);
                 assert_eq!(first_live_index, 0);
                 assert_eq!(end_index, 2);
                 assert!(suffix.is_empty());
             }
-            protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
+            protocol::ModelHistorySource::Items { .. } => {
+                panic!("expected store-backed model history")
+            }
         }
 
         let db = smelt_store::SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
@@ -2858,6 +2880,23 @@ mod tests {
     }
 
     #[test]
+    fn pruning_history_clears_only_checkpoints_past_the_new_boundary() {
+        let mut s = fixture_session();
+        s.checkpoint = Some(checkpoint("past", 3));
+        s.prune_rewindable_snapshots(2);
+        assert!(s.checkpoint.is_none());
+
+        s.checkpoint = Some(checkpoint("at boundary", 2));
+        s.prune_rewindable_snapshots(2);
+        assert_eq!(
+            s.checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.first_live_index),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn model_history_with_checkpoint_prepends_summary_and_tail() {
         let mut s = fixture_session();
         s.history = vec![
@@ -2875,39 +2914,6 @@ mod tests {
             matches!(&model[0], HistoryItem::User { content, .. } if content.text_content().contains("summary text"))
         );
         assert_eq!(model[1..], s.history[2..]);
-    }
-
-    #[test]
-    fn merge_model_history_snapshot_strips_injected_summary() {
-        let mut s = fixture_session();
-        s.history = vec![
-            user_item("old"),
-            assistant_text_item("old reply"),
-            user_item("recent"),
-            assistant_text_item("recent reply"),
-        ];
-        s.checkpoint = Some(checkpoint("the summary", 2));
-
-        s.merge_model_history_snapshot(
-            "SUMMARY:",
-            vec![
-                user_item("SUMMARY:\nthe summary"),
-                user_item("recent"),
-                assistant_text_item("recent reply"),
-                assistant_text_item("new reply"),
-            ],
-        );
-
-        assert_eq!(
-            s.history,
-            vec![
-                user_item("old"),
-                assistant_text_item("old reply"),
-                user_item("recent"),
-                assistant_text_item("recent reply"),
-                assistant_text_item("new reply"),
-            ]
-        );
     }
 
     #[test]

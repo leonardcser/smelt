@@ -46,7 +46,7 @@ fn replacement_from_decision(
     context: &str,
 ) -> Vec<protocol::Message> {
     match decision {
-        engine::HostRequestDecision::Replace(messages) => messages,
+        engine::HostRequestDecision::Replace { messages, .. } => messages,
         other => panic!("{context}: expected replacement, got {other:?}"),
     }
 }

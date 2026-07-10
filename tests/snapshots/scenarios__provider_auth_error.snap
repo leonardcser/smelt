@@ -7,19 +7,16 @@ expression: out.events
   "Ready",
   {
     "HistoryUpdated": {
-      "first_changed_index": 1,
-      "history": [
-        {
-          "kind": "note",
-          "note_kind": "context",
-          "text": "Current working directory: /."
-        },
-        {
-          "content": "hi",
-          "kind": "user"
-        }
-      ],
-      "turn_id": 1
+      "turn_id": 1,
+      "update": {
+        "first_index": 1,
+        "items": [
+          {
+            "content": "hi",
+            "kind": "user"
+          }
+        ]
+      }
     }
   },
   {

@@ -1393,13 +1393,16 @@ mod tests {
                 first_live_index,
                 end_index,
                 ref suffix,
+                ..
             } => {
                 assert!(prefix.is_empty());
                 assert_eq!(first_live_index, 0);
                 assert_eq!(end_index, old_history_len);
                 assert!(suffix.is_empty());
             }
-            protocol::ModelHistorySource::Items(_) => panic!("request start cloned full history"),
+            protocol::ModelHistorySource::Items { .. } => {
+                panic!("request start cloned full history")
+            }
         }
         assert_eq!(
             payload.input.provider_content().text_content(),
@@ -1603,11 +1606,13 @@ mod tests {
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id,
-                first_changed_index: 0,
-                history: vec![
-                    HistoryItem::user(Content::text("previous user message")),
-                    HistoryItem::note(current_note.clone()),
-                ],
+                update: protocol::CanonicalHistoryDelta::new(
+                    0,
+                    vec![
+                        HistoryItem::user(Content::text("previous user message")),
+                        HistoryItem::note(current_note.clone()),
+                    ],
+                ),
             },
         ));
 

@@ -1804,12 +1804,13 @@ fn read_provider_history_source(
     session_dir: &std::path::Path,
 ) -> Vec<protocol::HistoryItem> {
     match source {
-        protocol::ModelHistorySource::Items(items) => items,
+        protocol::ModelHistorySource::Items { items, .. } => items,
         protocol::ModelHistorySource::Store {
             prefix,
             first_live_index,
             end_index,
             suffix,
+            ..
         } => {
             smelt_perf::perf::record_value("engine:model_history:source_store", 1);
             smelt_perf::perf::record_value(
@@ -1919,8 +1920,7 @@ fn run_history_appended_hot_path(
         app.app
             .dispatch_engine_event(protocol::EngineEvent::HistoryAppended {
                 turn_id: 1,
-                first_index: history_len,
-                items: vec![item],
+                delta: protocol::CanonicalHistoryDelta::new(history_len, vec![item]),
             });
         app.app.flush_persist();
     });
@@ -1967,7 +1967,6 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         app.app
             .dispatch_engine_event(protocol::EngineEvent::TurnComplete {
                 turn_id: 1,
-                first_changed_index: history_len,
                 history: None,
                 meta: Some(meta),
             });

@@ -245,6 +245,7 @@ impl LiveSession {
             store_start_index,
             store_end_index,
             suffix,
+            first_live_index,
         )
     }
 
@@ -416,8 +417,27 @@ mod tests {
                 assert_eq!(end_index, 2);
                 assert_eq!(suffix.len(), 1);
             }
-            protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
+            protocol::ModelHistorySource::Items { .. } => {
+                panic!("expected store-backed model history")
+            }
         }
+
+        let checkpoint = ContextCheckpoint {
+            summary: "summary through live suffix".into(),
+            first_live_index: 3,
+            ..Default::default()
+        };
+        let source = live.model_history_source("SUMMARY:", Some(&checkpoint));
+        assert_eq!(source.coordinates().canonical_start().get(), 3);
+        assert_eq!(source.coordinates().model_prefix_len(), 1);
+        assert!(matches!(
+            source,
+            protocol::ModelHistorySource::Store {
+                first_live_index: 2,
+                ref suffix,
+                ..
+            } if suffix.is_empty()
+        ));
     }
 
     #[test]

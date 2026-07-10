@@ -173,7 +173,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
     }
     assert!(matches!(
         rx.try_recv().expect("first prepare reply"),
-        engine::HostRequestDecision::Replace(_)
+        engine::HostRequestDecision::Replace { .. }
     ));
     let checkpoint = app
         .app

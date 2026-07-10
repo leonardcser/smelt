@@ -696,12 +696,23 @@ smelt.engine.on_context_limit(function(messages, reply)
 			reply(nil)
 			return
 		end
-		local replacement = checkpointed_messages_from_boundary(messages, summary, first_live_message_index)
+		local installed = smelt.session.checkpoint({
+			kind = "compaction",
+			summary = summary,
+			first_live_message_index = first_live_message_index,
+			guard = guard,
+		})
 		set_compaction_preview(nil)
 		record_compaction("recovery", "summarize-recovery", 0, first_live_message_index)
 		emit_event("summarize-recovery", 0, 0, {
 			first_live_message_index = first_live_message_index,
 		})
-		reply({ action = "replace", messages = replacement })
+		if installed then
+			reply({ action = "replace", source = "model_history" })
+		else
+			-- Detached requests have no canonical session boundary to checkpoint.
+			local replacement = checkpointed_messages_from_boundary(messages, summary, first_live_message_index)
+			reply({ action = "replace", messages = replacement })
+		end
 	end)
 end)

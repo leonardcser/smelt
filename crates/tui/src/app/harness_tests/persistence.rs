@@ -323,7 +323,6 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
         }));
         app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
             turn_id: 1,
-            first_changed_index: 0,
             history: None,
             meta: None,
         }));
@@ -381,8 +380,7 @@ fn cancel_or_shutdown_preserves_committed_tool_invocations() {
         app.feed_one(SourceEvent::engine(
             protocol::EngineEvent::HistoryAppended {
                 turn_id: 42,
-                first_index: 0,
-                items: tool_history(),
+                delta: protocol::CanonicalHistoryDelta::new(0, tool_history()),
             },
         ));
 
@@ -965,6 +963,163 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
 }
 
 #[test]
+fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    for idx in 0..24 {
+        app.app
+            .session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
+    }
+    let compacted_prefix_len = app.app.session_history_len();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::TokenUsage {
+        usage: TokenUsage {
+            context_tokens: Some(100),
+            ..Default::default()
+        },
+        tokens_per_sec: None,
+        cost_usd: None,
+        background: false,
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        history: None,
+        meta: None,
+    }));
+    app.app.save_session_and_flush();
+
+    let mut settings = app.app.core.config.settings.clone();
+    settings.auto_compact = true;
+    settings.compact_threshold = 0.8;
+    settings.compact_keep_recent_groups = 1.0;
+    app.app.set_settings(settings);
+    app.app.core.config.context_window = Some(100);
+    app.app.commit_request_history_item(
+        HistoryItem::user(Content::text("request after compaction")),
+        Some(Block::User {
+            text: "request after compaction".into(),
+            image_labels: Vec::new(),
+        }),
+    );
+    app.start_turn(42);
+
+    let messages = protocol::history_to_messages(&app.app.model_history());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_host_call(engine::HostCall::PrepareRequest {
+                messages,
+                estimated_tokens: 200,
+                reply: tx,
+            });
+    }
+    let ask_id = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter_map(|command| match command {
+            protocol::UiCommand::EngineAsk { id, .. } => Some(id),
+            _ => None,
+        })
+        .next_back()
+        .expect("pre-request compaction should issue EngineAsk");
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_engine_event(EngineEvent::EngineAskResponse {
+                id: ask_id,
+                message: Some(protocol::Message::assistant(
+                    Some(Content::text("# Goal\nretained summary")),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        app.app.drive_lua_tasks();
+    }
+
+    let (replacement, coordinates) = match rx
+        .try_recv()
+        .expect("compaction prepare reply should be ready")
+    {
+        engine::HostRequestDecision::Replace {
+            messages,
+            coordinates,
+        } => (messages, coordinates),
+        decision => panic!("expected model-history replacement, got {decision:?}"),
+    };
+    assert_eq!(coordinates.model_prefix_len(), 1);
+    assert_eq!(coordinates.canonical_start().get(), compacted_prefix_len);
+    assert_eq!(replacement.len(), 2);
+
+    let replacement_history = protocol::history_from_messages(replacement);
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryUpdated {
+        turn_id: 42,
+        update: coordinates.canonical_delta(protocol::ModelHistoryIndex::ZERO, replacement_history),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 42,
+        delta: protocol::CanonicalHistoryDelta {
+            first_index: coordinates.canonical_index(protocol::ModelHistoryIndex::new(2)),
+            items: vec![HistoryItem::Assistant(AssistantStep::terminal(
+                Some(Content::text("reply after compaction")),
+                None,
+                Vec::new(),
+            ))],
+        },
+    }));
+    app.app.save_session_and_flush();
+
+    assert!(
+        app.app.notification.is_none(),
+        "compacted append should save without a side-table bounds error: {:?}",
+        app.app.notification
+    );
+    assert_eq!(app.app.session_history_len(), compacted_prefix_len + 2);
+    let session_id = app.app.core.session.id.clone();
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), compacted_prefix_len + 2);
+    assert!(loaded
+        .context_snapshots
+        .iter()
+        .any(|(index, _)| *index == compacted_prefix_len));
+    assert!(loaded
+        .context_snapshots
+        .iter()
+        .all(|(index, _)| *index <= loaded.history.len()));
+    assert!(matches!(
+        loaded.history.first(),
+        Some(HistoryItem::User { content, .. }) if content.text_content() == "row 0"
+    ));
+    assert!(matches!(
+        loaded.history.get(compacted_prefix_len),
+        Some(HistoryItem::User { content, .. }) if content.text_content() == "request after compaction"
+    ));
+    assert!(matches!(
+        loaded.history.last(),
+        Some(HistoryItem::Assistant(step))
+            if step.content.as_ref().is_some_and(|content| content.text_content() == "reply after compaction")
+    ));
+
+    drop(app);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert_eq!(resumed.app.session_history_len(), compacted_prefix_len + 2);
+    let resumed_history = resumed
+        .app
+        .session_history_range(0..resumed.app.session_history_len());
+    assert!(matches!(
+        resumed_history.first(),
+        Some(HistoryItem::User { content, .. }) if content.text_content() == "row 0"
+    ));
+    assert!(matches!(
+        resumed_history.last(),
+        Some(HistoryItem::Assistant(step))
+            if step.content.as_ref().is_some_and(|content| content.text_content() == "reply after compaction")
+    ));
+}
+
+#[test]
 fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() {
     let guard = test_home_guard();
     let session_id = {
@@ -1001,11 +1156,10 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
             .map(|checkpoint| checkpoint.first_live_index),
         Some(3)
     );
-    resumed.app.session_truncate_from(1);
     let identity = resumed.app.active_context_token_identity();
     resumed.app.apply_session_document_mutation(
-        crate::app::session_document::SessionMutation::RestoreRewindableAfterRewind {
-            history_len: 1,
+        crate::app::session_document::SessionMutation::RewindHistoryTo {
+            index: 1,
             keep_checkpoint_at_boundary: false,
             identity,
         },

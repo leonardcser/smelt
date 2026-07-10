@@ -180,24 +180,24 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         }
         let recv = tokio::time::timeout(Duration::from_millis(300), handle.recv()).await;
         match recv {
-            Ok(Some(EngineEvent::HistoryUpdated { history, .. })) => {
-                if let Some(orphans) = snapshot_has_orphan(&history) {
-                    bad_snapshots.push(("HistoryUpdated", history.clone(), orphans));
+            Ok(Some(EngineEvent::HistoryUpdated { update, .. })) => {
+                if let Some(orphans) = snapshot_has_orphan(&update.items) {
+                    bad_snapshots.push(("HistoryUpdated", update.items.clone(), orphans));
                 }
-                all_snapshots.push(("HistoryUpdated", history));
+                all_snapshots.push(("HistoryUpdated", update.items));
             }
-            Ok(Some(EngineEvent::HistoryAppended { items, .. })) => {
-                if let Some(orphans) = snapshot_has_orphan(&items) {
-                    bad_snapshots.push(("HistoryAppended", items.clone(), orphans));
+            Ok(Some(EngineEvent::HistoryAppended { delta, .. })) => {
+                if let Some(orphans) = snapshot_has_orphan(&delta.items) {
+                    bad_snapshots.push(("HistoryAppended", delta.items.clone(), orphans));
                 }
-                all_snapshots.push(("HistoryAppended", items));
+                all_snapshots.push(("HistoryAppended", delta.items));
             }
             Ok(Some(EngineEvent::TurnComplete { history, .. })) => {
                 if let Some(history) = history {
-                    if let Some(orphans) = snapshot_has_orphan(&history) {
-                        bad_snapshots.push(("TurnComplete", history.clone(), orphans));
+                    if let Some(orphans) = snapshot_has_orphan(&history.items) {
+                        bad_snapshots.push(("TurnComplete", history.items.clone(), orphans));
                     }
-                    all_snapshots.push(("TurnComplete", history));
+                    all_snapshots.push(("TurnComplete", history.items));
                 }
                 break;
             }

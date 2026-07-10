@@ -18,8 +18,30 @@ use tokio::sync::oneshot;
 #[derive(Debug)]
 pub enum HostRequestDecision {
     Continue,
-    Replace(Vec<Message>),
+    Replace {
+        messages: Vec<Message>,
+        coordinates: protocol::ModelHistoryCoordinates,
+    },
     Abort(String),
+}
+
+impl HostRequestDecision {
+    pub fn replace_canonical_history(messages: Vec<Message>) -> Self {
+        Self::Replace {
+            messages,
+            coordinates: protocol::ModelHistoryCoordinates::canonical(),
+        }
+    }
+
+    pub fn replace_model_history(
+        messages: Vec<Message>,
+        coordinates: protocol::ModelHistoryCoordinates,
+    ) -> Self {
+        Self::Replace {
+            messages,
+            coordinates,
+        }
+    }
 }
 
 /// One synchronous request from the engine to the host (TUI / headless).
@@ -39,7 +61,7 @@ pub enum HostCall {
     /// Engine hit a context-window error mid-turn. The host's registered
     /// recovery hook (`smelt.engine.on_context_limit`) is invoked with
     /// the conversation up to that point and returns a shorter
-    /// conversation to retry with. `Replace(msgs)` swaps the engine's
+    /// conversation to retry with. `Replace { .. }` swaps the engine's
     /// `messages` (excluding the system prompt at index 0) and re-runs
     /// the loop; `Continue` (no hook registered, hook returned nil, or hook
     /// failed) aborts the turn with the existing `TurnError`; `Abort(message)`
