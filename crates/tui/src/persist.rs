@@ -419,6 +419,102 @@ pub(crate) fn write_transcript_descriptor_suffix(
 mod tests {
     use super::*;
 
+    fn commit(session_id: &str, base_revision: u64) -> smelt_store::SessionCommit {
+        smelt_store::SessionCommit {
+            session_id: session_id.into(),
+            save_id: smelt_store::SaveId::new(1),
+            base_revision: smelt_store::Revision::new(base_revision),
+            base_history_len: smelt_store::HistoryLen::ZERO,
+            base_descriptor_len: smelt_store::DescriptorLen::ZERO,
+            state: smelt_store::SessionState {
+                id: session_id.into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: None,
+                reasoning_effort: None,
+                model: None,
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: 0,
+                history_len: 1,
+                created_at: 1,
+                updated_at: 1,
+            },
+            history: smelt_store::HistorySuffix {
+                start: smelt_store::HistoryIndex::ZERO,
+                final_len: smelt_store::HistoryLen::new(1),
+                items: vec![protocol::HistoryItem::user(protocol::Content::text(
+                    "saved",
+                ))],
+            },
+            side_tables: smelt_store::SideTableSuffixes {
+                start: smelt_store::HistoryIndex::ZERO,
+                turn_metas: Vec::new(),
+                metadata_snapshots: Vec::new(),
+                context_snapshots: Vec::new(),
+            },
+            descriptors: None,
+        }
+    }
+
+    #[test]
+    fn failed_commit_currently_leaves_published_directory_and_attachment_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-a");
+        let request = PersistRequest {
+            session_dir: session_dir.clone(),
+            command: commit("session-a", 9),
+            blobs: vec![Blob {
+                filename: "attachment.png".into(),
+                data_url: "data:image/png;base64,AAAA".into(),
+            }],
+        };
+        let mut cache = PersistDbCache { current: None };
+
+        let result = write(&request, &mut cache);
+
+        assert!(result.is_err(), "stale commit should fail");
+        assert!(
+            session_dir.join("session.db").is_file(),
+            "database creation publishes the destination before a valid first commit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session_dir.join("blobs/attachment.png")).unwrap(),
+            "data:image/png;base64,AAAA",
+            "attachment is written before the failed canonical transaction"
+        );
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert!(db.session_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn derived_refresh_failure_does_not_undo_canonical_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("session-a");
+        std::fs::create_dir_all(session_dir.join("meta.json")).unwrap();
+        let request = PersistRequest {
+            session_dir: session_dir.clone(),
+            command: commit("session-a", 0),
+            blobs: Vec::new(),
+        };
+        let mut cache = PersistDbCache { current: None };
+
+        let receipt = write(&request, &mut cache).expect("canonical commit succeeds");
+
+        assert_eq!(receipt.revision.get(), 1);
+        assert!(session_dir.join("meta.json").is_dir());
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert_eq!(db.session_state().unwrap().unwrap().history_len, 1);
+        assert_eq!(db.read_history_items_range(0..1).unwrap().len(), 1);
+    }
+
     #[test]
     fn request_audit_is_written_by_worker() {
         let dir = tempfile::tempdir().unwrap();

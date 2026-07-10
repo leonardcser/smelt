@@ -2221,6 +2221,50 @@ mod tests {
         assert_eq!(prefix, "abcd");
     }
 
+    #[test]
+    fn delete_currently_accepts_absolute_and_parent_traversal_paths() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let sessions = sessions_dir();
+        fs::create_dir_all(&sessions).expect("create sessions dir");
+
+        let absolute_target = state.path().join("absolute-target");
+        fs::create_dir_all(&absolute_target).expect("create absolute target");
+        fs::write(absolute_target.join("sentinel"), "keep").expect("write absolute sentinel");
+        delete(absolute_target.to_str().expect("utf-8 temp path"));
+        assert!(
+            !absolute_target.exists(),
+            "an unchecked absolute id currently escapes the sessions root"
+        );
+
+        let parent_target = sessions.parent().unwrap().join("parent-target");
+        fs::create_dir_all(&parent_target).expect("create parent target");
+        fs::write(parent_target.join("sentinel"), "keep").expect("write parent sentinel");
+        delete("../parent-target");
+        assert!(
+            !parent_target.exists(),
+            "an unchecked parent id currently escapes the sessions root"
+        );
+    }
+
+    #[test]
+    fn delete_currently_removes_valid_exact_id_but_not_its_unique_prefix() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let dir = sessions_dir().join(id);
+        fs::create_dir_all(&dir).expect("create valid session dir");
+        fs::write(dir.join("session.db"), "fixture").expect("write fixture database");
+
+        delete("01234567");
+        assert!(
+            dir.exists(),
+            "delete currently does not resolve unique prefixes"
+        );
+        delete(id);
+        assert!(!dir.exists(), "valid exact ids are deleted");
+    }
+
     use protocol::{AssistantStep, Content, ContentPart, HistoryItem, ToolInvocation, ToolOutcome};
 
     fn user_item(text: &str) -> HistoryItem {

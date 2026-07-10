@@ -3086,6 +3086,62 @@ mod tests {
     }
 
     #[test]
+    fn model_history_read_completes_after_concurrent_writer_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let item = HistoryItem::user(protocol::Content::text("persisted"));
+        let snapshot = smelt_store::SessionSnapshot {
+            state: smelt_store::SessionState {
+                id: "blocked-history".into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: None,
+                reasoning_effort: None,
+                model: None,
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: 0,
+                history_len: 1,
+                created_at: 10,
+                updated_at: 20,
+            },
+            history_start_idx: 0,
+            history_len: 1,
+            history: vec![item.clone()],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
+        };
+        db.save_session_snapshot_for_import(&snapshot).unwrap();
+        db.connection()
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE store_meta SET updated_at = updated_at WHERE key = 'schema_version';",
+            )
+            .unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            db.connection().execute_batch("COMMIT").unwrap();
+        });
+
+        let history = load_model_history(
+            protocol::ModelHistorySource::store(Vec::new(), 0, 1),
+            dir.path(),
+        )
+        .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(history.items, vec![item]);
+    }
+
+    #[test]
     fn classify_provider_error_detects_kimi_model_token_limit() {
         let err = ProviderError::InvalidResponse(
             r#"{"error":{"type":"invalid_request_error","message":"Invalid request: Your request exceeded model token limit: 262144 (requested: 264866)"},"type":"error"}"#.into(),

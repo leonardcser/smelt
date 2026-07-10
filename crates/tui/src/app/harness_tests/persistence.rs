@@ -148,6 +148,96 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
 }
 
 #[test]
+fn shutdown_retries_after_transient_session_directory_failure() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    std::fs::create_dir_all(session_dir.parent().unwrap()).unwrap();
+    std::fs::write(&session_dir, "temporarily blocks directory creation").unwrap();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("retry me")));
+
+    app.app.save_session_and_flush();
+    assert!(app.app.session_document_has_unflushed_work());
+    assert!(app.app.notification.is_some());
+
+    std::fs::remove_file(&session_dir).unwrap();
+    app.app.save_session_and_flush();
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), 1);
+}
+
+#[test]
+fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    std::fs::create_dir_all(session_dir.parent().unwrap()).unwrap();
+    std::fs::write(&session_dir, "permanently blocks directory creation").unwrap();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("cannot save")));
+
+    app.app.save_session_and_flush();
+
+    assert!(app.app.session_document_has_unflushed_work());
+    assert!(app.app.notification.is_some());
+    assert!(!session_dir.join("session.db").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_sparse_fork_currently_leaves_a_published_destination_database() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Privileged processes can read mode-000 files, so this failure injection
+    // is meaningful only for the unprivileged environment smelt supports.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("fork source")));
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    let source_dir = smelt_core::session::dir_for_id(&session_id);
+    let blob_dir = source_dir.join("blobs");
+    std::fs::create_dir_all(&blob_dir).unwrap();
+    let unreadable = blob_dir.join("unreadable.png");
+    std::fs::write(&unreadable, "private attachment").unwrap();
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o0)).unwrap();
+    let sessions_dir = source_dir.parent().unwrap().to_path_buf();
+    let before = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect::<std::collections::HashSet<_>>();
+
+    resumed.app.fork_session();
+
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(resumed.app.core.session.id, session_id);
+    assert!(resumed.app.notification.is_some());
+    let destinations = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| !before.contains(&entry.file_name()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        destinations.len(),
+        1,
+        "failed fork should leave one partial destination"
+    );
+    assert!(destinations[0].path().join("session.db").is_file());
+}
+
+#[test]
 fn shutdown_flushes_descriptor_only_transcript_blocks() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
