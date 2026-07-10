@@ -24,10 +24,12 @@ fn starts_assistant_or_tool_output(ev: &EngineEvent) -> bool {
         | EngineEvent::ToolFinished { .. }
         | EngineEvent::RequestPermission { .. } => true,
         EngineEvent::ToolCallDraftDelta { delta, .. } => !delta.is_empty(),
-        EngineEvent::HistoryAppended { items, .. } => items
+        EngineEvent::HistoryAppended { delta, .. } => delta
+            .items
             .iter()
             .any(|item| matches!(item, protocol::HistoryItem::Assistant(_))),
-        EngineEvent::HistoryUpdated { history, .. } => history
+        EngineEvent::HistoryUpdated { update, .. } => update
+            .items
             .iter()
             .any(|item| matches!(item, protocol::HistoryItem::Assistant(_))),
         _ => false,
@@ -538,31 +540,25 @@ impl TuiApp {
                 self.lua.fire_ask_callback(id, message.as_ref(), error);
                 SessionControl::Continue
             }
-            EngineEvent::HistoryAppended {
-                turn_id: id,
-                first_index,
-                items,
-            } => {
+            EngineEvent::HistoryAppended { turn_id: id, delta } => {
                 if id == turn_id {
-                    self.append_engine_history_items(first_index, items);
+                    self.append_engine_history_items(delta.first_index.get(), delta.items);
                     self.save_session();
                 }
                 SessionControl::Continue
             }
             EngineEvent::HistoryUpdated {
                 turn_id: id,
-                first_changed_index,
-                history,
+                update,
             } => {
                 if id == turn_id {
-                    self.set_history_from(history, Some(first_changed_index));
+                    self.set_history_from(update.first_index.get(), update.items);
                     self.save_session();
                 }
                 SessionControl::Continue
             }
             EngineEvent::TurnComplete {
                 turn_id: id,
-                first_changed_index,
                 history,
                 meta,
             } => {
@@ -570,7 +566,7 @@ impl TuiApp {
                     return SessionControl::Continue;
                 }
                 if let Some(history) = history {
-                    self.set_history_from(history, Some(first_changed_index));
+                    self.set_history_from(history.first_index.get(), history.items);
                 }
                 let payload = meta.clone().unwrap_or(protocol::TurnMeta {
                     elapsed_ms: 0,
@@ -667,11 +663,10 @@ impl TuiApp {
             EngineEvent::HistoryUpdated { .. } => {}
             EngineEvent::TurnComplete {
                 history: Some(history),
-                first_changed_index,
                 ..
-            } if !history.is_empty() => {
+            } if !history.items.is_empty() => {
                 // Persist final messages from a cancelled turn without rebuilding the screen.
-                self.set_history_from(history, Some(first_changed_index));
+                self.set_history_from(history.first_index.get(), history.items);
                 self.save_session();
             }
             EngineEvent::EngineAskDelta { id, delta } => {

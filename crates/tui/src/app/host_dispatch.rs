@@ -24,8 +24,11 @@ fn restore_working_phase() {
 }
 
 fn current_model_history_decision() -> HostRequestDecision {
-    crate::lua::try_with_app(|app| HostRequestDecision::Replace(app.model_history_messages()))
-        .unwrap_or(HostRequestDecision::Continue)
+    crate::lua::try_with_app(|app| {
+        let coordinates = app.model_history_source().coordinates();
+        HostRequestDecision::replace_model_history(app.model_history_messages(), coordinates)
+    })
+    .unwrap_or(HostRequestDecision::Continue)
 }
 
 fn request_decision_from_lua(
@@ -46,7 +49,7 @@ fn request_decision_from_lua(
             Ok(t.get::<mlua::Value>("messages")
                 .ok()
                 .and_then(|v| smelt_core::lua::lua_to_serde::<Vec<Message>>(inner_lua, &v))
-                .map(HostRequestDecision::Replace)
+                .map(HostRequestDecision::replace_canonical_history)
                 .unwrap_or(HostRequestDecision::Continue))
         }
         Some(_) => Ok(HostRequestDecision::Continue),

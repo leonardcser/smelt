@@ -122,7 +122,6 @@ fn queued_turn_preserves_work_elapsed() {
     let before = app.app.working.elapsed().expect("live turn elapsed");
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
         history: None,
         meta: None,
     }));
@@ -148,6 +147,25 @@ fn queued_turn_preserves_work_elapsed() {
         after >= before && after >= Duration::from_secs(3),
         "queued turn reset elapsed time: before {before:?}, after {after:?}"
     );
+}
+
+#[test]
+fn engine_history_replacement_preserves_work_elapsed() {
+    let mut app = TestApp::builder().build();
+    app.app
+        .session_append_history(protocol::HistoryItem::user(protocol::Content::text("old")));
+    app.start_turn(1);
+    app.feed_one(SourceEvent::Tick(750));
+
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryUpdated {
+        turn_id: 1,
+        update: protocol::CanonicalHistoryDelta::new(
+            0,
+            vec![protocol::HistoryItem::user(protocol::Content::text("new"))],
+        ),
+    }));
+
+    assert_eq!(app.app.working.elapsed(), Some(Duration::from_millis(750)));
 }
 
 #[test]
@@ -574,7 +592,6 @@ fn typing_after_turn_complete_keeps_prompt_cursor_coherent() {
     app.start_turn(1);
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
         history: None,
         meta: None,
     }));

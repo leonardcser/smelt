@@ -109,7 +109,7 @@ pub(crate) async fn engine_task(
                             tools,
                         } = *payload;
                         let display = input.display();
-                        let history = match load_model_history(history, &session_dir) {
+                        let loaded_history = match load_model_history(history, &session_dir) {
                             Ok(history) => history,
                             Err(message) => {
                                 let _ = event_tx.send(EngineEvent::TurnError {
@@ -150,6 +150,7 @@ pub(crate) async fn engine_task(
                             cancel: CancellationToken::new(),
                             bg_cancel: bg_cancel.clone(),
                             history: Vec::new(),
+                            history_coordinates: loaded_history.coordinates,
                             mode,
                             reasoning_effort,
                             turn_id,
@@ -166,7 +167,7 @@ pub(crate) async fn engine_task(
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
                         };
-                        turn.run(input, history).await;
+                        turn.run(input, loaded_history.items).await;
                     }
                     UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                         config.api.base = api_base;
@@ -210,21 +211,28 @@ pub(crate) async fn engine_task(
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
 }
 
+struct LoadedModelHistory {
+    items: Vec<HistoryItem>,
+    coordinates: protocol::ModelHistoryCoordinates,
+}
+
 fn load_model_history(
     source: protocol::ModelHistorySource,
     session_dir: &std::path::Path,
-) -> Result<Vec<HistoryItem>, String> {
-    match source {
-        protocol::ModelHistorySource::Items(items) => {
+) -> Result<LoadedModelHistory, String> {
+    let coordinates = source.coordinates();
+    let items = match source {
+        protocol::ModelHistorySource::Items { items, .. } => {
             smelt_perf::perf::record_value("engine:model_history:source_items", 1);
             smelt_perf::perf::record_value("engine:model_history:items", items.len() as u64);
-            Ok(items)
+            items
         }
         protocol::ModelHistorySource::Store {
             prefix,
             first_live_index,
             end_index,
             suffix,
+            ..
         } => {
             smelt_perf::perf::record_value("engine:model_history:source_store", 1);
             smelt_perf::perf::record_value(
@@ -249,9 +257,10 @@ fn load_model_history(
             }
             history.extend(suffix);
             smelt_perf::perf::record_value("engine:model_history:items", history.len() as u64);
-            Ok(history)
+            history
         }
-    }
+    };
+    Ok(LoadedModelHistory { items, coordinates })
 }
 
 /// Resolve an `AskModel` override (or the primary) into `(ApiConfig, model_name)`.
@@ -789,6 +798,7 @@ struct Turn<'a> {
     /// dispatch phase and is folded into a single `HistoryItem::Assistant`
     /// at commit time.
     history: Vec<HistoryItem>,
+    history_coordinates: protocol::ModelHistoryCoordinates,
     mode: AgentMode,
     reasoning_effort: ReasoningEffort,
     turn_id: u64,
@@ -1023,15 +1033,29 @@ impl<'a> Turn<'a> {
         self.next_history_changed_from = self.public_history_len();
         self.emit(EngineEvent::HistoryAppended {
             turn_id: self.turn_id,
-            first_index,
-            items,
+            delta: protocol::CanonicalHistoryDelta {
+                first_index: self
+                    .history_coordinates
+                    .canonical_index(protocol::ModelHistoryIndex::new(first_index)),
+                items,
+            },
         });
     }
 
-    /// Emit the public-visible slice of history (everything except the
-    /// leading system item). Callers can rely on the invariant: every
-    /// `HistoryItem::Assistant` in the emitted vec carries its full set of
-    /// paired `ToolInvocation`s.
+    fn replace_model_history(
+        &mut self,
+        history: Vec<HistoryItem>,
+        coordinates: protocol::ModelHistoryCoordinates,
+    ) {
+        self.mark_history_changed_from(0);
+        self.history_coordinates = coordinates;
+        self.history.truncate(1);
+        self.history.extend(history);
+        self.emit_messages_snapshot();
+    }
+
+    /// Emit the canonical suffix affected by model-visible history changes.
+    /// Synthetic checkpoint items are omitted from the payload.
     fn emit_messages_snapshot(&mut self) {
         let items: Vec<HistoryItem> = self
             .history
@@ -1043,8 +1067,9 @@ impl<'a> Turn<'a> {
         self.next_history_changed_from = items.len();
         self.emit(EngineEvent::HistoryUpdated {
             turn_id: self.turn_id,
-            first_changed_index,
-            history: items,
+            update: self
+                .history_coordinates
+                .canonical_delta(protocol::ModelHistoryIndex::new(first_changed_index), items),
         });
     }
 
@@ -1153,21 +1178,23 @@ impl<'a> Turn<'a> {
 
     fn emit_turn_complete(&mut self, interrupted: bool) {
         let meta = self.build_meta(interrupted);
-        let (first_changed_index, history) = if interrupted {
+        let history = if interrupted {
             let items: Vec<HistoryItem> = std::mem::take(&mut self.history)
                 .into_iter()
                 .filter(|i| !matches!(i, HistoryItem::System { .. }))
                 .collect();
             let first_changed_index = self.next_history_changed_from.min(items.len());
             self.next_history_changed_from = items.len();
-            (first_changed_index, Some(items))
+            Some(
+                self.history_coordinates
+                    .canonical_delta(protocol::ModelHistoryIndex::new(first_changed_index), items),
+            )
         } else {
             self.history.clear();
-            (self.next_history_changed_from, None)
+            None
         };
         self.emit(EngineEvent::TurnComplete {
             turn_id: self.turn_id,
-            first_changed_index,
             history,
             meta: Some(meta),
         });
@@ -1234,16 +1261,17 @@ impl<'a> Turn<'a> {
                 apply_deferred,
             )
             .await;
-        let replacement = match decision {
+        let (replacement, coordinates) = match decision {
             HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
             | HostCallResult::Dropped => return PrepareRequestOutcome::Continue,
             HostCallResult::Cancelled => return PrepareRequestOutcome::Cancelled,
             HostCallResult::Replied(crate::host::HostRequestDecision::Abort(message)) => {
                 return PrepareRequestOutcome::Abort(message);
             }
-            HostCallResult::Replied(crate::host::HostRequestDecision::Replace(messages)) => {
-                messages
-            }
+            HostCallResult::Replied(crate::host::HostRequestDecision::Replace {
+                messages,
+                coordinates,
+            }) => (messages, coordinates),
         };
         if replacement.is_empty() {
             log::entry(
@@ -1263,10 +1291,7 @@ impl<'a> Turn<'a> {
                 "new_message_count": new.len() + 1,
             }),
         );
-        self.mark_history_changed_from(0);
-        self.history.truncate(1);
-        self.history.extend(new);
-        self.emit_messages_snapshot();
+        self.replace_model_history(new, coordinates);
         PrepareRequestOutcome::Restart
     }
 
@@ -1530,9 +1555,12 @@ impl<'a> Turn<'a> {
                                 self.emit_turn_complete(false);
                                 return;
                             }
-                            HostCallResult::Replied(crate::host::HostRequestDecision::Replace(
-                                shorter,
-                            )) => {
+                            HostCallResult::Replied(
+                                crate::host::HostRequestDecision::Replace {
+                                    messages: shorter,
+                                    coordinates,
+                                },
+                            ) => {
                                 warn_if_replacement_has_orphans(&shorter, "context_limit_recovery");
                                 let new = protocol::history_from_messages(shorter);
                                 log::entry(
@@ -1540,9 +1568,7 @@ impl<'a> Turn<'a> {
                                     "context_limit_recovered",
                                     &serde_json::json!({"new_message_count": new.len() + 1}),
                                 );
-                                self.history.truncate(1);
-                                self.history.extend(new);
-                                self.emit_messages_snapshot();
+                                self.replace_model_history(new, coordinates);
                                 continue;
                             }
                             HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
@@ -3029,12 +3055,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(history.len(), 3);
+        assert_eq!(history.items.len(), 3);
         assert!(
-            matches!(&history[0], HistoryItem::User { content, .. } if content.text_content() == "SUMMARY:\ncompact")
+            matches!(&history.items[0], HistoryItem::User { content, .. } if content.text_content() == "SUMMARY:\ncompact")
         );
-        assert_eq!(history[1], recent);
-        assert_eq!(history[2], reply);
+        assert_eq!(history.items[1], recent);
+        assert_eq!(history.items[2], reply);
+        assert_eq!(
+            history.coordinates,
+            protocol::ModelHistoryCoordinates::projected(1, 1)
+        );
     }
 
     #[test]
@@ -3140,6 +3170,7 @@ mod tests {
             cancel: CancellationToken::new(),
             bg_cancel: CancellationToken::new(),
             history: vec![HistoryItem::system("sys")],
+            history_coordinates: protocol::ModelHistoryCoordinates::canonical(),
             mode: AgentMode::normal(),
             reasoning_effort: ReasoningEffort::Off,
             turn_id: 1,
@@ -3190,7 +3221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_turn_note_input_emits_typed_note_snapshot() {
+    async fn checkpointed_start_turn_emits_canonical_typed_note_update() {
         let note = protocol::HistoryNote::process_status_event(
             protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
         );
@@ -3219,7 +3250,13 @@ mod tests {
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
-            history: protocol::ModelHistorySource::items(vec![prior.clone()]),
+            history: protocol::ModelHistorySource::projected_items(
+                vec![
+                    HistoryItem::user(Content::text("SUMMARY:\ncheckpoint")),
+                    prior.clone(),
+                ],
+                protocol::ModelHistoryCoordinates::projected(1, 24),
+            ),
             api_base: None,
             api_key: None,
             session_id: "s".into(),
@@ -3235,13 +3272,9 @@ mod tests {
                 .await
                 .expect("history snapshot")
             {
-                Some(EngineEvent::HistoryUpdated {
-                    history,
-                    first_changed_index,
-                    ..
-                }) => {
-                    assert_eq!(history, vec![prior.clone(), HistoryItem::note(note)]);
-                    assert_eq!(first_changed_index, 1);
+                Some(EngineEvent::HistoryUpdated { update, .. }) => {
+                    assert_eq!(update.items, vec![HistoryItem::note(note)]);
+                    assert_eq!(update.first_index.get(), 25);
                     break;
                 }
                 Some(_) => continue,

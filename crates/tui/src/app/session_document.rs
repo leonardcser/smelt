@@ -542,14 +542,16 @@ pub(crate) enum SessionMutation {
     },
     ApplyHistoryAppend {
         append: HistoryAppend,
-    },
-    ReplaceHistoryFrom {
-        history: Vec<HistoryItem>,
-        dirty_from: usize,
-        summary_prefix: &'static str,
+        identity: ContextTokenIdentity,
     },
     TruncateHistoryFrom {
         index: usize,
+        identity: ContextTokenIdentity,
+    },
+    RewindHistoryTo {
+        index: usize,
+        keep_checkpoint_at_boundary: bool,
+        identity: ContextTokenIdentity,
     },
     AppendTranscriptBlock {
         block: Block,
@@ -691,16 +693,10 @@ pub(crate) enum SessionMutation {
     RestoreMetadataAfterRewind {
         history_len: usize,
     },
-    RestoreRewindableAfterRewind {
-        history_len: usize,
-        keep_checkpoint_at_boundary: bool,
-        identity: ContextTokenIdentity,
-    },
     PruneRewindableState {
         history_len: usize,
         identity: ContextTokenIdentity,
     },
-    ClearRewindableState,
 }
 
 #[cfg(test)]
@@ -877,6 +873,7 @@ impl SessionDocument {
             }
             SessionMutation::AppendHistoryItem { .. }
             | SessionMutation::TruncateHistoryFrom { .. }
+            | SessionMutation::RewindHistoryTo { .. }
             | SessionMutation::SetCheckpoint { .. }
             | SessionMutation::SetCheckpointTokensAfterEstimate { .. } => {
                 if let Some(live_session) = live_session {
@@ -1134,6 +1131,7 @@ impl SessionDocument {
                 let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
                     input.session,
                     input.state.history_len,
+                    input.state.history_len,
                 )
                 .map_err(|err| err.to_string())?;
                 Ok(PreparedSessionSave::MetadataOnly {
@@ -1163,6 +1161,7 @@ impl SessionDocument {
                 let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
                     input.session,
                     history_start_idx,
+                    history_len,
                 )
                 .map_err(|err| err.to_string())?;
                 Ok(PreparedSessionSave::History {
@@ -1312,7 +1311,7 @@ impl SessionDocument {
             SessionMutation::CommitRequestHistoryItem { .. } => {
                 unreachable!("history-with-transcript mutation requires a transcript target")
             }
-            SessionMutation::ApplyHistoryAppend { append } => {
+            SessionMutation::ApplyHistoryAppend { append, identity } => {
                 let old_len = session.history.len();
                 let append_result = protocol::apply_history_append(&mut session.history, &append);
                 let dirty_from = match append_result {
@@ -1322,30 +1321,47 @@ impl SessionDocument {
                         Some(old_len.saturating_sub(1))
                     }
                 };
+                let turn_meta = if append_result == HistoryAppendResult::RemovedLast {
+                    let turn_meta = session.prune_rewindable_snapshots(session.history.len());
+                    session.clear_context_tokens_baseline_if_mismatched(&identity);
+                    turn_meta
+                } else {
+                    None
+                };
                 MutationResult {
                     session_dirty: dirty_from.is_some(),
                     history_dirty_from: dirty_from,
                     history_append_result: Some(append_result),
+                    turn_meta,
                     ..Default::default()
                 }
             }
-            SessionMutation::ReplaceHistoryFrom {
-                history,
-                dirty_from,
-                summary_prefix,
-            } => {
-                session.merge_model_history_snapshot(summary_prefix, history);
-                MutationResult {
-                    session_dirty: true,
-                    history_dirty_from: Some(dirty_from),
-                    ..Default::default()
-                }
-            }
-            SessionMutation::TruncateHistoryFrom { index } => {
+            SessionMutation::TruncateHistoryFrom { index, identity } => {
+                let index = index.min(session.history.len());
                 session.history.truncate(index);
+                let turn_meta = session.prune_rewindable_snapshots(index);
+                session.clear_context_tokens_baseline_if_mismatched(&identity);
                 MutationResult {
                     session_dirty: true,
                     history_dirty_from: Some(index),
+                    turn_meta,
+                    ..Default::default()
+                }
+            }
+            SessionMutation::RewindHistoryTo {
+                index,
+                keep_checkpoint_at_boundary,
+                identity,
+            } => {
+                let index = index.min(session.history.len());
+                session.history.truncate(index);
+                let turn_meta = session
+                    .restore_rewindable_snapshots_after_rewind(index, keep_checkpoint_at_boundary);
+                session.clear_context_tokens_baseline_if_mismatched(&identity);
+                MutationResult {
+                    session_dirty: true,
+                    history_dirty_from: Some(index),
+                    turn_meta,
                     ..Default::default()
                 }
             }
@@ -1532,22 +1548,6 @@ impl SessionDocument {
                     ..Default::default()
                 }
             }
-            SessionMutation::RestoreRewindableAfterRewind {
-                history_len,
-                keep_checkpoint_at_boundary,
-                identity,
-            } => {
-                let turn_meta = session.restore_rewindable_snapshots_after_rewind(
-                    history_len,
-                    keep_checkpoint_at_boundary,
-                );
-                session.clear_context_tokens_baseline_if_mismatched(&identity);
-                MutationResult {
-                    session_dirty: true,
-                    turn_meta,
-                    ..Default::default()
-                }
-            }
             SessionMutation::PruneRewindableState {
                 history_len,
                 identity,
@@ -1567,16 +1567,6 @@ impl SessionDocument {
                 MutationResult {
                     session_dirty: changed,
                     turn_meta,
-                    ..Default::default()
-                }
-            }
-            SessionMutation::ClearRewindableState => {
-                session.turn_metas.clear();
-                session.clear_context_snapshots();
-                session.clear_context_tokens();
-                session.clear_metadata_snapshots();
-                MutationResult {
-                    session_dirty: true,
                     ..Default::default()
                 }
             }
@@ -1601,12 +1591,34 @@ impl SessionDocument {
             SessionMutation::CommitRequestHistoryItem { .. } => {
                 unreachable!("history-with-transcript mutation requires a transcript target")
             }
-            SessionMutation::TruncateHistoryFrom { index } => {
+            SessionMutation::TruncateHistoryFrom { index, identity } => {
                 let dirty_from = index.min(live_session.history_len());
-                live_session.truncate_from(index);
+                live_session.truncate_from(dirty_from);
+                let turn_meta = session.prune_rewindable_snapshots(dirty_from);
+                session.clear_context_tokens_baseline_if_mismatched(&identity);
                 MutationResult {
                     session_dirty: true,
                     history_dirty_from: Some(dirty_from),
+                    turn_meta,
+                    ..Default::default()
+                }
+            }
+            SessionMutation::RewindHistoryTo {
+                index,
+                keep_checkpoint_at_boundary,
+                identity,
+            } => {
+                let dirty_from = index.min(live_session.history_len());
+                live_session.truncate_from(dirty_from);
+                let turn_meta = session.restore_rewindable_snapshots_after_rewind(
+                    dirty_from,
+                    keep_checkpoint_at_boundary,
+                );
+                session.clear_context_tokens_baseline_if_mismatched(&identity);
+                MutationResult {
+                    session_dirty: true,
+                    history_dirty_from: Some(dirty_from),
+                    turn_meta,
                     ..Default::default()
                 }
             }
@@ -1659,7 +1671,6 @@ impl SessionDocument {
             | SessionMutation::FinishExec { .. }
             | SessionMutation::FinalizeExec
             | SessionMutation::ApplyHistoryAppend { .. }
-            | SessionMutation::ReplaceHistoryFrom { .. }
             | SessionMutation::RecordTokenUsage { .. }
             | SessionMutation::ClearContextTokensBaselineIfMismatched { .. }
             | SessionMutation::AccumulateUsage { .. }
@@ -1671,9 +1682,7 @@ impl SessionDocument {
             | SessionMutation::InstallContextCheckpoint { .. }
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
             | SessionMutation::RestoreMetadataAfterRewind { .. }
-            | SessionMutation::RestoreRewindableAfterRewind { .. }
-            | SessionMutation::PruneRewindableState { .. }
-            | SessionMutation::ClearRewindableState => MutationResult::default(),
+            | SessionMutation::PruneRewindableState { .. } => MutationResult::default(),
         }
     }
 
@@ -1775,8 +1784,8 @@ impl SessionDocument {
             SessionMutation::AppendHistoryItem { .. }
             | SessionMutation::CommitRequestHistoryItem { .. }
             | SessionMutation::ApplyHistoryAppend { .. }
-            | SessionMutation::ReplaceHistoryFrom { .. }
             | SessionMutation::TruncateHistoryFrom { .. }
+            | SessionMutation::RewindHistoryTo { .. }
             | SessionMutation::AppendTranscriptBlock { .. }
             | SessionMutation::InsertCheckpointMarker { .. }
             | SessionMutation::RemoveUnoriginatedTranscriptBlockAt { .. }
@@ -1799,9 +1808,7 @@ impl SessionDocument {
             | SessionMutation::SetCheckpoint { .. }
             | SessionMutation::SetCheckpointTokensAfterEstimate { .. }
             | SessionMutation::RestoreMetadataAfterRewind { .. }
-            | SessionMutation::RestoreRewindableAfterRewind { .. }
-            | SessionMutation::PruneRewindableState { .. }
-            | SessionMutation::ClearRewindableState => {}
+            | SessionMutation::PruneRewindableState { .. } => {}
         }
         let history = transcript.history();
         let transcript_dirty = history.descriptor_dirty_generation() != before_generation
@@ -1870,8 +1877,8 @@ impl SessionDocument {
             SessionMutation::AppendHistoryItem { .. }
             | SessionMutation::CommitRequestHistoryItem { .. }
             | SessionMutation::ApplyHistoryAppend { .. }
-            | SessionMutation::ReplaceHistoryFrom { .. }
             | SessionMutation::TruncateHistoryFrom { .. }
+            | SessionMutation::RewindHistoryTo { .. }
             | SessionMutation::AppendStreamingThinking { .. }
             | SessionMutation::FlushStreamingThinking
             | SessionMutation::AppendStreamingText { .. }
@@ -1903,9 +1910,7 @@ impl SessionDocument {
             | SessionMutation::SetCheckpoint { .. }
             | SessionMutation::SetCheckpointTokensAfterEstimate { .. }
             | SessionMutation::RestoreMetadataAfterRewind { .. }
-            | SessionMutation::RestoreRewindableAfterRewind { .. }
-            | SessionMutation::PruneRewindableState { .. }
-            | SessionMutation::ClearRewindableState => {}
+            | SessionMutation::PruneRewindableState { .. } => {}
         }
         let history = transcript.history();
         MutationResult {
@@ -2327,10 +2332,13 @@ mod tests {
     }
 
     #[test]
-    fn clear_rewindable_state_mutation_clears_snapshots_and_tokens() {
+    fn rewind_to_start_mutation_clears_history_snapshots_and_tokens() {
         let identity = token_identity();
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.record_context_tokens(500, identity);
+        session
+            .history
+            .push(HistoryItem::user(Content::text("prompt")));
+        session.record_context_tokens(500, identity.clone());
         session.snapshot_context_at(1);
         apply_session(
             &mut session,
@@ -2351,9 +2359,17 @@ mod tests {
             },
         ));
 
-        let result = apply_session(&mut session, SessionMutation::ClearRewindableState);
+        let result = apply_session(
+            &mut session,
+            SessionMutation::RewindHistoryTo {
+                index: 0,
+                keep_checkpoint_at_boundary: false,
+                identity,
+            },
+        );
 
         assert!(result.session_dirty);
+        assert!(session.history.is_empty());
         assert!(session.turn_metas.is_empty());
         assert!(session.context_snapshots.is_empty());
         assert_eq!(session.current_context_tokens(), None);
@@ -2468,7 +2484,7 @@ mod tests {
         assert_eq!(session.turn_metas.len(), 1);
         assert_eq!(session.turn_metas[0].0, 7);
         assert_eq!(session.context_tokens_history_len, Some(7));
-        assert!(session.context_snapshots.iter().any(|(idx, _)| *idx == 1));
+        assert!(session.context_snapshots.iter().any(|(idx, _)| *idx == 7));
     }
 
     #[test]
@@ -2677,6 +2693,7 @@ mod tests {
                     HistoryItem::note(protocol::HistoryNote::named_context("cwd", "new")),
                     "cwd",
                 ),
+                identity: token_identity(),
             },
         );
 
@@ -2696,25 +2713,27 @@ mod tests {
     }
 
     #[test]
-    fn replace_history_mutation_updates_history_and_reports_dirty_range() {
+    fn removing_history_item_prunes_rewindable_side_tables_atomically() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![HistoryItem::user(Content::text("old"))];
+        session.history = vec![HistoryItem::note(protocol::HistoryNote::named_context(
+            "cwd", "old",
+        ))];
+        session.snapshot_context_at(1);
 
         let result = apply_session(
             &mut session,
-            SessionMutation::ReplaceHistoryFrom {
-                history: vec![
-                    HistoryItem::user(Content::text("old")),
-                    HistoryItem::user(Content::text("new")),
-                ],
-                dirty_from: 1,
-                summary_prefix: "summary-prefix",
+            SessionMutation::ApplyHistoryAppend {
+                append: HistoryAppend::remove_context_note("cwd"),
+                identity: token_identity(),
             },
         );
 
-        assert!(result.session_dirty);
-        assert_eq!(result.history_dirty_from, Some(1));
-        assert_eq!(session.history.len(), 2);
+        assert_eq!(
+            result.history_append_result,
+            Some(HistoryAppendResult::RemovedLast)
+        );
+        assert!(session.history.is_empty());
+        assert!(session.context_snapshots.is_empty());
     }
 
     #[test]
@@ -2726,14 +2745,19 @@ mod tests {
             HistoryItem::user(Content::text("three")),
         ];
 
+        session.snapshot_context_at(3);
         let result = apply_session(
             &mut session,
-            SessionMutation::TruncateHistoryFrom { index: 1 },
+            SessionMutation::TruncateHistoryFrom {
+                index: 1,
+                identity: token_identity(),
+            },
         );
 
         assert!(result.session_dirty);
         assert_eq!(result.history_dirty_from, Some(1));
         assert_eq!(session.history.len(), 1);
+        assert!(session.context_snapshots.is_empty());
     }
 
     #[test]

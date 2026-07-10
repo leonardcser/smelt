@@ -694,12 +694,15 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn set_history_from(
-        &mut self,
-        history: Vec<HistoryItem>,
-        first_changed_index: Option<usize>,
-    ) {
+    pub(crate) fn set_history_from(&mut self, first_index: usize, history: Vec<HistoryItem>) {
         if self.block_read_only_mutation("update read-only session history") {
+            return;
+        }
+        let current_len = self.session_history_len();
+        if first_index > current_len {
+            self.notify_error_sticky(format!(
+                "invalid canonical history update: start {first_index} exceeds length {current_len}"
+            ));
             return;
         }
         let applied_items: Vec<HistoryItem> = self
@@ -712,36 +715,22 @@ impl TuiApp {
                     .cloned()
             })
             .collect();
-        let dirty_from =
-            match first_changed_index.filter(|_| self.core.session.checkpoint.is_none()) {
-                Some(idx) => {
-                    smelt_perf::perf::record_value("tui:set_history:dirty_from_hint", idx as u64);
-                    idx.min(history.len())
-                }
-                None => {
-                    let _perf = smelt_perf::perf::begin("tui:set_history:dirty_prefix_compare");
-                    let dirty_from = self
-                        .core
-                        .session
-                        .history
-                        .iter()
-                        .zip(history.iter())
-                        .take_while(|(left, right)| left == right)
-                        .count();
-                    smelt_perf::perf::record_value(
-                        "tui:set_history:dirty_prefix_compared",
-                        dirty_from as u64,
-                    );
-                    dirty_from
-                }
-            };
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::ReplaceHistoryFrom {
-                history,
-                dirty_from,
-                summary_prefix: engine::SUMMARY_PREFIX,
-            },
-        );
+        let comparable_len = history.len().min(current_len.saturating_sub(first_index));
+        let existing = self.session_history_range(first_index..first_index + comparable_len);
+        let common_len = existing
+            .iter()
+            .zip(history.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let dirty_from = first_index.saturating_add(common_len);
+        let final_len = first_index.saturating_add(history.len());
+        if dirty_from < current_len || common_len < history.len() {
+            self.session_truncate_from(dirty_from);
+            for item in history.iter().skip(common_len).cloned() {
+                self.session_append_history(item);
+            }
+        }
+        debug_assert_eq!(self.session_history_len(), final_len);
         for item in applied_items {
             self.commit_pending_history_append(&item);
         }
@@ -763,9 +752,15 @@ impl TuiApp {
 
         smelt_perf::perf::record_value("tui:history_appended:items", items.len() as u64);
         smelt_perf::perf::record_value("tui:history_appended:first_index", first_index as u64);
+        let current_len = self.session_history_len();
+        if first_index > current_len {
+            self.notify_error_sticky(format!(
+                "invalid canonical history append: start {first_index} exceeds length {current_len}"
+            ));
+            return;
+        }
 
-        let already_present = self.core.session.checkpoint.is_none()
-            && first_index.saturating_add(items.len()) <= self.session_history_len()
+        let already_present = first_index.saturating_add(items.len()) <= current_len
             && self.session_history_range(first_index..first_index.saturating_add(items.len()))
                 == items;
 
@@ -874,11 +869,16 @@ impl TuiApp {
         let result = self.apply_session_document_mutation(
             crate::app::session_document::SessionMutation::ApplyHistoryAppend {
                 append: append.clone(),
+                identity: self.active_context_token_identity(),
             },
         );
-        result
+        let append_result = result
             .history_append_result
-            .unwrap_or(protocol::HistoryAppendResult::Unchanged)
+            .unwrap_or(protocol::HistoryAppendResult::Unchanged);
+        if append_result == protocol::HistoryAppendResult::RemovedLast {
+            self.sync_task_label_from_session();
+        }
+        append_result
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {
@@ -940,13 +940,16 @@ impl TuiApp {
                 history_len: hist_idx,
             },
         );
+        self.sync_task_label_from_session();
+    }
+
+    fn sync_task_label_from_session(&mut self) {
         let slug = self.core.session.slug.clone().unwrap_or_default();
         self.set_task_label(slug);
     }
 
     fn apply_rewindable_session_state(&mut self, turn_meta: Option<protocol::TurnMeta>) {
-        let slug = self.core.session.slug.clone().unwrap_or_default();
-        self.set_task_label(slug);
+        self.sync_task_label_from_session();
         if let Some(meta) = turn_meta {
             self.working.restore_from_turn_meta(&meta);
         } else {
@@ -954,15 +957,11 @@ impl TuiApp {
         }
     }
 
-    fn restore_rewindable_session_state_after_rewind(
-        &mut self,
-        hist_idx: usize,
-        keep_checkpoint_at_boundary: bool,
-    ) {
+    fn rewind_session_history_to(&mut self, hist_idx: usize, keep_checkpoint_at_boundary: bool) {
         let identity = self.active_context_token_identity();
         let result = self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::RestoreRewindableAfterRewind {
-                history_len: hist_idx,
+            crate::app::session_document::SessionMutation::RewindHistoryTo {
+                index: hist_idx,
                 keep_checkpoint_at_boundary,
                 identity,
             },
@@ -1482,8 +1481,12 @@ impl TuiApp {
     #[allow(dead_code)]
     pub(crate) fn session_truncate_from(&mut self, index: usize) {
         self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::TruncateHistoryFrom { index },
+            crate::app::session_document::SessionMutation::TruncateHistoryFrom {
+                index,
+                identity: self.active_context_token_identity(),
+            },
         );
+        self.sync_task_label_from_session();
     }
 
     #[allow(dead_code)]
@@ -1518,12 +1521,13 @@ impl TuiApp {
         source: protocol::ModelHistorySource,
     ) -> Vec<HistoryItem> {
         match source {
-            protocol::ModelHistorySource::Items(history) => history,
+            protocol::ModelHistorySource::Items { items, .. } => items,
             protocol::ModelHistorySource::Store {
                 prefix,
                 first_live_index,
                 end_index,
                 suffix,
+                ..
             } => {
                 let mut history = prefix;
                 history.extend(self.session_history_range(first_live_index..end_index));
@@ -1536,7 +1540,11 @@ impl TuiApp {
     pub(crate) fn session_model_history_source(&self) -> protocol::ModelHistorySource {
         let source = self.store_session_model_history_source();
         if self.ephemeral() {
-            protocol::ModelHistorySource::items(self.materialize_model_history_source(source))
+            let coordinates = source.coordinates();
+            protocol::ModelHistorySource::projected_items(
+                self.materialize_model_history_source(source),
+                coordinates,
+            )
         } else {
             source
         }
@@ -2022,6 +2030,7 @@ impl TuiApp {
             first_live_index,
             end_index,
             suffix,
+            ..
         } = self.model_history_source()
         else {
             return Ok(None);
@@ -2134,7 +2143,6 @@ impl TuiApp {
                 .then(|| self.mode_at_history_boundary(hist_idx))
         };
 
-        self.session_truncate_from(hist_idx);
         let keep_checkpoint_at_boundary = turn_text.is_some()
             && self
                 .core
@@ -2142,7 +2150,7 @@ impl TuiApp {
                 .checkpoint
                 .as_ref()
                 .is_some_and(|cp| cp.first_live_index == hist_idx);
-        self.restore_rewindable_session_state_after_rewind(hist_idx, keep_checkpoint_at_boundary);
+        self.rewind_session_history_to(hist_idx, keep_checkpoint_at_boundary);
         self.truncate_to(block_idx);
         if let Some(mode) = mode_after_rewind {
             self.restore_mode_after_rewind(mode);
@@ -2155,11 +2163,7 @@ impl TuiApp {
     }
 
     pub(crate) fn rewind_to_start(&mut self) {
-        self.session_truncate_from(0);
-        self.session_set_checkpoint(None);
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::ClearRewindableState,
-        );
+        self.rewind_session_history_to(0, false);
         self.task_label = None;
         self.working.clear();
         self.clear_transcript();
@@ -2785,13 +2789,16 @@ mod checkpoint_tests {
                 first_live_index,
                 end_index,
                 suffix,
+                ..
             } => {
                 assert_eq!(prefix.len(), 1);
                 assert_eq!(first_live_index, 4);
                 assert_eq!(end_index, 32);
                 assert!(suffix.is_empty());
             }
-            protocol::ModelHistorySource::Items(_) => panic!("expected store-backed model history"),
+            protocol::ModelHistorySource::Items { .. } => {
+                panic!("expected store-backed model history")
+            }
         }
         assert!(app.app.session_document.is_save_queued());
     }
@@ -2918,12 +2925,10 @@ mod checkpoint_tests {
     fn history_updated_save_persists_only_dirty_suffix_rows() {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app("history-updated-dirty-suffix-gate", OLD_HISTORY_LEN);
-        let mut updated = app.app.core.session.history.clone();
-        updated.push(assistant("new assistant"));
-
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        app.app.set_history_from(updated, None);
+        app.app
+            .set_history_from(OLD_HISTORY_LEN, vec![assistant("new assistant")]);
         app.app.save_session();
         app.app.flush_persist();
         smelt_perf::perf::set_enabled(false);

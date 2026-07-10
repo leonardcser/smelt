@@ -750,10 +750,12 @@ mod tests {
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
-                first_changed_index: 0,
-                history: vec![protocol::HistoryItem::note(
-                    protocol::HistoryNote::mode_change(note),
-                )],
+                update: protocol::CanonicalHistoryDelta::new(
+                    0,
+                    vec![protocol::HistoryItem::note(
+                        protocol::HistoryNote::mode_change(note),
+                    )],
+                ),
             },
         ));
 
@@ -772,10 +774,12 @@ mod tests {
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
-                first_changed_index: 0,
-                history: vec![protocol::HistoryItem::note(
-                    protocol::HistoryNote::mode_change(note),
-                )],
+                update: protocol::CanonicalHistoryDelta::new(
+                    0,
+                    vec![protocol::HistoryItem::note(
+                        protocol::HistoryNote::mode_change(note),
+                    )],
+                ),
             },
         ));
 

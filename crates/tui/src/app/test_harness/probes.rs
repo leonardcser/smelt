@@ -301,8 +301,8 @@ impl TestApp {
                 };
                 self.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
                     turn_id,
-                    first_changed_index: 0,
-                    history: (!history.is_empty()).then_some(history),
+                    history: (!history.is_empty())
+                        .then(|| protocol::CanonicalHistoryDelta::new(0, history)),
                     meta: None,
                 }));
                 if prediction_probe {
@@ -471,7 +471,7 @@ impl TestApp {
             .try_recv()
             .expect("compaction prepare reply should be ready")
         {
-            engine::HostRequestDecision::Replace(messages) => messages,
+            engine::HostRequestDecision::Replace { messages, .. } => messages,
             decision => panic!("expected compaction replacement, got {decision:?}"),
         };
         assert!(!replacement.is_empty(), "compaction replacement is empty");

@@ -218,7 +218,6 @@ fn auto_continue_always_continues_without_goal() {
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
         history: None,
         meta: None,
     }));
@@ -234,7 +233,6 @@ fn auto_continue_goal_mode_ignores_sessions_without_goal() {
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
         history: None,
         meta: None,
     }));
@@ -265,7 +263,6 @@ fn turn_complete_still_chains_queued_turn() {
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id: 1,
-        first_changed_index: 0,
         history: None,
         meta: None,
     }));
