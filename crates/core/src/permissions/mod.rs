@@ -77,50 +77,77 @@ impl ToolPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathResolution {
+    Resolved(PathBuf),
+    Unresolved(PathBuf),
+}
+
+impl PathResolution {
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Resolved(path) | Self::Unresolved(path) => path,
+        }
+    }
+
+    pub fn resolved(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Resolved(path) => Some(path),
+            Self::Unresolved(_) => None,
+        }
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, Self::Resolved(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathEffect {
     pub raw_path: String,
     pub base_dir: PathBuf,
-    pub path: PathBuf,
+    pub resolution: PathResolution,
     pub access: PathAccess,
     pub target_kind: PathTargetKind,
 }
 
 impl PathEffect {
-    pub(super) fn from_raw(
-        raw_path: String,
-        base_dir: &std::path::Path,
-        access: PathAccess,
-    ) -> Self {
-        Self::from_raw_with_kind(raw_path, base_dir, access, PathTargetKind::Unknown)
-    }
-
     pub(super) fn from_tool_path(
         tool_path: ToolPath,
         base_dir: &std::path::Path,
         access: PathAccess,
     ) -> Self {
-        Self::from_raw_with_kind(tool_path.path, base_dir, access, tool_path.target_kind)
+        let resolution = workspace::resolve_tool_path(&tool_path.path, base_dir);
+        Self::new(
+            tool_path.path,
+            base_dir,
+            resolution,
+            access,
+            tool_path.target_kind,
+        )
     }
 
-    pub(super) fn from_directory(
+    pub(super) fn from_shell_path(
         raw_path: String,
-        base_dir: &std::path::Path,
-        access: PathAccess,
-    ) -> Self {
-        Self::from_raw_with_kind(raw_path, base_dir, access, PathTargetKind::Directory)
-    }
-
-    fn from_raw_with_kind(
-        raw_path: String,
-        base_dir: &std::path::Path,
+        expanded_path: Option<&str>,
+        cwd: &PathResolution,
         access: PathAccess,
         target_kind: PathTargetKind,
     ) -> Self {
-        let path = workspace::resolve_path(&raw_path, base_dir);
+        let resolution = workspace::resolve_shell_path(&raw_path, expanded_path, cwd);
+        Self::new(raw_path, cwd.path(), resolution, access, target_kind)
+    }
+
+    fn new(
+        raw_path: String,
+        base_dir: &std::path::Path,
+        resolution: PathResolution,
+        access: PathAccess,
+        target_kind: PathTargetKind,
+    ) -> Self {
         Self {
             raw_path,
             base_dir: base_dir.to_path_buf(),
-            path,
+            resolution,
             access,
             target_kind,
         }
@@ -558,16 +585,18 @@ impl Permissions {
         };
         let allowed_roots: Vec<_> = roots
             .iter()
-            .map(|root| workspace::canonicalize_path_or_parent(root))
+            .map(|root| workspace::resolve_filesystem_path(root))
             .collect();
         let mut paths = Vec::new();
         Self::effect_paths(effects, &mut paths);
         let mut out = Vec::new();
         for effect in paths {
-            if allowed_roots
-                .iter()
-                .any(|root| workspace::path_prefix_matches(root, &effect.path))
-            {
+            if effect.resolution.resolved().is_some_and(|path| {
+                allowed_roots
+                    .iter()
+                    .filter_map(PathResolution::resolved)
+                    .any(|root| path.starts_with(root))
+            }) {
                 continue;
             }
             let dir = display_dir_for_effect(effect);
@@ -895,18 +924,25 @@ fn dedupe_requirements(requirements: &mut Vec<PermissionRequirement>) {
 }
 
 fn display_dir_for_effect(effect: &PathEffect) -> PathBuf {
-    let raw = std::path::Path::new(&effect.raw_path);
-    if effect.target_kind == PathTargetKind::Directory || effect.path.is_dir() {
-        return effect.path.clone();
+    let path = effect.resolution.path();
+    if !effect.resolution.is_resolved() {
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            &effect.base_dir
+        };
+        return absolute
+            .ancestors()
+            .last()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
     }
-    if !raw.is_absolute() && !effect.raw_path.starts_with("~/") {
-        return effect.base_dir.clone();
+    if effect.target_kind == PathTargetKind::Directory || path.is_dir() {
+        return path.to_path_buf();
     }
-    effect
-        .path
-        .parent()
+    path.parent()
         .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| effect.path.clone())
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn base_evaluation(permissions: &Permissions, request: &PermissionRequest<'_>) -> BaseEvaluation {
