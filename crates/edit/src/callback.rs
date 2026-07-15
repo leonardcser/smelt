@@ -266,45 +266,6 @@ impl Callbacks {
         lua_ids
     }
 
-    fn retain_non_lua(cb: &Callback, lua_ids: &mut Vec<u64>) -> bool {
-        if let Some(id) = cb.lua_id() {
-            lua_ids.push(id);
-            false
-        } else {
-            true
-        }
-    }
-
-    /// Remove every Lua callback across window and overlay registries. Rust
-    /// callbacks are preserved. Returns Lua handle ids for caller cleanup.
-    #[must_use]
-    pub(crate) fn clear_lua_callbacks(&mut self) -> Vec<u64> {
-        let mut lua_ids = Vec::new();
-
-        self.keymaps.retain(|_, table| {
-            table.retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
-            !table.is_empty()
-        });
-
-        self.events.retain(|_, events| {
-            events.retain(|_, callbacks| {
-                callbacks.retain(|cb| Self::retain_non_lua(cb, &mut lua_ids));
-                !callbacks.is_empty()
-            });
-            !events.is_empty()
-        });
-
-        self.key_fallback
-            .retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
-
-        self.scoped_keymaps.retain(|_, table| {
-            table.retain(|_, cb| Self::retain_non_lua(cb, &mut lua_ids));
-            !table.is_empty()
-        });
-
-        lua_ids
-    }
-
     /// Move the Rust-owned callbacks out of this registry, dropping every Lua
     /// callback with the retired generation. Candidate registries start with no
     /// callbacks and merge these back only after a successful commit.

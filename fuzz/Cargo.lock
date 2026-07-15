@@ -2444,6 +2444,7 @@ dependencies = [
  "smelt-style",
  "smelt-term",
  "smelt-tui",
+ "tempfile",
  "tokio",
 ]
 

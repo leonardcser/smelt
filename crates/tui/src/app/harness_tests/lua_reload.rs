@@ -117,6 +117,63 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
 }
 
 #[test]
+fn repeated_failed_candidates_do_not_leak_handles_or_resources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"
+        smelt.cmd.register("committed_before_failed_leak_check", function() end)
+        "#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+
+    app.assert_no_handle_leak_across_failed_reload(&init);
+    app.reload_lua();
+
+    assert!(app
+        .app
+        .lua
+        .command_names_handle()
+        .lock()
+        .unwrap()
+        .contains("committed_before_failed_leak_check"));
+}
+
+#[test]
+fn runtime_status_sanitizes_and_clears_candidate_failure_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(&init, "_G.committed = true\n").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+
+    std::fs::write(&init, "error('private candidate source detail')\n").unwrap();
+    app.reload_lua();
+    assert!(app.run_lua(
+        r#"
+        local status = smelt.config.runtime_status()
+        assert(type(status.lua_generation) == "number")
+        assert(type(status.runtime_revision) == "number")
+        assert(status.reload.failure.phase == "user")
+        assert(type(status.reload.failure.path) == "string")
+        assert(not status.reload.failure.path:find("private candidate source detail", 1, true))
+        assert(type(status.controllers.lsp.status) == "string")
+        local model_status = smelt.model.status()
+        for name, provider in pairs(model_status.providers) do
+          assert(type(name) == "string")
+          assert(type(provider.auth_revision) == "number")
+          assert(type(provider.desired_revision) == "number")
+        end
+        "#,
+    ));
+
+    std::fs::write(&init, "_G.recovered = true\n").unwrap();
+    app.reload_lua();
+    assert!(app.run_lua("assert(smelt.config.runtime_status().reload.failure == nil)"));
+}
+
+#[test]
 fn failed_candidate_rejects_external_effects_and_recovers() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");

@@ -25,9 +25,9 @@
 //! body, assert the cache-relevant fields are byte-identical.
 
 use arbitrary::Arbitrary;
-use smelt_provider::{fuzz_build_openai_body, CacheConfig, ModelConfig, ToolDefinition};
 use libfuzzer_sys::fuzz_target;
-use protocol::{mode_change_note, Content, Message, ReasoningEffort};
+use protocol::{mode_change_note, Content, Message, ModelConfig, ReasoningEffort};
+use smelt_provider::{fuzz_build_openai_body, CacheConfig, ToolDefinition};
 use serde_json::Value;
 use smelt_fuzz::cache_common::{mode_at, ArbTool, StableAction};
 

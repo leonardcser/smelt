@@ -1,13 +1,11 @@
 use super::*;
 
 impl TestApp {
-    /// Side-channel: invoke the `/reload` pipeline. Wipes every Lua
-    /// registry (commands, keymaps, statusline, tools, hooks, timers,
-    /// signals), re-runs `init.lua` and bundled plugins, then
-    /// re-fires `on_ready` hooks with `ctx.kind = "reload"`. Named
-    /// resources (paint slots, NamedSlots bindings on bufs/wins/overlays)
-    /// must keep stable ids; anonymous ones get reaped. Exercises the
-    /// hot-reload surface that was untested by fuzz.
+    /// Side-channel: invoke the transactional `/reload` pipeline. It loads a
+    /// fresh candidate, commits it only after validation, retires the previous
+    /// generation, and fires `on_ready` with `ctx.kind = "reload"`. Named
+    /// resources keep stable ids while anonymous resources from the retired
+    /// generation are reaped.
     pub fn reload_lua(&mut self) {
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.reload_lua();
@@ -202,5 +200,47 @@ impl TestApp {
                 "FFI-LEDGER: handle leak across reload - count went {baseline} -> {after} on second consecutive reload (steady state should be stable)"
             );
         }
+    }
+
+    /// Repeatedly load a candidate that allocates handles and then fails. The
+    /// committed generation and named resources must remain unchanged, and
+    /// discarding each candidate must return the global handle ledger to its
+    /// baseline.
+    pub fn assert_no_handle_leak_across_failed_reload(&mut self, init_path: &std::path::Path) {
+        let original = std::fs::read(init_path).unwrap_or_default();
+        let generation = self.app.core.lua_generation;
+        let named_resources = self.named_resource_counts();
+        self.app.lua.lua.gc_collect().ok();
+        self.app.lua.lua.gc_collect().ok();
+        let baseline = smelt_core::lua::lua_handles_live();
+        let failing_candidate = r#"
+            local buffer = smelt.buf.new({ name = "fuzz.failed.buffer" })
+            buffer:source("discarded")
+            smelt.cmd.register("fuzz.failed", function() end)
+            smelt.signal.new("fuzz.failed.signal", 1)
+            smelt.signal.subscribe("fuzz.failed.signal", function() end)
+            smelt.timer.set(60000, function() end)
+            smelt.lifecycle.on_ready(function() end)
+            error("intentional failed candidate")
+        "#;
+
+        for _ in 0..2 {
+            std::fs::write(init_path, failing_candidate).expect("write failing Lua candidate");
+            self.reload_lua();
+            self.app.lua.lua.gc_collect().ok();
+            self.app.lua.lua.gc_collect().ok();
+            assert_eq!(self.app.core.lua_generation, generation);
+            assert_eq!(self.named_resource_counts(), named_resources);
+            let after = smelt_core::lua::lua_handles_live();
+            if after > baseline {
+                panic!(
+                    "FFI-LEDGER: handle leak across failed reload - count went {baseline} -> {after}"
+                );
+            }
+            self.assert_lua_handles_alive();
+            self.assert_invariants();
+        }
+
+        std::fs::write(init_path, original).expect("restore Lua init after failed candidate");
     }
 }

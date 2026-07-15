@@ -38,7 +38,7 @@ Resolved input modalities for the active model as an array such as `{ "text", "i
 fun(): table
 ```
 
-Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
+Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.
 
 ## `smelt.model.max_tokens`
 
@@ -78,7 +78,7 @@ Switch the active model by key. Errors when the name cannot be resolved.
 fun(): table
 ```
 
-Return `{ current, requested, availability, reason? }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings.
+Return `{ current, requested, availability, reason?, providers }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings. Each managed provider reports sanitized `authenticated`, `status`, `error`, `request_id`, `auth_revision`, and `desired_revision` fields.
 
 ## `smelt.model.supports_input`
 

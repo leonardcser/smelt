@@ -1271,6 +1271,8 @@ Resolved application configuration introspection.
   Resolved model-level sampling, capability, and cost overrides as a table.
 - `smelt.config.provider_type` :: `fun(): string?`
   Active provider type string, e.g.
+- `smelt.config.runtime_status` :: `fun(): table`
+  Return sanitized runtime and reload diagnostics: committed Lua/runtime revisions, pending reload and last failure location, model selection, managed-provider freshness, and MCP/LSP/watcher/context controller convergence.
 
 #### `smelt.confirm`
 
@@ -1412,7 +1414,7 @@ Model selector.
 - `smelt.model.input_modalities` :: `fun(): table?`
   Resolved input modalities for the active model as an array such as `{ "text", "image", "pdf" }`.
 - `smelt.model.list` :: `fun(): table`
-  Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
+  Return an array of `{ key, name, display_name?, provider, api_base, provider_type }` records for every model the active config can switch to.
 - `smelt.model.max_tokens` :: `fun(): integer?`
   Resolved maximum output tokens for the active model.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
@@ -1421,7 +1423,7 @@ Model selector.
 - `smelt.model.set` :: `fun(name: string): nil`
   Switch the active model by key.
 - `smelt.model.status` :: `fun(): table`
-  Return `{ current, requested, availability, reason? }` for model selection.
+  Return `{ current, requested, availability, reason?, providers }` for model selection.
 - `smelt.model.supports_input` :: `fun(modality: string): boolean?`
   Return whether the active model supports the named input modality, for example `image` or `pdf`.
 - `smelt.model.transport` :: `fun(): table?`

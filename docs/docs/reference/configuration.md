@@ -28,6 +28,30 @@ edit invalidates the hash and requires re-running `/trust`.
 | `smelt.trust.mark`   | Trust the current cwd's `.smelt/` content            |
 | `smelt.trust.status` | Return `"trusted"`, `"untrusted"`, or `"no_content"` |
 
+### Reload behavior
+
+Lua config reloads are transactional. smelt loads and validates a fresh candidate
+before replacing the running generation. If any early, autoload, user, project,
+or plugin file raises or contains invalid syntax, the current commands, keymaps,
+tools, hooks, providers, settings, permissions, MCP/LSP declarations, and watcher
+roots remain active. Candidate `on_ready` hooks do not run.
+
+A successful `/reload` reconciles providers, models, settings, permissions, modes,
+MCP, LSP, and watched config roots as one committed generation. Background
+controller work is revisioned, so an older connection or metadata result cannot
+replace newer config. Manual `/reload` also refreshes prompt inputs such as
+`AGENTS.md`, skills, and `--system-prompt`; automatic Lua config reloads do not.
+
+Settings and background model metadata affect requests created after the commit.
+An active turn keeps its original target and static permission policy. Explicit
+model, mode, or reasoning changes made by the user take effect at the next
+provider-request boundary.
+
+For diagnostics, `smelt.config.runtime_status()` returns sanitized generation and
+runtime revisions, pending/failure reload state, model availability, managed
+provider freshness, and desired/observed revisions for background controllers.
+It never includes credential values or Lua source contents.
+
 ## Providers
 
 Register a provider with `smelt.provider.register`:
@@ -128,6 +152,18 @@ Switch models at runtime with `/model`. The choice is recorded in `recent.json`
 (in `$XDG_STATE_HOME/smelt/`) and restored on the next launch. To always start
 from `smelt.defaults` and ignore the last pick, set
 `smelt.remember.set({ model = false })` in `init.lua`.
+
+OAuth-backed Codex, Copilot, and Kimi Code catalogs load from cache for the first
+frame and refresh in the background. Fresh models and capability metadata become
+available in the running picker without a restart. Login, logout, account changes,
+and authoritative empty catalogs are reflected live without discarding the saved
+selection key.
+
+The TUI can run while a requested model is pending or unavailable. In that state
+`smelt.model.current()` returns `nil`, and model-backed actions fail with a clear
+message instead of dispatching an empty model name. `smelt.model.status()` reports
+the requested key, availability reason, and sanitized managed-provider refresh
+status.
 
 ## Modes and Reasoning
 

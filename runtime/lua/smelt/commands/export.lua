@@ -52,7 +52,7 @@ local function format_markdown()
 
   local meta = {}
   local model = smelt.model.current()
-  if model and model ~= "" then
+  if model then
     table.insert(meta, "**Model:** " .. model)
   end
   local cwd = smelt.session.cwd()

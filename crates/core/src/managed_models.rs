@@ -86,6 +86,10 @@ impl std::fmt::Debug for ManagedProviderModels {
 }
 
 impl ManagedProviderModels {
+    pub fn in_flight_request_id(&self) -> Option<u64> {
+        self.in_flight.map(|token| token.request_id)
+    }
+
     fn new(provider: AuthProvider, desired: bool, desired_revision: u64) -> Self {
         let credential_fingerprint = engine::auth::credential_fingerprint(provider);
         let authenticated = credential_fingerprint.is_some();

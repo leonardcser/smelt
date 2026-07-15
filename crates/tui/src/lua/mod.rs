@@ -747,6 +747,7 @@ impl LuaRuntime {
 
 pub struct FailedLuaCandidate {
     pub message: String,
+    pub location: smelt_core::lua::LuaLoadFailureLocation,
 }
 
 pub struct LuaGeneration {
@@ -806,11 +807,23 @@ impl LuaGeneration {
         runtime.shared().set_generation_id(id);
         runtime.set_wakeup_sender(wakeup);
         if let Some(message) = runtime.reload_with_state(target_cwd, Some(&state)) {
-            return Err(FailedLuaCandidate { message });
+            let location = runtime.load_failure_location().cloned().unwrap_or(
+                smelt_core::lua::LuaLoadFailureLocation {
+                    phase: "load",
+                    path: None,
+                },
+            );
+            return Err(FailedLuaCandidate { message, location });
         }
         let desired = runtime
             .snapshot_desired_state()
-            .map_err(|message| FailedLuaCandidate { message })?;
+            .map_err(|message| FailedLuaCandidate {
+                message,
+                location: smelt_core::lua::LuaLoadFailureLocation {
+                    phase: "runtime_resolution",
+                    path: None,
+                },
+            })?;
         let manifest = LuaLoadManifest::discover(&runtime, target_cwd);
         let warnings = runtime.take_load_warnings();
         let project_trust = target_cwd.map_or(smelt_core::trust::TrustState::NoContent, |cwd| {

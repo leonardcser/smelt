@@ -1,11 +1,22 @@
 //! Operations called by Lua bindings through `with_app`.
 
-use crate::app::TuiApp;
+use crate::app::{LuaBringUpError, TuiApp};
 use smelt_core::transcript_model::ConfirmChoice;
 
 enum LuaReloadKind {
     Manual,
     AutoConfig,
+}
+
+fn bring_up_error(
+    phase: &'static str,
+    path: Option<std::path::PathBuf>,
+    message: String,
+) -> LuaBringUpError {
+    LuaBringUpError {
+        message,
+        location: smelt_core::lua::LuaLoadFailureLocation { phase, path },
+    }
 }
 
 struct LuaTuiGeneration {
@@ -70,10 +81,17 @@ impl TuiApp {
         match err {
             Some(error) => {
                 let message = format!("lua reload: {error}");
-                if self.lua_reload_failure.as_deref() != Some(message.as_str()) {
+                if self
+                    .lua_reload_failure
+                    .as_ref()
+                    .is_none_or(|failure| failure.message != message)
+                {
                     self.notify_error_sticky(message.clone());
                 }
-                self.lua_reload_failure = Some(message);
+                self.lua_reload_failure = Some(LuaBringUpError {
+                    message,
+                    location: error.location,
+                });
             }
             None if self.lua.warnings().is_empty() => {
                 self.lua_reload_failure = None;
@@ -147,7 +165,7 @@ impl TuiApp {
         true
     }
 
-    fn can_reload_lua_now(&self) -> bool {
+    pub(crate) fn can_reload_lua_now(&self) -> bool {
         !self.prompt_input_is_busy() && self.ui.active_modal().is_none()
     }
 
@@ -169,7 +187,7 @@ impl TuiApp {
         &mut self,
         kind: &'static str,
         refresh_agent_inputs: bool,
-    ) -> Option<String> {
+    ) -> Option<LuaBringUpError> {
         self.bring_up_lua_at(kind, refresh_agent_inputs, None)
     }
 
@@ -177,7 +195,7 @@ impl TuiApp {
         &mut self,
         path: std::path::PathBuf,
         mark_session_dirty: bool,
-    ) -> Option<String> {
+    ) -> Option<LuaBringUpError> {
         self.bring_up_lua_at("cwd", true, Some((path, mark_session_dirty)))
     }
 
@@ -186,10 +204,14 @@ impl TuiApp {
         kind: &'static str,
         refresh_agent_inputs: bool,
         cwd_transition: Option<(std::path::PathBuf, bool)>,
-    ) -> Option<String> {
+    ) -> Option<LuaBringUpError> {
         if matches!(kind, "reload" | "cwd") {
             if let Some(error) = self.lua.flush_persistent_state() {
-                return Some(format!("flush persistent state: {error}"));
+                return Some(bring_up_error(
+                    "state_flush",
+                    None,
+                    format!("flush persistent state: {error}"),
+                ));
             }
         }
 
@@ -208,7 +230,10 @@ impl TuiApp {
             Ok(candidate) => candidate,
             Err(failed) => {
                 self.discard_lua_candidate_resources(candidate_id);
-                return Some(failed.message);
+                return Some(LuaBringUpError {
+                    message: failed.message,
+                    location: failed.location,
+                });
             }
         };
         let (next_runtime, next_managed_models) =
@@ -216,7 +241,7 @@ impl TuiApp {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     self.discard_lua_candidate_resources(candidate_id);
-                    return Some(error);
+                    return Some(bring_up_error("runtime_resolution", None, error));
                 }
             };
         let next_permissions = smelt_core::permissions::resolve_permissions(
@@ -248,7 +273,7 @@ impl TuiApp {
                 Ok(staged) => Some(staged),
                 Err(error) => {
                     self.discard_lua_candidate_resources(candidate_id);
-                    return Some(error);
+                    return Some(bring_up_error("cwd", Some(path.clone()), error));
                 }
             }
         } else {
@@ -256,7 +281,11 @@ impl TuiApp {
         };
         if let Err(error) = candidate.activate() {
             self.discard_lua_candidate_resources(candidate_id);
-            return Some(format!("activate Lua candidate: {error}"));
+            return Some(bring_up_error(
+                "activation",
+                None,
+                format!("activate Lua candidate: {error}"),
+            ));
         }
         let committed_cwd = match (staged_cwd, cwd_transition) {
             (Some(staged), Some((_, mark_session_dirty))) => {

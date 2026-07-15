@@ -27,4 +27,8 @@ config.model_config = nil
 ---@type fun(): string?
 config.provider_type = nil
 
+--- Return sanitized runtime and reload diagnostics: committed Lua/runtime revisions, pending reload and last failure location, model selection, managed-provider freshness, and MCP/LSP/watcher/context controller convergence. No credential values or Lua source contents are included.
+---@type fun(): table
+config.runtime_status = nil
+
 return config

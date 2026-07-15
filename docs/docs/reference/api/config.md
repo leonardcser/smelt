@@ -48,3 +48,11 @@ fun(): string?
 
 Active provider type string, e.g. `"openai"`, `"anthropic"`, `"openai-compatible"`.
 
+## `smelt.config.runtime_status`
+
+```lua
+fun(): table
+```
+
+Return sanitized runtime and reload diagnostics: committed Lua/runtime revisions, pending reload and last failure location, model selection, managed-provider freshness, and MCP/LSP/watcher/context controller convergence. No credential values or Lua source contents are included.
+

@@ -101,6 +101,38 @@ pub struct RuntimeControllerStatus {
     pub context_window: ControllerRevisionStatus,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManagedProviderStatusSnapshot {
+    pub(crate) name: String,
+    pub(crate) authenticated: bool,
+    pub(crate) status: &'static str,
+    pub(crate) error: Option<String>,
+    pub(crate) request_id: Option<u64>,
+    pub(crate) auth_revision: u64,
+    pub(crate) desired_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelStatusSnapshot {
+    pub(crate) current: Option<String>,
+    pub(crate) requested: Option<String>,
+    pub(crate) availability: &'static str,
+    pub(crate) reason: Option<String>,
+    pub(crate) providers: Vec<ManagedProviderStatusSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LuaBringUpError {
+    pub(crate) message: String,
+    pub(crate) location: smelt_core::lua::LuaLoadFailureLocation,
+}
+
+impl std::fmt::Display for LuaBringUpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 impl ContextWindowController {
     pub(crate) fn prepare(&mut self, desired: Option<ContextWindowTarget>) -> Option<u64> {
         if self.desired == desired {
@@ -306,7 +338,7 @@ pub struct TuiApp {
     pub(crate) pending_lua_reload_refresh_agent_inputs: bool,
     /// Last candidate failure shown to the user. Equal failures remain one
     /// sticky diagnostic until a successful generation clears it.
-    pub(crate) lua_reload_failure: Option<String>,
+    pub(crate) lua_reload_failure: Option<LuaBringUpError>,
     pub ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
     /// Timers + chord state observed and updated by event dispatch.
@@ -1315,6 +1347,42 @@ impl TuiApp {
         if self.core.config.context_window != update.value {
             self.core.config.revision = self.core.config.revision.wrapping_add(1);
             self.core.config.context_window = update.value;
+        }
+    }
+
+    pub(crate) fn model_status_snapshot(&self) -> ModelStatusSnapshot {
+        let selection = &self.core.config.model_selection;
+        let (availability, reason) =
+            match selection.active.as_ref().map(|model| &model.availability) {
+                Some(smelt_core::ModelAvailability::Available) => ("available", None),
+                Some(smelt_core::ModelAvailability::StaleCatalog) => ("stale_catalog", None),
+                Some(smelt_core::ModelAvailability::Unavailable { reason }) => {
+                    ("unavailable", Some(reason.status_reason().to_string()))
+                }
+                None if selection.requested_key.is_some() => ("pending", None),
+                None => ("none", None),
+            };
+        let providers = smelt_core::ManagedModels::provider_kinds()
+            .into_iter()
+            .map(|provider| {
+                let state = self.managed_models.provider(provider);
+                ManagedProviderStatusSnapshot {
+                    name: provider.provider_type().replace('-', "_"),
+                    authenticated: state.authenticated,
+                    status: state.status.as_str(),
+                    error: state.last_error.clone(),
+                    request_id: state.in_flight_request_id(),
+                    auth_revision: state.auth_revision,
+                    desired_revision: state.desired_revision,
+                }
+            })
+            .collect();
+        ModelStatusSnapshot {
+            current: selection.active.as_ref().map(|model| model.key.clone()),
+            requested: selection.requested_key.clone(),
+            availability,
+            reason,
+            providers,
         }
     }
 

@@ -1,10 +1,11 @@
 # Hot reload surface audit
 
 This ledger is the Phase 0 ownership baseline for
-[`hot-reload-refactor-plan.md`](hot-reload-refactor-plan.md). It records the
-current ownership and the required transactional behavior before the runtime is
-refactored. Update this file whenever a Lua API, a `LuaShared` field, an active
-model consumer, or an engine command receive loop is added or moved.
+[`hot-reload-refactor-plan.md`](hot-reload-refactor-plan.md). Its "current"
+columns record the pre-refactor architecture, while the owner/class columns are
+the implemented transactional contract. The ledger remains the namespace and
+surface coverage checklist. Update it whenever a Lua API, a `LuaShared` field,
+an active model consumer, or an engine command receive loop is added or moved.
 
 ## Classification vocabulary
 

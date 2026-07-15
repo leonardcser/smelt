@@ -6,6 +6,26 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
+fn revision_status(
+    desired_revision: u64,
+    observed_revision: u64,
+    error: Option<String>,
+) -> serde_json::Value {
+    let status = if error.is_some() {
+        "degraded"
+    } else if desired_revision == observed_revision {
+        "ready"
+    } else {
+        "pending"
+    };
+    serde_json::json!({
+        "desired_revision": desired_revision,
+        "observed_revision": observed_revision,
+        "status": status,
+        "error": error,
+    })
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -134,6 +154,98 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 t.set("cache_write_cost", v)?;
             }
             Ok(Some(t))
+        },
+    )?;
+
+    m.fn_(
+        "runtime_status",
+        "Return sanitized runtime and reload diagnostics: committed Lua/runtime revisions, pending reload and last failure location, model selection, managed-provider freshness, and MCP/LSP/watcher/context controller convergence. No credential values or Lua source contents are included.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let Some(status) = crate::lua::try_with_app(|app| {
+                let controllers = app.runtime_controller_status();
+                let model = app.model_status_snapshot();
+                let failure = app.lua_reload_failure.as_ref().map(|failure| {
+                    serde_json::json!({
+                        "phase": failure.location.phase,
+                        "path": failure
+                            .location
+                            .path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                    })
+                });
+                let managed_providers = model
+                    .providers
+                    .iter()
+                    .map(|provider| {
+                        (
+                            provider.name.clone(),
+                            serde_json::json!({
+                                "authenticated": provider.authenticated,
+                                "status": provider.status,
+                                "request_id": provider.request_id,
+                                "auth_revision": provider.auth_revision,
+                                "desired_revision": provider.desired_revision,
+                            }),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                let mcp = controllers.mcp.map_or_else(
+                    || serde_json::json!({ "status": "unavailable" }),
+                    |status| {
+                        revision_status(
+                            status.desired_revision,
+                            status.observed_revision,
+                            None,
+                        )
+                    },
+                );
+                serde_json::json!({
+                    "lua_generation": app.core.lua_generation,
+                    "runtime_revision": app.core.config.revision,
+                    "reload": {
+                        "pending": app.pending_lua_reload,
+                        "waiting_for_safe_point": app.pending_lua_reload && !app.can_reload_lua_now(),
+                        "failure": failure,
+                    },
+                    "model": {
+                        "current": model.current,
+                        "requested": model.requested,
+                        "availability": model.availability,
+                        "reason": model.reason,
+                    },
+                    "managed_providers": managed_providers,
+                    "controllers": {
+                        "mcp": mcp,
+                        "lsp": revision_status(
+                            controllers.lsp.desired_revision,
+                            controllers.lsp.observed_revision,
+                            None,
+                        ),
+                        "watcher": revision_status(
+                            controllers.auto_reload.desired_revision,
+                            controllers.auto_reload.observed_revision,
+                            controllers.auto_reload.error,
+                        ),
+                        "context_window": revision_status(
+                            controllers.context_window.desired_revision,
+                            controllers.context_window.observed_revision,
+                            controllers.context_window.error,
+                        ),
+                    },
+                })
+            }) else {
+                return Err(LuaError::external(
+                    "smelt.config.runtime_status: app not initialized",
+                ));
+            };
+            match smelt_core::lua::json_to_lua(lua, &status)? {
+                mlua::Value::Table(table) => Ok(table),
+                _ => Err(LuaError::external(
+                    "smelt.config.runtime_status: invalid status shape",
+                )),
+            }
         },
     )?;
 

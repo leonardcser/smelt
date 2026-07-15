@@ -236,10 +236,17 @@ impl LuaLoadPaths {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LuaLoadFailureLocation {
+    pub phase: &'static str,
+    pub path: Option<PathBuf>,
+}
+
 /// Headless-safe Lua runtime.
 pub struct LuaRuntime {
     pub lua: Lua,
     pub load_error: Option<String>,
+    load_failure_location: Option<LuaLoadFailureLocation>,
     shared: Arc<LuaShared>,
     init_lua_path: Option<PathBuf>,
     bootstrap_mode: BootstrapMode,
@@ -278,9 +285,14 @@ impl LuaRuntime {
         let load_error = Self::register_api(&lua, &shared)
             .err()
             .map(|error| error.to_string());
+        let load_failure_location = load_error.as_ref().map(|_| LuaLoadFailureLocation {
+            phase: "api_registration",
+            path: None,
+        });
         let mut runtime = Self {
             lua,
             load_error,
+            load_failure_location,
             shared,
             init_lua_path: None,
             bootstrap_mode: BootstrapMode::Host,
@@ -298,7 +310,11 @@ impl LuaRuntime {
                 roots,
                 Some(Arc::clone(&runtime.loaded_files)),
             ) {
-                runtime.load_error = Some(format!("embedded searcher: {error}"));
+                runtime.set_load_error(
+                    "module_searcher",
+                    None,
+                    format!("embedded searcher: {error}"),
+                );
             }
         }
         runtime.snapshot_native_modules();
@@ -318,6 +334,15 @@ impl LuaRuntime {
 
     pub fn load_error(&self) -> Option<&str> {
         self.load_error.as_deref()
+    }
+
+    pub fn load_failure_location(&self) -> Option<&LuaLoadFailureLocation> {
+        self.load_failure_location.as_ref()
+    }
+
+    fn set_load_error(&mut self, phase: &'static str, path: Option<PathBuf>, message: String) {
+        self.load_error = Some(message);
+        self.load_failure_location = Some(LuaLoadFailureLocation { phase, path });
     }
 
     pub fn set_init_lua_path(&mut self, path: PathBuf) {
@@ -447,7 +472,7 @@ impl LuaRuntime {
         if let Err(error) =
             load_bootstrap_group_with_roots(&self.lua, files, &roots, Some(&self.loaded_files))
         {
-            self.load_error = Some(format!("bootstrap: {error}"));
+            self.set_load_error("bootstrap", None, format!("bootstrap: {error}"));
         }
     }
 
@@ -466,7 +491,7 @@ impl LuaRuntime {
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "~/.config/smelt/init.lua".to_string());
-                self.load_error = Some(format!("{label}: {error}"));
+                self.set_load_error("user", Some(path), format!("{label}: {error}"));
             }
         }
     }
@@ -497,7 +522,7 @@ impl LuaRuntime {
             Ok(())
         });
         if let Err(e) = result {
-            self.load_error = Some(format!("bundled early init: {e}"));
+            self.set_load_error("early", None, format!("bundled early init: {e}"));
         }
     }
 
@@ -519,7 +544,11 @@ impl LuaRuntime {
             return;
         }
         if let Err(e) = self.run_early_phase(&path, "early.lua") {
-            self.load_error = Some(format!("{}: {e}", path.display()));
+            self.set_load_error(
+                "early",
+                Some(path.clone()),
+                format!("{}: {e}", path.display()),
+            );
         }
     }
 
@@ -540,7 +569,11 @@ impl LuaRuntime {
             return;
         }
         if let Err(e) = self.run_early_phase(&path, ".smelt/early.lua") {
-            self.load_error = Some(format!("{}: {e}", path.display()));
+            self.set_load_error(
+                "early",
+                Some(path.clone()),
+                format!("{}: {e}", path.display()),
+            );
         }
     }
 
@@ -665,7 +698,7 @@ impl LuaRuntime {
         let disabled = self.disabled_modules();
         for name in autoload_modules_filtered(&disabled) {
             if let Err(e) = self.require_module(&name) {
-                self.load_error = Some(format!("autoload {name}: {e}"));
+                self.set_load_error("autoload", None, format!("autoload {name}: {e}"));
                 return;
             }
         }
@@ -694,7 +727,7 @@ impl LuaRuntime {
             register.call(())
         })();
         if let Err(e) = result {
-            self.load_error = Some(format!("{label}: {e}"));
+            self.set_load_error("commands", None, format!("{label}: {e}"));
         }
     }
 
@@ -742,6 +775,7 @@ impl LuaRuntime {
         candidate: bool,
     ) -> Option<String> {
         self.load_error = None;
+        self.load_failure_location = None;
         self.load_warnings.clear();
         self.loaded_files
             .lock()
@@ -768,7 +802,11 @@ impl LuaRuntime {
         }
         if candidate {
             if let Err(error) = self.install_candidate_effect_guards() {
-                self.load_error = Some(format!("candidate effect guards: {error}"));
+                self.set_load_error(
+                    "candidate_guards",
+                    None,
+                    format!("candidate effect guards: {error}"),
+                );
                 return self.load_error.clone();
             }
         }
@@ -778,7 +816,11 @@ impl LuaRuntime {
         }
         if candidate {
             if let Err(error) = self.install_candidate_effect_guards() {
-                self.load_error = Some(format!("candidate effect guards: {error}"));
+                self.set_load_error(
+                    "candidate_guards",
+                    None,
+                    format!("candidate effect guards: {error}"),
+                );
                 return self.load_error.clone();
             }
             self.load_bundled_early();
@@ -830,7 +872,11 @@ impl LuaRuntime {
         }
         if let Some(state) = state {
             if let Err(error) = self.install_state_snapshot(state) {
-                self.load_error = Some(format!("restore smelt.state: {error}"));
+                self.set_load_error(
+                    "state_restore",
+                    None,
+                    format!("restore smelt.state: {error}"),
+                );
                 return self.load_error.clone();
             }
         }
@@ -1124,7 +1170,11 @@ impl LuaRuntime {
         let dir = self.load_paths.config_dir.join("plugins");
         for path in lua_files_in(&dir) {
             if let Err(e) = self.load_plugin_file(&path) {
-                self.load_error = Some(format!("{}: {e}", path.display()));
+                self.set_load_error(
+                    "plugin",
+                    Some(path.clone()),
+                    format!("{}: {e}", path.display()),
+                );
                 return;
             }
         }
@@ -1146,14 +1196,22 @@ impl LuaRuntime {
         }
         for path in lua_files_in(&smelt_dir.join("plugins")) {
             if let Err(e) = self.load_plugin_file(&path) {
-                self.load_error = Some(format!("{}: {e}", path.display()));
+                self.set_load_error(
+                    "plugin",
+                    Some(path.clone()),
+                    format!("{}: {e}", path.display()),
+                );
                 return state;
             }
         }
         let init = smelt_dir.join("init.lua");
         if init.exists() {
             if let Err(e) = self.load_init(&init) {
-                self.load_error = Some(format!("{}: {e}", init.display()));
+                self.set_load_error(
+                    "project",
+                    Some(init.clone()),
+                    format!("{}: {e}", init.display()),
+                );
             }
         }
         state
@@ -1176,19 +1234,6 @@ impl LuaRuntime {
             Ok(wrapped) => wrapped.call::<()>(()),
             Err(_) => loader.call::<()>(()),
         }
-    }
-
-    /// Snapshot the desired MCP server set as registered through
-    /// `smelt.mcp.register`. `/reload` uses this to drive
-    /// [`crate::mcp::McpManager::reconcile`].
-    pub fn mcp_configs_snapshot(
-        &self,
-    ) -> std::collections::HashMap<String, crate::mcp::McpServerConfig> {
-        self.shared
-            .mcp_configs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
     }
 
     pub fn to_config(&self) -> crate::config::Config {

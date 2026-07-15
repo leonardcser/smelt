@@ -325,55 +325,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "status",
-        "Return `{ current, requested, availability, reason?, providers }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings. `providers` reports each managed provider's authentication and refresh status without exposing credential identity.",
+        "Return `{ current, requested, availability, reason?, providers }` for model selection. `availability` is `available`, `stale_catalog`, `unavailable`, `pending`, or `none`; unavailable reasons are stable snake-case strings. Each managed provider reports sanitized `authenticated`, `status`, `error`, `request_id`, `auth_revision`, and `desired_revision` fields.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
-            if let Some((current, requested, availability, reason, providers)) =
-                crate::lua::try_with_app(|app| {
-                    let selection = &app.core.config.model_selection;
-                    let current = selection.active.as_ref().map(|model| model.key.clone());
-                    let requested = selection.requested_key.clone();
-                    let (availability, reason) =
-                        match selection.active.as_ref().map(|model| &model.availability) {
-                            Some(smelt_core::ModelAvailability::Available) => ("available", None),
-                            Some(smelt_core::ModelAvailability::StaleCatalog) => {
-                                ("stale_catalog", None)
-                            }
-                            Some(smelt_core::ModelAvailability::Unavailable { reason }) => {
-                                ("unavailable", Some(reason.status_reason()))
-                            }
-                            None if requested.is_some() => ("pending", None),
-                            None => ("none", None),
-                        };
-                    let providers = smelt_core::ManagedModels::provider_kinds()
-                        .into_iter()
-                        .map(|provider| {
-                            let state = app.managed_models.provider(provider);
-                            let name = provider.provider_type().replace('-', "_");
-                            let status = state.status.as_str();
-                            (
-                                name,
-                                state.authenticated,
-                                status,
-                                state.last_error.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    (current, requested, availability, reason, providers)
-                })
-            {
-                out.set("current", current)?;
-                out.set("requested", requested)?;
-                out.set("availability", availability)?;
-                out.set("reason", reason)?;
+            if let Some(status) = crate::lua::try_with_app(|app| app.model_status_snapshot()) {
+                out.set("current", status.current)?;
+                out.set("requested", status.requested)?;
+                out.set("availability", status.availability)?;
+                out.set("reason", status.reason)?;
                 let provider_status = lua.create_table()?;
-                for (name, authenticated, status, error) in providers {
+                for provider in status.providers {
                     let row = lua.create_table()?;
-                    row.set("authenticated", authenticated)?;
-                    row.set("status", status)?;
-                    row.set("error", error)?;
-                    provider_status.set(name, row)?;
+                    row.set("authenticated", provider.authenticated)?;
+                    row.set("status", provider.status)?;
+                    row.set("error", provider.error)?;
+                    row.set("request_id", provider.request_id)?;
+                    row.set("auth_revision", provider.auth_revision)?;
+                    row.set("desired_revision", provider.desired_revision)?;
+                    provider_status.set(provider.name, row)?;
                 }
                 out.set("providers", provider_status)?;
             } else {

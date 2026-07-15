@@ -333,16 +333,6 @@ impl Signals {
         self.slots.contains_key(name)
     }
 
-    /// Drop every Lua subscriber (direct + glob) plus queued fires.
-    /// Dropping `pending` too prevents one stale post-reload firing.
-    pub fn clear_lua_subscribers(&mut self) {
-        for slot in self.slots.values_mut() {
-            slot.subscribers.clear();
-        }
-        self.glob_subs.clear();
-        self.pending.clear();
-    }
-
     /// Retire only subscriptions owned by one Lua generation.
     pub fn clear_lua_generation(&mut self, generation: u64) {
         for slot in self.slots.values_mut() {

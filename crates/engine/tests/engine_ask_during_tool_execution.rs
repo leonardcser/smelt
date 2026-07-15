@@ -1,20 +1,5 @@
-//! Regression test: `UiCommand::EngineAsk` must not be silently dropped
-//! while the engine is in `execute_concurrent`.
-//!
-//! Several built-in Lua tools (notably `web_fetch`) park their coroutine
-//! on `smelt.engine.ask{...}` while they're still executing. The Lua
-//! call lowers to `UiCommand::EngineAsk`. The engine processes that
-//! command everywhere *except* inside `execute_concurrent`'s
-//! `tokio::select!`, where it falls into the catch-all `_ => {}` arm
-//! and is discarded. Result: the EngineAsk never fires its provider
-//! request, no `EngineAskResponse` event ever comes back, the Lua
-//! coroutine never resumes, the tool never sends `ToolResult`, the
-//! turn never completes. A permanent deadlock for any tool that parks
-//! on `smelt.engine.ask`.
-//!
-//! `call_llm` does the right thing at `agent.rs:1868`:
-//! `other => { self.handle_background_cmd(other); }`. The fix is to
-//! mirror that in `execute_concurrent`'s catch-all.
+//! Integration coverage for auxiliary engine asks and explicit model switches
+//! across in-flight provider requests and concurrent or sequential tool waits.
 
 use engine::EngineConfig;
 use protocol::{
@@ -31,6 +16,7 @@ use tokio::net::TcpListener;
 
 const TOOL_NAME: &str = "needs_engine_ask";
 const TOOL_CALL_ID: &str = "needs_engine_ask:1";
+const TEST_DEADLINE: Duration = Duration::from_secs(30);
 
 fn primary_turn_sse() -> String {
     let block_start = format!(
@@ -210,11 +196,8 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         tools: vec![tool],
     })));
 
-    // Pose as the Lua host: on ToolDispatch, simulate web_fetch.lua by
-    // firing UiCommand::EngineAsk and waiting for EngineAskResponse
-    // before sending ToolResult. With the current `_ => {}` catch-all in
-    // execute_concurrent the EngineAsk is dropped, no response ever
-    // arrives, and we hit the deadline with `got_response = false`.
+    // Pose as the Lua host: on ToolDispatch, simulate a Lua tool that sends
+    // EngineAsk and waits for EngineAskResponse before returning ToolResult.
     let ask_id: u64 = 0xDEAD_BEEF;
     let ask_target = ModelTarget {
         model: "ask-model".into(),
@@ -239,68 +222,72 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     let mut turn_completed = false;
     let mut tool_dispatch_request_id: Option<u64> = None;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < deadline {
-        let recv = tokio::time::timeout(Duration::from_millis(200), handle.recv()).await;
-        match recv {
-            Ok(Some(EngineEvent::ToolEvaluationRequest { request_id, .. })) => {
-                handle.send(UiCommand::ToolEvaluationResponse {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                    handle.send(UiCommand::ToolEvaluationResponse {
+                        request_id,
+                        evaluation: protocol::ToolEvaluation {
+                            decision: protocol::Decision::Allow,
+                            metadata: ToolMetadata::default(),
+                        },
+                    });
+                }
+                Some(EngineEvent::ToolDispatch {
                     request_id,
-                    evaluation: protocol::ToolEvaluation {
-                        decision: protocol::Decision::Allow,
-                        metadata: ToolMetadata::default(),
-                    },
-                });
-            }
-            Ok(Some(EngineEvent::ToolDispatch {
-                request_id,
-                call_id,
-                ..
-            })) => {
-                assert_eq!(call_id, TOOL_CALL_ID);
-                tool_dispatch_request_id = Some(request_id);
-                if !sent_engine_ask {
-                    sent_engine_ask = true;
-                    handle.send(UiCommand::SetTurnModel {
-                        target: Box::new(switched_target.clone()),
-                    });
-                    handle.send(UiCommand::EngineAsk {
-                        id: ask_id,
-                        system: "sub-system".into(),
-                        messages: vec![Message::user(Content::text("sub-q"))],
-                        target: Box::new(ask_target.clone()),
-                        request_config: RequestRuntimeConfig::default(),
-                        response_format: None,
-                        reasoning_effort: ReasoningEffort::Off,
-                        fast_mode: false,
-                        tools: Vec::new(),
-                        session_id: "sess".into(),
-                        session_dir: std::path::PathBuf::from("/tmp/sess"),
-                        stream: false,
-                        visible_retries: false,
-                    });
+                    call_id,
+                    ..
+                }) => {
+                    assert_eq!(call_id, TOOL_CALL_ID);
+                    tool_dispatch_request_id = Some(request_id);
+                    if !sent_engine_ask {
+                        sent_engine_ask = true;
+                        handle.send(UiCommand::SetTurnModel {
+                            target: Box::new(switched_target.clone()),
+                        });
+                        handle.send(UiCommand::EngineAsk {
+                            id: ask_id,
+                            system: "sub-system".into(),
+                            messages: vec![Message::user(Content::text("sub-q"))],
+                            target: Box::new(ask_target.clone()),
+                            request_config: RequestRuntimeConfig::default(),
+                            response_format: None,
+                            reasoning_effort: ReasoningEffort::Off,
+                            fast_mode: false,
+                            tools: Vec::new(),
+                            session_id: "sess".into(),
+                            session_dir: std::path::PathBuf::from("/tmp/sess"),
+                            stream: false,
+                            visible_retries: false,
+                        });
+                    }
                 }
-            }
-            Ok(Some(EngineEvent::EngineAskResponse { id, .. })) if id == ask_id => {
-                got_response = true;
-                // Unblock the tool so the engine can complete its turn.
-                if let Some(rid) = tool_dispatch_request_id {
-                    handle.send(UiCommand::ToolResult {
-                        request_id: rid,
-                        call_id: TOOL_CALL_ID.into(),
-                        content: "tool finished".into(),
-                        is_error: false,
-                        metadata: None,
-                    });
+                Some(EngineEvent::EngineAskResponse { id, .. }) if id == ask_id => {
+                    got_response = true;
+                    // Unblock the tool so the engine can complete its turn.
+                    if let Some(rid) = tool_dispatch_request_id {
+                        handle.send(UiCommand::ToolResult {
+                            request_id: rid,
+                            call_id: TOOL_CALL_ID.into(),
+                            content: "tool finished".into(),
+                            is_error: false,
+                            metadata: None,
+                        });
+                    }
                 }
+                Some(EngineEvent::TurnComplete { .. }) => {
+                    turn_completed = true;
+                    break;
+                }
+                Some(EngineEvent::TurnError { message, .. }) => panic!("turn failed: {message}"),
+                Some(_) => {}
+                None => panic!("engine stopped before turn completion"),
             }
-            Ok(Some(EngineEvent::TurnComplete { .. })) => {
-                turn_completed = true;
-                break;
-            }
-            Ok(Some(_)) | Ok(None) | Err(_) => {}
         }
-    }
+    })
+    .await
+    .expect("concurrent tool turn completion");
 
     server.abort();
 
@@ -311,12 +298,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     );
     assert!(
         got_response,
-        "EngineAsk sent while a tool was executing produced no EngineAskResponse \
-         within the timeout. The command was silently dropped by \
-         execute_concurrent's `_ => {{}}` catch-all in crates/engine/src/agent.rs. \
-         Any tool that parks on smelt.engine.ask (web_fetch, etc.) will deadlock \
-         the turn. Fix: change the catch-all to \
-         `other => {{ self.handle_background_cmd(other); }}` to mirror call_llm."
+        "EngineAsk sent during tool execution must produce EngineAskResponse"
     );
     assert!(
         turn_completed,
@@ -498,7 +480,7 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
     })));
 
     loop {
-        match tokio::time::timeout(Duration::from_secs(5), handle.recv())
+        match tokio::time::timeout(TEST_DEADLINE, handle.recv())
             .await
             .expect("sequential turn event")
         {

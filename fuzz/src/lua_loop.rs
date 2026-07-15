@@ -9,7 +9,7 @@
 //! are serialised into a single Lua snippet per scenario and executed
 //! against a fresh `TestApp`. The harness asserts the existing
 //! `assert_invariants` floor (text / UI / session / resource) after every
-//! batch, plus reload-survival invariants when `LuaOp::Reload` lands.
+//! batch, plus commit/discard invariants for successful and failed reloads.
 //!
 //! Why a single batched `lua.load(...).exec()` and not one snippet per
 //! op? Mutations have to thread through Lua locals (`local b1 = ...`),
@@ -129,6 +129,10 @@ pub enum LuaOp {
     /// re-fires `on_ready` with `ctx.kind = "reload"`. Asserts named
     /// resources keep stable ids and anonymous ones are reaped.
     Reload,
+
+    /// Load a candidate that allocates Lua handles and then raises. The live
+    /// generation must survive unchanged and candidate resources must not leak.
+    FailedReload,
 
     /// `smelt.paint.register(fn, { name = ... })`. `body_kind` picks
     /// a small body (no-op, write one cell, write a row) - the body
@@ -250,6 +254,7 @@ impl LuaOp {
             },
             Remove { kind, idx } => format!("remove kind={kind} idx={idx}"),
             Reload => "reload".into(),
+            FailedReload => "failed reload".into(),
             PaintRegister {
                 name_slot,
                 body_kind,
@@ -319,6 +324,7 @@ const LUAOP_BUILDERS: &[LuaOpBuilder] = &[
         })
     },
     |_| Ok(LuaOp::Reload),
+    |_| Ok(LuaOp::FailedReload),
     |u| {
         Ok(LuaOp::PaintRegister {
             name_slot: opt_slot(u)?,
@@ -703,6 +709,9 @@ fn emit_keymap_set(out: &mut String, scope_kind: u8, chord_slot: u8, handler_kin
     ));
 }
 
+const FUZZ_POOL_INIT: &str =
+    "local __fuzz = { bufs = {}, wins = {}, overlays = {}, paints = {}, regs = {} }\n";
+
 /// Build the full Lua chunk for `ops`. `api_metas` is the live
 /// `(module, name)` enumeration from `TestApp::lua_doc_snapshot()` -
 /// `LuaOp::ApiProbe` indices mod into it at emit time so the fuzz
@@ -710,13 +719,10 @@ fn emit_keymap_set(out: &mut String, scope_kind: u8, chord_slot: u8, handler_kin
 /// string.
 pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(2048);
-    // Handle pool - declared as Lua-side tables so emitted ops can
-    // index into them. Initialised fresh each scenario; on /reload
-    // these locals survive (they're in the eval frame, not the
-    // bundled-plugin frame that gets wiped).
-    out.push_str(
-        "local __fuzz = { bufs = {}, wins = {}, overlays = {}, paints = {}, regs = {} }\n",
-    );
+    // Every reload marker splits the stream into a new Lua chunk. Seed a fresh
+    // handle pool at the start of each chunk so post-reload operations remain
+    // effective instead of indexing an out-of-scope local from the prior chunk.
+    out.push_str(FUZZ_POOL_INIT);
     for op in ops {
         match op {
             LuaOp::BufNew { name_slot } => emit_buf_new(&mut out, *name_slot),
@@ -733,6 +739,11 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
                 // reload from inside a running chunk because mlua
                 // can't recursively bring up its own runtime.
                 out.push_str("-- @reload@\n");
+                out.push_str(FUZZ_POOL_INIT);
+            }
+            LuaOp::FailedReload => {
+                out.push_str("-- @failed_reload@\n");
+                out.push_str(FUZZ_POOL_INIT);
             }
             LuaOp::PaintRegister {
                 name_slot,
@@ -960,14 +971,41 @@ fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
     }
 }
 
-/// Run one scenario end-to-end. The build emits a `-- @reload@` line
-/// for every `LuaOp::Reload`; the runner splits on that line so each
-/// resulting segment is one chunk, with `app.reload_lua()` interleaved.
-/// Invariants assert after every segment AND after every reload -
-/// failures stay attached to whichever op caused them.
+#[derive(Clone, Copy)]
+enum ReloadAction {
+    Commit,
+    Fail,
+}
+
+fn split_reload_segments(snippet: &str) -> Vec<(String, Option<ReloadAction>)> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    for line in snippet.split_inclusive('\n') {
+        let action = match line {
+            "-- @reload@\n" => Some(ReloadAction::Commit),
+            "-- @failed_reload@\n" => Some(ReloadAction::Fail),
+            _ => None,
+        };
+        if let Some(action) = action {
+            segments.push((std::mem::take(&mut current), Some(action)));
+        } else {
+            current.push_str(line);
+        }
+    }
+    segments.push((current, None));
+    segments
+}
+
+/// Run one scenario end-to-end. Reload markers split Lua batches around
+/// successful and intentionally failed candidate generations. Invariants run
+/// after every segment and completion so failures stay attached to the op that
+/// caused them.
 pub fn run_lua_scenario(scenario: LuaScenario) {
     crate::runtime::with_current_thread_runtime("lua_loop", || {
-        let mut app = TestApp::builder().build();
+        let config_dir = tempfile::tempdir().expect("fuzz Lua config dir");
+        let init_path = config_dir.path().join("init.lua");
+        std::fs::write(&init_path, "").expect("write fuzz init.lua");
+        let mut app = TestApp::builder().with_init_lua(&init_path).build();
         // Capture the live Lua doc-registry enumeration *after* the TUI
         // LuaRuntime has finished registering every `LuaMod::fn_`. The
         // snapshot drives `LuaOp::ApiProbe` emit so the fuzz surface
@@ -977,48 +1015,58 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
         let ops = &scenario.ops[..take];
         let snippet = build_snippet(ops, &api_metas);
 
-        let segments: Vec<&str> = snippet.split("-- @reload@\n").collect();
-        for (i, segment) in segments.iter().enumerate() {
+        for (segment, action) in split_reload_segments(&snippet) {
             if !segment.trim().is_empty() {
                 // Lua-level errors aren't fuzz failures - the snippet
                 // intentionally tolerates type errors via `pcall`. Real
                 // bugs surface through `assert_invariants`, Rust panics
                 // inside binding code, or the FFI ledger detecting a
                 // dangling `RegistryKey`.
-                let _ = app.run_lua(segment);
+                let _ = app.run_lua(&segment);
                 app.assert_invariants();
                 // FFI ledger: force a full Lua GC and verify every Rust-
                 // side `LuaHandle` still resolves in the mlua registry.
-                // Without this, a path that drops a `RegistryKey` without
-                // calling `remove` survives latently - only manifesting
-                // when something else tries to invoke the dead handle,
-                // potentially much later or never. Running it between
-                // segments pins the failure to the op batch responsible.
                 app.assert_lua_handles_alive();
                 if app.drain_idle_work() {
                     app.assert_lua_handles_alive();
                 }
                 app.assert_invariants();
             }
-            // Reload BETWEEN segments (matches the sentinel position).
-            // Skipped after the last segment so the final invariant check
-            // observes terminal state, not post-reload state.
-            if i + 1 < segments.len() {
-                app.reload_lua();
-                app.assert_invariants();
-                // `/reload` is the heaviest GC-and-rebuild surface in the
-                // Lua API - re-check per-field liveness afterward so a
-                // reload that forgot to re-register a named handle surfaces
-                // here.
-                app.assert_lua_handles_alive();
+            match action {
+                Some(ReloadAction::Commit) => {
+                    app.reload_lua();
+                    app.assert_invariants();
+                    app.assert_lua_handles_alive();
+                }
+                Some(ReloadAction::Fail) => {
+                    app.assert_no_handle_leak_across_failed_reload(&init_path);
+                }
+                None => {}
             }
         }
         // Post-scenario steady-state leak check: do two more reloads from
         // current state and assert the live-handle count is stable between
         // them. Catches reload-path leaks (handles created during reload
-        // but never dropped) that the per-field walk above can't see - it
-        // only checks tracked fields, not the global counter.
-        drop(segments);
+        // but never dropped) that the per-field walk above can't see.
         app.assert_no_handle_leak_across_reload();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_reload_scenario_discards_candidate_resources() {
+        run_lua_scenario(LuaScenario {
+            ops: vec![
+                LuaOp::CmdRegister {
+                    name_slot: 0,
+                    handler_kind: 0,
+                },
+                LuaOp::FailedReload,
+                LuaOp::Reload,
+            ],
+        });
+    }
 }
