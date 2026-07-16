@@ -6,6 +6,8 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
 pub const CHATGPT_BACKEND_API_BASE: &str = "https://chatgpt.com/backend-api";
 pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+pub const DEFAULT_SERVICE_TIER: &str = "default";
+pub const FAST_SERVICE_TIER: &str = "priority";
 pub const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600;
 pub const OAUTH_PORT: u16 = 1455;
 
@@ -30,6 +32,8 @@ pub struct CodexModel {
     pub display_name: String,
     pub description: Option<String>,
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub supports_fast_mode: bool,
 }
 
 impl From<CodexModel> for protocol::ModelMetadata {
@@ -39,6 +43,7 @@ impl From<CodexModel> for protocol::ModelMetadata {
             display_name: Some(model.display_name),
             context_window: model.context_window,
             supports_reasoning: None,
+            supports_fast_mode: Some(model.supports_fast_mode),
             input_modalities: None,
         }
     }
@@ -443,6 +448,15 @@ fn build_refresh_request<'a>(issuer: &str, refresh_token: &'a str) -> TokenRefre
     }
 }
 
+fn model_supports_fast_mode(model: &serde_json::Value) -> bool {
+    model["service_tiers"]
+        .as_array()
+        .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == FAST_SERVICE_TIER))
+        || model["additional_speed_tiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
+}
+
 pub async fn fetch_models(
     client: &reqwest::Client,
     access_token: &str,
@@ -487,6 +501,7 @@ pub async fn fetch_models(
             let context_window = m["context_window"].as_u64().map(|v| v as u32);
             let visibility = m["visibility"].as_str().unwrap_or("none");
             let priority = m["priority"].as_i64().unwrap_or(999);
+            let supports_fast_mode = model_supports_fast_mode(m);
             (visibility == "list").then_some((
                 priority,
                 CodexModel {
@@ -494,6 +509,7 @@ pub async fn fetch_models(
                     display_name,
                     description,
                     context_window,
+                    supports_fast_mode,
                 },
             ))
         })
@@ -779,5 +795,23 @@ mod tests {
         let b = generate_state();
         assert!(!a.is_empty());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn model_fast_capability_accepts_current_and_legacy_catalog_fields() {
+        assert!(model_supports_fast_mode(&serde_json::json!({
+            "service_tiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "1.5x speed, increased usage"
+            }]
+        })));
+        assert!(model_supports_fast_mode(&serde_json::json!({
+            "additional_speed_tiers": ["fast"]
+        })));
+        assert!(!model_supports_fast_mode(&serde_json::json!({
+            "service_tiers": [{"id": "flex"}],
+            "additional_speed_tiers": []
+        })));
     }
 }

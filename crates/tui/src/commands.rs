@@ -505,6 +505,9 @@ impl TuiApp {
             api_key,
             provider_type: self.core.config.provider_type.clone(),
         });
+        self.core.engine.send(UiCommand::SetFastMode {
+            enabled: self.fast_mode_active(),
+        });
         if old != self.core.config.model {
             self.core
                 .signals
@@ -598,6 +601,30 @@ impl TuiApp {
     /// Replace all resolved settings at once, propagating to input/screen.
     pub(crate) fn set_settings(&mut self, new: smelt_core::config::ResolvedSettings) {
         self.update_settings(|slot| *slot = new);
+    }
+
+    pub(crate) fn fast_mode(&self) -> bool {
+        self.core
+            .session
+            .fast_mode
+            .unwrap_or(self.core.config.settings.fast_mode)
+    }
+
+    pub(crate) fn fast_mode_supported(&self) -> bool {
+        self.core.config.model_config.supports_fast_mode == Some(true)
+    }
+
+    pub(crate) fn fast_mode_active(&self) -> bool {
+        self.fast_mode_supported() && self.fast_mode()
+    }
+
+    pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::SetFastMode { enabled },
+        );
+        self.core.engine.send(UiCommand::SetFastMode {
+            enabled: self.fast_mode_active(),
+        });
     }
 
     /// `record=false` skips the `recent.json` write so session

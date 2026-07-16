@@ -8,6 +8,8 @@ pub struct ModelMetadata {
     pub context_window: Option<u32>,
     pub supports_reasoning: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub supports_fast_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub input_modalities: Option<Vec<String>>,
 }
 

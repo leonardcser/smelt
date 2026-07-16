@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -45,6 +45,9 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     }
     if current == 1 {
         migrate_v1_to_v2(conn)?;
+    }
+    if (1..=2).contains(&current) {
+        migrate_v2_to_v3(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -157,6 +160,13 @@ fn set_user_version(conn: &Connection, version: i32) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    if table_exists(conn, "session_state")? && !column_exists(conn, "session_state", "fast_mode")? {
+        conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
+    }
+    Ok(())
+}
+
 fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -252,6 +262,7 @@ CREATE TABLE IF NOT EXISTS session_state (
     mode TEXT,
     reasoning_effort TEXT,
     model TEXT,
+    fast_mode INTEGER,
     parent_id TEXT,
     accounting_json TEXT,
     checkpoint_json TEXT,
@@ -572,7 +583,7 @@ mod tests {
                 title TEXT,
                 slug TEXT
             );
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             "#,
         )
         .unwrap();
@@ -593,7 +604,7 @@ mod tests {
 
         let err = validate_read_only_schema(&conn).unwrap_err();
         assert!(
-            err.to_string().contains("unsupported schema version 3"),
+            err.to_string().contains("unsupported schema version 4"),
             "{err}"
         );
     }

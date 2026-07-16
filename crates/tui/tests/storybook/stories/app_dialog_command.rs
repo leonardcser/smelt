@@ -302,6 +302,7 @@ app_story!(resume_dialog, |ctx| {
             mode: None,
             reasoning_effort: None,
             model: None,
+            fast_mode: None,
             cwd: Some(cwd.clone()),
             parent_id: parent_id.map(str::to_string),
             context_tokens: None,

@@ -3144,6 +3144,7 @@ mod tests {
                 mode: Some("normal".into()),
                 reasoning_effort: None,
                 model: Some("model-a".into()),
+                fast_mode: None,
                 parent_id: None,
                 accounting_json: Some(serde_json::json!({"prompt_tokens": 1})),
                 checkpoint_json: None,
@@ -3231,6 +3232,7 @@ mod tests {
                 mode: Some("normal".into()),
                 reasoning_effort: None,
                 model: Some("model-a".into()),
+                fast_mode: None,
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
@@ -3306,6 +3308,7 @@ mod tests {
                 mode: Some("normal".into()),
                 reasoning_effort: None,
                 model: Some("model-a".into()),
+                fast_mode: None,
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
@@ -3408,6 +3411,7 @@ mod tests {
                 mode: Some("normal".into()),
                 reasoning_effort: None,
                 model: Some("model-a".into()),
+                fast_mode: None,
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
@@ -3801,6 +3805,7 @@ mod tests {
             mode: Some("ask".into()),
             reasoning_effort: Some("low".into()),
             model: Some("model".into()),
+            fast_mode: Some(true),
             parent_id: Some("parent".into()),
             accounting_json: Some(serde_json::json!({"cost": 1})),
             checkpoint_json: None,
@@ -3822,6 +3827,7 @@ mod tests {
         assert_eq!(meta.id, "s1");
         assert_eq!(meta.revision, 7);
         assert_eq!(meta.history_len, 3);
+        assert_eq!(meta.fast_mode, Some(true));
         assert_eq!(meta.schema_version, schema::SCHEMA_VERSION);
 
         let from_file: SessionMeta = serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
@@ -3841,6 +3847,7 @@ mod tests {
             mode: None,
             reasoning_effort: None,
             model: None,
+            fast_mode: None,
             parent_id: None,
             accounting_json: None,
             checkpoint_json: None,
@@ -3908,6 +3915,7 @@ mod tests {
             mode: None,
             reasoning_effort: None,
             model: None,
+            fast_mode: None,
             parent_id: None,
             accounting_json: None,
             checkpoint_json: None,

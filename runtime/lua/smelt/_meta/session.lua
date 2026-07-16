@@ -99,11 +99,15 @@ session.reset = nil
 ---@type fun(block_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
+--- Enable or disable accelerated inference for the current session.
+---@type fun(enabled: boolean): nil
+session.set_fast_mode = nil
+
 --- Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
 ---@type fun(title: string, slug: string, history_len: integer): nil
 session.set_title_for_history = nil
 
---- Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
+--- Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
 ---@type fun(): table
 session.status = nil
 

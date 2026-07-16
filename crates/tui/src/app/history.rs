@@ -60,6 +60,7 @@ pub(crate) fn live_session_for_test(
             mode: None,
             reasoning_effort: None,
             model: None,
+            fast_mode: None,
             cwd: None,
             parent_id: None,
             context_tokens: None,
@@ -892,6 +893,7 @@ impl TuiApp {
                 mode: self.core.config.mode.as_str().to_string(),
                 reasoning_effort: self.core.config.reasoning_effort,
                 model: self.current_model_key(),
+                fast_mode: self.fast_mode(),
             },
         );
         self.publish_shared_session_state();
@@ -1792,6 +1794,7 @@ impl TuiApp {
             mode: self.core.config.mode.as_str().to_string(),
             reasoning_effort: self.core.config.reasoning_effort,
             model: self.current_model_key(),
+            fast_mode: self.fast_mode(),
         }
     }
 
@@ -1803,6 +1806,7 @@ impl TuiApp {
                 mode: metadata.mode,
                 reasoning_effort: metadata.reasoning_effort,
                 model: metadata.model,
+                fast_mode: metadata.fast_mode,
             },
         );
     }

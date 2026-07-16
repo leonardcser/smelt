@@ -705,6 +705,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
                   end_col = opts.end_col,
                   fg = opts.fg,
                   hl_group = opts.hl_group,
+                  bold = opts.bold,
                 }
               end
               return b
@@ -743,6 +744,37 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
 
     lua.load(PROMPT_BAR_LUA).exec().expect("load prompt bar");
     lua
+}
+
+#[test]
+fn prompt_bar_renders_fast_mode_lightning_before_model() {
+    let lua = prompt_bar_lua_fixture();
+
+    let (text, color, bold, line): (String, Option<String>, Option<bool>, String) = lua
+        .load(
+            r#"
+            smelt.session.status = function()
+              return { model = "model", fast = { supported = true, active = true } }
+            end
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            top:renderer()
+            local buf = top:buf()
+            local line = buf._lines[1] or ""
+            for _, mark in ipairs(buf._marks) do
+              local marked = string.sub(buf._lines[mark.row] or "", mark.start_col + 1, mark.end_col)
+              if marked == " ⚡" then return marked, mark.fg, mark.bold, line end
+            end
+            return "", nil, nil, line
+            "#,
+        )
+        .eval()
+        .expect("render fast mode prompt bar");
+
+    assert_eq!(text, " ⚡");
+    assert_eq!(color.as_deref(), Some("Comment"));
+    assert_eq!(bold, Some(true));
+    assert!(line.contains("⚡ model"), "{line}");
+    assert!(!line.contains("⚡─ model"), "{line}");
 }
 
 #[test]

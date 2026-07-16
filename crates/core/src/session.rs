@@ -154,6 +154,7 @@ pub struct Session {
     pub mode: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub model: Option<String>,
+    pub fast_mode: Option<bool>,
     pub cwd: Option<String>,
     pub parent_id: Option<String>,
     pub history: Vec<HistoryItem>,
@@ -222,6 +223,8 @@ struct SessionWireV2 {
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub fast_mode: Option<bool>,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -361,6 +364,7 @@ impl From<SessionWireV2> for Session {
             mode: w.mode,
             reasoning_effort: w.reasoning_effort,
             model: w.model,
+            fast_mode: w.fast_mode,
             cwd: w.cwd,
             parent_id: w.parent_id,
             history: w.history,
@@ -392,6 +396,7 @@ impl From<&Session> for SessionWireV2 {
             mode: s.mode.clone(),
             reasoning_effort: s.reasoning_effort,
             model: s.model.clone(),
+            fast_mode: s.fast_mode,
             cwd: s.cwd.clone(),
             parent_id: s.parent_id.clone(),
             history: s.history.clone(),
@@ -448,6 +453,8 @@ pub struct SessionMeta {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub fast_mode: Option<bool>,
+    #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
@@ -495,6 +502,7 @@ impl Session {
             mode: None,
             reasoning_effort: None,
             model: None,
+            fast_mode: None,
             cwd,
             parent_id: None,
             history: Vec::new(),
@@ -973,6 +981,7 @@ impl Session {
             mode: self.mode.clone(),
             reasoning_effort: self.reasoning_effort,
             model: self.model.clone(),
+            fast_mode: self.fast_mode,
             cwd: self.cwd.clone(),
             parent_id: Some(self.id.clone()),
             history: self.history.clone(),
@@ -1275,6 +1284,7 @@ pub fn store_state_from_session(
             .reasoning_effort
             .map(|effort| effort.label().to_string()),
         model: session.model.clone(),
+        fast_mode: session.fast_mode,
         parent_id: session.parent_id.clone(),
         accounting_json: Some(serde_json::to_value(context_snapshot_state_from_session(
             session,
@@ -1548,6 +1558,7 @@ fn session_from_store_snapshot(
             .as_deref()
             .and_then(ReasoningEffort::parse),
         model: state.model,
+        fast_mode: state.fast_mode,
         cwd: state.cwd,
         parent_id: state.parent_id,
         history,
@@ -2029,6 +2040,7 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
             .as_deref()
             .and_then(ReasoningEffort::parse),
         model: state.model,
+        fast_mode: state.fast_mode,
         cwd: state.cwd,
         parent_id: state.parent_id,
         context_tokens: state
@@ -3065,6 +3077,7 @@ mod tests {
             mode: None,
             reasoning_effort: None,
             model: None,
+            fast_mode: None,
             cwd: None,
             parent_id: None,
             context_tokens: None,

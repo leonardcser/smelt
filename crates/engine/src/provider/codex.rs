@@ -605,6 +605,7 @@ mod tests {
             display_name: "Codex Mini".into(),
             description: Some("desc".into()),
             context_window: Some(1234),
+            supports_fast_mode: true,
         }
         .into();
 
@@ -612,6 +613,7 @@ mod tests {
         assert_eq!(meta.display_name.as_deref(), Some("Codex Mini"));
         assert_eq!(meta.context_window, Some(1234));
         assert_eq!(meta.supports_reasoning, None);
+        assert_eq!(meta.supports_fast_mode, Some(true));
     }
 
     #[test]

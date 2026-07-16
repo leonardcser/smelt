@@ -214,6 +214,7 @@ impl TuiApp {
                 mode: self.core.config.mode.clone(),
                 model: turn.model,
                 reasoning_effort: turn.reasoning_effort,
+                fast_mode: self.fast_mode_active(),
                 history: turn.history,
                 api_base: Some(turn.api_base),
                 api_key: Some(turn.api_key),

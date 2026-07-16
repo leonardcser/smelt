@@ -441,8 +441,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "set_fast_mode",
+        "Enable or disable accelerated inference for the current session.",
+        &["enabled"],
+        |_, enabled: bool| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.set_fast_mode(enabled));
+            Ok(())
+        },
+    )?;
+    m.fn_(
         "status",
-        "Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.",
+        "Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
@@ -469,6 +478,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 reasoning.set("pending", pending_reasoning)?;
                 reasoning.set("marker", if pending_reasoning { "*" } else { "" })?;
                 out.set("reasoning", reasoning)?;
+
+                let fast = lua.create_table()?;
+                fast.set("supported", app.fast_mode_supported())?;
+                fast.set("active", app.fast_mode_active())?;
+                out.set("fast", fast)?;
 
                 let context = lua.create_table()?;
                 context.set("tokens", app.core.session.display_context_tokens())?;

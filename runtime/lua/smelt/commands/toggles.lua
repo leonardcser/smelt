@@ -18,6 +18,30 @@ smelt.cmd.register("thinking", function(arg)
   smelt.notify.info("thinking blocks: " .. (changed and label or "unchanged"))
 end, { desc = "set thinking block view state", args = { "open", "close", "peek", "toggle" } })
 
+-- `/fast` - toggle accelerated inference for the current session.
+smelt.cmd.register("fast", function(arg)
+  local status = smelt.session.status()
+  if not status.fast.supported then
+    smelt.notify.error("fast mode is not supported by the current model")
+    return
+  end
+
+  local enabled
+  if not arg or arg == "" or arg:lower() == "toggle" then
+    enabled = not status.fast.active
+  elseif arg:lower() == "on" then
+    enabled = true
+  elseif arg:lower() == "off" then
+    enabled = false
+  else
+    smelt.notify.error("usage: /fast [on|off|toggle]")
+    return
+  end
+
+  smelt.session.set_fast_mode(enabled)
+  smelt.notify.info("fast mode: " .. (enabled and "on" or "off"))
+end, { desc = "toggle accelerated inference", args = { "on", "off", "toggle" } })
+
 -- `/reasoning` - set explicitly or show current effort.
 smelt.cmd.register("reasoning", function(arg)
   local valid = { off = true, low = true, medium = true, high = true, max = true }

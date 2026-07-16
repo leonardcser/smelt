@@ -98,6 +98,7 @@ pub(crate) async fn engine_task(
                             mode,
                             model,
                             reasoning_effort,
+                            fast_mode,
                             history,
                             api_base,
                             api_key,
@@ -152,6 +153,7 @@ pub(crate) async fn engine_task(
                             history: Vec::new(),
                             mode,
                             reasoning_effort,
+                            fast_mode,
                             turn_id,
                             model,
                             display,
@@ -187,6 +189,7 @@ pub(crate) async fn engine_task(
                         config.cwd = std::path::PathBuf::from(cwd);
                     }
                     UiCommand::SetMode { .. } => {}
+                    UiCommand::SetFastMode { .. } => {}
                     UiCommand::Cancel => {
                         bg_cancel.cancel();
                     }
@@ -281,6 +284,7 @@ pub(crate) struct AskTask {
     pub model: Option<AskModel>,
     pub response_format: Option<protocol::AskResponseFormat>,
     pub reasoning_effort: ReasoningEffort,
+    pub fast_mode: bool,
     /// Optional tool list. When non-empty AND matching the main session's
     /// tools byte-for-byte, the request reuses the main session's
     /// Anthropic prefix cache.
@@ -331,6 +335,7 @@ pub(crate) fn dispatch_background_cmd(
             model,
             response_format,
             reasoning_effort,
+            fast_mode,
             tools,
             session_id,
             session_dir,
@@ -348,6 +353,7 @@ pub(crate) fn dispatch_background_cmd(
                     model,
                     response_format,
                     reasoning_effort,
+                    fast_mode,
                     tools,
                     session_id,
                     session_dir,
@@ -380,6 +386,7 @@ fn spawn_engine_ask(
         model,
         response_format,
         reasoning_effort,
+        fast_mode,
         tools: supplied_tools,
         session_id,
         session_dir,
@@ -423,6 +430,7 @@ fn spawn_engine_ask(
         let mut opts = ChatOptions::new(&cancel);
         let mut request_opts = ChatRequestOptions {
             cache: provider.default_cache_config(cache_ttl_long, Some(&session_id)),
+            fast_mode,
             ..ChatRequestOptions::default()
         };
         if let Some(fmt) = response_format {
@@ -791,6 +799,7 @@ struct Turn<'a> {
     history: Vec<HistoryItem>,
     mode: AgentMode,
     reasoning_effort: ReasoningEffort,
+    fast_mode: bool,
     turn_id: u64,
     model: String,
     display: Option<String>,
@@ -1327,6 +1336,10 @@ impl<'a> Turn<'a> {
             }
             UiCommand::SetReasoningEffort { effort } => {
                 self.apply_reasoning_effort(effort);
+                true
+            }
+            UiCommand::SetFastMode { enabled } => {
+                self.fast_mode = enabled;
                 true
             }
             UiCommand::SetMode { mode } => {
@@ -2233,6 +2246,7 @@ impl<'a> Turn<'a> {
                         deferred.push(UiCommand::AppendHistoryItem { append });
                     }
                     UiCommand::SetReasoningEffort { .. }
+                    | UiCommand::SetFastMode { .. }
                     | UiCommand::SetMode { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
@@ -2570,6 +2584,7 @@ impl<'a> Turn<'a> {
                 cache: self
                     .provider
                     .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
+                fast_mode: self.fast_mode,
                 ..ChatRequestOptions::default()
             };
             let opts = ChatOptions {
@@ -2608,6 +2623,7 @@ impl<'a> Turn<'a> {
                             }
                         }
                         UiCommand::SetMode { mode } => self.mode = mode,
+                        UiCommand::SetFastMode { enabled } => self.fast_mode = enabled,
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
@@ -2669,6 +2685,7 @@ impl<'a> Turn<'a> {
                     self.apply_reasoning_effort(effort)
                 }
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,
+                Some(UiCommand::SetFastMode { enabled }) => self.fast_mode = enabled,
                 Some(UiCommand::SetModel {
                     model,
                     api_base,
@@ -2996,6 +3013,7 @@ mod tests {
                 mode: None,
                 reasoning_effort: None,
                 model: None,
+                fast_mode: None,
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
@@ -3142,6 +3160,7 @@ mod tests {
             history: vec![HistoryItem::system("sys")],
             mode: AgentMode::normal(),
             reasoning_effort: ReasoningEffort::Off,
+            fast_mode: false,
             turn_id: 1,
             model: "m".into(),
             display: None,
@@ -3219,6 +3238,7 @@ mod tests {
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
+            fast_mode: false,
             history: protocol::ModelHistorySource::items(vec![prior.clone()]),
             api_base: None,
             api_key: None,

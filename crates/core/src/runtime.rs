@@ -85,9 +85,11 @@ impl Core {
         // Read before the struct literal moves `config` into the field below.
         let clipboard =
             crate::Clipboard::new(clipboard_sink(frontend, config.settings.system_clipboard));
+        let mut session = Session::new(env.pid(), env.cwd());
+        session.fast_mode = Some(config.settings.fast_mode);
         Self {
             config,
-            session: Session::new(env.pid(), env.cwd()),
+            session,
             confirms,
             clipboard,
             timers: Timers::new(Arc::clone(&clock)),

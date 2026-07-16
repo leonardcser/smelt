@@ -1329,7 +1329,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        for name in ["brief", "handoff", "rewind", "worktree", "wt"] {
+        for name in ["brief", "fast", "handoff", "rewind", "worktree", "wt"] {
             assert!(
                 rt.has_command(name),
                 "/{name} should be registered by autoload"

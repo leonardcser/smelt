@@ -36,6 +36,82 @@ fn slash_completion_tab_accepts_command_name() {
 }
 
 #[test]
+fn fast_slash_command_toggles_session_state_for_supported_model() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.model_config.supports_fast_mode = Some(true);
+
+    app.type_text("/fast");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(app.app.core.session.fast_mode, Some(true));
+    assert!(!app.app.core.config.settings.fast_mode);
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(cmd)
+            if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { enabled: true })
+    )));
+
+    app.type_text("/fast");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.app.core.session.fast_mode, Some(false));
+}
+
+#[test]
+fn fast_slash_command_rejects_unsupported_model() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.provider_type = "codex".into();
+    app.app.core.config.model_config.supports_fast_mode = Some(false);
+
+    app.type_text("/fast");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(app.app.core.session.fast_mode, Some(false));
+    assert!(app.state().notification.is_some());
+    assert!(!app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(cmd)
+            if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { .. })
+    )));
+}
+
+#[test]
+fn fast_mode_is_restored_per_loaded_session() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.model_config.supports_fast_mode = Some(true);
+
+    let mut enabled =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    enabled.id = "fast-enabled".into();
+    enabled.fast_mode = Some(true);
+    app.app.load_store_backed_session(
+        crate::app::session_document::StoreBackedSessionDocument::new(
+            enabled,
+            crate::app::transcript::LoadedTranscript::full(
+                smelt_core::content::transcript::Transcript::new(),
+            ),
+            crate::app::history::live_session_for_test("fast-enabled".into(), 0, None),
+        ),
+    );
+    assert!(app.app.fast_mode());
+
+    let mut disabled =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    disabled.id = "fast-disabled".into();
+    disabled.fast_mode = Some(false);
+    app.app.load_store_backed_session(
+        crate::app::session_document::StoreBackedSessionDocument::new(
+            disabled,
+            crate::app::transcript::LoadedTranscript::full(
+                smelt_core::content::transcript::Transcript::new(),
+            ),
+            crate::app::history::live_session_for_test("fast-disabled".into(), 0, None),
+        ),
+    );
+    assert!(!app.app.fast_mode());
+    assert!(!app.app.core.config.settings.fast_mode);
+}
+
+#[test]
 fn path_completion_tab_still_opens_for_path_tokens() {
     let mut app = TestApp::builder().build();
     let src = std::path::Path::new(&app.app.cwd).join("src");

@@ -563,6 +563,8 @@ pub struct StartTurnPayload {
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
+    #[serde(default)]
+    pub fast_mode: bool,
     pub history: ModelHistorySource,
     /// Override API base URL for this turn (uses engine default if None).
     pub api_base: Option<String>,
@@ -622,6 +624,9 @@ pub enum UiCommand {
     /// Change reasoning effort while the engine is running.
     SetReasoningEffort { effort: ReasoningEffort },
 
+    /// Toggle accelerated provider inference for subsequent requests.
+    SetFastMode { enabled: bool },
+
     /// Change the model/provider while the engine is running.
     SetModel {
         model: String,
@@ -661,6 +666,8 @@ pub enum UiCommand {
         response_format: Option<AskResponseFormat>,
         #[serde(default)]
         reasoning_effort: ReasoningEffort,
+        #[serde(default)]
+        fast_mode: bool,
         /// Tools to send alongside the request. When this matches the
         /// main session's tool list byte-for-byte, the request shares
         /// the Anthropic prefix cache with the main turn.
@@ -877,6 +884,7 @@ mod tests {
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
+            fast_mode: false,
             history: ModelHistorySource::default(),
             api_base: None,
             api_key: None,

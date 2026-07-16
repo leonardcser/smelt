@@ -381,6 +381,7 @@ impl TuiSessionDocument {
                 mode: metadata.mode,
                 reasoning_effort: metadata.reasoning_effort,
                 model: metadata.model,
+                fast_mode: metadata.fast_mode,
             },
         );
         self.persist
@@ -468,6 +469,7 @@ pub(crate) struct RuntimeSessionMetadata {
     pub(crate) mode: String,
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) model: String,
+    pub(crate) fast_mode: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -655,6 +657,10 @@ pub(crate) enum SessionMutation {
         mode: String,
         reasoning_effort: ReasoningEffort,
         model: String,
+        fast_mode: bool,
+    },
+    SetFastMode {
+        enabled: bool,
     },
     SetCwd {
         cwd: String,
@@ -1427,11 +1433,20 @@ impl SessionDocument {
                 mode,
                 reasoning_effort,
                 model,
+                fast_mode,
             } => {
                 session.updated_at_ms = updated_at_ms;
                 session.mode = Some(mode);
                 session.reasoning_effort = Some(reasoning_effort);
                 session.model = Some(model);
+                session.fast_mode = Some(fast_mode);
+                MutationResult {
+                    session_dirty: true,
+                    ..Default::default()
+                }
+            }
+            SessionMutation::SetFastMode { enabled } => {
+                session.fast_mode = Some(enabled);
                 MutationResult {
                     session_dirty: true,
                     ..Default::default()
@@ -1665,6 +1680,7 @@ impl SessionDocument {
             | SessionMutation::AccumulateUsage { .. }
             | SessionMutation::SetTitle { .. }
             | SessionMutation::UpdateRuntimeMetadata { .. }
+            | SessionMutation::SetFastMode { .. }
             | SessionMutation::SetCwd { .. }
             | SessionMutation::RestoreCwd { .. }
             | SessionMutation::FinishTurnState { .. }
@@ -1791,6 +1807,7 @@ impl SessionDocument {
             | SessionMutation::AccumulateUsage { .. }
             | SessionMutation::SetTitle { .. }
             | SessionMutation::UpdateRuntimeMetadata { .. }
+            | SessionMutation::SetFastMode { .. }
             | SessionMutation::SetCwd { .. }
             | SessionMutation::RestoreCwd { .. }
             | SessionMutation::FinishTurnState { .. }
@@ -1895,6 +1912,7 @@ impl SessionDocument {
             | SessionMutation::AccumulateUsage { .. }
             | SessionMutation::SetTitle { .. }
             | SessionMutation::UpdateRuntimeMetadata { .. }
+            | SessionMutation::SetFastMode { .. }
             | SessionMutation::SetCwd { .. }
             | SessionMutation::RestoreCwd { .. }
             | SessionMutation::FinishTurnState { .. }
@@ -1983,6 +2001,7 @@ fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Se
     session.mode = meta.mode;
     session.reasoning_effort = meta.reasoning_effort;
     session.model = meta.model;
+    session.fast_mode = meta.fast_mode;
     session.cwd = meta.cwd;
     session.parent_id = meta.parent_id;
     session.checkpoint = meta.checkpoint;
@@ -2032,6 +2051,7 @@ mod tests {
                 mode: "agent".into(),
                 reasoning_effort: ReasoningEffort::Low,
                 model: "model-a".into(),
+                fast_mode: false,
             },
             RuntimeRequestHistoryAppendSave {
                 history_index,
@@ -2063,6 +2083,7 @@ mod tests {
             mode: Some("agent".into()),
             reasoning_effort: Some(ReasoningEffort::Low),
             model: Some("model-a".into()),
+            fast_mode: Some(true),
             cwd: Some("/tmp".into()),
             parent_id: Some("parent".into()),
             context_tokens: Some(42),
@@ -2372,6 +2393,7 @@ mod tests {
                 mode: "agent".into(),
                 reasoning_effort: ReasoningEffort::High,
                 model: "provider/model".into(),
+                fast_mode: true,
             },
         );
 
@@ -2380,6 +2402,7 @@ mod tests {
         assert_eq!(session.mode.as_deref(), Some("agent"));
         assert_eq!(session.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(session.model.as_deref(), Some("provider/model"));
+        assert_eq!(session.fast_mode, Some(true));
     }
 
     #[test]

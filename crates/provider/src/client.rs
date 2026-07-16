@@ -110,7 +110,7 @@ impl ProviderClient {
                 (url, body)
             }
             ProviderKind::Codex => {
-                let url = codex::CODEX_API_ENDPOINT.to_string();
+                let url = request.api_base.to_string();
                 let body = openai::build_codex_body(
                     request.messages,
                     request.tools,
@@ -149,6 +149,7 @@ impl ProviderClient {
                 body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
             }
         }
+        apply_fast_mode(&mut body, provider_kind, request.fast_mode);
 
         let use_stream = opts.on_delta.is_some() || provider_kind == ProviderKind::Codex;
         if use_stream {
@@ -448,6 +449,16 @@ impl ProviderClient {
     }
 }
 
+fn apply_fast_mode(body: &mut Value, provider_kind: ProviderKind, enabled: bool) {
+    if provider_kind == ProviderKind::Codex {
+        body["service_tier"] = serde_json::json!(if enabled {
+            codex::FAST_SERVICE_TIER
+        } else {
+            codex::DEFAULT_SERVICE_TIER
+        });
+    }
+}
+
 fn codex_request_headers(
     tokens: Option<&codex::CodexTokens>,
     turn_state: Option<&str>,
@@ -543,6 +554,7 @@ pub struct ChatRequest<'a> {
     pub config: &'a ModelConfig,
     pub cache: CacheConfig,
     pub response_format: Option<ResponseFormat>,
+    pub fast_mode: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -656,6 +668,7 @@ impl CopilotInitiator {
 pub struct ChatRequestOptions {
     pub response_format: Option<ResponseFormat>,
     pub cache: CacheConfig,
+    pub fast_mode: bool,
 }
 
 pub struct ChatOptions<'a> {
@@ -779,6 +792,91 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             vec![(Duration::from_secs(2), 1), (Duration::from_secs(4), 2)]
+        );
+    }
+
+    async fn capture_codex_request(fast_mode: bool) -> Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body =
+                serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let event = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                event.len(),
+                event
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            body
+        });
+
+        let tokens = codex::CodexTokens {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: u64::MAX,
+            account_id: Some("acct".into()),
+            last_refresh: 0,
+        };
+        let messages = [user_msg("hi")];
+        let cancel = CancellationToken::new();
+        ProviderClient::new(reqwest::Client::new())
+            .chat(
+                ChatRequest {
+                    provider: ChatProvider::codex(&tokens, None),
+                    api_base: &format!("http://{addr}/codex/responses"),
+                    model: "gpt-test",
+                    messages: &messages,
+                    tools: &[],
+                    effort: ReasoningEffort::Off,
+                    config: &ModelConfig::default(),
+                    cache: CacheConfig::default(),
+                    response_format: None,
+                    fast_mode,
+                },
+                &ChatOptions::new(&cancel),
+            )
+            .await
+            .unwrap();
+        server.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn codex_http_request_emits_fast_and_default_service_tiers() {
+        assert_eq!(
+            capture_codex_request(true).await["service_tier"],
+            "priority"
+        );
+        assert_eq!(
+            capture_codex_request(false).await["service_tier"],
+            "default"
         );
     }
 

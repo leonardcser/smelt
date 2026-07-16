@@ -382,6 +382,7 @@ impl AppStoryCtx {
                     .reasoning_effort
                     .map(|effort| effort.label().to_string()),
                 model: meta.model.clone(),
+                fast_mode: meta.fast_mode,
                 parent_id: meta.parent_id.clone(),
                 accounting_json: None,
                 checkpoint_json: None,

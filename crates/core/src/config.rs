@@ -187,6 +187,8 @@ settings! {
     /// metadata only; `full` stores reconstructable provider payloads; `off`
     /// disables request audit writes.
     request_audit:         String = "summary", choices: ["off", "summary", "full"];
+    /// Request the provider's accelerated inference mode when supported.
+    fast_mode:             Bool   = false;
     /// Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral
     /// TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.
@@ -492,6 +494,7 @@ impl Config {
             {
                 resolved_model.config.context_window = model.context_window;
                 resolved_model.config.supports_reasoning = model.supports_reasoning;
+                resolved_model.config.supports_fast_mode = model.supports_fast_mode;
                 resolved_model.config.input_modalities = model.input_modalities.clone();
             }
         }
@@ -511,6 +514,7 @@ impl Config {
                     name: Some(model.id.clone()),
                     context_window: model.context_window,
                     supports_reasoning: model.supports_reasoning,
+                    supports_fast_mode: model.supports_fast_mode,
                     input_modalities: model.input_modalities.clone(),
                     ..ModelConfig::default()
                 },

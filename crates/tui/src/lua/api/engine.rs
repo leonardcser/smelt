@@ -520,6 +520,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
+                        fast_mode: false,
                         tools: Vec::new(),
                         session_id,
                         session_dir,
@@ -586,6 +587,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
+                        fast_mode: app.fast_mode_active(),
                         tools: app.lua.tool_defs(
                             app.core.config.mode.clone(),
                             smelt_core::lua::ToolVisibility::Interactive,

@@ -48,6 +48,8 @@ pub struct LuaProviderModel {
     pub context_window: Option<u32>,
     /// Whether this model supports reasoning/thinking parameters.
     pub supports_reasoning: Option<bool>,
+    /// Whether this model supports accelerated inference.
+    pub supports_fast_mode: Option<bool>,
     /// Input modalities supported by this model, for example { "text", "image", "pdf" }.
     pub input_modalities: Option<Vec<String>>,
 }
@@ -128,6 +130,7 @@ impl FromLua for LuaModelEntry {
                     thinking_budgets: m.thinking_budgets.map(Into::into),
                     context_window: m.context_window,
                     supports_reasoning: m.supports_reasoning,
+                    supports_fast_mode: m.supports_fast_mode,
                     input_modalities: m.input_modalities,
                 }))
             }

@@ -493,6 +493,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after  compaction. A group is a user message, a plain assistant message,  or an assistant tool-use step together with its tool outputs. |
 | `request_audit` | `"off"` \| `"summary"` \| `"full"` | `"summary"` | Request audit storage mode. `summary` keeps timing, token, cost, and size  metadata only; `full` stores reconstructable provider payloads; `off`  disables request audit writes. |
+| `fast_mode` | `bool` | `false` | Request the provider's accelerated inference mode when supported. |
 | `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
 | `web_search_provider` | `"duckduckgo"` \| `"brave"` | `"duckduckgo"` | Search provider used by the built-in `web_search` tool. |
 | `brave_search_api_key_env` | string | `"BRAVE_SEARCH_API_KEY"` | Environment variable containing the Brave Search API key. |
@@ -1591,10 +1592,12 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.rewind_to` :: `fun(block_idx: integer?, opts: table?): nil`
   Rewind the session to a prior user turn.
+- `smelt.session.set_fast_mode` :: `fun(enabled: boolean): nil`
+  Enable or disable accelerated inference for the current session.
 - `smelt.session.set_title_for_history` :: `fun(title: string, slug: string, history_len: integer): nil`
   Set the session title and slug for a specific history length.
 - `smelt.session.status` :: `fun(): table`
-  Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`.
+  Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { tokens, window, stale, marker }, cost }`.
 - `smelt.session.switch_cwd` :: `fun(path: string): table`
   Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions.
 - `smelt.session.system` :: `fun(): string`

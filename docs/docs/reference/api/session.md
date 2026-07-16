@@ -186,6 +186,14 @@ fun(block_idx: integer?, opts: table?): nil
 
 Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 
+## `smelt.session.set_fast_mode`
+
+```lua
+fun(enabled: boolean): nil
+```
+
+Enable or disable accelerated inference for the current session.
+
 ## `smelt.session.set_title_for_history`
 
 ```lua
@@ -200,7 +208,7 @@ Set the session title and slug for a specific history length. Intended for title
 fun(): table
 ```
 
-Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
+Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { tokens, window, stale, marker }, cost }`. Markers are `*` for pending config and `?` for stale readings.
 
 ## `smelt.session.switch_cwd`
 

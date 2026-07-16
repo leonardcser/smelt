@@ -347,6 +347,7 @@ impl EngineProvider {
             config: attempt.config,
             cache: attempt.request_opts.cache.clone(),
             response_format: attempt.request_opts.response_format.clone(),
+            fast_mode: attempt.request_opts.fast_mode,
         };
 
         self.client.chat(request, attempt.opts).await
