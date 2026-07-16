@@ -359,7 +359,6 @@ pub struct LuaDesiredState {
     pub config: smelt_core::config::Config,
     pub modes: ModeDeclarations,
     pub permissions: PermissionDeclarations,
-    pub lsp: smelt_core::lsp::LspConfig,
     pub default_shell: Option<smelt_core::lua::DefaultShell>,
 }
 
@@ -460,7 +459,6 @@ impl LuaRuntime {
                 rules: self.permission_rules_snapshot().unwrap_or_default(),
                 tool_defaults: self.tool_defaults(),
             },
-            lsp: self.lsp_config_snapshot(),
             default_shell: self.default_shell_snapshot(),
         }
     }
@@ -800,10 +798,12 @@ impl LuaGeneration {
         &self,
         id: u64,
         target_cwd: Option<&std::path::Path>,
+        candidate_skills: std::sync::Arc<engine::SkillLoader>,
         wakeup: tokio::sync::mpsc::UnboundedSender<()>,
     ) -> Result<Self, FailedLuaCandidate> {
         let state = self.runtime.state_snapshot();
         let mut runtime = self.runtime.fresh_candidate(target_cwd);
+        runtime.core_shared().set_candidate_skills(candidate_skills);
         runtime.shared().set_generation_id(id);
         runtime.set_wakeup_sender(wakeup);
         if let Some(message) = runtime.reload_with_state(target_cwd, Some(&state)) {

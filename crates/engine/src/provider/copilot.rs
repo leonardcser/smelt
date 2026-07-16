@@ -83,7 +83,12 @@ pub(crate) async fn device_code_login(
         };
     if !models.is_empty() {
         (callbacks.on_progress)(&format!("Fetched {} Copilot models", models.len()));
-        if let Err(error) = save_models_cache_to(&cache_path(), &models) {
+        let account_fingerprint = crate::auth::model_cache_fingerprint(
+            crate::auth::AuthProvider::Copilot,
+            "refresh_token",
+            &tokens.refresh_token,
+        );
+        if let Err(error) = save_models_cache_to(&cache_path(), account_fingerprint, &models) {
             log::entry(
                 log::Level::Warn,
                 "copilot_models_cache_write_failed",
@@ -140,15 +145,29 @@ fn cache_path() -> PathBuf {
 }
 
 pub(crate) fn load_cached_models() -> Vec<CopilotModel> {
-    load_cached_models_from(&cache_path())
-}
-
-fn load_cached_models_from(path: &Path) -> Vec<CopilotModel> {
-    let Ok(data) = std::fs::read_to_string(path) else {
+    let Some(account_fingerprint) =
+        crate::auth::model_cache_account_fingerprint(crate::auth::AuthProvider::Copilot)
+    else {
         return Vec::new();
     };
-    let models: Vec<CopilotModel> = serde_json::from_str(&data).unwrap_or_default();
-    if !models.is_empty() && models.iter().all(|m| m.policy_state.is_none()) {
+    load_cached_models_for(&account_fingerprint)
+}
+
+pub(crate) fn load_cached_models_for(account_fingerprint: &str) -> Vec<CopilotModel> {
+    load_cached_models_from(&cache_path(), account_fingerprint)
+}
+
+fn load_cached_models_from(path: &Path, account_fingerprint: &str) -> Vec<CopilotModel> {
+    let models = super::load_managed_model_cache(
+        path,
+        crate::auth::AuthProvider::Copilot.provider_type(),
+        account_fingerprint,
+    );
+    if !models.is_empty()
+        && models
+            .iter()
+            .all(|m: &CopilotModel| m.policy_state.is_none())
+    {
         return Vec::new();
     }
     models
@@ -157,13 +176,24 @@ fn load_cached_models_from(path: &Path) -> Vec<CopilotModel> {
         .collect()
 }
 
-fn save_models_cache_to(path: &Path, models: &[CopilotModel]) -> Result<(), String> {
-    let json = serde_json::to_vec(models).map_err(|error| error.to_string())?;
-    crate::paths::write_atomic(path, &json).map_err(|error| error.to_string())
+fn save_models_cache_to(
+    path: &Path,
+    account_fingerprint: String,
+    models: &[CopilotModel],
+) -> Result<(), String> {
+    super::save_managed_model_cache(
+        path,
+        crate::auth::AuthProvider::Copilot.provider_type(),
+        account_fingerprint,
+        models,
+    )
 }
 
-pub(crate) fn save_models_cache(models: &[CopilotModel]) -> Result<(), String> {
-    save_models_cache_to(&cache_path(), models)
+pub(crate) fn save_models_cache_for(
+    account_fingerprint: String,
+    models: &[CopilotModel],
+) -> Result<(), String> {
+    save_models_cache_to(&cache_path(), account_fingerprint, models)
 }
 
 pub(crate) async fn fetch_models_fresh(
@@ -402,6 +432,21 @@ mod tests {
             v["model_picker_enabled"] = serde_json::json!(p);
         }
         v
+    }
+
+    #[test]
+    fn model_cache_rejects_a_different_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("models.json");
+        let models = parse_models_response(&serde_json::json!({"data": [{
+            "id": "account-a-model",
+            "policy": {"state": "enabled"}
+        }]}))
+        .unwrap();
+        save_models_cache_to(&path, "account-a".into(), &models).unwrap();
+
+        assert_eq!(load_cached_models_from(&path, "account-a").len(), 1);
+        assert!(load_cached_models_from(&path, "account-b").is_empty());
     }
 
     #[test]

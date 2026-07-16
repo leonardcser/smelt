@@ -3,6 +3,7 @@
 use super::hooks::HookRegistry;
 use super::{LuaHandle, LuaTaskRuntime, TaskEvent};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -247,6 +248,12 @@ pub struct LuaShared {
     pub watchers: Mutex<HashMap<u64, crate::lua::watchers::WatcherEntry>>,
     pub next_watcher_id: AtomicU64,
     external_effects_active: AtomicBool,
+    candidate_skills: Mutex<Option<Arc<engine::SkillLoader>>>,
+    staged_logs: Mutex<Vec<(engine::log::Level, String, serde_json::Value)>>,
+    /// Project context used while this generation is evaluated as a candidate.
+    /// Committed generations read process cwd so explicit runtime cwd changes
+    /// retain their documented behavior.
+    project_cwd: Mutex<PathBuf>,
     /// Current boot phase. Phase-sensitive APIs use this to gate their
     /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`;
     /// the runtime promotes it to `Init` before autoload and `Running` once
@@ -404,6 +411,9 @@ impl Default for LuaShared {
             watchers: Mutex::new(HashMap::new()),
             next_watcher_id: AtomicU64::new(1),
             external_effects_active: AtomicBool::new(true),
+            candidate_skills: Mutex::new(None),
+            staged_logs: Mutex::new(Vec::new()),
+            project_cwd: Mutex::new(std::env::current_dir().unwrap_or_default()),
             phase: AtomicU8::new(Phase::Early as u8),
             generation_id: AtomicU64::new(0),
         }
@@ -446,6 +456,81 @@ impl LuaShared {
         self.external_effects_active.load(Ordering::Acquire)
     }
 
+    pub fn set_candidate_skills(&self, skills: Arc<engine::SkillLoader>) {
+        *self
+            .candidate_skills
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(skills);
+    }
+
+    pub fn candidate_skills(&self) -> Option<Arc<engine::SkillLoader>> {
+        self.candidate_skills
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn log_entry(&self, level: engine::log::Level, event: String, payload: serde_json::Value) {
+        if self.external_effects_active() {
+            engine::log::entry(level, &event, &payload);
+        } else {
+            self.staged_logs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((level, event, payload));
+        }
+    }
+
+    pub fn commit_staged_logs(&self) {
+        let logs = std::mem::take(
+            &mut *self
+                .staged_logs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for (level, event, payload) in logs {
+            engine::log::entry(level, &event, &payload);
+        }
+    }
+
+    pub fn set_project_cwd(&self, cwd: Option<&Path>) {
+        let cwd = cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        *self
+            .project_cwd
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = cwd;
+    }
+
+    /// Resolve cwd-sensitive reads against the candidate's target project.
+    /// Once committed, process cwd remains authoritative for runtime APIs.
+    pub fn evaluation_cwd(&self) -> PathBuf {
+        if self.external_effects_active() {
+            std::env::current_dir().unwrap_or_else(|_| {
+                self.project_cwd
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            })
+        } else {
+            self.project_cwd
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    pub fn resolve_project_path(&self, path: impl AsRef<Path>) -> PathBuf {
+        let path = path.as_ref();
+        if path.is_absolute() || self.external_effects_active() {
+            path.to_path_buf()
+        } else {
+            self.evaluation_cwd().join(path)
+        }
+    }
+
     pub fn activate_generation_resources(&self) -> Result<(), String> {
         let mut watchers = self
             .watchers
@@ -455,6 +540,10 @@ impl LuaShared {
             watcher.activate()?;
         }
         self.external_effects_active.store(true, Ordering::Release);
+        self.candidate_skills
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         Ok(())
     }
 

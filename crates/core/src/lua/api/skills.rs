@@ -2,9 +2,11 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -12,15 +14,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "List and load skill content from the SkillLoader populated at startup. Markdown custom commands can opt into skill discovery with `agent_skill: true` (or `agent-skill: true`) in their frontmatter; the skill name is the command file stem. Loaded command skills are static context: slash-command arguments are not included, and shell output markers are not evaluated.",
         Tier::Host,
     )?;
+    let content_skills = Arc::clone(shared);
     m.fn_(
         "content",
         "Load the skill named `name` and return `(content, nil)` on success or `(nil, err_string)` if the skill is missing or failed to load.",
         &["name"],
-        |_, name: String| -> LuaResult<(Option<String>, Option<String>)> {
-            let resolved = crate::host::try_with_core(|core| {
-                core.skills.as_ref().map(|loader| loader.content(&name))
-            })
-            .flatten();
+        move |_, name: String| -> LuaResult<(Option<String>, Option<String>)> {
+            let resolved = skill_loader(&content_skills).map(|loader| loader.content(&name));
             match resolved {
                 Some(Ok(content)) => Ok((Some(content), None)),
                 Some(Err(msg)) => Ok((None, Some(msg))),
@@ -29,18 +29,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    let list_skills = Arc::clone(shared);
     m.fn_(
         "list",
         "Return the names of every skill discovered by the loader as a Lua array. Empty when no skills are loaded.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let names: Vec<String> = crate::host::try_with_core(|core| {
-                core.skills
-                    .as_ref()
-                    .map(|loader| loader.names())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        move |lua, ()| -> LuaResult<mlua::Table> {
+            let names = skill_loader(&list_skills)
+                .map(|loader| loader.names())
+                .unwrap_or_default();
             let t = lua.create_table()?;
             for (i, n) in names.into_iter().enumerate() {
                 t.set(i + 1, n)?;
@@ -49,18 +46,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    let info_skills = Arc::clone(shared);
     m.fn_(
         "info",
         "Return every discovered skill as `{ name, description, source, location, shadowed }` rows sorted by name.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let rows = crate::host::try_with_core(|core| {
-                core.skills
-                    .as_ref()
-                    .map(|loader| loader.info())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        move |lua, ()| -> LuaResult<mlua::Table> {
+            let rows = skill_loader(&info_skills)
+                .map(|loader| loader.info())
+                .unwrap_or_default();
             let t = lua.create_table()?;
             for (i, info) in rows.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -83,4 +77,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     Ok(())
+}
+
+fn skill_loader(shared: &LuaShared) -> Option<Arc<engine::SkillLoader>> {
+    if !shared.external_effects_active() {
+        return shared.candidate_skills();
+    }
+    crate::host::try_with_core(|core| core.skills.clone()).flatten()
 }

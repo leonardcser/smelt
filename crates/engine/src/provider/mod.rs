@@ -14,6 +14,7 @@ use smelt_provider::ParsedResponse;
 #[cfg(test)]
 use smelt_provider::{apply_response_format, sanitize_tool_call_arguments};
 use smelt_provider::{ChatProvider, ChatResponse, CopilotInitiator};
+use std::path::Path;
 #[cfg(test)]
 use std::time::Duration;
 
@@ -40,6 +41,60 @@ use smelt_provider::{
 use smelt_provider::{collect_indexed_tool_calls, non_empty};
 
 type EngineChatResponse = ChatResponse;
+
+const MANAGED_MODEL_CACHE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ManagedModelCache<T> {
+    schema_version: u32,
+    provider_kind: String,
+    fetched_at: u64,
+    account_fingerprint: String,
+    models: Vec<T>,
+}
+
+pub(crate) fn load_managed_model_cache<T>(
+    path: &Path,
+    provider_kind: &str,
+    account_fingerprint: &str,
+) -> Vec<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Ok(data) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_slice::<ManagedModelCache<T>>(&data) else {
+        return Vec::new();
+    };
+    if cache.schema_version != MANAGED_MODEL_CACHE_SCHEMA_VERSION
+        || cache.provider_kind != provider_kind
+        || cache.account_fingerprint != account_fingerprint
+    {
+        return Vec::new();
+    }
+    cache.models
+}
+
+pub(crate) fn save_managed_model_cache<T>(
+    path: &Path,
+    provider_kind: &str,
+    account_fingerprint: String,
+    models: &[T],
+) -> Result<(), String>
+where
+    T: serde::Serialize + Clone,
+{
+    let cache = ManagedModelCache {
+        schema_version: MANAGED_MODEL_CACHE_SCHEMA_VERSION,
+        provider_kind: provider_kind.to_string(),
+        fetched_at: smelt_provider::unix_now(),
+        account_fingerprint,
+        models: models.to_vec(),
+    };
+    let json = serde_json::to_vec_pretty(&cache).map_err(|error| error.to_string())?;
+    crate::paths::write_atomic(path, &json).map_err(|error| error.to_string())
+}
 
 use smelt_provider::ProviderError;
 #[cfg(test)]

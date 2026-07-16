@@ -155,6 +155,7 @@ pub struct RuntimeState {
     pub request_audit: RequestAuditMode,
     pub context_window: Option<u32>,
     pub mcp: HashMap<String, crate::mcp::McpServerConfig>,
+    pub lsp: crate::lsp::LspConfig,
 }
 
 impl RuntimeState {
@@ -390,7 +391,14 @@ fn inherit_unavailable_state(inputs: &RuntimeInputs<'_>, active: &mut ActiveMode
         && previous.api_base == active.api_base
         && previous.api_key_env == active.api_key_env
         && previous.provider_type == active.provider_type
-        && matches!(previous.availability, ModelAvailability::Unavailable { .. })
+        && matches!(
+            previous.availability,
+            ModelAvailability::Unavailable {
+                reason: ModelUnavailableReason::Unauthenticated
+                    | ModelUnavailableReason::InvalidTransport
+                    | ModelUnavailableReason::Other(_),
+            }
+        )
     {
         active.availability = previous.availability.clone();
     }
@@ -625,6 +633,7 @@ pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, Resolv
         request_audit,
         context_window,
         mcp: inputs.config.mcp.clone(),
+        lsp: inputs.config.lsp.clone(),
     })
 }
 

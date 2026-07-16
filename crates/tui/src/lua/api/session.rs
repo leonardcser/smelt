@@ -255,7 +255,11 @@ fn conversation_to_lua(
     Ok(out)
 }
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    shared: &std::sync::Arc<crate::lua::LuaShared>,
+) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -308,11 +312,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(crate::lua::try_with_app(|app| app.core.session.slug.clone()).unwrap_or_default())
         },
     )?;
+    let cwd_context = shared.core_arc();
     m.fn_(
         "cwd",
-        "Current working directory. Updated when Smelt enters a managed worktree.",
+        "Current working directory. Updated when smelt enters a managed worktree.",
         &[],
-        |_, ()| Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default()),
+        move |_, ()| {
+            if cwd_context.external_effects_active() {
+                Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default())
+            } else {
+                Ok(cwd_context.evaluation_cwd().to_string_lossy().into_owned())
+            }
+        },
     )?;
     m.fn_(
         "context_note",

@@ -121,7 +121,7 @@ impl LuaRuntime {
         config::register(lua, &smelt)?;
         model::register(lua, &smelt)?;
         permissions::register(lua, &smelt, shared)?;
-        session::register(lua, &smelt)?;
+        session::register(lua, &smelt, shared)?;
         settings::register(lua, &smelt, shared)?;
         terminal::register(lua, &smelt, shared)?;
         transcript::register(lua, &smelt)?;

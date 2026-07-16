@@ -1,6 +1,5 @@
 use crate::log;
 use crate::paths::{cache_dir, state_dir};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use rand::RngExt;
@@ -14,25 +13,9 @@ use super::{auth_storage::CredStore, LoginCallbacks};
 const API_BASE: &str = smelt_provider::kimi_code::API_BASE;
 const OAUTH_HOST: &str = smelt_provider::kimi_code::OAUTH_HOST;
 const TOKENS_ENV: &str = "SMELT_KIMI_CODE_TOKENS";
-const MODELS_CACHE_VERSION: u32 = 1;
 
 pub fn is_api_base(api_base: &str) -> bool {
     smelt_provider::is_kimi_code_api_base(api_base)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct KimiCodeModelsCache {
-    version: u32,
-    models: Vec<KimiCodeModelInfo>,
-}
-
-impl KimiCodeModelsCache {
-    fn new(models: Vec<KimiCodeModelInfo>) -> Self {
-        Self {
-            version: MODELS_CACHE_VERSION,
-            models,
-        }
-    }
 }
 
 fn cred_store() -> CredStore {
@@ -208,7 +191,14 @@ async fn login_with_env(
     let outcome = kimi_protocol::login(client, &progress, &env.protocol).await?;
     save_tokens_to(&outcome.tokens, &env.token_store)?;
     if !outcome.models.is_empty() {
-        if let Err(error) = save_models_cache_to(&env.models_cache_path, &outcome.models) {
+        let account_fingerprint = crate::auth::model_cache_fingerprint(
+            crate::auth::AuthProvider::KimiCode,
+            "refresh_token",
+            &outcome.tokens.refresh_token,
+        );
+        if let Err(error) =
+            save_models_cache_to(&env.models_cache_path, account_fingerprint, &outcome.models)
+        {
             log::entry(
                 log::Level::Warn,
                 "kimi_code_models_cache_write_failed",
@@ -278,34 +268,24 @@ fn models_cache_path() -> PathBuf {
 }
 
 pub fn load_cached_model_info() -> Vec<KimiCodeModelInfo> {
-    load_cached_model_info_from(&models_cache_path())
-}
-
-fn load_cached_model_info_from(path: &Path) -> Vec<KimiCodeModelInfo> {
-    let Ok(data) = std::fs::read_to_string(path) else {
+    let Some(account_fingerprint) =
+        crate::auth::model_cache_account_fingerprint(crate::auth::AuthProvider::KimiCode)
+    else {
         return Vec::new();
     };
-    if let Ok(cache) = serde_json::from_str::<KimiCodeModelsCache>(&data) {
-        if cache.version == MODELS_CACHE_VERSION {
-            return cache.models;
-        }
-    }
-    if let Ok(models) = serde_json::from_str::<Vec<KimiCodeModelInfo>>(&data) {
-        return models;
-    }
-    serde_json::from_str::<Vec<String>>(&data)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| KimiCodeModelInfo {
-            id,
-            context_length: None,
-            supports_reasoning: None,
-            supports_image_in: None,
-            supports_video_in: None,
-            supports_tool_use: None,
-            display_name: None,
-        })
-        .collect()
+    load_cached_model_info_for(&account_fingerprint)
+}
+
+pub(crate) fn load_cached_model_info_for(account_fingerprint: &str) -> Vec<KimiCodeModelInfo> {
+    load_cached_model_info_from(&models_cache_path(), account_fingerprint)
+}
+
+fn load_cached_model_info_from(path: &Path, account_fingerprint: &str) -> Vec<KimiCodeModelInfo> {
+    super::load_managed_model_cache(
+        path,
+        crate::auth::AuthProvider::KimiCode.provider_type(),
+        account_fingerprint,
+    )
 }
 
 pub fn load_cached_models() -> Vec<String> {
@@ -315,14 +295,31 @@ pub fn load_cached_models() -> Vec<String> {
         .collect()
 }
 
-fn save_models_cache_to(cache_path: &Path, models: &[KimiCodeModelInfo]) -> Result<(), String> {
-    let cache = KimiCodeModelsCache::new(models.to_vec());
-    let json = serde_json::to_vec_pretty(&cache).map_err(|error| error.to_string())?;
-    crate::paths::write_atomic(cache_path, &json).map_err(|error| error.to_string())
+fn save_models_cache_to(
+    cache_path: &Path,
+    account_fingerprint: String,
+    models: &[KimiCodeModelInfo],
+) -> Result<(), String> {
+    super::save_managed_model_cache(
+        cache_path,
+        crate::auth::AuthProvider::KimiCode.provider_type(),
+        account_fingerprint,
+        models,
+    )
 }
 
 pub(crate) fn save_models_cache(models: &[KimiCodeModelInfo]) -> Result<(), String> {
-    save_models_cache_to(&models_cache_path(), models)
+    let account_fingerprint =
+        crate::auth::model_cache_account_fingerprint(crate::auth::AuthProvider::KimiCode)
+            .ok_or("cannot cache Kimi Code models without credentials")?;
+    save_models_cache_for(account_fingerprint, models)
+}
+
+pub(crate) fn save_models_cache_for(
+    account_fingerprint: String,
+    models: &[KimiCodeModelInfo],
+) -> Result<(), String> {
+    save_models_cache_to(&models_cache_path(), account_fingerprint, models)
 }
 
 pub(crate) async fn fetch_models_fresh(
@@ -461,48 +458,27 @@ mod tests {
     }
 
     #[test]
-    fn load_cached_model_info_from_reads_current_and_legacy_shapes() {
+    fn model_cache_is_bound_to_the_authenticated_account() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("models.json");
+        let models = vec![KimiCodeModelInfo {
+            id: "kimi-current".to_string(),
+            context_length: Some(128_000),
+            supports_reasoning: Some(true),
+            supports_image_in: None,
+            supports_video_in: None,
+            supports_tool_use: None,
+            display_name: Some("Kimi Current".to_string()),
+        }];
+        save_models_cache_to(&path, "account-a".into(), &models).unwrap();
 
-        std::fs::write(
-            &path,
-            serde_json::to_string(&KimiCodeModelsCache::new(vec![KimiCodeModelInfo {
-                id: "kimi-current".to_string(),
-                context_length: Some(128_000),
-                supports_reasoning: Some(true),
-                supports_image_in: None,
-                supports_video_in: None,
-                supports_tool_use: None,
-                display_name: Some("Kimi Current".to_string()),
-            }]))
-            .unwrap(),
-        )
-        .unwrap();
-        let current = load_cached_model_info_from(&path);
+        let current = load_cached_model_info_from(&path, "account-a");
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].id, "kimi-current");
         assert_eq!(current[0].context_length, Some(128_000));
+        assert!(load_cached_model_info_from(&path, "account-b").is_empty());
 
-        std::fs::write(&path, r#"["kimi-a", "kimi-b"]"#).unwrap();
-        let legacy_ids: Vec<_> = load_cached_model_info_from(&path)
-            .into_iter()
-            .map(|model| model.id)
-            .collect();
-        assert_eq!(legacy_ids, vec!["kimi-a", "kimi-b"]);
-
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "version": 999,
-                "models": [{"id": "ignored", "context_length": 1}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(load_cached_model_info_from(&path).is_empty());
-
-        std::fs::write(&path, "not json").unwrap();
-        assert!(load_cached_model_info_from(&path).is_empty());
+        std::fs::write(&path, serde_json::to_vec(&models).unwrap()).unwrap();
+        assert!(load_cached_model_info_from(&path, "account-a").is_empty());
     }
 }

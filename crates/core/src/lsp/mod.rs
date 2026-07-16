@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LspServerConfig {
@@ -53,6 +54,7 @@ struct LspClientSlot {
     config: LspServerConfig,
     state: Mutex<LspClientState>,
     stderr_tail: StderrTail,
+    cancel: CancellationToken,
 }
 
 enum LspClientState {
@@ -430,7 +432,10 @@ impl LspManager {
                 .get(name)
                 .is_some_and(|new_config| new_config == &entry.config);
             if !keep {
-                removed_clients.extend(entry.clients.values().cloned());
+                for client in entry.clients.values() {
+                    client.cancel.cancel();
+                    removed_clients.push(Arc::clone(client));
+                }
             }
             keep
         });
@@ -1180,18 +1185,29 @@ impl LspClientSlot {
                 started: Instant::now(),
             }),
             stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
+            cancel: CancellationToken::new(),
         });
         let slot_for_task = slot.clone();
         tokio::spawn(async move {
             let started = Instant::now();
-            let result = LspClient::start(
-                slot_for_task.name.clone(),
-                slot_for_task.config.clone(),
-                slot_for_task.root.clone(),
-                slot_for_task.stderr_tail.clone(),
-            )
-            .await;
+            let result = tokio::select! {
+                biased;
+                _ = slot_for_task.cancel.cancelled() => return,
+                result = LspClient::start(
+                    slot_for_task.name.clone(),
+                    slot_for_task.config.clone(),
+                    slot_for_task.root.clone(),
+                    slot_for_task.stderr_tail.clone(),
+                ) => result,
+            };
             let mut state = slot_for_task.state.lock().await;
+            if slot_for_task.cancel.is_cancelled() {
+                *state = LspClientState::Failed {
+                    started,
+                    error: "language server stopped during initialization".into(),
+                };
+                return;
+            }
             *state = match result {
                 Ok(client) => LspClientState::Ready {
                     client,
@@ -1301,9 +1317,21 @@ impl LspClientSlot {
     }
 
     async fn shutdown(&self) {
-        let client = match &*self.state.lock().await {
-            LspClientState::Ready { client, .. } => Some(client.clone()),
-            _ => None,
+        self.cancel.cancel();
+        let client = {
+            let mut state = self.state.lock().await;
+            match &*state {
+                LspClientState::Ready { client, .. } => Some(client.clone()),
+                LspClientState::Starting { started } => {
+                    let started = *started;
+                    *state = LspClientState::Failed {
+                        started,
+                        error: "language server stopped during initialization".into(),
+                    };
+                    None
+                }
+                LspClientState::Failed { .. } => None,
+            }
         };
         if let Some(client) = client {
             client.shutdown().await;
@@ -2580,6 +2608,49 @@ mod tests {
         let status = manager.controller_status();
         assert!(manager.prepare_configure(LspConfig::default()).is_none());
         assert_eq!(manager.controller_status(), status);
+    }
+
+    #[tokio::test]
+    async fn removing_a_starting_client_cancels_initialization() {
+        let manager = Arc::new(LspManager::default());
+        let config = test_server("unused", "text", &["txt"]).config;
+        manager
+            .configure(LspConfig {
+                servers: HashMap::from([("old".into(), config.clone())]),
+            })
+            .await;
+        let slot = Arc::new(LspClientSlot {
+            name: "old".into(),
+            root: PathBuf::from("/tmp"),
+            config,
+            state: Mutex::new(LspClientState::Starting {
+                started: Instant::now(),
+            }),
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
+            cancel: CancellationToken::new(),
+        });
+        manager
+            .servers
+            .lock()
+            .unwrap()
+            .get_mut("old")
+            .unwrap()
+            .clients
+            .insert(PathBuf::from("/tmp"), Arc::clone(&slot));
+
+        let completion = manager
+            .prepare_configure(LspConfig::default())
+            .unwrap()
+            .install()
+            .unwrap();
+        assert!(slot.cancel.is_cancelled());
+
+        completion.finish().await;
+        assert!(matches!(
+            &*slot.state.lock().await,
+            LspClientState::Failed { error, .. }
+                if error == "language server stopped during initialization"
+        ));
     }
 
     #[tokio::test]

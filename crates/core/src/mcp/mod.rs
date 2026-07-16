@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for a single MCP server.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -146,6 +147,7 @@ pub struct McpServer {
     info: StdRwLock<Option<McpServerInfo>>,
     tools: StdRwLock<Vec<McpToolDef>>,
     client: RwLock<Option<RunningService<rmcp::RoleClient, ()>>>,
+    cancel: CancellationToken,
 }
 
 impl McpServer {
@@ -162,6 +164,7 @@ impl McpServer {
             info: StdRwLock::new(None),
             tools: StdRwLock::new(Vec::new()),
             client: RwLock::new(None),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -246,17 +249,29 @@ impl McpServer {
             Err(e) => return self.record_failure(format!("failed to spawn: {e}")).await,
         };
 
-        let client = match tokio::time::timeout(timeout_dur, ().serve(transport)).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => return self.record_failure(format!("handshake failed: {e}")).await,
-            Err(_) => return self.record_failure("connection timed out".into()).await,
+        let client = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return,
+            result = tokio::time::timeout(timeout_dur, ().serve(transport)) => match result {
+                Ok(Ok(client)) => client,
+                Ok(Err(error)) => {
+                    return self.record_failure(format!("handshake failed: {error}")).await;
+                }
+                Err(_) => return self.record_failure("connection timed out".into()).await,
+            },
         };
         self.set_info(client.peer_info().map(McpServerInfo::from));
 
-        let mcp_tools = match tokio::time::timeout(timeout_dur, client.list_all_tools()).await {
-            Ok(Ok(t)) => t,
-            Ok(Err(e)) => return self.record_failure(format!("list_tools failed: {e}")).await,
-            Err(_) => return self.record_failure("list_tools timed out".into()).await,
+        let mcp_tools = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return,
+            result = tokio::time::timeout(timeout_dur, client.list_all_tools()) => match result {
+                Ok(Ok(tools)) => tools,
+                Ok(Err(error)) => {
+                    return self.record_failure(format!("list_tools failed: {error}")).await;
+                }
+                Err(_) => return self.record_failure("list_tools timed out".into()).await,
+            },
         };
 
         let tool_defs: Vec<McpToolDef> = mcp_tools
@@ -284,9 +299,18 @@ impl McpServer {
             }),
         );
 
+        let mut installed = self.client.write().await;
+        if self.cancel.is_cancelled() {
+            return;
+        }
         self.set_tools(tool_defs);
-        *self.client.write().await = Some(client);
+        *installed = Some(client);
         self.set_status(McpStatus::Connected { since_ms: now_ms() });
+    }
+
+    async fn disconnect(&self) {
+        self.cancel.cancel();
+        self.client.write().await.take();
     }
 
     async fn call_tool(
@@ -332,6 +356,7 @@ impl McpServer {
 pub struct McpManager {
     servers: StdRwLock<HashMap<String, Arc<McpServer>>>,
     controller: StdMutex<McpControllerState>,
+    worker: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -351,12 +376,13 @@ pub struct McpReconcile {
     manager: Arc<McpManager>,
     revision: u64,
     desired: HashMap<String, McpServerConfig>,
+    removed_servers: Vec<Arc<McpServer>>,
 }
 
 struct McpConnections {
     manager: Arc<McpManager>,
     revision: u64,
-    servers: Vec<Arc<McpServer>>,
+    new_servers: Vec<Arc<McpServer>>,
 }
 
 impl McpManager {
@@ -367,6 +393,7 @@ impl McpManager {
         let manager = Arc::new(Self {
             servers: StdRwLock::new(HashMap::new()),
             controller: StdMutex::new(McpControllerState::default()),
+            worker: tokio::sync::Mutex::new(()),
         });
         manager.reconcile(configs.clone()).await;
         manager
@@ -393,8 +420,8 @@ impl McpManager {
         guard.get(name).cloned()
     }
 
-    /// Reserve a desired revision before asynchronous reconciliation starts.
-    /// Equal desired maps are idempotent and do not create work.
+    /// Submit a desired revision and remove obsolete servers before returning so
+    /// new dispatches cannot reach them. Equal desired maps are idempotent.
     pub fn prepare_reconcile(
         self: &Arc<Self>,
         desired: HashMap<String, McpServerConfig>,
@@ -408,10 +435,27 @@ impl McpManager {
         }
         controller.desired_revision = controller.desired_revision.wrapping_add(1);
         controller.desired = desired.clone();
+        let revision = controller.desired_revision;
+        let mut removed_servers = Vec::new();
+        self.servers
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|name, server| {
+                let keep = desired
+                    .get(name)
+                    .is_some_and(|config| config == &server.config);
+                if !keep {
+                    server.cancel.cancel();
+                    removed_servers.push(Arc::clone(server));
+                }
+                keep
+            });
+        drop(controller);
         Some(McpReconcile {
             manager: Arc::clone(self),
-            revision: controller.desired_revision,
+            revision,
             desired,
+            removed_servers,
         })
     }
 
@@ -481,11 +525,6 @@ impl McpReconcile {
             .servers
             .write()
             .unwrap_or_else(|error| error.into_inner());
-        servers.retain(|name, server| {
-            self.desired
-                .get(name)
-                .is_some_and(|config| &server.config == config)
-        });
         let mut new_servers = Vec::new();
         for (name, config) in self.desired {
             if servers.contains_key(&name) {
@@ -500,11 +539,16 @@ impl McpReconcile {
         Some(McpConnections {
             manager: self.manager,
             revision: self.revision,
-            servers: new_servers,
+            new_servers,
         })
     }
 
-    pub async fn apply(self) {
+    pub async fn apply(mut self) {
+        for server in self.removed_servers.drain(..) {
+            server.disconnect().await;
+        }
+        let manager = Arc::clone(&self.manager);
+        let _worker = manager.worker.lock().await;
         if let Some(connections) = self.install() {
             connections.finish().await;
         }
@@ -514,7 +558,7 @@ impl McpReconcile {
 impl McpConnections {
     async fn finish(self) {
         let mut handles = Vec::new();
-        for server in self.servers {
+        for server in self.new_servers {
             handles.push(tokio::spawn(async move { server.connect().await }));
         }
         for handle in handles {
@@ -815,7 +859,8 @@ mod tests {
             .unwrap()
             .install()
             .unwrap();
-        assert!(manager.server("old").is_some());
+        let old_server = manager.server("old").expect("installed old server");
+        assert!(!old_server.cancel.is_cancelled());
         let (control, completion) = crate::test_util::controlled_completion(());
         let old_task = tokio::spawn(async move {
             completion.complete().await;
@@ -823,12 +868,18 @@ mod tests {
         });
 
         let release = control.wait_started().await;
-        manager.reconcile(HashMap::new()).await;
+        let current_reconcile = manager
+            .prepare_reconcile(HashMap::new())
+            .expect("new desired revision");
+        assert!(manager.server("old").is_none());
+        assert!(old_server.cancel.is_cancelled());
+        current_reconcile.apply().await;
         let current_status = manager.controller_status();
         release.send(()).unwrap();
         old_task.await.unwrap();
 
         assert!(manager.server("old").is_none());
+        assert!(old_server.cancel.is_cancelled());
         assert_eq!(manager.controller_status(), current_status);
     }
 }

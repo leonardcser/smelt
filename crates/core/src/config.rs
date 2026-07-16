@@ -345,6 +345,8 @@ pub struct Config {
     pub settings: ResolvedSettings,
     /// MCP server configurations.
     pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
+    /// LSP server configurations.
+    pub lsp: crate::lsp::LspConfig,
     pub defaults: DefaultsConfig,
     pub remember: RememberConfig,
 }

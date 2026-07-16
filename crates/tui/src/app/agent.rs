@@ -686,7 +686,17 @@ impl TuiApp {
             );
             return None;
         };
-        if let smelt_core::ModelAvailability::Unavailable { .. } = active.availability {
+        let retry_missing_credentials = matches!(
+            active.availability,
+            smelt_core::ModelAvailability::Unavailable {
+                reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+            }
+        );
+        if matches!(
+            active.availability,
+            smelt_core::ModelAvailability::Unavailable { .. }
+        ) && !retry_missing_credentials
+        {
             self.notify_error_sticky(format!("model '{}' is unavailable", active.key));
             return None;
         }
@@ -699,6 +709,12 @@ impl TuiApp {
             }
             return None;
         };
+        if retry_missing_credentials {
+            if let Some(current) = self.core.config.active_model_mut() {
+                current.availability = smelt_core::ModelAvailability::Available;
+                self.core.config.revision = self.core.config.revision.wrapping_add(1);
+            }
+        }
         Some(active.target(api_key))
     }
 

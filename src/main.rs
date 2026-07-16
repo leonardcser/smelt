@@ -896,10 +896,6 @@ async fn async_main() {
     let lua_tool_defaults = lua_runtime.tool_defaults();
     let lua_modes = lua_runtime.mode_names();
     let lua_mode_behaviors = lua_runtime.mode_behaviors();
-    lua_runtime
-        .core_shared()
-        .lsp
-        .configure_detached(lua_runtime.lsp_config_snapshot());
     if let Some(err) = lua_runtime.load_error() {
         eprintln!("warning: lua init: {err}");
     }
@@ -920,6 +916,10 @@ async fn async_main() {
         managed_models,
         mut startup_auth_error,
     } = s;
+    lua_runtime
+        .core_shared()
+        .lsp
+        .configure_detached(runtime.lsp.clone());
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
         engine::log::set_level(level);

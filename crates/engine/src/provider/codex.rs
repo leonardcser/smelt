@@ -113,17 +113,32 @@ pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
 }
 
 pub(crate) fn load_cached_models() -> Vec<CodexModel> {
-    let cache_path = crate::paths::cache_dir().join("codex_models.json");
-    let Ok(data) = std::fs::read_to_string(&cache_path) else {
+    let Some(account_fingerprint) =
+        crate::auth::model_cache_account_fingerprint(crate::auth::AuthProvider::Codex)
+    else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<CodexModel>>(&data).unwrap_or_default()
+    load_cached_models_for(&account_fingerprint)
 }
 
-pub(crate) fn save_models_cache(models: &[CodexModel]) -> Result<(), String> {
-    let cache_path = crate::paths::cache_dir().join("codex_models.json");
-    let json = serde_json::to_vec(models).map_err(|error| error.to_string())?;
-    crate::paths::write_atomic(&cache_path, &json).map_err(|error| error.to_string())
+pub(crate) fn load_cached_models_for(account_fingerprint: &str) -> Vec<CodexModel> {
+    super::load_managed_model_cache(
+        &crate::paths::cache_dir().join("codex_models.json"),
+        crate::auth::AuthProvider::Codex.provider_type(),
+        account_fingerprint,
+    )
+}
+
+pub(crate) fn save_models_cache_for(
+    account_fingerprint: String,
+    models: &[CodexModel],
+) -> Result<(), String> {
+    super::save_managed_model_cache(
+        &crate::paths::cache_dir().join("codex_models.json"),
+        crate::auth::AuthProvider::Codex.provider_type(),
+        account_fingerprint,
+        models,
+    )
 }
 
 pub(crate) async fn fetch_models_fresh(

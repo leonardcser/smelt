@@ -2,10 +2,12 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::LuaShared;
 use mlua::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -20,13 +22,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, p: String| Ok(to_string(crate::path::normalize(&p))),
     )?;
 
+    let canonical_context = Arc::clone(shared);
     m.fn_(
         "canonical",
         "Resolve `p` to its canonical absolute form (following symlinks). Returns `(path, nil)` on success or `(nil, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::path::canonical(&p) {
-            Ok(resolved) => Ok((Some(to_string(resolved)), None)),
-            Err(err) => Ok((None, Some(err.to_string()))),
+        move |_, p: String| {
+            match crate::path::canonical(canonical_context.resolve_project_path(p)) {
+                Ok(resolved) => Ok((Some(to_string(resolved)), None)),
+                Err(err) => Ok((None, Some(err.to_string()))),
+            }
         },
     )?;
 

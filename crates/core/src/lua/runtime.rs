@@ -281,6 +281,7 @@ impl LuaRuntime {
         load_paths: LuaLoadPaths,
         load_bootstrap: bool,
     ) -> Self {
+        shared.set_project_cwd(load_paths.project_cwd.as_deref());
         let lua = Lua::new();
         let load_error = Self::register_api(&lua, &shared)
             .err()
@@ -368,6 +369,8 @@ impl LuaRuntime {
         self.load_paths.config_dir = config_dir;
         self.load_paths.runtime_override = runtime_override;
         self.load_paths.project_cwd = target_cwd;
+        self.shared
+            .set_project_cwd(self.load_paths.project_cwd.as_deref());
     }
 
     fn current_launch_inputs(&self) -> LuaLaunchInputs {
@@ -935,7 +938,15 @@ impl LuaRuntime {
     /// evaluation. Generation-owned registrations and reads remain available;
     /// guarded functions become live automatically when the generation commits.
     fn install_candidate_effect_guards(&mut self) -> LuaResult<()> {
-        const BLOCKED_NAMESPACES: &[&str] = &["smelt.clipboard", "smelt.log"];
+        const BLOCKED_NAMESPACES: &[&str] = &[
+            "smelt.clipboard",
+            "smelt.history",
+            "smelt.messages",
+            "smelt.metrics",
+            "smelt.search",
+            "smelt.vim",
+            "smelt.work",
+        ];
         const BLOCKED_FUNCTIONS: &[&str] = &[
             "smelt.auth.managed_usage",
             "smelt.auth.request",
@@ -957,9 +968,6 @@ impl LuaRuntime {
             "smelt.inspect.__open_url",
             "smelt.inspect.__start",
             "smelt.inspect.__stop",
-            "smelt.messages.append",
-            "smelt.messages.clear",
-            "smelt.messages.mark_read",
             "smelt.fs.copy",
             "smelt.fs.file_state.record_read",
             "smelt.fs.file_state.record_read_with_mtime",
@@ -1012,12 +1020,10 @@ impl LuaRuntime {
             "smelt.session.switch_cwd",
             "smelt.session.title.set",
             "smelt.signal.set",
-            "smelt.search.clear",
             "smelt.state.__save",
             "smelt.terminal.bell",
             "smelt.terminal.osc9_notify",
             "smelt.trust.mark",
-            "smelt.work.busy",
         ];
 
         let namespaces = self.lua.create_table()?;
@@ -1249,6 +1255,7 @@ impl LuaRuntime {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let lsp = self.lsp_config_snapshot();
         let mut settings = crate::config::ResolvedSettings::default();
         let overrides = self
             .shared
@@ -1275,6 +1282,7 @@ impl LuaRuntime {
         crate::config::Config {
             providers,
             mcp,
+            lsp,
             settings,
             defaults,
             remember,

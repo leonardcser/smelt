@@ -198,6 +198,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
         format!(
             r#"
             smelt.notify.info("discarded candidate notice", "phase3-candidate")
+            smelt.log.info("discarded_candidate_log")
             smelt.lifecycle.on("ready", function()
                 smelt.fs.write({ready_path}, "ran")
             end)
@@ -229,6 +230,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
             r#"
             smelt.cmd.register("recovered_external_guard", function() end)
             smelt.notify.info("committed candidate notice", "phase3-committed")
+            smelt.log.info("committed_candidate_log")
             smelt.lifecycle.on("ready", function()
                 smelt.fs.write({ready_path}, "ran")
             end)
@@ -257,6 +259,37 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
         .lock()
         .unwrap()
         .contains("recovered_external_guard"));
+}
+
+#[test]
+fn candidate_rejects_unstaged_perf_mutations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"smelt.cmd.register("committed_before_perf_candidate", function() end)"#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let committed_generation = app.app.lua.id;
+
+    for effect in [
+        "smelt.metrics.perf.set_enabled(true)",
+        "smelt.metrics.perf.clear()",
+    ] {
+        smelt_perf::perf::set_enabled(false);
+        std::fs::write(&init, effect).unwrap();
+        app.reload_lua();
+        assert!(!smelt_perf::perf::enabled());
+        assert_eq!(app.app.lua.id, committed_generation);
+        assert!(app
+            .app
+            .lua
+            .command_names_handle()
+            .lock()
+            .unwrap()
+            .contains("committed_before_perf_candidate"));
+    }
 }
 
 #[test]
@@ -1048,19 +1081,39 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
 fn cwd_request_during_turn_commits_project_context_only_after_idle() {
     let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create deferred cwd tempdir");
-    let smelt_dir = target_dir.path().join(".smelt");
-    std::fs::create_dir_all(&smelt_dir).unwrap();
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let expected = target.to_string_lossy().into_owned();
+    let expected_lua = serde_json::to_string(&expected).unwrap();
+    let marker = target.join("candidate-context.txt");
+    let marker_lua = serde_json::to_string(&marker.to_string_lossy()).unwrap();
+    std::fs::write(&marker, "target project").unwrap();
+    let smelt_dir = target.join(".smelt");
+    std::fs::create_dir_all(smelt_dir.join("commands")).unwrap();
+    std::fs::write(
+        smelt_dir.join("commands/target-context.md"),
+        "---\ndescription: Target cwd skill\nagent_skill: true\n---\n\nTarget cwd content.",
+    )
+    .unwrap();
     std::fs::write(
         smelt_dir.join("init.lua"),
-        r#"smelt.cmd.register("deferred_cwd_project", function() end)"#,
+        format!(
+            r#"
+            assert(smelt.os.cwd() == {expected_lua})
+            assert(smelt.session.cwd() == {expected_lua})
+            assert(smelt.trust.status() == "trusted")
+            assert(smelt.fs.read("candidate-context.txt") == "target project")
+            assert(smelt.path.canonical("candidate-context.txt") == {marker_lua})
+            local skill = smelt.skills.content("target-context")
+            assert(skill and skill:find("Target cwd content", 1, true))
+            smelt.cmd.register("deferred_cwd_project", function() end)
+            "#
+        ),
     )
     .unwrap();
     let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
-    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    smelt_core::trust::mark_trusted(&target).unwrap();
     let original_cwd = app.app.cwd.clone();
     let original_generation = app.app.lua.id;
-    let target = std::fs::canonicalize(target_dir.path()).unwrap();
-    let expected = target.to_string_lossy().into_owned();
     app.app
         .lua
         .lua

@@ -25,9 +25,12 @@ pub(crate) struct StagedProcessCwd {
 }
 
 impl StagedProcessCwd {
-    pub(crate) fn commit(mut self) -> std::path::PathBuf {
+    pub(crate) fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub(crate) fn commit(mut self) {
         self.committed = true;
-        self.cwd.clone()
     }
 }
 

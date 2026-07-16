@@ -219,12 +219,19 @@ impl TuiApp {
             .as_ref()
             .map(|(path, _)| path.clone())
             .unwrap_or_else(|| self.core.env.cwd().clone());
+        let candidate_skills = std::sync::Arc::new(engine::SkillLoader::load_for_cwd(
+            &self.prompt_inputs.skill_extra_paths,
+            &target_cwd,
+        ));
         let retired_generation = self.lua.id;
         let candidate_id = retired_generation.wrapping_add(1);
         let committed_tui = self.begin_lua_tui_candidate();
-        let candidate_result =
-            self.lua
-                .load_candidate(candidate_id, Some(&target_cwd), self.lua_wakeup_tx.clone());
+        let candidate_result = self.lua.load_candidate(
+            candidate_id,
+            Some(&target_cwd),
+            candidate_skills,
+            self.lua_wakeup_tx.clone(),
+        );
         let mut candidate_tui = self.finish_lua_tui_candidate(committed_tui);
         let candidate = match candidate_result {
             Ok(candidate) => candidate,
@@ -287,10 +294,9 @@ impl TuiApp {
                 format!("activate Lua candidate: {error}"),
             ));
         }
-        let committed_cwd = match (staged_cwd, cwd_transition) {
+        let cwd_commit = match (&staged_cwd, &cwd_transition) {
             (Some(staged), Some((_, mark_session_dirty))) => {
-                self.install_runtime_cwd(staged.commit(), mark_session_dirty);
-                Some(mark_session_dirty)
+                Some((staged.cwd().to_path_buf(), *mark_session_dirty))
             }
             (None, None) => None,
             _ => unreachable!("staged cwd must match the requested transition"),
@@ -307,11 +313,23 @@ impl TuiApp {
             self.notify_error_sticky(format!("terminal title: {error}"));
         }
         crate::lua::api::notify::commit_staged_notices(&lua_shared);
+        lua_shared.commit_staged_logs();
         for warning in self.lua.warnings().to_vec() {
             self.notify_warn(warning);
         }
         self.managed_models = next_managed_models;
         self.commit_lua_runtime_config(next_runtime, next_permissions);
+        if let Some((cwd, mark_session_dirty)) = &cwd_commit {
+            self.install_runtime_cwd(cwd.clone(), *mark_session_dirty);
+        }
+        let committed_cwd = match (staged_cwd, cwd_commit) {
+            (Some(staged), Some((_, mark_session_dirty))) => {
+                staged.commit();
+                Some(mark_session_dirty)
+            }
+            (None, None) => None,
+            _ => unreachable!("staged cwd must match the requested transition"),
+        };
         self.submit_managed_model_refreshes();
         self.reconcile_auto_reload();
         if let Some(mark_session_dirty) = committed_cwd {
@@ -324,11 +342,7 @@ impl TuiApp {
         if refresh_agent_inputs {
             self.refresh_agent_inputs();
         }
-        self.reconcile_mcp_servers();
-        self.lua
-            .shared()
-            .lsp
-            .configure_detached(self.lua.desired().lsp.clone());
+        self.reconcile_runtime_controllers();
 
         // Make layout geometry current before `ready` hooks open overlays or
         // query `Win:rect()`. Without this, cold-start hooks see the seed layout
@@ -384,6 +398,7 @@ impl TuiApp {
         self.managed_models = managed_models;
         self.commit_lua_runtime_config(next, permissions);
         self.submit_managed_model_refreshes();
+        self.reconcile_runtime_controllers();
         self.publish_diff_signals();
         self.drain_signals_pending();
         Ok(())
@@ -485,12 +500,19 @@ impl TuiApp {
     /// [`smelt_core::mcp::McpDispatcher`] reads tool defs live from the
     /// manager, so the engine's dispatch path picks up the new server
     /// set without further coordination.
+    fn reconcile_runtime_controllers(&mut self) {
+        self.reconcile_mcp_servers();
+        self.lua
+            .shared()
+            .lsp
+            .configure_detached(self.core.config.lsp.clone());
+    }
+
     pub(crate) fn reconcile_mcp_servers(&mut self) {
-        let desired = self.lua.desired().config.mcp.clone();
         let Some(manager) = self.core.mcp.clone() else {
             return;
         };
-        if let Some(reconcile) = manager.prepare_reconcile(desired) {
+        if let Some(reconcile) = manager.prepare_reconcile(self.core.config.mcp.clone()) {
             tokio::spawn(reconcile.apply());
         }
     }

@@ -128,19 +128,35 @@ pub fn cached_models(kind: AuthProvider) -> Vec<String> {
 }
 
 pub fn cached_model_info(kind: AuthProvider) -> Vec<AuthModelInfo> {
+    cached_model_snapshot(kind).1
+}
+
+pub fn cached_model_snapshot(kind: AuthProvider) -> (Option<u64>, Vec<AuthModelInfo>) {
+    let Some(account_fingerprint) = model_cache_account_fingerprint(kind) else {
+        return (None, Vec::new());
+    };
+    (
+        short_fingerprint(&account_fingerprint),
+        cached_model_info_for(kind, &account_fingerprint),
+    )
+}
+
+fn cached_model_info_for(kind: AuthProvider, account_fingerprint: &str) -> Vec<AuthModelInfo> {
     match kind {
-        AuthProvider::Codex => provider::codex::load_cached_models()
+        AuthProvider::Codex => provider::codex::load_cached_models_for(account_fingerprint)
             .into_iter()
             .map(Into::into)
             .collect(),
-        AuthProvider::Copilot => provider::copilot::load_cached_models()
+        AuthProvider::Copilot => provider::copilot::load_cached_models_for(account_fingerprint)
             .into_iter()
             .map(Into::into)
             .collect(),
-        AuthProvider::KimiCode => provider::kimi_code::load_cached_model_info()
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+        AuthProvider::KimiCode => {
+            provider::kimi_code::load_cached_model_info_for(account_fingerprint)
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        }
     }
 }
 
@@ -149,30 +165,69 @@ pub fn is_logged_in(provider: AuthProvider) -> bool {
 }
 
 /// In-memory identity used only to invalidate stale refreshes after credentials
-/// change. The hash is never persisted or logged.
+/// change. The hash is never logged.
 pub fn credential_fingerprint(provider: AuthProvider) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
+    let fingerprint = model_cache_account_fingerprint(provider)?;
+    short_fingerprint(&fingerprint)
+}
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+fn short_fingerprint(fingerprint: &str) -> Option<u64> {
+    u64::from_str_radix(fingerprint.get(..16)?, 16).ok()
+}
+
+pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<String> {
     match provider {
         AuthProvider::Codex => {
             let tokens = provider::codex::load_tokens()?;
-            tokens
-                .account_id
-                .as_deref()
-                .unwrap_or(&tokens.refresh_token)
-                .hash(&mut hasher);
+            if let Some(account_id) = tokens.account_id {
+                Some(model_cache_fingerprint(provider, "account_id", &account_id))
+            } else {
+                Some(model_cache_fingerprint(
+                    provider,
+                    "refresh_token",
+                    &tokens.refresh_token,
+                ))
+            }
         }
         AuthProvider::Copilot => {
             let tokens = provider::copilot::load_tokens()?;
-            tokens.refresh_token.hash(&mut hasher);
+            Some(model_cache_fingerprint(
+                provider,
+                "refresh_token",
+                &tokens.refresh_token,
+            ))
         }
         AuthProvider::KimiCode => {
             let tokens = provider::kimi_code::load_tokens()?;
-            tokens.refresh_token.hash(&mut hasher);
+            Some(model_cache_fingerprint(
+                provider,
+                "refresh_token",
+                &tokens.refresh_token,
+            ))
         }
     }
-    Some(hasher.finish())
+}
+
+pub(crate) fn model_cache_fingerprint(
+    provider: AuthProvider,
+    identity_kind: &str,
+    identity: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    let mut hasher = Sha256::new();
+    hasher.update(provider.provider_type().as_bytes());
+    hasher.update([0]);
+    hasher.update(identity_kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(identity.as_bytes());
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut fingerprint, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    fingerprint
 }
 
 #[derive(Debug, Clone)]
@@ -274,7 +329,7 @@ pub async fn refresh_model_info_outcome_for(
                 kind,
                 expected_fingerprint,
                 models,
-                provider::codex::save_models_cache,
+                provider::codex::save_models_cache_for,
             ),
             Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
         },
@@ -283,7 +338,7 @@ pub async fn refresh_model_info_outcome_for(
                 kind,
                 expected_fingerprint,
                 models,
-                provider::copilot::save_models_cache,
+                provider::copilot::save_models_cache_for,
             ),
             Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
         },
@@ -292,7 +347,7 @@ pub async fn refresh_model_info_outcome_for(
                 kind,
                 expected_fingerprint,
                 models,
-                provider::kimi_code::save_models_cache,
+                provider::kimi_code::save_models_cache_for,
             ),
             Err(error) => model_refresh_failure(kind, expected_fingerprint, error),
         },
@@ -303,15 +358,18 @@ fn finish_model_refresh<T>(
     kind: AuthProvider,
     expected_fingerprint: u64,
     models: Vec<T>,
-    save: impl FnOnce(&[T]) -> Result<(), String>,
+    save: impl FnOnce(String, &[T]) -> Result<(), String>,
 ) -> ManagedModelsRefreshOutcome
 where
     T: Into<AuthModelInfo>,
 {
-    if credential_fingerprint(kind) != Some(expected_fingerprint) {
+    let Some(account_fingerprint) = model_cache_account_fingerprint(kind) else {
+        return ManagedModelsRefreshOutcome::CredentialsChanged;
+    };
+    if short_fingerprint(&account_fingerprint) != Some(expected_fingerprint) {
         return ManagedModelsRefreshOutcome::CredentialsChanged;
     }
-    let cache_warning = save(&models).err();
+    let cache_warning = save(account_fingerprint, &models).err();
     ManagedModelsRefreshOutcome::Fresh {
         models: models.into_iter().map(Into::into).collect(),
         cache_warning,
@@ -323,10 +381,13 @@ fn model_refresh_failure(
     expected_fingerprint: u64,
     error: String,
 ) -> ManagedModelsRefreshOutcome {
-    if credential_fingerprint(kind) != Some(expected_fingerprint) {
+    let Some(account_fingerprint) = model_cache_account_fingerprint(kind) else {
+        return ManagedModelsRefreshOutcome::CredentialsChanged;
+    };
+    if short_fingerprint(&account_fingerprint) != Some(expected_fingerprint) {
         return ManagedModelsRefreshOutcome::CredentialsChanged;
     }
-    let models = cached_model_info(kind);
+    let models = cached_model_info_for(kind, &account_fingerprint);
     if models.is_empty() {
         ManagedModelsRefreshOutcome::Failed(error)
     } else {
@@ -509,7 +570,7 @@ mod tests {
             AuthProvider::Codex,
             expected,
             Vec::<protocol::ModelMetadata>::new(),
-            |_| {
+            |_, _| {
                 cache_written.set(true);
                 Ok(())
             },

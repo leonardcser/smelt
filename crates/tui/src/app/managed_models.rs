@@ -16,11 +16,9 @@ impl TuiApp {
             let snapshots = smelt_core::ManagedModels::provider_kinds()
                 .into_iter()
                 .map(|provider| {
-                    (
-                        provider,
-                        engine::auth::credential_fingerprint(provider),
-                        engine::auth::cached_model_info(provider),
-                    )
+                    let (fingerprint, cached_models) =
+                        engine::auth::cached_model_snapshot(provider);
+                    (provider, fingerprint, cached_models)
                 })
                 .collect();
             let _ = tx.send(AppEvent::ManagedAuthChecked { snapshots });

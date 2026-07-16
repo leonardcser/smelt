@@ -91,9 +91,8 @@ impl ManagedProviderModels {
     }
 
     fn new(provider: AuthProvider, desired: bool, desired_revision: u64) -> Self {
-        let credential_fingerprint = engine::auth::credential_fingerprint(provider);
+        let (credential_fingerprint, mut models) = engine::auth::cached_model_snapshot(provider);
         let authenticated = credential_fingerprint.is_some();
-        let mut models = engine::auth::cached_model_info(provider);
         normalize_models(&mut models);
         let status = if authenticated {
             ManagedModelsStatus::Cached

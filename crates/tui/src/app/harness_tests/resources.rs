@@ -100,7 +100,7 @@ fn unavailable_model_is_reported_and_blocks_dispatch() {
     let mut app = TestApp::builder().build();
     app.app.core.config.active_model_mut().unwrap().availability =
         smelt_core::ModelAvailability::Unavailable {
-            reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+            reason: smelt_core::ModelUnavailableReason::InvalidTransport,
         };
 
     assert!(app.run_lua(
@@ -110,7 +110,7 @@ fn unavailable_model_is_reported_and_blocks_dispatch() {
             assert(status.current == "test/test-model")
             assert(status.requested == "test/test-model")
             assert(status.availability == "unavailable")
-            assert(status.reason == "missing_credentials")
+            assert(status.reason == "invalid_transport")
         "#,
     ));
 
@@ -166,6 +166,59 @@ fn model_switch_marks_missing_credentials_unavailable() {
         assert(status.reason == "missing_credentials")
         "#,
     ));
+}
+
+#[test]
+fn restored_static_credentials_recover_without_model_reselection() {
+    const KEY_ENV: &str = "SMELT_TEST_RESTORED_MODEL_KEY_9E76B1";
+    let environment_guard = test_environment_guard();
+    unsafe { std::env::remove_var(KEY_ENV) };
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    app.app
+        .core
+        .config
+        .available_models
+        .push(smelt_core::config::ResolvedModel {
+            key: "restored/credentials".into(),
+            provider_name: "restored".into(),
+            model_name: "credentials".into(),
+            display_name: None,
+            api_base: "https://example.invalid/v1".into(),
+            api_key_env: KEY_ENV.into(),
+            provider_type: "openai-compatible".into(),
+            config: protocol::ModelConfig::default(),
+        });
+    app.app.apply_model("restored/credentials", true);
+    assert!(matches!(
+        app.app
+            .core
+            .config
+            .active_model()
+            .map(|model| &model.availability),
+        Some(smelt_core::ModelAvailability::Unavailable {
+            reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+        })
+    ));
+
+    unsafe { std::env::set_var(KEY_ENV, "restored-secret") };
+    app.type_text("dispatch after credential restore");
+    app.press(KeyCode::Enter);
+    unsafe { std::env::remove_var(KEY_ENV) };
+
+    assert!(app.state().agent_running);
+    assert!(matches!(
+        app.app
+            .core
+            .config
+            .active_model()
+            .map(|model| &model.availability),
+        Some(smelt_core::ModelAvailability::Available)
+    ));
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(command)
+            if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+    )));
 }
 
 #[test]

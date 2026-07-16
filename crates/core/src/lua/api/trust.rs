@@ -2,9 +2,11 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -12,14 +14,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Query and mutate the per-project content trust store.",
         Tier::Host,
     )?;
+    let status_context = Arc::clone(shared);
     m.fn_(
         "status",
-        "Return the trust state of the current working directory: `\"trusted\"`, `\"untrusted\"`, or `\"no_content\"`. Raises if the cwd cannot be read.",
+        "Return the trust state of the current working directory: `\"trusted\"`, `\"untrusted\"`, or `\"no_content\"`.",
         &[],
-        |_, ()| -> LuaResult<&'static str> {
-            let cwd = std::env::current_dir()
-                .map_err(|e| LuaError::RuntimeError(format!("trust.status: cwd: {e}")))?;
-            Ok(match crate::trust::project_trust_state(&cwd) {
+        move |_, ()| -> LuaResult<&'static str> {
+            Ok(match crate::trust::project_trust_state(&status_context.evaluation_cwd()) {
                 crate::trust::TrustState::Trusted { .. } => "trusted",
                 crate::trust::TrustState::Untrusted { .. } => "untrusted",
                 crate::trust::TrustState::NoContent => "no_content",
@@ -27,14 +28,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    let mark_context = Arc::clone(shared);
     m.fn_(
         "mark",
         "Mark the current working directory as trusted, persisting it in the user's trust store.",
         &[],
-        |_, ()| -> LuaResult<String> {
-            let cwd = std::env::current_dir()
-                .map_err(|e| LuaError::RuntimeError(format!("trust.mark: cwd: {e}")))?;
-            crate::trust::mark_trusted(&cwd).map_err(LuaError::RuntimeError)
+        move |_, ()| -> LuaResult<String> {
+            crate::trust::mark_trusted(&mark_context.evaluation_cwd())
+                .map_err(LuaError::RuntimeError)
         },
     )?;
 

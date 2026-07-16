@@ -95,6 +95,15 @@ impl SkillLoader {
     /// directories. Later sources override earlier ones, so user skills
     /// can shadow built-ins by sharing the same `name:` in frontmatter.
     pub fn load(extra_paths: &[PathBuf]) -> Self {
+        let cwd = std::env::current_dir().ok();
+        Self::load_with_project(extra_paths, cwd.as_deref())
+    }
+
+    pub fn load_for_cwd(extra_paths: &[PathBuf], cwd: &Path) -> Self {
+        Self::load_with_project(extra_paths, Some(cwd))
+    }
+
+    fn load_with_project(extra_paths: &[PathBuf], cwd: Option<&Path>) -> Self {
         let mut skills = HashMap::new();
 
         for (name, body) in BUILTIN_SKILLS {
@@ -117,7 +126,7 @@ impl SkillLoader {
         scan_dir(&home.join(".claude/skills"), &mut skills);
         scan_dir(&home.join(".agents/skills"), &mut skills);
 
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Some(cwd) = cwd {
             scan_dir(&cwd.join(".smelt/skills"), &mut skills);
             scan_command_dir(&cwd.join(".smelt/commands"), &mut skills);
             scan_dir(&cwd.join(".claude/skills"), &mut skills);

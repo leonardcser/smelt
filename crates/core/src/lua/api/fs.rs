@@ -20,22 +20,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Sync filesystem primitives. Errors use the `(value, err_string)` convention so callers can distinguish failures without pcall.",
         Tier::Host,
     )?;
+    let read_context = Arc::clone(shared);
     fs.fn_(
         "read",
         "Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::read_to_string(&p) {
+        move |_, p: String| match crate::fs::read_to_string(read_context.resolve_project_path(p)) {
             Ok(s) => Ok((Some(s), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         },
     )?;
 
+    let read_limited_context = Arc::clone(shared);
     fs.fn_(
         "read_limited",
         "Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)` on success or `(nil, err_string)` on failure.",
         &["p", "max_bytes"],
-        |lua, (p, max_bytes): (String, usize)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
-            match crate::fs::read_to_string_limited(&p, max_bytes) {
+        move |lua, (p, max_bytes): (String, usize)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
+            match crate::fs::read_to_string_limited(read_limited_context.resolve_project_path(p), max_bytes) {
                 Ok(read) => {
                     let t = lua.create_table()?;
                     t.set("content", read.content)?;
@@ -57,42 +59,47 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let exists_context = Arc::clone(shared);
     fs.fn_(
         "exists",
         "Return `true` if a filesystem entry exists at `p`.",
         &["p"],
-        |_, p: String| Ok(crate::fs::exists(&p)),
+        move |_, p: String| Ok(crate::fs::exists(exists_context.resolve_project_path(p))),
     )?;
 
+    let is_file_context = Arc::clone(shared);
     fs.fn_(
         "is_file",
         "Return `true` if `p` exists and refers to a regular file.",
         &["p"],
-        |_, p: String| Ok(crate::fs::is_file(&p)),
+        move |_, p: String| Ok(crate::fs::is_file(is_file_context.resolve_project_path(p))),
     )?;
 
+    let is_dir_context = Arc::clone(shared);
     fs.fn_(
         "is_dir",
         "Return `true` if `p` exists and refers to a directory.",
         &["p"],
-        |_, p: String| Ok(crate::fs::is_dir(&p)),
+        move |_, p: String| Ok(crate::fs::is_dir(is_dir_context.resolve_project_path(p))),
     )?;
 
+    let read_dir_context = Arc::clone(shared);
     fs.fn_(
         "read_dir",
         "List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::read_dir(&p) {
+        move |_, p: String| match crate::fs::read_dir(read_dir_context.resolve_project_path(p)) {
             Ok(entries) => Ok((Some(paths_to_strings(entries)), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         },
     )?;
 
+    let completion_context = Arc::clone(shared);
     fs.fn_(
         "complete_path",
         "List immediate filesystem completions under `dir` matching `prefix`. Directory entries are returned first, then files, case-insensitive alphabetical, capped by `opts.limit` (default 200). Hidden names are included only when `prefix` starts with `.`. `opts.insert_prefix` controls inserted text and defaults to `dir` with a trailing separator. Returns `({ items }, nil)` or `(nil, err_string)`. Items are `{ label, path, insert_text, kind, description }`.",
         &["dir", "prefix", "opts"],
-        |lua, (dir, prefix, opts): (String, String, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
+        move |lua, (dir, prefix, opts): (String, String, Option<mlua::Table>)| -> LuaResult<(Option<mlua::Table>, Option<String>)> {
             let limit = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<u64>>("limit").ok().flatten())
@@ -102,7 +109,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("insert_prefix").ok().flatten())
                 .unwrap_or_else(|| default_insert_prefix(&dir));
-            match complete_path_rows(&dir, &prefix, &insert_prefix, limit) {
+            let scan_dir = completion_context.resolve_project_path(&dir);
+            match complete_path_rows(&scan_dir.to_string_lossy(), &prefix, &insert_prefix, limit) {
                 Ok(rows) => complete_path_to_lua(lua, rows).map(|table| (Some(table), None)),
                 Err(err) => Ok((None, Some(err.to_string()))),
             }
@@ -179,29 +187,31 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let size_context = Arc::clone(shared);
     fs.fn_(
         "size",
         "Return the size of file `p` in bytes. Returns `(size, nil)` or `(nil, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::size(&p) {
+        move |_, p: String| match crate::fs::size(size_context.resolve_project_path(p)) {
             Ok(n) => Ok((Some(n), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         },
     )?;
 
+    let glob_context = Arc::clone(shared);
     fs.fn_(
         "glob",
         "Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.",
         &["pattern", "path", "opts"],
-        |_, args: (String, Option<String>, Option<mlua::Table>)| -> LuaResult<(Option<Vec<String>>, Option<String>)> {
+        move |_, args: (String, Option<String>, Option<mlua::Table>)| -> LuaResult<(Option<Vec<String>>, Option<String>)> {
             let (pattern, path, opts) = args;
-            let dir = path.unwrap_or_default();
+            let dir = glob_context.resolve_project_path(path.unwrap_or_default());
             let max = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<u64>>("max").ok().flatten())
                 .map(|n| n as usize)
                 .unwrap_or(200);
-            match crate::fs::glob(&pattern, &dir, max) {
+            match crate::fs::glob(&pattern, &dir.to_string_lossy(), max) {
                 Ok(mut matches) => {
                     matches.sort_by_key(|m| std::cmp::Reverse(m.mtime));
                     let paths: Vec<String> = matches.into_iter().map(|m| m.path).collect();
@@ -304,11 +314,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
+    let mtime_context = Arc::clone(shared);
     file_state.fn_(
         "mtime_ms",
         "Return the modification time of `p` in milliseconds since the UNIX epoch. Returns `(ms, nil)` or `(nil, err_string)` on failure.",
         &["p"],
-        |_, p: String| match crate::fs::file_mtime_ms(&p) {
+        move |_, p: String| match crate::fs::file_mtime_ms(
+            &mtime_context.resolve_project_path(p).to_string_lossy(),
+        ) {
             Ok(ms) => Ok((Some(ms), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         },
@@ -328,6 +341,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_file_info",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                let path = s.resolve_project_path(path);
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::metadata(&path) {
                         Ok(meta) => {
@@ -351,7 +365,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                         "is_file": true,
                                         "len": meta.len(),
                                         "kind": file_kind,
-                                        "mtime_ms": crate::fs::file_mtime_ms(&path).unwrap_or(0),
+                                        "mtime_ms": crate::fs::file_mtime_ms(&path.to_string_lossy()).unwrap_or(0),
                                     })
                                 }
                                 Err(err) => serde_json::json!({ "err": err.to_string() }),
@@ -371,10 +385,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_read",
             &["task_id", "path"],
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                let path = s.resolve_project_path(path);
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::read_to_string(&path) {
                         Ok(content) => {
-                            let mtime_ms = crate::fs::file_mtime_ms(&path).unwrap_or(0);
+                            let mtime_ms =
+                                crate::fs::file_mtime_ms(&path.to_string_lossy()).unwrap_or(0);
                             serde_json::json!({ "content": content, "mtime_ms": mtime_ms })
                         }
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
@@ -513,10 +529,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
                     .map(std::time::Duration::from_millis)
                     .unwrap_or_else(|| std::time::Duration::from_secs(30));
+                let path = s.resolve_project_path(path);
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match crate::fs::glob_with_limits(
                         &pattern,
-                        &path,
+                        &path.to_string_lossy(),
                         max,
                         Some(max_scanned),
                         Some(timeout),
@@ -560,7 +577,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 };
                 let id = s.next_watcher_id.fetch_add(1, Ordering::Relaxed);
                 let entry = match WatcherEntry::new(
-                    PathBuf::from(path),
+                    s.resolve_project_path(path),
                     mode,
                     s.resume_sink(),
                     s.external_effects_active(),

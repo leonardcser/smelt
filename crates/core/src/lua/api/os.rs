@@ -2,9 +2,11 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -88,13 +90,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, ()| Ok(dirs::home_dir().map(|p| p.to_string_lossy().into_owned())),
     )?;
 
+    let cwd_context = Arc::clone(shared);
     m.fn_(
         "cwd",
         "Return the current working directory as `(path, nil)`, or `(nil, err_string)` on failure.",
         &[],
-        |_, ()| match std::env::current_dir() {
-            Ok(p) => Ok((Some(p.to_string_lossy().into_owned()), None)),
-            Err(err) => Ok((None, Some(err.to_string()))),
+        move |_, ()| {
+            Ok((
+                Some(cwd_context.evaluation_cwd().to_string_lossy().into_owned()),
+                None::<String>,
+            ))
         },
     )?;
 

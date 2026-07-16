@@ -156,30 +156,30 @@ pub fn register_host_api(
     json::register(lua, smelt)?;
     layout::register(lua, smelt)?;
     lifecycle::register(lua, smelt, shared)?;
-    log::register(lua, smelt)?;
+    log::register(lua, smelt, shared)?;
     lsp::register(lua, smelt, shared)?;
     mcp::register(lua, smelt, shared)?;
     messages::register(lua, smelt, shared)?;
     mode::register(lua, smelt)?;
-    os::register(lua, smelt)?;
+    os::register(lua, smelt, shared)?;
     reasoning::register(lua, smelt)?;
     reg::register(lua, smelt)?;
     remember::register(lua, smelt, shared)?;
     parse::register(lua, smelt)?;
-    path::register(lua, smelt)?;
+    path::register(lua, smelt, shared)?;
     perf::register(lua, smelt)?;
     phase::register(lua, smelt, shared)?;
     process::register(lua, smelt, shared)?;
     provider::register(lua, smelt, shared)?;
     shell::register(lua, smelt)?;
     signal::register(lua, smelt, shared)?;
-    skills::register(lua, smelt)?;
+    skills::register(lua, smelt, shared)?;
     spawn::register(lua, smelt, shared)?;
     state::register(lua, smelt)?;
     task::register(lua, smelt, shared)?;
     timer::register(lua, smelt, shared)?;
     tools::register(lua, smelt, shared)?;
     transcript::register(lua, smelt, shared)?;
-    trust::register(lua, smelt)?;
+    trust::register(lua, smelt, shared)?;
     Ok(())
 }
