@@ -3005,7 +3005,7 @@ impl TuiApp {
             }
         }
 
-        crate::lua::with_app_ptr(self, |app| {
+        let persistence_error = crate::lua::with_app_ptr(self, |app| {
             if app.agent.is_some() {
                 app.finish_turn(crate::app::TurnEnd::Cancelled);
             }
@@ -3016,6 +3016,18 @@ impl TuiApp {
             app.drain_host_calls();
             app.stop_background_processes();
             app.save_session_and_flush();
+            let unflushed = app.session_document_has_unflushed_work().then(|| {
+                format!(
+                    "session {} still has unflushed changes",
+                    app.core.session.id
+                )
+            });
+            let shutdown = app.shutdown_persist().err();
+            match (unflushed, shutdown) {
+                (Some(unflushed), Some(shutdown)) => Some(format!("{unflushed}; {shutdown}")),
+                (Some(error), None) | (None, Some(error)) => Some(error),
+                (None, None) => None,
+            }
         });
 
         // Stop the stdin reader before releasing terminal modes so no background
@@ -3024,6 +3036,9 @@ impl TuiApp {
 
         // Drop the terminal guard last so any rendering above stays in TUI mode.
         self.terminal = None;
+        if let Some(error) = persistence_error {
+            eprintln!("smelt: persistence shutdown incomplete: {error}");
+        }
     }
 }
 

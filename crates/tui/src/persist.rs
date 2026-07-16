@@ -39,12 +39,20 @@ pub(crate) struct PersistRequestAuditPayloadSkipped {
 
 pub(crate) type PersistSaveKind = smelt_core::session_save::SessionSaveKind;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PersistFailure {
     pub(crate) save_id: u64,
     pub(crate) session_id: String,
     pub(crate) message: String,
     pub(crate) commit_failure: Option<smelt_store::SessionCommitFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PersistFlushOutcome {
+    Drained,
+    CommitFailed(Vec<PersistFailure>),
+    WorkerExited,
+    Disconnected,
 }
 
 #[derive(Clone, Debug)]
@@ -65,8 +73,9 @@ enum SessionBackendCommand {
     ),
     CommitSession(Box<PersistRequest>),
     AppendRequestAudit(Box<PersistRequestAudit>),
-    Flush(Sender<()>),
+    Flush(Sender<Vec<PersistFailure>>),
     Release(Sender<Result<(), String>>),
+    Shutdown(Sender<Result<(), String>>),
 }
 
 impl SessionBackendCommand {
@@ -74,7 +83,7 @@ impl SessionBackendCommand {
         match self {
             Self::CommitSession(req) => serialized_size(&req.command),
             Self::AppendRequestAudit(req) => serialized_size(&req.entry),
-            Self::OpenOwned(..) | Self::Flush(_) | Self::Release(_) => 0,
+            Self::OpenOwned(..) | Self::Flush(_) | Self::Release(_) | Self::Shutdown(_) => 0,
         }
     }
 }
@@ -296,29 +305,72 @@ impl Persister {
         reports
     }
 
-    /// Block until all queued saves are written. No-op if the worker has exited.
-    pub(crate) fn flush(&self) {
-        if self.tx.is_none() || self.handle.as_ref().is_some_and(|h| h.is_finished()) {
-            return;
+    /// Block until all commands queued before this call have completed.
+    pub(crate) fn flush(&self) -> PersistFlushOutcome {
+        if self.tx.is_none() {
+            return PersistFlushOutcome::Disconnected;
+        }
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            return PersistFlushOutcome::WorkerExited;
         }
         let (done_tx, done_rx) = mpsc::channel();
         if self
             .enqueue(SessionBackendCommand::Flush(done_tx), 0)
-            .is_ok()
+            .is_err()
         {
-            let _ = done_rx.recv();
+            return PersistFlushOutcome::WorkerExited;
         }
+        match done_rx.recv() {
+            Ok(failures) if failures.is_empty() => PersistFlushOutcome::Drained,
+            Ok(failures) => PersistFlushOutcome::CommitFailed(failures),
+            Err(_) => PersistFlushOutcome::WorkerExited,
+        }
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        if self.tx.is_none() {
+            return match self.handle.take() {
+                Some(handle) => handle
+                    .join()
+                    .map_err(|_| "persistence worker panicked".to_string()),
+                None => Ok(()),
+            };
+        }
+
+        let result = if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            Err("persistence worker exited before shutdown".to_string())
+        } else {
+            let (done_tx, done_rx) = mpsc::channel();
+            match self.enqueue(SessionBackendCommand::Shutdown(done_tx), 0) {
+                Ok(()) => done_rx
+                    .recv()
+                    .map_err(|_| "persistence worker stopped during shutdown".to_string())
+                    .and_then(|result| result),
+                Err(()) => Err("persistence worker is closed".to_string()),
+            }
+        };
+        self.tx = None;
+        let joined = self.handle.take().map_or(Ok(()), |handle| {
+            handle
+                .join()
+                .map_err(|_| "persistence worker panicked".to_string())
+        });
+        result.and(joined)
     }
 }
 
 impl Drop for Persister {
     fn drop(&mut self) {
-        self.flush();
-        let _ = self.release();
-        self.tx = None;
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+        let _ = self.flush();
+        let _ = self.shutdown();
     }
 }
 
@@ -398,7 +450,7 @@ impl SessionBackend {
     fn writer(
         &mut self,
         session_id: &str,
-    ) -> Result<(&smelt_store::OwnedSessionWriter, PathBuf), String> {
+    ) -> Result<(&mut smelt_store::OwnedSessionWriter, PathBuf), String> {
         let session_id = smelt_core::session_id::SessionId::parse(session_id)
             .map_err(|err| format!("invalid session id: {err}"))?;
         let already_owned = match &self.state {
@@ -417,7 +469,7 @@ impl SessionBackend {
         } else {
             self.open_owned(session_id.clone())?;
         }
-        match &self.state {
+        match &mut self.state {
             SessionBackendState::Owned { writer, .. } => {
                 let session_dir = writer
                     .path()
@@ -487,6 +539,13 @@ impl SessionBackend {
             SessionBackendState::Closed | SessionBackendState::ReadOnly { .. } => Ok(()),
         }
     }
+
+    fn discard_owned_writer(&mut self) {
+        let state = std::mem::replace(&mut self.state, SessionBackendState::Closed);
+        if !matches!(state, SessionBackendState::Owned { .. }) {
+            self.state = state;
+        }
+    }
 }
 
 fn worker_loop(
@@ -498,6 +557,7 @@ fn worker_loop(
 ) {
     smelt_core::session::cleanup_abandoned_session_artifacts();
     let mut backend = SessionBackend::new();
+    let mut failures_since_flush = Vec::new();
     while let Ok(queued) = rx.recv() {
         let depth = queued_commands
             .fetch_sub(1, Ordering::AcqRel)
@@ -511,6 +571,7 @@ fn worker_loop(
             payload_bytes as u64,
         );
         let reserved_full_audit_bytes = queued.reserved_full_audit_bytes;
+        let mut shutdown = false;
         match queued.command {
             SessionBackendCommand::OpenOwned(session_id, reply) => {
                 let _ = reply.send(backend.open_owned(session_id));
@@ -530,19 +591,38 @@ fn worker_loop(
                     }
                     Ok(success)
                 });
-                report_save_result(result, &req, &reports);
+                if result
+                    .as_ref()
+                    .is_err_and(PersistWriteError::invalidates_connection)
+                {
+                    backend.discard_owned_writer();
+                }
+                if let Some(failure) = report_save_result(result, &req, &reports) {
+                    failures_since_flush.push(failure);
+                }
             }
             SessionBackendCommand::AppendRequestAudit(req) => {
                 let result = backend
                     .writer(&req.session_id)
+                    .map_err(PersistRequestAuditError::Message)
                     .and_then(|(writer, _)| write_request_audit(&req, writer));
+                if result
+                    .as_ref()
+                    .is_err_and(PersistRequestAuditError::invalidates_connection)
+                {
+                    backend.discard_owned_writer();
+                }
                 report_request_audit_result(result, &req, &reports);
             }
             SessionBackendCommand::Flush(done) => {
-                let _ = done.send(());
+                let _ = done.send(std::mem::take(&mut failures_since_flush));
             }
             SessionBackendCommand::Release(done) => {
                 let _ = done.send(backend.release());
+            }
+            SessionBackendCommand::Shutdown(done) => {
+                let _ = done.send(backend.release());
+                shutdown = true;
             }
         }
         let full_audit_bytes = pending_full_audit_bytes
@@ -552,6 +632,9 @@ fn worker_loop(
             "persist:queue:remaining_full_audit_bytes",
             full_audit_bytes as u64,
         );
+        if shutdown {
+            return;
+        }
     }
     let _ = backend.release();
 }
@@ -565,33 +648,40 @@ fn report_save_result(
     result: Result<PersistSuccess, PersistWriteError>,
     req: &PersistRequest,
     reports: &Sender<SessionBackendEvent>,
-) {
-    let report = match result {
-        Ok(success) => SessionBackendEvent::Saved {
-            receipt: success.receipt,
-            warning: success.warning,
-        },
-        Err(err) => SessionBackendEvent::Failed(PersistFailure {
-            save_id: req.command.save_id.get(),
-            session_id: req.command.session_id.clone(),
-            message: err.message(),
-            commit_failure: err.commit_failure(),
-        }),
+) -> Option<PersistFailure> {
+    let (report, failure) = match result {
+        Ok(success) => (
+            SessionBackendEvent::Saved {
+                receipt: success.receipt,
+                warning: success.warning,
+            },
+            None,
+        ),
+        Err(err) => {
+            let failure = PersistFailure {
+                save_id: req.command.save_id.get(),
+                session_id: req.command.session_id.clone(),
+                message: err.message(),
+                commit_failure: err.commit_failure(),
+            };
+            (SessionBackendEvent::Failed(failure.clone()), Some(failure))
+        }
     };
     let _ = reports.send(report);
+    failure
 }
 
 fn report_request_audit_result(
-    result: Result<i64, String>,
+    result: Result<i64, PersistRequestAuditError>,
     req: &PersistRequestAudit,
     reports: &Sender<SessionBackendEvent>,
 ) {
     match result {
-        Err(message) => {
+        Err(err) => {
             let _ = reports.send(SessionBackendEvent::RequestAuditFailed(
                 PersistRequestAuditFailure {
                     session_id: req.session_id.clone(),
-                    message,
+                    message: err.message(),
                 },
             ));
         }
@@ -631,6 +721,29 @@ impl PersistWriteError {
             Self::Message(_) => None,
         }
     }
+
+    fn invalidates_connection(&self) -> bool {
+        matches!(self, Self::Commit(failure) if failure.invalidates_connection())
+    }
+}
+
+#[derive(Debug)]
+enum PersistRequestAuditError {
+    Message(String),
+    Store(smelt_store::StoreError),
+}
+
+impl PersistRequestAuditError {
+    fn message(&self) -> String {
+        match self {
+            Self::Message(message) => message.clone(),
+            Self::Store(err) => err.to_string(),
+        }
+    }
+
+    fn invalidates_connection(&self) -> bool {
+        matches!(self, Self::Store(err) if err.invalidates_connection())
+    }
 }
 
 fn persist_write_error(message: impl Into<String>) -> PersistWriteError {
@@ -645,24 +758,14 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
                 actual
             )
         }
-        smelt_store::SessionCommitFailure::StaleRevision { base, current } => {
-            format!(
-                "stale revision: base {}, current {}",
-                base.get(),
-                current.get()
-            )
-        }
-        smelt_store::SessionCommitFailure::StaleHistoryBase { base, current } => {
-            format!(
-                "stale history base: base {}, current {}",
-                base.get(),
-                current.get()
-            )
-        }
-        smelt_store::SessionCommitFailure::StaleDescriptorBase { base, current } => format!(
-            "stale descriptor base: base {}, current {}",
-            base.get(),
-            current.get()
+        smelt_store::SessionCommitFailure::StaleBase { expected, current } => format!(
+            "stale store head: expected revision/history/descriptors {}/{}/{}, current {}/{}/{}",
+            expected.revision.get(),
+            expected.history_len.get(),
+            expected.descriptor_len.get(),
+            current.revision.get(),
+            current.history_len.get(),
+            current.descriptor_len.get()
         ),
         smelt_store::SessionCommitFailure::InvalidHistorySuffix {
             start,
@@ -707,7 +810,20 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
         smelt_store::SessionCommitFailure::OwnershipLost => {
             "session writer ownership was lost".into()
         }
-        smelt_store::SessionCommitFailure::Integrity { message } => message.clone(),
+        smelt_store::SessionCommitFailure::Busy {
+            operation,
+            attempts,
+            waited_ms,
+        } => {
+            format!("database busy during {operation} after {attempts} attempts over {waited_ms}ms")
+        }
+        smelt_store::SessionCommitFailure::UnsupportedSchema { found, expected } => {
+            format!("unsupported schema version {found}; expected {expected}")
+        }
+        smelt_store::SessionCommitFailure::InvalidCommand { message }
+        | smelt_store::SessionCommitFailure::Integrity { message }
+        | smelt_store::SessionCommitFailure::Io { message }
+        | smelt_store::SessionCommitFailure::Sqlite { message } => message.clone(),
     }
 }
 
@@ -723,7 +839,7 @@ fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
 
 fn write(
     req: &PersistRequest,
-    writer: &smelt_store::OwnedSessionWriter,
+    writer: &mut smelt_store::OwnedSessionWriter,
     session_dir: &Path,
 ) -> Result<PersistSuccess, PersistWriteError> {
     let _perf = smelt_perf::perf::begin("persist:write");
@@ -764,12 +880,12 @@ fn write(
 
 fn write_request_audit(
     req: &PersistRequestAudit,
-    writer: &smelt_store::OwnedSessionWriter,
-) -> Result<i64, String> {
+    writer: &mut smelt_store::OwnedSessionWriter,
+) -> Result<i64, PersistRequestAuditError> {
     let _perf = smelt_perf::perf::begin("persist:request_audit");
     writer
         .append_request_attempt(&req.entry, req.payload_mode)
-        .map_err(|err| err.to_string())
+        .map_err(PersistRequestAuditError::Store)
 }
 
 #[cfg(any(test, feature = "harness"))]
@@ -782,7 +898,7 @@ pub(crate) fn write_transcript_descriptor_suffix(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| smelt_store::StoreError::Integrity("session directory has no id".into()))?;
-    let maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
+    let mut maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
     let rows = records
         .iter()
         .enumerate()
@@ -954,9 +1070,9 @@ mod tests {
         let request = PersistRequest {
             command: commit("session-a", 9),
         };
-        let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        let mut writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
-        let result = write(&request, &writer, &session_dir);
+        let result = write(&request, &mut writer, &session_dir);
 
         assert!(result.is_err(), "stale commit should fail");
         assert!(
@@ -994,9 +1110,10 @@ mod tests {
             vec![("attachment.png".into(), data_url.into())],
         ))];
         let request = PersistRequest { command };
-        let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        let mut writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
-        let success = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
+        let success =
+            write(&request, &mut writer, &session_dir).expect("canonical commit succeeds");
 
         assert_eq!(success.receipt.revision.get(), 1);
         assert!(success.warning.is_none());
@@ -1034,9 +1151,10 @@ mod tests {
         let request = PersistRequest {
             command: commit("session-a", 0),
         };
-        let writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        let mut writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
 
-        let success = write(&request, &writer, &session_dir).expect("canonical commit succeeds");
+        let success =
+            write(&request, &mut writer, &session_dir).expect("canonical commit succeeds");
 
         assert_eq!(success.receipt.revision.get(), 1);
         assert!(success
@@ -1059,13 +1177,54 @@ mod tests {
         persister.save(PersistRequest {
             command: commit(SESSION_ID, 9),
         });
-        persister.flush();
+        let outcome = persister.flush();
 
+        assert!(matches!(
+            outcome,
+            PersistFlushOutcome::CommitFailed(failures)
+                if failures.len() == 1 && failures[0].session_id == SESSION_ID
+        ));
         assert!(matches!(
             persister.drain_reports().as_slice(),
             [SessionBackendEvent::Failed(_)]
         ));
         assert!(!session_dir.exists());
+    }
+
+    #[test]
+    fn flush_distinguishes_disconnected_and_exited_workers() {
+        let mut disconnected = Persister::spawn();
+        disconnected.shutdown().unwrap();
+        assert_eq!(disconnected.flush(), PersistFlushOutcome::Disconnected);
+
+        let (tx, rx) = mpsc::channel::<QueuedCommand>();
+        drop(rx);
+        let (_report_tx, reports) = mpsc::channel();
+        let mut exited = Persister {
+            tx: Some(tx),
+            reports,
+            queued_commands: Arc::new(AtomicUsize::new(0)),
+            queued_payload_bytes: Arc::new(AtomicUsize::new(0)),
+            pending_full_audit_bytes: Arc::new(AtomicUsize::new(0)),
+            handle: Some(std::thread::spawn(|| {})),
+        };
+        assert_eq!(exited.flush(), PersistFlushOutcome::WorkerExited);
+        let _ = exited.shutdown();
+    }
+
+    #[test]
+    fn discarding_an_invalid_writer_allows_clean_reacquisition() {
+        let _serial = crate::app::test_harness::test_home_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _state_home = StateHomeGuard::install(dir.path());
+        let session_id = smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap();
+        let mut backend = SessionBackend::new();
+        backend.open_owned(session_id.clone()).unwrap();
+
+        backend.discard_owned_writer();
+
+        backend.open_owned(session_id).unwrap();
+        backend.release().unwrap();
     }
 
     #[test]
@@ -1155,7 +1314,7 @@ mod tests {
             },
         });
 
-        persister.flush();
+        assert_eq!(persister.flush(), PersistFlushOutcome::Drained);
         assert!(persister.drain_reports().is_empty());
 
         let session_dir = smelt_core::session::dir_for_id(SESSION_ID);

@@ -3021,7 +3021,7 @@ mod tests {
     #[test]
     fn load_model_history_reads_requested_store_range() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let old = HistoryItem::user(protocol::Content::text("old"));
         let recent = HistoryItem::user(protocol::Content::text("recent"));
         let reply = HistoryItem::Assistant(protocol::AssistantStep::terminal(
@@ -3088,7 +3088,7 @@ mod tests {
     #[test]
     fn model_history_read_completes_after_concurrent_writer_commits() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let item = HistoryItem::user(protocol::Content::text("persisted"));
         let snapshot = smelt_store::SessionSnapshot {
             state: smelt_store::SessionState {

@@ -2,7 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    Connection, DropBehavior, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use sha2::{Digest, Sha256};
 
 use crate::compression::ObjectCompression;
@@ -20,7 +22,7 @@ use crate::request_audit::{
 use crate::schema;
 use crate::session_commit::{
     DescriptorIndex, HistoryIndex, HistoryIndexBound, HistoryLen, SaveReceipt, SessionCommit,
-    SessionCommitFailure,
+    SessionCommitFailure, StoreHead,
 };
 use crate::session_snapshot::{self, SessionSaveReport, SessionSnapshot};
 
@@ -50,7 +52,10 @@ impl Default for OpenOptions {
 const LAST_SESSION_COMMIT_KEY: &str = "last_session_commit";
 const JOURNAL_SIZE_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 const WAL_AUTOCHECKPOINT_PAGES: u64 = 1_000;
-const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+const BEGIN_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+const BEGIN_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+const BEGIN_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PersistedSessionCommit {
@@ -69,6 +74,16 @@ pub struct StorageStats {
     pub object_raw_bytes: u64,
     pub object_stored_bytes: u64,
     pub request_rows: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionResumeSnapshot {
+    pub state: SessionState,
+    pub head: StoreHead,
+    pub retained_history_len: usize,
+    pub history_text_bytes: u64,
+    pub missing_object_references: Vec<String>,
+    pub descriptor_tail: TranscriptDescriptorSlice,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -144,24 +159,58 @@ impl SessionDb {
         &self.conn
     }
 
-    fn immediate_transaction<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        {
-            let _perf = smelt_perf::perf::begin("store:db:transaction_begin");
-            self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        }
-        let result = f(&self.conn);
-        match result {
+    fn immediate_transaction<T>(
+        &mut self,
+        operation: &'static str,
+        f: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.run_immediate_transaction(operation, f, |err| err)
+    }
+
+    fn run_immediate_transaction<T, E>(
+        &mut self,
+        operation: &'static str,
+        f: impl FnOnce(&Connection) -> std::result::Result<T, E>,
+        map_store_error: impl Fn(StoreError) -> E,
+    ) -> std::result::Result<T, E>
+    where
+        E: std::fmt::Debug,
+    {
+        let _busy_retry_mode = TransactionBusyRetryGuard;
+        let mut tx =
+            begin_immediate_with_retry(&mut self.conn, operation).map_err(&map_store_error)?;
+        match f(&tx) {
             Ok(value) => {
-                {
-                    let _perf = smelt_perf::perf::begin("store:db:transaction_commit");
-                    self.conn.execute_batch("COMMIT")?;
+                let _perf = smelt_perf::perf::begin("store:db:transaction_commit");
+                match tx.execute_batch("COMMIT") {
+                    Ok(()) => {
+                        tx.set_drop_behavior(DropBehavior::Ignore);
+                        Ok(value)
+                    }
+                    Err(commit_err) => {
+                        let rollback = rollback_after_commit_failure(tx);
+                        let err = match rollback {
+                            Ok(()) => StoreError::from(commit_err),
+                            Err(rollback_err) => StoreError::TransactionCleanup {
+                                operation,
+                                message: format!(
+                                    "commit failed ({commit_err}); rollback failed ({rollback_err})"
+                                ),
+                            },
+                        };
+                        Err(map_store_error(err))
+                    }
                 }
-                Ok(value)
             }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
+            Err(body_err) => match tx.rollback() {
+                Ok(()) => Err(body_err),
+                Err(rollback_err) => Err(map_store_error(StoreError::TransactionCleanup {
+                    operation,
+                    message: format!(
+                        "body failed ({body_err:?}); rollback failed ({rollback_err})"
+                    ),
+                })),
+            },
         }
     }
 
@@ -457,12 +506,16 @@ impl SessionDb {
         Ok(persisted_session_commit(&self.conn)?.map(|commit| commit.fingerprint))
     }
 
-    pub(crate) fn claim_writer_owner(&self, token: &str, owner: &WriterOwner) -> Result<()> {
-        self.immediate_transaction(|conn| meta::claim_writer_owner(conn, token, owner))
+    pub(crate) fn claim_writer_owner(&mut self, token: &str, owner: &WriterOwner) -> Result<()> {
+        self.immediate_transaction("claim writer ownership", |conn| {
+            meta::claim_writer_owner(conn, token, owner)
+        })
     }
 
-    pub(crate) fn release_writer_owner(&self, token: &str) -> Result<()> {
-        self.immediate_transaction(|conn| meta::clear_writer_owner(conn, token))
+    pub(crate) fn release_writer_owner(&mut self, token: &str) -> Result<()> {
+        self.immediate_transaction("release writer ownership", |conn| {
+            meta::clear_writer_owner(conn, token)
+        })
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -476,6 +529,44 @@ impl SessionDb {
 
     pub fn session_meta(&self) -> Result<Option<SessionMeta>> {
         meta::session_meta(&self.conn)
+    }
+
+    pub fn load_session_resume_snapshot(
+        &self,
+        descriptor_width: u16,
+        descriptor_target_rows: u16,
+    ) -> Result<Option<SessionResumeSnapshot>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let Some(state) = meta::session_state(&tx)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let retained_history_len = history::history_item_count(&tx)?;
+        let history_text_bytes = session_snapshot::history_text_bytes(&tx)?;
+        let missing_object_references = missing_object_references(&tx)?;
+        let descriptor_len = history::transcript_descriptor_count(&tx)?;
+        let descriptor_tail = read_descriptor_tail_for_rows(
+            &tx,
+            descriptor_len,
+            descriptor_width,
+            descriptor_target_rows,
+        )?;
+        let descriptor_len_u64 = u64::try_from(descriptor_len)
+            .map_err(|_| StoreError::Integrity("transcript descriptor count exceeds u64".into()))?;
+        let head = StoreHead {
+            revision: state.revision.into(),
+            history_len: state.history_len.into(),
+            descriptor_len: descriptor_len_u64.into(),
+        };
+        tx.commit()?;
+        Ok(Some(SessionResumeSnapshot {
+            state,
+            head,
+            retained_history_len,
+            history_text_bytes,
+            missing_object_references,
+            descriptor_tail,
+        }))
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -519,20 +610,7 @@ impl SessionDb {
     }
 
     pub fn missing_object_references(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT refs.object_hash
-             FROM (
-                 SELECT object_hash FROM history_object_refs
-                 UNION ALL
-                 SELECT object_hash FROM request_object_refs
-             ) refs
-             LEFT JOIN objects ON objects.hash = refs.object_hash
-             WHERE objects.hash IS NULL
-             ORDER BY refs.object_hash",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        missing_object_references(&self.conn)
     }
 
     pub fn export_history_jsonl(&self, out: impl Write) -> Result<()> {
@@ -545,57 +623,50 @@ impl SessionDb {
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn append_request_attempt(
-        &self,
+        &mut self,
         entry: &protocol::request_log::RequestLogEntry,
         payload_mode: request_audit::RequestAuditPayloadMode,
     ) -> Result<i64> {
-        self.immediate_transaction(|conn| {
-            request_audit::append_request_attempt(
-                conn,
-                entry,
-                self.object_compression,
-                payload_mode,
-            )
+        let compression = self.object_compression;
+        self.immediate_transaction("append request audit", |conn| {
+            request_audit::append_request_attempt(conn, entry, compression, payload_mode)
         })
     }
 
     pub(crate) fn append_request_attempt_owned(
-        &self,
+        &mut self,
         token: &str,
         entry: &protocol::request_log::RequestLogEntry,
         payload_mode: request_audit::RequestAuditPayloadMode,
     ) -> Result<i64> {
-        self.immediate_transaction(|conn| {
+        let compression = self.object_compression;
+        self.immediate_transaction("append owned request audit", |conn| {
             meta::verify_writer_owner(conn, token)?;
-            request_audit::append_request_attempt(
-                conn,
-                entry,
-                self.object_compression,
-                payload_mode,
-            )
+            request_audit::append_request_attempt(conn, entry, compression, payload_mode)
         })
     }
 
     pub(crate) fn import_legacy_attachments_owned(
-        &self,
+        &mut self,
         token: &str,
         attachments: &std::collections::BTreeMap<String, String>,
     ) -> Result<usize> {
-        self.immediate_transaction(|conn| {
+        let compression = self.object_compression;
+        self.immediate_transaction("import legacy attachments", |conn| {
             meta::verify_writer_owner(conn, token)?;
-            history::import_legacy_attachments(conn, attachments, self.object_compression)
+            history::import_legacy_attachments(conn, attachments, compression)
         })
     }
 
-    pub(crate) fn garbage_collect_objects_owned(&self, token: &str) -> Result<usize> {
-        self.immediate_transaction(|conn| {
+    pub(crate) fn garbage_collect_objects_owned(&mut self, token: &str) -> Result<usize> {
+        self.immediate_transaction("garbage collect objects", |conn| {
             meta::verify_writer_owner(conn, token)?;
             object::delete_unreachable_objects(conn)
         })
     }
 
-    pub(crate) fn rebuild_search_index_owned(&self, token: &str) -> Result<()> {
-        self.immediate_transaction(|conn| {
+    pub(crate) fn rebuild_search_index_owned(&mut self, token: &str) -> Result<()> {
+        self.immediate_transaction("rebuild search index", |conn| {
             meta::verify_writer_owner(conn, token)?;
             conn.execute(
                 "INSERT INTO transcript_search_fts(transcript_search_fts) VALUES('rebuild')",
@@ -631,69 +702,81 @@ impl SessionDb {
 
     #[cfg(test)]
     pub fn save_session_snapshot(
-        &self,
+        &mut self,
         snapshot: &SessionSnapshot,
         expected_revision: Option<u64>,
     ) -> Result<SessionSaveReport> {
-        session_snapshot::save_session_snapshot(
-            &self.conn,
-            snapshot,
-            expected_revision,
-            None,
-            self.object_compression,
-        )
+        let compression = self.object_compression;
+        self.immediate_transaction("save session snapshot", |conn| {
+            session_snapshot::save_session_snapshot_in_transaction(
+                conn,
+                snapshot,
+                expected_revision,
+                None,
+                compression,
+            )
+        })
     }
 
     /// Import-only snapshot writer. Runtime session saves must use `commit_session_owned`.
     #[cfg(any(test, feature = "test-util"))]
     pub fn save_session_snapshot_for_import(
-        &self,
+        &mut self,
         snapshot: &SessionSnapshot,
     ) -> Result<SessionSaveReport> {
-        session_snapshot::save_session_snapshot(
-            &self.conn,
-            snapshot,
-            Some(0),
-            None,
-            self.object_compression,
-        )
+        let compression = self.object_compression;
+        self.immediate_transaction("import session snapshot", |conn| {
+            session_snapshot::save_session_snapshot_in_transaction(
+                conn,
+                snapshot,
+                Some(0),
+                None,
+                compression,
+            )
+        })
     }
 
     pub(crate) fn save_session_snapshot_for_import_owned(
-        &self,
+        &mut self,
         token: &str,
         snapshot: &SessionSnapshot,
     ) -> Result<SessionSaveReport> {
-        session_snapshot::save_session_snapshot(
-            &self.conn,
-            snapshot,
-            Some(0),
-            Some(token),
-            self.object_compression,
-        )
+        let compression = self.object_compression;
+        self.immediate_transaction("import owned session snapshot", |conn| {
+            session_snapshot::save_session_snapshot_in_transaction(
+                conn,
+                snapshot,
+                Some(0),
+                Some(token),
+                compression,
+            )
+        })
     }
 
     #[cfg(test)]
     pub fn save_session_snapshot_as_writer(
-        &self,
+        &mut self,
         snapshot: &SessionSnapshot,
     ) -> Result<SessionSaveReport> {
         let expected_revision = self
             .session_state()?
             .as_ref()
             .map_or(0, |state| state.revision);
-        session_snapshot::save_session_snapshot(
-            &self.conn,
-            snapshot,
-            Some(expected_revision),
-            None,
-            self.object_compression,
-        )
+        let compression = self.object_compression;
+        self.immediate_transaction("save session snapshot as writer", |conn| {
+            session_snapshot::save_session_snapshot_in_transaction(
+                conn,
+                snapshot,
+                Some(expected_revision),
+                None,
+                compression,
+            )
+        })
     }
 
     #[cfg(test)]
     pub fn save_session_snapshot_and_transcript_descriptor_suffix_as_writer(
-        &self,
+        &mut self,
         snapshot: &SessionSnapshot,
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
@@ -702,19 +785,20 @@ impl SessionDb {
             .session_state()?
             .as_ref()
             .map_or(0, |state| state.revision);
-        self.immediate_transaction(|conn| {
+        let compression = self.object_compression;
+        self.immediate_transaction("save session snapshot and descriptors", |conn| {
             let report = session_snapshot::save_session_snapshot_in_transaction(
                 conn,
                 snapshot,
                 Some(expected_revision),
                 None,
-                self.object_compression,
+                compression,
             )?;
             history::replace_transcript_descriptor_suffix_in_transaction(
                 conn,
                 start_descriptor_idx,
                 records,
-                self.object_compression,
+                compression,
             )?;
             Ok(report)
         })
@@ -727,12 +811,12 @@ impl SessionDb {
         state: &SessionState,
         history_len: usize,
     ) -> Result<()> {
-        let dest = SessionDb::open(dest_path)?;
+        let mut dest = SessionDb::open(dest_path)?;
         dest.copy_prefix_from(self, state, history_len, None)
     }
 
     pub(crate) fn copy_prefix_from(
-        &self,
+        &mut self,
         source: &SessionDb,
         state: &SessionState,
         history_len: usize,
@@ -742,7 +826,7 @@ impl SessionDb {
         self.conn
             .execute("ATTACH DATABASE ?1 AS src", [source_path.as_str()])?;
         let history_len = history_len as i64;
-        let copy_result = self.immediate_transaction(|conn| {
+        let copy_result = self.immediate_transaction("copy session prefix", |conn| {
             if let Some(token) = owner_token {
                 meta::verify_writer_owner(conn, token)?;
             }
@@ -784,7 +868,7 @@ impl SessionDb {
             )?;
             conn.execute(
                 "INSERT INTO turn_metas
-                 SELECT * FROM src.turn_metas WHERE turn_idx < ?1 ORDER BY turn_idx",
+                 SELECT * FROM src.turn_metas WHERE turn_idx <= ?1 ORDER BY turn_idx",
                 [history_len],
             )?;
             conn.execute(
@@ -807,14 +891,14 @@ impl SessionDb {
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn commit_session(
-        &self,
+        &mut self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         self.commit_session_with_owner(command, None)
     }
 
     pub(crate) fn commit_session_owned(
-        &self,
+        &mut self,
         token: &str,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
@@ -822,60 +906,48 @@ impl SessionDb {
     }
 
     fn commit_session_with_owner(
-        &self,
+        &mut self,
         command: &SessionCommit,
         owner_token: Option<&str>,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|err| session_commit_failure_from_store_error(err.into()))?;
-        let result = commit_session_in_transaction(
-            &self.conn,
-            command,
-            owner_token,
-            self.object_compression,
-        );
-        match result {
-            Ok(receipt) => {
-                self.conn
-                    .execute_batch("COMMIT")
-                    .map_err(|err| session_commit_failure_from_store_error(err.into()))?;
-                Ok(receipt)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        let compression = self.object_compression;
+        self.run_immediate_transaction(
+            "commit session",
+            |conn| commit_session_in_transaction(conn, command, owner_token, compression),
+            session_commit_failure_from_store_error,
+        )
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub fn repair_mismatched_transcript_descriptor_history_links(&self) -> Result<usize> {
-        self.immediate_transaction(|conn| {
+    pub fn repair_mismatched_transcript_descriptor_history_links(&mut self) -> Result<usize> {
+        self.immediate_transaction("repair transcript history links", |conn| {
             history::repair_mismatched_transcript_descriptor_history_links(conn)
         })
     }
 
     pub(crate) fn repair_mismatched_transcript_descriptor_history_links_owned(
-        &self,
+        &mut self,
         token: &str,
     ) -> Result<usize> {
-        self.immediate_transaction(|conn| {
+        self.immediate_transaction("repair owned transcript history links", |conn| {
             meta::verify_writer_owner(conn, token)?;
             history::repair_mismatched_transcript_descriptor_history_links(conn)
         })
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub fn repair_checkpoint_first_live_index_past_history(&self) -> Result<usize> {
-        self.immediate_transaction(meta::repair_checkpoint_first_live_index_past_history)
+    pub fn repair_checkpoint_first_live_index_past_history(&mut self) -> Result<usize> {
+        self.immediate_transaction(
+            "repair checkpoint history boundary",
+            meta::repair_checkpoint_first_live_index_past_history,
+        )
     }
 
     pub(crate) fn repair_checkpoint_first_live_index_past_history_owned(
-        &self,
+        &mut self,
         token: &str,
     ) -> Result<usize> {
-        self.immediate_transaction(|conn| {
+        self.immediate_transaction("repair owned checkpoint history boundary", |conn| {
             meta::verify_writer_owner(conn, token)?;
             meta::repair_checkpoint_first_live_index_past_history(conn)
         })
@@ -888,24 +960,33 @@ impl SessionDb {
     /// Maintenance-only descriptor repair hook. Runtime session saves must use `commit_session`.
     #[cfg(any(test, feature = "test-util"))]
     pub fn replace_transcript_descriptor_records_for_repair(
-        &self,
+        &mut self,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
-        history::replace_transcript_descriptor_records(&self.conn, records, self.object_compression)
+        let compression = self.object_compression;
+        self.immediate_transaction("replace transcript descriptors", |conn| {
+            history::replace_transcript_descriptor_suffix_in_transaction(
+                conn,
+                0,
+                records,
+                compression,
+            )
+        })
     }
 
     pub(crate) fn replace_transcript_descriptor_records_owned(
-        &self,
+        &mut self,
         token: &str,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
-        self.immediate_transaction(|conn| {
+        let compression = self.object_compression;
+        self.immediate_transaction("replace owned transcript descriptors", |conn| {
             meta::verify_writer_owner(conn, token)?;
             history::replace_transcript_descriptor_suffix_in_transaction(
                 conn,
                 0,
                 records,
-                self.object_compression,
+                compression,
             )
         })
     }
@@ -913,31 +994,35 @@ impl SessionDb {
     /// Maintenance-only descriptor repair hook. Runtime session saves must use `commit_session`.
     #[cfg(any(test, feature = "test-util"))]
     pub fn replace_transcript_descriptor_suffix_for_repair(
-        &self,
+        &mut self,
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
-        history::replace_transcript_descriptor_suffix(
-            &self.conn,
-            start_descriptor_idx,
-            records,
-            self.object_compression,
-        )
+        let compression = self.object_compression;
+        self.immediate_transaction("replace transcript descriptor suffix", |conn| {
+            history::replace_transcript_descriptor_suffix_in_transaction(
+                conn,
+                start_descriptor_idx,
+                records,
+                compression,
+            )
+        })
     }
 
     pub(crate) fn replace_transcript_descriptor_suffix_owned(
-        &self,
+        &mut self,
         token: &str,
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
-        self.immediate_transaction(|conn| {
+        let compression = self.object_compression;
+        self.immediate_transaction("replace owned transcript descriptor suffix", |conn| {
             meta::verify_writer_owner(conn, token)?;
             history::replace_transcript_descriptor_suffix_in_transaction(
                 conn,
                 start_descriptor_idx,
                 records,
-                self.object_compression,
+                compression,
             )
         })
     }
@@ -1001,6 +1086,18 @@ impl SessionDb {
         count: usize,
     ) -> Result<TranscriptDescriptorSlice> {
         history::read_transcript_descriptor_tail_slice_with_total(&self.conn, total_count, count)
+    }
+
+    pub fn read_transcript_descriptor_tail_for_rows(
+        &self,
+        width: u16,
+        target_rows: u16,
+    ) -> Result<TranscriptDescriptorSlice> {
+        let tx = self.conn.unchecked_transaction()?;
+        let total_count = history::transcript_descriptor_count(&tx)?;
+        let slice = read_descriptor_tail_for_rows(&tx, total_count, width, target_rows)?;
+        tx.commit()?;
+        Ok(slice)
     }
 
     pub fn read_transcript_descriptor_centered_slice(
@@ -1118,11 +1215,103 @@ impl SessionDb {
     }
 }
 
-fn session_commit_failure_from_store_error(err: StoreError) -> SessionCommitFailure {
+fn missing_object_references(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT refs.object_hash
+         FROM (
+             SELECT object_hash FROM history_object_refs
+             UNION ALL
+             SELECT object_hash FROM request_object_refs
+         ) refs
+         LEFT JOIN objects ON objects.hash = refs.object_hash
+         WHERE objects.hash IS NULL
+         ORDER BY refs.object_hash",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn read_descriptor_tail_for_rows(
+    conn: &Connection,
+    total_count: usize,
+    width: u16,
+    target_rows: u16,
+) -> Result<TranscriptDescriptorSlice> {
+    if total_count == 0 {
+        return history::read_transcript_descriptor_tail_slice_with_total(conn, 0, 0);
+    }
+
+    let target_rows = u64::from(target_rows.max(1));
+    let mut count = target_rows
+        .saturating_add(1)
+        .saturating_div(2)
+        .min(total_count as u64) as usize;
+    let mut probes = 0u64;
+    loop {
+        probes = probes.saturating_add(1);
+        smelt_perf::perf::record_value("transcript:resume_tail:tail_probe_count", count as u64);
+        let slice =
+            history::read_transcript_descriptor_tail_slice_with_total(conn, total_count, count)?;
+        if estimated_descriptor_rows(&slice.records, width) >= target_rows || count == total_count {
+            smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes);
+            return Ok(slice);
+        }
+        count = count.saturating_mul(2).min(total_count);
+    }
+}
+
+fn estimated_descriptor_rows(records: &[TranscriptDescriptorRecord], width: u16) -> u64 {
+    let width = u64::from(width.max(1));
+    records
+        .iter()
+        .map(|record| {
+            let text_rows = record.estimated_text_bytes.saturating_add(width - 1) / width;
+            text_rows.max(1).saturating_add(1)
+        })
+        .sum()
+}
+
+pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> SessionCommitFailure {
     match err {
         StoreError::OwnershipLost => SessionCommitFailure::OwnershipLost,
-        err => SessionCommitFailure::Integrity {
+        StoreError::Busy {
+            operation,
+            attempts,
+            waited_ms,
+        } => SessionCommitFailure::Busy {
+            operation: operation.to_string(),
+            attempts,
+            waited_ms,
+        },
+        StoreError::UnsupportedSchema { found, expected } => {
+            SessionCommitFailure::UnsupportedSchema { found, expected }
+        }
+        StoreError::Json(err) => SessionCommitFailure::InvalidCommand {
             message: err.to_string(),
+        },
+        StoreError::ObjectTooLarge { size, max } => SessionCommitFailure::InvalidCommand {
+            message: format!("session object is too large: {size} bytes exceeds {max}"),
+        },
+        StoreError::Integrity(message) | StoreError::MissingObject { reference: message } => {
+            SessionCommitFailure::Integrity { message }
+        }
+        StoreError::Io(err) => SessionCommitFailure::Io {
+            message: err.to_string(),
+        },
+        StoreError::Sqlite(err) => SessionCommitFailure::Sqlite {
+            message: err.to_string(),
+        },
+        StoreError::TransactionCleanup { operation, message } => SessionCommitFailure::Sqlite {
+            message: format!("transaction cleanup failed during {operation}: {message}"),
+        },
+        StoreError::OwnershipConflict { owner } => SessionCommitFailure::Busy {
+            operation: owner.map_or_else(
+                || "claim session ownership".to_string(),
+                |owner| format!("claim session ownership held by {owner}"),
+            ),
+            attempts: 1,
+            waited_ms: 0,
         },
     }
 }
@@ -1161,27 +1350,23 @@ fn commit_session_in_transaction(
     }
 
     let current_revision = current_state.as_ref().map_or(0, |state| state.revision);
-    if current_revision != command.base_revision.get() {
-        return Err(SessionCommitFailure::StaleRevision {
-            base: command.base_revision,
-            current: current_revision.into(),
-        });
-    }
-
     let current_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
-    if current_history_len != command.base_history_len.get() {
-        return Err(SessionCommitFailure::StaleHistoryBase {
-            base: command.base_history_len,
-            current: current_history_len.into(),
-        });
-    }
-
     let current_descriptor_len = history::transcript_descriptor_count(conn)
         .map_err(session_commit_failure_from_store_error)? as u64;
-    if current_descriptor_len != command.base_descriptor_len.get() {
-        return Err(SessionCommitFailure::StaleDescriptorBase {
-            base: command.base_descriptor_len,
-            current: current_descriptor_len.into(),
+    let expected_head = StoreHead {
+        revision: command.base_revision,
+        history_len: command.base_history_len,
+        descriptor_len: command.base_descriptor_len,
+    };
+    let current_head = StoreHead {
+        revision: current_revision.into(),
+        history_len: current_history_len.into(),
+        descriptor_len: current_descriptor_len.into(),
+    };
+    if expected_head != current_head {
+        return Err(SessionCommitFailure::StaleBase {
+            expected: expected_head,
+            current: current_head,
         });
     }
 
@@ -1274,7 +1459,11 @@ pub(crate) fn session_commit_fingerprint(command: &SessionCommit) -> Result<Stri
 
 fn persisted_session_commit(conn: &Connection) -> Result<Option<PersistedSessionCommit>> {
     meta::meta(conn, LAST_SESSION_COMMIT_KEY)?
-        .map(|persisted| serde_json::from_str(&persisted).map_err(Into::into))
+        .map(|persisted| {
+            serde_json::from_str(&persisted).map_err(|err| {
+                StoreError::Integrity(format!("invalid persisted session commit: {err}"))
+            })
+        })
         .transpose()
 }
 
@@ -1301,7 +1490,7 @@ fn validate_side_table_suffixes(
         "turn_metas",
         &command.side_tables.turn_metas,
         command.history.final_len,
-        false,
+        true,
     )?;
     validate_side_table_rows(
         "metadata_snapshots",
@@ -1452,7 +1641,7 @@ fn validate_transcript_descriptor_history_bounds(
 fn validate_side_table_history_bounds(conn: &Connection, history_count: u64) -> Result<()> {
     let turn_meta_invalid: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM turn_metas WHERE turn_idx >= ?1",
+            "SELECT COUNT(*) FROM turn_metas WHERE turn_idx > ?1",
             [history_count as i64],
             |row| row.get(0),
         )
@@ -1720,12 +1909,130 @@ fn secure_sqlite_files(path: &Path) -> Result<()> {
     Ok(())
 }
 
+std::thread_local! {
+    static BEGIN_BUSY_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TRANSACTION_BUSY_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BEGIN_BUSY_ATTEMPTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static BEGIN_BUSY_BUDGET: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+struct TransactionBusyRetryGuard;
+
+impl Drop for TransactionBusyRetryGuard {
+    fn drop(&mut self) {
+        BEGIN_BUSY_ACTIVE.set(false);
+        TRANSACTION_BUSY_DISABLED.set(false);
+    }
+}
+
+fn rollback_after_commit_failure(mut tx: Transaction<'_>) -> rusqlite::Result<()> {
+    if tx.is_autocommit() {
+        tx.set_drop_behavior(DropBehavior::Ignore);
+        Ok(())
+    } else {
+        tx.rollback()
+    }
+}
+
+fn begin_immediate_with_retry<'conn>(
+    conn: &'conn mut Connection,
+    operation: &'static str,
+) -> Result<Transaction<'conn>> {
+    begin_immediate_with_retry_budget(conn, operation, BEGIN_RETRY_BUDGET)
+}
+
+fn begin_immediate_with_retry_budget<'conn>(
+    conn: &'conn mut Connection,
+    operation: &'static str,
+    budget: std::time::Duration,
+) -> Result<Transaction<'conn>> {
+    let _perf = smelt_perf::perf::begin("store:db:transaction_begin");
+    BEGIN_BUSY_ATTEMPTS.set(0);
+    BEGIN_BUSY_BUDGET.set(budget);
+    conn.busy_handler(Some(begin_busy_retry))?;
+    TRANSACTION_BUSY_DISABLED.set(false);
+    BEGIN_BUSY_ACTIVE.set(true);
+    let started = std::time::Instant::now();
+    let result = conn.transaction_with_behavior(TransactionBehavior::Immediate);
+    BEGIN_BUSY_ACTIVE.set(false);
+    match result {
+        Ok(tx) => {
+            TRANSACTION_BUSY_DISABLED.set(true);
+            let attempts = BEGIN_BUSY_ATTEMPTS.get().saturating_add(1);
+            smelt_perf::perf::record_value(
+                "store:db:transaction_begin_attempts",
+                u64::from(attempts),
+            );
+            smelt_perf::perf::record_value(
+                "store:db:transaction_begin_wait_ms",
+                started.elapsed().as_millis() as u64,
+            );
+            Ok(tx)
+        }
+        Err(err) if sqlite_error_is_locked(&err) => Err(StoreError::Busy {
+            operation,
+            attempts: BEGIN_BUSY_ATTEMPTS.get().max(1),
+            waited_ms: started.elapsed().as_millis() as u64,
+        }),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn begin_busy_retry(count: i32) -> bool {
+    if TRANSACTION_BUSY_DISABLED.get() {
+        return false;
+    }
+    let Ok(count) = u32::try_from(count) else {
+        return false;
+    };
+    let budget = if BEGIN_BUSY_ACTIVE.get() {
+        BEGIN_BUSY_ATTEMPTS.set(count.saturating_add(1));
+        BEGIN_BUSY_BUDGET.get()
+    } else {
+        BUSY_TIMEOUT
+    };
+    let delay = begin_retry_delay(count);
+    let elapsed = (0..=count).fold(std::time::Duration::ZERO, |elapsed, attempt| {
+        elapsed.saturating_add(begin_retry_delay(attempt))
+    });
+    if elapsed > budget {
+        return false;
+    }
+    std::thread::sleep(delay);
+    true
+}
+
+fn begin_retry_delay(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.min(6);
+    let base = BEGIN_RETRY_INITIAL_DELAY
+        .saturating_mul(1u32 << exponent)
+        .min(BEGIN_RETRY_MAX_DELAY);
+    let jitter_bound = (base.as_millis() / 4).max(1) as u64;
+    let jitter_ms = u64::from(attempt)
+        .wrapping_mul(17)
+        .wrapping_add(std::process::id() as u64)
+        % jitter_bound;
+    base.saturating_add(std::time::Duration::from_millis(jitter_ms))
+}
+
+fn sqlite_error_is_locked(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(
+                err.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;
          PRAGMA temp_store = MEMORY;",
     )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     match mode {
         OpenMode::ReadWrite => conn.execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
@@ -1785,6 +2092,225 @@ mod tests {
                 .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             WAL_AUTOCHECKPOINT_PAGES as i64
+        );
+    }
+
+    #[test]
+    fn immediate_transaction_retries_only_until_the_write_lock_is_acquired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        let lock = Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(75));
+            lock.execute_batch("COMMIT").unwrap();
+        });
+
+        let started = std::time::Instant::now();
+        db.immediate_transaction("test lock acquisition", |conn| {
+            conn.execute(
+                "INSERT INTO store_meta (key, value) VALUES ('retried_begin', 'committed')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        releaser.join().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        assert!(BEGIN_BUSY_ATTEMPTS.get() > 0);
+        assert_eq!(
+            db.meta("retried_begin").unwrap().as_deref(),
+            Some("committed")
+        );
+        assert!(!TRANSACTION_BUSY_DISABLED.get());
+    }
+
+    #[test]
+    fn immediate_transaction_restores_bounded_ordinary_busy_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        db.immediate_transaction("install begin retry handler", |_| Ok(()))
+            .unwrap();
+        let lock = Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = std::time::Instant::now();
+        let err = db
+            .connection()
+            .execute(
+                "INSERT INTO store_meta (key, value) VALUES ('ordinary_busy', 'blocked')",
+                [],
+            )
+            .unwrap_err();
+        let waited = started.elapsed();
+        lock.execute_batch("ROLLBACK").unwrap();
+
+        assert!(sqlite_error_is_locked(&err));
+        assert!(waited >= std::time::Duration::from_millis(10));
+        assert!(waited < std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn immediate_transaction_surfaces_bounded_busy_exhaustion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        let lock = Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+
+        let err = match begin_immediate_with_retry_budget(
+            &mut db.conn,
+            "test busy exhaustion",
+            std::time::Duration::from_millis(20),
+        ) {
+            Ok(tx) => {
+                drop(tx);
+                panic!("write lock was unexpectedly acquired");
+            }
+            Err(err) => err,
+        };
+        lock.execute_batch("ROLLBACK").unwrap();
+
+        assert!(matches!(
+            err,
+            StoreError::Busy {
+                operation: "test busy exhaustion",
+                attempts,
+                waited_ms,
+            } if attempts >= 2 && waited_ms >= 10
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        assert!(!TRANSACTION_BUSY_DISABLED.get());
+    }
+
+    #[test]
+    fn immediate_transaction_disables_busy_waiting_after_begin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+
+        let err = db
+            .immediate_transaction("test body failure", |conn| {
+                conn.execute(
+                    "INSERT INTO store_meta (key, value) VALUES ('body_write', 'rolled_back')",
+                    [],
+                )?;
+                assert!(!BEGIN_BUSY_ACTIVE.get());
+                let started = std::time::Instant::now();
+                assert!(!begin_busy_retry(0));
+                assert!(started.elapsed() < std::time::Duration::from_millis(5));
+                Err::<(), _>(StoreError::Integrity("injected body failure".into()))
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(err, StoreError::Integrity(message) if message == "injected body failure")
+        );
+        assert_eq!(db.meta("body_write").unwrap(), None);
+        assert!(!TRANSACTION_BUSY_DISABLED.get());
+    }
+
+    #[test]
+    fn immediate_transaction_reports_commit_failure_and_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.connection()
+            .execute_batch(
+                "CREATE TABLE commit_parent(id INTEGER PRIMARY KEY);
+                 CREATE TABLE commit_child(
+                    parent_id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED
+                 );",
+            )
+            .unwrap();
+
+        let err = db
+            .immediate_transaction("test commit failure", |conn| {
+                conn.execute("INSERT INTO commit_child(parent_id) VALUES (1)", [])?;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Sqlite(_)));
+        assert_eq!(
+            db.connection()
+                .query_row("SELECT COUNT(*) FROM commit_child", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(!TRANSACTION_BUSY_DISABLED.get());
+    }
+
+    #[test]
+    fn immediate_transaction_surfaces_rollback_cleanup_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+
+        let err = db
+            .immediate_transaction("test rollback failure", |conn| {
+                conn.execute_batch("ROLLBACK")?;
+                Err::<(), _>(StoreError::Integrity("injected body failure".into()))
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::TransactionCleanup {
+                operation: "test rollback failure",
+                message,
+            } if message.contains("rollback failed")
+        ));
+    }
+
+    #[test]
+    fn resume_snapshot_reads_one_complete_store_head_and_descriptor_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let history = (0..4)
+            .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
+            .collect::<Vec<_>>();
+        db.save_session_snapshot_for_import(&SessionSnapshot {
+            state: test_session_state("resume-snapshot", history.len()),
+            history_start_idx: 0,
+            history_len: history.len(),
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let descriptors = (0..4)
+            .map(|idx| transcript_record(idx, "text", &format!("descriptor {idx}")))
+            .collect::<Vec<_>>();
+        db.replace_transcript_descriptor_records_for_repair(&descriptors)
+            .unwrap();
+        drop(db);
+        let db = SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
+
+        let snapshot = db
+            .load_session_resume_snapshot(80, 3)
+            .unwrap()
+            .expect("resume snapshot");
+
+        assert_eq!(snapshot.state.id, "resume-snapshot");
+        assert_eq!(snapshot.head.revision, crate::Revision::new(1));
+        assert_eq!(snapshot.head.history_len, HistoryLen::new(4));
+        assert_eq!(snapshot.head.descriptor_len, crate::DescriptorLen::new(4));
+        assert_eq!(snapshot.retained_history_len, 4);
+        assert!(snapshot.history_text_bytes > 0);
+        assert!(snapshot.missing_object_references.is_empty());
+        assert_eq!(snapshot.descriptor_tail.total_count, 4);
+        assert_eq!(snapshot.descriptor_tail.start.get(), 2);
+        assert_eq!(
+            snapshot.descriptor_tail.records,
+            descriptors[2..]
+                .iter()
+                .cloned()
+                .map(without_indexed_text)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1975,7 +2501,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_suffix_preserves_prefix_and_replaces_tail() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial = vec![
             transcript_record(0, "zero", "old zero"),
             transcript_record(1, "one", "old one"),
@@ -2018,7 +2544,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_suffix_compacts_sparse_existing_descriptor_indices() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = transcript_record(0, "zero", "zero");
         let sparse = transcript_record(302, "sparse", "sparse");
         db.replace_transcript_descriptor_records_for_repair(&[first.clone(), sparse.clone()])
@@ -2046,7 +2572,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_suffix_rejects_start_past_dense_end() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.replace_transcript_descriptor_records_for_repair(&[transcript_record(
             0, "zero", "zero",
         )])
@@ -2069,10 +2595,25 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_persisted_commit_is_classified_as_integrity_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.set_meta(LAST_SESSION_COMMIT_KEY, "not-json").unwrap();
+
+        let err = db.last_session_commit_fingerprint().unwrap_err();
+
+        assert!(matches!(
+            session_commit_failure_from_store_error(err),
+            SessionCommitFailure::Integrity { message }
+                if message.contains("invalid persisted session commit")
+        ));
+    }
+
+    #[test]
     fn commit_session_is_idempotent_for_the_same_command() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.db");
-        let db = SessionDb::open(&path).unwrap();
+        let mut db = SessionDb::open(&path).unwrap();
         let history = protocol::HistoryItem::user(protocol::Content::text("hello"));
         let command = SessionCommit {
             session_id: "typed-commit".into(),
@@ -2095,7 +2636,7 @@ mod tests {
 
         let receipt = db.commit_session(&command).unwrap();
         drop(db);
-        let db = SessionDb::open(&path).unwrap();
+        let mut db = SessionDb::open(&path).unwrap();
         let repeated = db.commit_session(&command).unwrap();
 
         assert_eq!(repeated, receipt);
@@ -2105,12 +2646,13 @@ mod tests {
         assert_eq!(receipt.descriptor_len, crate::DescriptorLen::new(1));
         assert_eq!(db.history_item_count().unwrap(), 1);
         assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+        assert!(!TRANSACTION_BUSY_DISABLED.get());
     }
 
     #[test]
     fn commit_session_rejects_stale_descriptor_base_before_replacement() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("stale-descriptor", 1),
             history_start_idx: 0,
@@ -2154,9 +2696,17 @@ mod tests {
 
         assert_eq!(
             err,
-            SessionCommitFailure::StaleDescriptorBase {
-                base: crate::DescriptorLen::new(303),
-                current: crate::DescriptorLen::new(1),
+            SessionCommitFailure::StaleBase {
+                expected: StoreHead {
+                    revision: current_revision.into(),
+                    history_len: HistoryLen::new(1),
+                    descriptor_len: crate::DescriptorLen::new(303),
+                },
+                current: StoreHead {
+                    revision: current_revision.into(),
+                    history_len: HistoryLen::new(1),
+                    descriptor_len: crate::DescriptorLen::new(1),
+                },
             }
         );
         assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
@@ -2165,7 +2715,7 @@ mod tests {
     #[test]
     fn commit_session_rejects_stale_revision() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("stale-revision", 1),
             history_start_idx: 0,
@@ -2199,14 +2749,14 @@ mod tests {
 
         assert!(matches!(
             db.commit_session(&command).unwrap_err(),
-            SessionCommitFailure::StaleRevision { .. }
+            SessionCommitFailure::StaleBase { .. }
         ));
     }
 
     #[test]
     fn commit_session_rejects_stale_history_base() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("stale-history", 1),
             history_start_idx: 0,
@@ -2241,9 +2791,17 @@ mod tests {
 
         assert_eq!(
             db.commit_session(&command).unwrap_err(),
-            SessionCommitFailure::StaleHistoryBase {
-                base: HistoryLen::new(2),
-                current: HistoryLen::new(1),
+            SessionCommitFailure::StaleBase {
+                expected: StoreHead {
+                    revision: current_revision.into(),
+                    history_len: HistoryLen::new(2),
+                    descriptor_len: crate::DescriptorLen::ZERO,
+                },
+                current: StoreHead {
+                    revision: current_revision.into(),
+                    history_len: HistoryLen::new(1),
+                    descriptor_len: crate::DescriptorLen::ZERO,
+                },
             }
         );
         assert_eq!(db.history_item_count().unwrap(), 1);
@@ -2252,7 +2810,7 @@ mod tests {
     #[test]
     fn commit_session_rejects_history_start_past_final_len() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = SessionCommit {
             session_id: "bad-history-suffix".into(),
             save_id: crate::SaveId::new(5),
@@ -2283,7 +2841,7 @@ mod tests {
     #[test]
     fn commit_session_truncates_history_with_empty_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("truncate-history", 3),
             history_start_idx: 0,
@@ -2328,7 +2886,7 @@ mod tests {
     #[test]
     fn commit_session_applies_side_table_suffixes() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("side-table-commit", 1),
             history_start_idx: 0,
@@ -2378,7 +2936,7 @@ mod tests {
     #[test]
     fn commit_session_rejects_side_table_rows_past_history_len() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = SessionCommit {
             session_id: "bad-side-table".into(),
             save_id: crate::SaveId::new(6),
@@ -2395,7 +2953,7 @@ mod tests {
             },
             side_tables: SideTableSuffixes {
                 start: HistoryIndex::ZERO,
-                turn_metas: vec![(HistoryIndex::new(1), serde_json::json!({"turn": 1}))],
+                turn_metas: vec![(HistoryIndex::new(2), serde_json::json!({"turn": 2}))],
                 ..SideTableSuffixes::default()
             },
             descriptors: None,
@@ -2407,9 +2965,9 @@ mod tests {
             err,
             SessionCommitFailure::InvalidSideTableRow {
                 table: "turn_metas".into(),
-                index: HistoryIndex::new(1),
+                index: HistoryIndex::new(2),
                 final_len: HistoryLen::new(1),
-                bound: HistoryIndexBound::BeforeFinalLen,
+                bound: HistoryIndexBound::AtOrBeforeFinalLen,
             }
         );
         assert!(db.session_state().unwrap().is_none());
@@ -2419,7 +2977,7 @@ mod tests {
     #[test]
     fn commit_session_rejects_side_table_start_past_history_len() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = SessionCommit {
             session_id: "bad-side-table-suffix".into(),
             save_id: crate::SaveId::new(7),
@@ -2450,9 +3008,9 @@ mod tests {
     }
 
     #[test]
-    fn commit_session_accepts_metadata_snapshots_at_history_len_boundary() {
+    fn commit_session_accepts_side_tables_at_history_len_boundary() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("bad-turn-meta", 1),
             history_start_idx: 0,
@@ -2480,7 +3038,7 @@ mod tests {
             },
             side_tables: SideTableSuffixes {
                 start: HistoryIndex::new(1),
-                turn_metas: Vec::new(),
+                turn_metas: vec![(HistoryIndex::new(1), serde_json::json!({"turn": 1}))],
                 metadata_snapshots: vec![(HistoryIndex::new(1), serde_json::json!({"ok": true}))],
                 context_snapshots: vec![(HistoryIndex::new(1), serde_json::json!({"tokens": 7}))],
             },
@@ -2491,7 +3049,10 @@ mod tests {
         let snapshot = db.load_full_session_snapshot().unwrap().unwrap();
 
         assert_eq!(receipt.history_len, HistoryLen::new(1));
-        assert_eq!(snapshot.turn_metas, Vec::new());
+        assert_eq!(
+            snapshot.turn_metas,
+            vec![(1, serde_json::json!({"turn": 1}))]
+        );
         assert_eq!(
             snapshot.metadata_snapshots,
             vec![(1, serde_json::json!({"ok": true}))]
@@ -2504,12 +3065,13 @@ mod tests {
             db.session_state().unwrap().unwrap().revision,
             current_revision + 1
         );
+        assert!(db.doctor_report().unwrap().healthy);
     }
 
     #[test]
     fn commit_session_rejects_missing_history_object_refs() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("missing-object-ref", 1),
             history_start_idx: 0,
@@ -2566,7 +3128,7 @@ mod tests {
     #[test]
     fn commit_session_rolls_back_history_when_descriptor_validation_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("rollback-descriptor", 1),
             history_start_idx: 0,
@@ -2620,7 +3182,7 @@ mod tests {
     #[test]
     fn commit_session_appends_after_sparse_descriptors_and_nondescriptor_blocks() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let history = (0..12)
             .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
             .collect::<Vec<_>>();
@@ -2669,7 +3231,7 @@ mod tests {
         let appended_descriptor =
             transcript_record_with_history(303, 12, "appended", "new assistant");
         commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("sparse-follow-up", 13),
             12,
             vec![appended_history],
@@ -2698,7 +3260,7 @@ mod tests {
     #[test]
     fn commit_session_keeps_transcript_descriptors_independent_from_history_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let history = (0..3)
             .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
             .collect::<Vec<_>>();
@@ -2734,7 +3296,7 @@ mod tests {
         ));
         let appended_descriptor = transcript_record_with_history(3, 3, "appended", "new assistant");
         commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("independent-transcript", 4),
             3,
             vec![appended_history],
@@ -2759,9 +3321,9 @@ mod tests {
     #[test]
     fn commit_session_rejects_descriptor_history_kind_mismatch_in_saved_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let err = commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("mismatched-descriptor-origin", 1),
             0,
             vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
@@ -2785,7 +3347,7 @@ mod tests {
     #[test]
     fn repair_mismatched_transcript_descriptor_history_links_detaches_bad_links() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("repair-mismatched-links", 1),
             history_start_idx: 0,
@@ -2826,7 +3388,7 @@ mod tests {
     #[test]
     fn repair_checkpoint_first_live_index_past_history_replays_retained_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let history = vec![
             protocol::HistoryItem::user(protocol::Content::text("old prompt")),
             protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
@@ -2881,7 +3443,7 @@ mod tests {
     #[test]
     fn repair_checkpoint_first_live_index_past_actual_history_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("repair-checkpoint-actual-rows", 2),
             history_start_idx: 0,
@@ -2950,7 +3512,7 @@ mod tests {
     #[test]
     fn commit_session_allows_descriptor_links_to_persisted_history_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("prefix-descriptor-origin", 1),
             history_start_idx: 0,
@@ -2966,7 +3528,7 @@ mod tests {
         let updated_descriptor = transcript_user_record_with_history(0, 0, "updated", "old user");
 
         commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("prefix-descriptor-origin", 1),
             1,
             Vec::new(),
@@ -2984,7 +3546,7 @@ mod tests {
     #[test]
     fn commit_session_rejects_descriptor_history_kind_mismatch_in_persisted_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&SessionSnapshot {
             state: test_session_state("prefix-descriptor-mismatch", 1),
             history_start_idx: 0,
@@ -2999,7 +3561,7 @@ mod tests {
         .unwrap();
 
         let err = commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("prefix-descriptor-mismatch", 1),
             1,
             Vec::new(),
@@ -3029,7 +3591,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_estimated_rows_sums_dense_descriptor_ranges() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = vec![
             transcript_record(10, "zero", ""),
             transcript_record(20, "one", "a"),
@@ -3070,7 +3632,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_estimated_rows_uses_compact_tool_preview() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut tool = transcript_record(0, "tool", &"x".repeat(10_000));
         tool.kind = "tool".into();
         tool.tool_name = Some("edit_file".into());
@@ -3094,7 +3656,7 @@ mod tests {
     #[test]
     fn descriptor_slices_omit_indexed_text_payloads() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let huge_indexed_text = format!("needle {}", "x".repeat(10_000));
         let record = transcript_record(0, "huge", &huge_indexed_text);
         db.replace_transcript_descriptor_records_for_repair(std::slice::from_ref(&record))
@@ -3119,7 +3681,7 @@ mod tests {
     #[test]
     fn transcript_search_filters_exact_substring_in_sql() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.replace_transcript_descriptor_records_for_repair(&[
             transcript_record(0, "false-positive", "aba gap bab"),
             transcript_record(1, "exact", "xx abab yy"),
@@ -3138,7 +3700,7 @@ mod tests {
     #[test]
     fn transcript_search_treats_fts_query_punctuation_literally() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.replace_transcript_descriptor_records_for_repair(&[
             transcript_record(0, "underscore", "xx foo_bar yy"),
             transcript_record(1, "wildcard", "xx fooXbar yy"),
@@ -3173,7 +3735,7 @@ mod tests {
     #[test]
     fn commit_session_appends_history_and_descriptors_transactionally() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![
             protocol::HistoryItem::user(protocol::Content::text("old user")),
             protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
@@ -3203,7 +3765,7 @@ mod tests {
         let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
         let appended_descriptor = transcript_user_record_with_history(2, 2, "new-user", "new user");
         let receipt = commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("typed-suffix", 3),
             2,
             vec![appended.clone()],
@@ -3237,7 +3799,7 @@ mod tests {
     fn copy_prefix_to_forks_store_without_copied_tail() {
         let source_dir = tempfile::tempdir().unwrap();
         let dest_dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(source_dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(source_dir.path().join("session.db")).unwrap();
         let history = vec![
             protocol::HistoryItem::user(protocol::Content::text("one")),
             protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
@@ -3252,7 +3814,10 @@ mod tests {
             history_start_idx: 0,
             history_len: history.len(),
             history: history.clone(),
-            turn_metas: vec![(0, serde_json::json!({"turn":"first"}))],
+            turn_metas: vec![
+                (0, serde_json::json!({"turn":"first"})),
+                (2, serde_json::json!({"turn":"fork-boundary"})),
+            ],
             metadata_snapshots: vec![(2, serde_json::json!({"slug":"prefix"}))],
             context_snapshots: Vec::new(),
         })
@@ -3279,6 +3844,16 @@ mod tests {
         );
         assert_eq!(fork.transcript_descriptor_count().unwrap(), 2);
         assert_eq!(
+            fork.load_full_session_snapshot()
+                .unwrap()
+                .unwrap()
+                .turn_metas,
+            vec![
+                (0, serde_json::json!({"turn":"first"})),
+                (2, serde_json::json!({"turn":"fork-boundary"})),
+            ]
+        );
+        assert_eq!(
             fork.search_transcript_candidates("three").unwrap(),
             Vec::<TranscriptSearchCandidate>::new()
         );
@@ -3291,7 +3866,7 @@ mod tests {
     #[test]
     fn commit_session_without_descriptors_preserves_transcript_descriptors() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![
             protocol::HistoryItem::user(protocol::Content::text("old user")),
             protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
@@ -3320,7 +3895,7 @@ mod tests {
 
         let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
         commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("delta-history-only", 3),
             2,
             vec![appended],
@@ -3342,7 +3917,7 @@ mod tests {
     #[test]
     fn commit_session_descriptor_suffix_replaces_only_requested_tail() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![protocol::HistoryItem::user(protocol::Content::text("user"))];
         let initial_snapshot = SessionSnapshot {
             state: test_session_state("delta-descriptors", initial_history.len()),
@@ -3365,7 +3940,7 @@ mod tests {
 
         let replacement = transcript_record(1, "one-new", "updated one");
         commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("delta-descriptors", 1),
             1,
             Vec::new(),
@@ -3387,7 +3962,7 @@ mod tests {
     #[test]
     fn commit_session_syncs_requested_side_table_suffixes() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let initial_history = vec![
             protocol::HistoryItem::user(protocol::Content::text("old user")),
             protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
@@ -3412,7 +3987,7 @@ mod tests {
         let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
         let appended_metadata = serde_json::json!({"first_user_message":"new user"});
         commit_current_suffix(
-            &db,
+            &mut db,
             test_session_state("typed-side-tables", 3),
             2,
             vec![appended],
@@ -3439,7 +4014,7 @@ mod tests {
     #[test]
     fn transcript_search_uses_indexed_short_utf8_and_paged_candidates() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = vec![
             transcript_record(0, "zero", "alpha café"),
             transcript_record(1, "one", "beta needle"),
@@ -3499,7 +4074,7 @@ mod tests {
     #[test]
     fn transcript_search_pages_past_false_positive_postings() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..80)
             .map(|idx| transcript_record(idx, &format!("false-{idx}"), "abc false bcd"))
             .collect::<Vec<_>>();
@@ -3525,7 +4100,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_range_and_tail_read_bounded_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..6)
             .map(|idx| transcript_record(idx * 10, &format!("block-{idx}"), &format!("text {idx}")))
             .collect::<Vec<_>>();
@@ -3611,7 +4186,7 @@ mod tests {
     #[test]
     fn transcript_block_metadata_reads_include_descriptorless_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = vec![
             transcript_record(0, "zero", "zero text"),
             transcript_record(2, "two", "two text"),
@@ -3663,7 +4238,7 @@ mod tests {
     #[test]
     fn transcript_descriptor_navigation_by_kind_reads_nearest_matching_indexes() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..6)
             .map(|idx| transcript_record(idx * 10, &format!("block-{idx}"), &format!("text {idx}")))
             .collect::<Vec<_>>();
@@ -3717,7 +4292,7 @@ mod tests {
     #[test]
     fn sparse_transcript_descriptor_reads_keep_metadata_object_backed() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut record = transcript_record(0, "tool", "tool text");
         let metadata_payload = "x".repeat(crate::history::METADATA_OBJECT_MIN_BYTES + 128);
         record.descriptor_json = serde_json::json!({
@@ -3863,7 +4438,7 @@ mod tests {
     #[test]
     fn session_snapshot_save_appends_only_changed_history_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
         let second = protocol::HistoryItem::user(protocol::Content::text("second"));
         let mut snapshot = SessionSnapshot {
@@ -3951,7 +4526,7 @@ mod tests {
     #[test]
     fn combined_snapshot_and_descriptor_save_rolls_back_together() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
         let second = protocol::HistoryItem::user(protocol::Content::text("second"));
         let mut snapshot = SessionSnapshot {
@@ -4027,7 +4602,7 @@ mod tests {
     #[test]
     fn session_snapshot_append_preserves_descriptor_tail_without_descriptor_delta() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
         let second = protocol::HistoryItem::user(protocol::Content::text("second"));
         let mut snapshot = SessionSnapshot {
@@ -4128,7 +4703,7 @@ mod tests {
     #[test]
     fn session_snapshot_suffix_preserves_transcript_until_descriptor_delta() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = protocol::HistoryItem::user(protocol::Content::text("first"));
         let assistant = protocol::HistoryItem::user(protocol::Content::text("assistant history"));
         let old_request = protocol::HistoryItem::user(protocol::Content::text("old request"));
@@ -4190,7 +4765,7 @@ mod tests {
     #[test]
     fn transcript_descriptors_roundtrip_and_feed_search_candidates() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         db.replace_transcript_descriptor_records_for_repair(&[
             TranscriptDescriptorRecord {
                 block_idx: 0,
@@ -4247,7 +4822,7 @@ mod tests {
     #[test]
     fn appends_request_audit_to_sqlite_objects_and_queries_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let body = serde_json::json!({"model": "model-a", "messages": [{"role": "user", "content": "hi"}]});
         let entry = protocol::request_log::RequestLogEntry {
             request_id: 9,
@@ -4350,7 +4925,7 @@ mod tests {
     #[test]
     fn request_audit_summary_mode_omits_payload_objects() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let body = serde_json::json!({
             "model": "model-a",
             "messages": [{"role": "user", "content": "hi"}],
@@ -4414,7 +4989,7 @@ mod tests {
     #[test]
     fn request_audit_full_mode_dedupes_repeated_prefix_items() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let first = serde_json::json!({
             "model": "model-a",
             "input": [
@@ -4523,7 +5098,6 @@ mod tests {
         assert!(second_manifest["parent_hash"].is_string());
         assert_eq!(second_manifest["item_hashes"].as_array().unwrap().len(), 1);
     }
-
     #[test]
     fn writes_session_meta_sidecar_from_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -4610,7 +5184,7 @@ mod tests {
     #[test]
     fn roundtrips_writer_owner() {
         let dir = tempfile::tempdir().unwrap();
-        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let owner = WriterOwner {
             hostname: "host".into(),
             pid: 42,
@@ -4662,7 +5236,7 @@ mod tests {
     }
 
     fn commit_current_suffix(
-        db: &SessionDb,
+        db: &mut SessionDb,
         state: SessionState,
         history_start: usize,
         history: Vec<protocol::HistoryItem>,

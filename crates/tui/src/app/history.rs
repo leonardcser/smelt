@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn display_only_sqlite_load_reads_bounded_tail_descriptors() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..200)
             .map(|idx| test_descriptor_record(idx, &format!("block {idx}")))
             .collect::<Vec<_>>();
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn display_only_sqlite_load_counts_non_dense_descriptor_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = vec![
             test_descriptor_record(70, "visible old tail"),
             test_descriptor_record(235, "visible newest tail"),
@@ -1095,13 +1095,14 @@ impl TuiApp {
                 return;
             }
         };
-        let maintenance = match smelt_store::SessionMaintenance::open(&fork_work_dir, &forked.id) {
-            Ok(maintenance) => maintenance,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to own fork destination: {err}"));
-                return;
-            }
-        };
+        let mut maintenance =
+            match smelt_store::SessionMaintenance::open(&fork_work_dir, &forked.id) {
+                Ok(maintenance) => maintenance,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to own fork destination: {err}"));
+                    return;
+                }
+            };
         if let Err(err) = maintenance.copy_prefix_from(&source, &state, history_len) {
             self.notify_error_sticky(format!("failed to fork session store: {err}"));
             return;
@@ -1852,22 +1853,60 @@ impl TuiApp {
     /// that save has either completed or the document can no longer make progress.
     pub(crate) fn save_session_and_flush(&mut self) {
         self.save_session();
-        for _ in 0..64 {
-            self.flush_persist();
+        loop {
+            let outcome = self.flush_persist();
             if !self.session_document_has_unflushed_work() {
+                break;
+            }
+            let retryable = match &outcome {
+                crate::persist::PersistFlushOutcome::Drained => true,
+                crate::persist::PersistFlushOutcome::CommitFailed(failures) => {
+                    failures.iter().all(|failure| {
+                        failure.commit_failure.as_ref().is_some_and(
+                            smelt_store::SessionCommitFailure::is_recoverable_stale_base,
+                        )
+                    })
+                }
+                crate::persist::PersistFlushOutcome::WorkerExited
+                | crate::persist::PersistFlushOutcome::Disconnected => false,
+            };
+            if !retryable {
                 break;
             }
             if !self.session_document.has_pending_save() {
                 self.save_session();
+                if !self.session_document.has_pending_save() {
+                    break;
+                }
             }
         }
-        self.flush_persist();
     }
 
     /// Block until all queued persist writes complete. Call before reading session files from disk.
-    pub(crate) fn flush_persist(&mut self) {
-        self.persister.flush();
+    pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistFlushOutcome {
+        let outcome = self.persister.flush();
         self.drain_persist_reports();
+        match &outcome {
+            crate::persist::PersistFlushOutcome::WorkerExited => {
+                self.notify_error_sticky(
+                    "persistence worker exited before queued writes completed".into(),
+                );
+            }
+            crate::persist::PersistFlushOutcome::Disconnected => {
+                self.notify_error_sticky("persistence worker is disconnected".into());
+            }
+            crate::persist::PersistFlushOutcome::Drained
+            | crate::persist::PersistFlushOutcome::CommitFailed(_) => {}
+        }
+        outcome
+    }
+
+    pub(crate) fn shutdown_persist(&mut self) -> Result<(), String> {
+        let result = self.persister.shutdown();
+        if let Err(err) = &result {
+            self.notify_error_sticky(format!("failed to stop persistence worker: {err}"));
+        }
+        result
     }
 
     fn suppress_duplicate_carried_tail_before(&mut self, index: usize) -> usize {

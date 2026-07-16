@@ -93,6 +93,13 @@ pub struct TranscriptDescriptorSuffix {
     pub records: Vec<TranscriptDescriptorRecord>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct StoreHead {
+    pub revision: Revision,
+    pub history_len: HistoryLen,
+    pub descriptor_len: DescriptorLen,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct SaveReceipt {
     pub session_id: String,
@@ -101,6 +108,16 @@ pub struct SaveReceipt {
     pub revision: Revision,
     pub history_len: HistoryLen,
     pub descriptor_len: DescriptorLen,
+}
+
+impl SaveReceipt {
+    pub const fn head(&self) -> StoreHead {
+        StoreHead {
+            revision: self.revision,
+            history_len: self.history_len,
+            descriptor_len: self.descriptor_len,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -115,17 +132,9 @@ pub enum SessionCommitFailure {
         expected: String,
         actual: Option<String>,
     },
-    StaleRevision {
-        base: Revision,
-        current: Revision,
-    },
-    StaleHistoryBase {
-        base: HistoryLen,
-        current: HistoryLen,
-    },
-    StaleDescriptorBase {
-        base: DescriptorLen,
-        current: DescriptorLen,
+    StaleBase {
+        expected: StoreHead,
+        current: StoreHead,
     },
     InvalidHistorySuffix {
         start: HistoryIndex,
@@ -147,19 +156,36 @@ pub enum SessionCommitFailure {
         bound: HistoryIndexBound,
     },
     OwnershipLost,
+    Busy {
+        operation: String,
+        attempts: u32,
+        waited_ms: u64,
+    },
+    UnsupportedSchema {
+        found: i32,
+        expected: i32,
+    },
+    InvalidCommand {
+        message: String,
+    },
     Integrity {
+        message: String,
+    },
+    Io {
+        message: String,
+    },
+    Sqlite {
         message: String,
     },
 }
 
 impl SessionCommitFailure {
     pub fn is_recoverable_stale_base(&self) -> bool {
-        matches!(
-            self,
-            Self::StaleRevision { .. }
-                | Self::StaleHistoryBase { .. }
-                | Self::StaleDescriptorBase { .. }
-        )
+        matches!(self, Self::StaleBase { .. })
+    }
+
+    pub fn invalidates_connection(&self) -> bool {
+        matches!(self, Self::Sqlite { .. })
     }
 }
 
@@ -168,29 +194,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn commit_failure_classifies_recoverable_stale_bases() {
-        let stale_revision = SessionCommitFailure::StaleRevision {
-            base: Revision::new(1),
-            current: Revision::new(2),
-        };
-        let stale_history = SessionCommitFailure::StaleHistoryBase {
-            base: HistoryLen::new(1),
-            current: HistoryLen::new(2),
-        };
-        let stale_descriptor = SessionCommitFailure::StaleDescriptorBase {
-            base: DescriptorLen::new(1),
-            current: DescriptorLen::new(2),
+    fn commit_failure_classifies_recoverable_stale_base() {
+        let stale = SessionCommitFailure::StaleBase {
+            expected: StoreHead {
+                revision: Revision::new(1),
+                history_len: HistoryLen::new(2),
+                descriptor_len: DescriptorLen::new(3),
+            },
+            current: StoreHead {
+                revision: Revision::new(4),
+                history_len: HistoryLen::new(5),
+                descriptor_len: DescriptorLen::new(6),
+            },
         };
         let ownership_lost = SessionCommitFailure::OwnershipLost;
         let integrity = SessionCommitFailure::Integrity {
             message: "bad suffix".into(),
         };
+        let sqlite = SessionCommitFailure::Sqlite {
+            message: "connection failed".into(),
+        };
 
-        assert!(stale_revision.is_recoverable_stale_base());
-        assert!(stale_history.is_recoverable_stale_base());
-        assert!(stale_descriptor.is_recoverable_stale_base());
+        assert!(stale.is_recoverable_stale_base());
         assert!(!ownership_lost.is_recoverable_stale_base());
         assert!(!integrity.is_recoverable_stale_base());
+        assert!(sqlite.invalidates_connection());
+        assert!(!stale.invalidates_connection());
     }
 
     #[test]
@@ -203,15 +232,25 @@ mod tests {
     }
 
     #[test]
-    fn commit_failure_serializes_stale_descriptor_context() {
-        let failure = SessionCommitFailure::StaleDescriptorBase {
-            base: DescriptorLen::new(303),
-            current: DescriptorLen::new(111),
+    fn commit_failure_serializes_complete_stale_head() {
+        let failure = SessionCommitFailure::StaleBase {
+            expected: StoreHead {
+                revision: Revision::new(301),
+                history_len: HistoryLen::new(302),
+                descriptor_len: DescriptorLen::new(303),
+            },
+            current: StoreHead {
+                revision: Revision::new(109),
+                history_len: HistoryLen::new(110),
+                descriptor_len: DescriptorLen::new(111),
+            },
         };
 
         let json = serde_json::to_value(&failure).expect("serialize failure");
 
-        assert_eq!(json["StaleDescriptorBase"]["base"], 303);
-        assert_eq!(json["StaleDescriptorBase"]["current"], 111);
+        assert_eq!(json["StaleBase"]["expected"]["descriptor_len"], 303);
+        assert_eq!(json["StaleBase"]["current"]["revision"], 109);
+        assert_eq!(json["StaleBase"]["current"]["history_len"], 110);
+        assert_eq!(json["StaleBase"]["current"]["descriptor_len"], 111);
     }
 }

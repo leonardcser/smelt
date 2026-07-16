@@ -33,33 +33,6 @@ pub struct SessionSaveReport {
     pub changed: bool,
 }
 
-pub(crate) fn save_session_snapshot(
-    conn: &Connection,
-    snapshot: &SessionSnapshot,
-    expected_revision: Option<u64>,
-    owner_token: Option<&str>,
-    compression: ObjectCompression,
-) -> Result<SessionSaveReport> {
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = save_session_snapshot_in_transaction(
-        conn,
-        snapshot,
-        expected_revision,
-        owner_token,
-        compression,
-    );
-    match result {
-        Ok(report) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(report)
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
-        }
-    }
-}
-
 pub(crate) fn save_session_snapshot_in_transaction(
     conn: &Connection,
     snapshot: &SessionSnapshot,

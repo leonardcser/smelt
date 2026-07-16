@@ -593,25 +593,16 @@ impl SessionPersistState {
         };
         self.mark_history_dirty_from(pending.history.start_idx);
         let mut plan = SaveFailurePlan::default();
-        match failure {
-            Some(smelt_store::SessionCommitFailure::StaleDescriptorBase { current, .. }) => {
-                if let Some(current) = current.as_usize() {
-                    self.durable.descriptor_len = current;
-                    plan.reconcile_descriptor_len = Some(current);
-                }
-                self.queue_save();
+        if let Some(smelt_store::SessionCommitFailure::StaleBase { current, .. }) = failure {
+            self.durable.revision = current.revision.get();
+            if let Some(history_len) = current.history_len.as_usize() {
+                self.durable.store_history_len = history_len;
             }
-            Some(smelt_store::SessionCommitFailure::StaleRevision { current, .. }) => {
-                self.durable.revision = current.get();
-                self.queue_save();
+            if let Some(descriptor_len) = current.descriptor_len.as_usize() {
+                self.durable.descriptor_len = descriptor_len;
+                plan.reconcile_descriptor_len = Some(descriptor_len);
             }
-            Some(smelt_store::SessionCommitFailure::StaleHistoryBase { current, .. }) => {
-                if let Some(current) = current.as_usize() {
-                    self.durable.store_history_len = current;
-                }
-                self.queue_save();
-            }
-            _ => {}
+            self.queue_save();
         }
         plan
     }
@@ -1138,9 +1129,17 @@ mod tests {
         let plan = state.record_save_failure(
             save_id,
             "session-a",
-            Some(&smelt_store::SessionCommitFailure::StaleDescriptorBase {
-                base: smelt_store::DescriptorLen::new(303),
-                current: smelt_store::DescriptorLen::new(111),
+            Some(&smelt_store::SessionCommitFailure::StaleBase {
+                expected: smelt_store::StoreHead {
+                    revision: smelt_store::Revision::new(7),
+                    history_len: smelt_store::HistoryLen::new(3),
+                    descriptor_len: smelt_store::DescriptorLen::new(303),
+                },
+                current: smelt_store::StoreHead {
+                    revision: smelt_store::Revision::new(7),
+                    history_len: smelt_store::HistoryLen::new(3),
+                    descriptor_len: smelt_store::DescriptorLen::new(111),
+                },
             }),
         );
 
@@ -1173,9 +1172,17 @@ mod tests {
         let plan = state.record_save_failure(
             save_id + 1,
             "session-a",
-            Some(&smelt_store::SessionCommitFailure::StaleDescriptorBase {
-                base: smelt_store::DescriptorLen::new(303),
-                current: smelt_store::DescriptorLen::new(111),
+            Some(&smelt_store::SessionCommitFailure::StaleBase {
+                expected: smelt_store::StoreHead {
+                    revision: smelt_store::Revision::new(7),
+                    history_len: smelt_store::HistoryLen::new(3),
+                    descriptor_len: smelt_store::DescriptorLen::new(303),
+                },
+                current: smelt_store::StoreHead {
+                    revision: smelt_store::Revision::new(7),
+                    history_len: smelt_store::HistoryLen::new(3),
+                    descriptor_len: smelt_store::DescriptorLen::new(111),
+                },
             }),
         );
 
@@ -1250,12 +1257,25 @@ mod tests {
         let failure = state.record_save_failure(
             second_save,
             "session-a",
-            Some(&smelt_store::SessionCommitFailure::StaleRevision {
-                base: smelt_store::Revision::new(5),
-                current: smelt_store::Revision::new(7),
+            Some(&smelt_store::SessionCommitFailure::StaleBase {
+                expected: smelt_store::StoreHead {
+                    revision: smelt_store::Revision::new(5),
+                    history_len: smelt_store::HistoryLen::new(4),
+                    descriptor_len: smelt_store::DescriptorLen::new(4),
+                },
+                current: smelt_store::StoreHead {
+                    revision: smelt_store::Revision::new(7),
+                    history_len: smelt_store::HistoryLen::new(4),
+                    descriptor_len: smelt_store::DescriptorLen::new(4),
+                },
             }),
         );
-        assert_eq!(failure, SaveFailurePlan::default());
+        assert_eq!(
+            failure,
+            SaveFailurePlan {
+                reconcile_descriptor_len: Some(4),
+            }
+        );
         assert!(!state.has_pending_save());
         assert!(state.is_save_queued());
         assert!(state.session_dirty);

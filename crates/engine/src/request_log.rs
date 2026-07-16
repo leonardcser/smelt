@@ -17,7 +17,7 @@ pub fn entry(
 /// Append one request attempt to the session's SQLite request audit.
 #[cfg(test)]
 pub fn append(
-    db: &smelt_store::SessionDb,
+    db: &mut smelt_store::SessionDb,
     ctx: RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
@@ -242,9 +242,9 @@ mod tests {
             background: false,
         };
 
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let id = append(
-            &db,
+            &mut db,
             ctx,
             &info,
             &zero_pricing(),
@@ -263,7 +263,7 @@ mod tests {
     fn request_log_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let session_dir = tmp.path();
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
 
         let body = serde_json::json!({"model": "gpt-test", "messages": []});
         let url = "https://api.example.com/v1/chat/completions";
@@ -298,7 +298,7 @@ mod tests {
             background: false,
         };
         append(
-            &db,
+            &mut db,
             ctx,
             &info,
             &zero_pricing(),
@@ -328,7 +328,7 @@ mod tests {
             background: false,
         };
         append(
-            &db,
+            &mut db,
             ctx_err,
             &info_err,
             &zero_pricing(),

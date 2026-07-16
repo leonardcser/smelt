@@ -5,24 +5,48 @@ pub enum StoreError {
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
-    OwnershipConflict { owner: Option<String> },
+    Busy {
+        operation: &'static str,
+        attempts: u32,
+        waited_ms: u64,
+    },
+    TransactionCleanup {
+        operation: &'static str,
+        message: String,
+    },
+    OwnershipConflict {
+        owner: Option<String>,
+    },
     OwnershipLost,
-    MissingObject { reference: String },
-    ObjectTooLarge { size: u64, max: u64 },
+    MissingObject {
+        reference: String,
+    },
+    ObjectTooLarge {
+        size: u64,
+        max: u64,
+    },
     Integrity(String),
-    UnsupportedSchema { found: i32, expected: i32 },
+    UnsupportedSchema {
+        found: i32,
+        expected: i32,
+    },
 }
 
 impl StoreError {
     pub fn is_database_locked(&self) -> bool {
-        matches!(
-            self,
-            StoreError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
-                if matches!(
-                    err.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
-        )
+        matches!(self, StoreError::Busy { .. })
+            || matches!(
+                self,
+                StoreError::Sqlite(rusqlite::Error::SqliteFailure(err, _))
+                    if matches!(
+                        err.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    )
+            )
+    }
+
+    pub fn invalidates_connection(&self) -> bool {
+        matches!(self, Self::Sqlite(_) | Self::TransactionCleanup { .. })
     }
 }
 
@@ -32,6 +56,20 @@ impl fmt::Display for StoreError {
             StoreError::Io(err) => write!(f, "io error: {err}"),
             StoreError::Sqlite(err) => write!(f, "sqlite error: {err}"),
             StoreError::Json(err) => write!(f, "json error: {err}"),
+            StoreError::Busy {
+                operation,
+                attempts,
+                waited_ms,
+            } => write!(
+                f,
+                "database busy during {operation} after {attempts} attempts over {waited_ms}ms"
+            ),
+            StoreError::TransactionCleanup { operation, message } => {
+                write!(
+                    f,
+                    "transaction cleanup failed during {operation}: {message}"
+                )
+            }
             StoreError::OwnershipConflict { owner } => match owner {
                 Some(owner) => write!(f, "session is owned by another writer: {owner}"),
                 None => f.write_str("session is owned by another writer"),

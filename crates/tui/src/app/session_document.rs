@@ -4031,9 +4031,17 @@ mod tests {
                 save_id,
                 session_id: "session-a".into(),
                 message: "save session database: stale descriptor base".into(),
-                commit_failure: Some(smelt_store::SessionCommitFailure::StaleDescriptorBase {
-                    base: smelt_store::DescriptorLen::new(303),
-                    current: smelt_store::DescriptorLen::new(111),
+                commit_failure: Some(smelt_store::SessionCommitFailure::StaleBase {
+                    expected: smelt_store::StoreHead {
+                        revision: smelt_store::Revision::new(7),
+                        history_len: smelt_store::HistoryLen::new(1),
+                        descriptor_len: smelt_store::DescriptorLen::new(303),
+                    },
+                    current: smelt_store::StoreHead {
+                        revision: smelt_store::Revision::new(7),
+                        history_len: smelt_store::HistoryLen::new(1),
+                        descriptor_len: smelt_store::DescriptorLen::new(111),
+                    },
                 }),
             },
         );

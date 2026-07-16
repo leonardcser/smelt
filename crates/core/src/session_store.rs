@@ -25,6 +25,11 @@ pub enum SessionStoreError {
     ReadOnlyOwnerConflict {
         owner: String,
     },
+    Busy {
+        operation: String,
+        attempts: u32,
+        waited_ms: u64,
+    },
     Io {
         operation: &'static str,
         path: String,
@@ -60,6 +65,7 @@ impl SessionStoreError {
             Self::MissingDatabase { .. } => "missing_database",
             Self::SymlinkNotAllowed { .. } => "symlink_not_allowed",
             Self::ReadOnlyOwnerConflict { .. } => "read_only_owner_conflict",
+            Self::Busy { .. } => "busy",
             Self::Io { .. } => "io",
             Self::UnsupportedSchema { .. } => "unsupported_schema",
             Self::MissingObject { .. } => "missing_object",
@@ -92,6 +98,14 @@ impl fmt::Display for SessionStoreError {
             Self::ReadOnlyOwnerConflict { owner } => {
                 write!(f, "session is owned by another writer: {owner}")
             }
+            Self::Busy {
+                operation,
+                attempts,
+                waited_ms,
+            } => write!(
+                f,
+                "session database busy during {operation} after {attempts} attempts over {waited_ms}ms"
+            ),
             Self::Io {
                 operation,
                 path,
@@ -140,6 +154,25 @@ pub fn store_error(
         },
         smelt_store::StoreError::Json(err) => SessionStoreError::Corrupt {
             context: format!("{operation} {}: {err}", path.display()),
+        },
+        smelt_store::StoreError::Busy {
+            operation,
+            attempts,
+            waited_ms,
+        } => SessionStoreError::Busy {
+            operation: operation.to_string(),
+            attempts,
+            waited_ms,
+        },
+        smelt_store::StoreError::TransactionCleanup {
+            operation: transaction_operation,
+            message,
+        } => SessionStoreError::Sqlite {
+            operation,
+            path: path.display().to_string(),
+            message: format!(
+                "transaction cleanup failed during {transaction_operation}: {message}"
+            ),
         },
         smelt_store::StoreError::OwnershipConflict { owner } => {
             SessionStoreError::ReadOnlyOwnerConflict {

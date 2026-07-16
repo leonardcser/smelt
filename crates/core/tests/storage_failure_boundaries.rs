@@ -67,7 +67,7 @@ fn repair_needed_read_does_not_mutate_while_another_process_owns_session() {
             Vec::new(),
         )),
     ];
-    let db = smelt_store::SessionDb::open(&db_path).expect("create database");
+    let mut db = smelt_store::SessionDb::open(&db_path).expect("create database");
     db.save_session_snapshot_for_import(
         &smelt_core::session::store_snapshot_from_session(&session, 0).expect("build snapshot"),
     )

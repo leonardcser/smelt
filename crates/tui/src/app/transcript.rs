@@ -161,41 +161,8 @@ impl SqliteTranscriptStore {
         width: u16,
         target_rows: u16,
     ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
-        let total = {
-            let _perf = smelt_perf::perf::begin("transcript:resume_tail:descriptor_count");
-            self.db.transcript_descriptor_count()?
-        };
-        if total == 0 {
-            return self
-                .db
-                .read_transcript_descriptor_tail_slice_with_total(total, 0);
-        }
-
-        let target_rows = u64::from(target_rows.max(1));
-        let mut count = target_rows
-            .saturating_add(1)
-            .saturating_div(2)
-            .min(total as u64) as usize;
-        let mut probes = 0u64;
-        while count < total {
-            probes = probes.saturating_add(1);
-            smelt_perf::perf::record_value("transcript:resume_tail:tail_probe_count", count as u64);
-            let slice = {
-                let _perf = smelt_perf::perf::begin("transcript:resume_tail:tail_slice_probe");
-                self.db
-                    .read_transcript_descriptor_tail_slice_with_total(total, count)?
-            };
-            if estimate_descriptor_rows(&slice.records, width) >= target_rows {
-                smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes);
-                return Ok(slice);
-            }
-            count = count.saturating_mul(2).min(total);
-        }
-        smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes + 1);
-        smelt_perf::perf::record_value("transcript:resume_tail:tail_probe_count", total as u64);
-        let _perf = smelt_perf::perf::begin("transcript:resume_tail:tail_slice_probe");
         self.db
-            .read_transcript_descriptor_tail_slice_with_total(total, total)
+            .read_transcript_descriptor_tail_for_rows(width, target_rows)
     }
 
     fn read_descriptor_slice(
@@ -248,25 +215,11 @@ impl TranscriptStoreCache {
     }
 }
 
-fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
+pub(crate) fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
     viewport_rows
         .max(1)
         .saturating_mul(DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS.saturating_add(1))
         .max(DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS)
-}
-
-fn estimate_descriptor_rows(
-    records: &[smelt_store::TranscriptDescriptorRecord],
-    width: u16,
-) -> u64 {
-    let width = u64::from(width.max(1));
-    records
-        .iter()
-        .map(|record| {
-            let text_rows = record.estimated_text_bytes.saturating_add(width - 1) / width;
-            text_rows.max(1).saturating_add(1)
-        })
-        .sum()
 }
 
 fn descriptor_window_payload_bytes(records: &[TranscriptBlockRecordWithId]) -> u64 {
@@ -7926,7 +7879,7 @@ mod tests {
     #[test]
     fn transcript_document_loads_descriptor_window_from_store() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..4).map(test_descriptor_record).collect::<Vec<_>>();
         db.replace_transcript_descriptor_records_for_repair(&records)
             .unwrap();
@@ -7949,7 +7902,7 @@ mod tests {
     #[test]
     fn transcript_document_merges_descriptor_windows_without_discarding_tail() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..6).map(test_descriptor_record).collect::<Vec<_>>();
         db.replace_transcript_descriptor_records_for_repair(&records)
             .unwrap();
@@ -8063,7 +8016,7 @@ mod tests {
     #[test]
     fn approximate_row_seek_uses_descriptor_prefix_estimates() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..300).map(test_descriptor_record).collect::<Vec<_>>();
         records[0].estimated_text_bytes = 1_000;
         db.replace_transcript_descriptor_records_for_repair(&records)
@@ -8092,7 +8045,7 @@ mod tests {
     #[test]
     fn scrollbar_total_ignores_exact_loaded_height_refinements_for_sparse_sessions() {
         let dir = tempfile::tempdir().unwrap();
-        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..16).map(test_descriptor_record).collect::<Vec<_>>();
         db.replace_transcript_descriptor_records_for_repair(&records)
             .unwrap();

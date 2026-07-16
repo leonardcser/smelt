@@ -1,7 +1,21 @@
 # Storage architecture audit and hardening plan
 
-Status: proposed  
+Status: implemented with deferred follow-ups on `storage-spine-refactor-plan`
 Audit target: `6ff5f188e fix(storage): preserve canonical history through compaction`, on top of `bc17a9cbe refactor(storage): consolidate session persistence spine`
+
+The detailed findings below describe the audited baseline. The branch now implements the
+robust-storage target through all six phases, including path confinement, strict readers,
+lifetime ownership, fenced mutable APIs, RAII transactions, bounded pre-mutation busy retry,
+typed commit failures, staged lifecycle operations, transactional attachments, coherent
+resume snapshots, final-boundary turn metadata, deterministic worker shutdown, schema
+hardening, and operational maintenance commands.
+
+The intentionally deferred work is measurement-driven or architectural polish: a global
+read-only catalog, generic repository or async storage interfaces, event sourcing,
+automatic multi-writer merging, and module splitting that does not improve lifecycle
+correctness. The worker queue remains instrumented and audit payload memory is bounded;
+further queue backpressure should be added only if production measurements show sustained
+save backlog.
 
 ## Executive decision
 

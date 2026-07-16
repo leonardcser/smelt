@@ -1242,12 +1242,22 @@ pub struct SessionHeader {
     pub degraded_warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionStoreResume {
+    pub header: SessionHeader,
+    pub store_ref: SessionStoreRef,
+    pub head: smelt_store::StoreHead,
+    pub descriptor_tail: smelt_store::TranscriptDescriptorSlice,
+}
+
 pub fn save(session: &Session) {
     if let Err(err) = save_result(session) {
         eprintln!("smelt: failed to save session {}: {err}", session.id);
     }
 }
 
+/// Synchronous save entry point for offline tools and tests.
+/// Interactive sessions persist through the worker-owned writer lifecycle.
 pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
     let session_id = crate::session_id::SessionId::parse(&session.id)
@@ -1264,7 +1274,7 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
         .as_ref()
         .map_or(session_dir.as_path(), |staged| staged.path());
 
-    let writer = smelt_store::OwnedSessionWriter::open(writer_dir, &session.id)?;
+    let mut writer = smelt_store::OwnedSessionWriter::open(writer_dir, &session.id)?;
     let current_state = writer.session_state()?;
     let base_revision = current_state.as_ref().map_or(0, |state| state.revision);
     let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
@@ -1475,11 +1485,9 @@ fn turn_meta_values_from<T: Serialize>(
             "turn metadata index {idx} must be at or before final history length {history_len}"
         )));
     }
-    // A turn completed exactly at the current boundary remains staged until a
-    // subsequent history item makes it a valid `turn_idx` row in the store.
     snapshots
         .iter()
-        .filter(|(idx, _)| *idx >= history_start_idx && *idx < history_len)
+        .filter(|(idx, _)| *idx >= history_start_idx && *idx <= history_len)
         .map(|(idx, value)| Ok((*idx as u64, serde_json::to_value(value)?)))
         .collect()
 }
@@ -1710,6 +1718,61 @@ pub fn prepare_session_dir_for_read_result(id_or_prefix: &str) -> SessionStoreRe
     Ok(resolved.dir)
 }
 
+pub fn load_store_resume_result(
+    id_or_prefix: &str,
+    descriptor_width: u16,
+    descriptor_target_rows: u16,
+) -> SessionStoreResult<Option<SessionStoreResume>> {
+    let resolved = resolve_session_dir_for_read_result(id_or_prefix)?;
+    let session_dir = resolved.dir;
+    crate::session_store::reject_symlink(&session_dir, "read")?;
+    let db_path = session_dir.join("session.db");
+    crate::session_store::reject_symlink(&db_path, "read")?;
+    let db = smelt_store::SessionReader::open_database(&db_path)
+        .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
+    let Some(snapshot) = db
+        .load_session_resume_snapshot(descriptor_width, descriptor_target_rows)
+        .map_err(|err| {
+            crate::session_store::store_error("read coherent session snapshot", &db_path, err)
+        })?
+    else {
+        return Ok(None);
+    };
+    let history_len =
+        snapshot
+            .head
+            .history_len
+            .as_usize()
+            .ok_or_else(|| SessionStoreError::Corrupt {
+                context: "session history length exceeds platform limits".into(),
+            })?;
+    let meta = session_meta_from_store_state(
+        &session_dir,
+        snapshot.state,
+        snapshot.history_text_bytes,
+        snapshot.retained_history_len.min(history_len),
+    )?;
+    let header = SessionHeader {
+        meta,
+        history_len,
+        revision: snapshot.head.revision.get(),
+        degraded_warnings: snapshot
+            .missing_object_references
+            .iter()
+            .map(|reference| format!("missing SQLite object {reference}"))
+            .collect(),
+    };
+    Ok(Some(SessionStoreResume {
+        header,
+        store_ref: SessionStoreRef {
+            session_dir,
+            db_path,
+        },
+        head: snapshot.head,
+        descriptor_tail: snapshot.descriptor_tail,
+    }))
+}
+
 pub fn load_store_header(id_or_prefix: &str) -> Option<(SessionHeader, SessionStoreRef)> {
     load_store_header_result(id_or_prefix).ok().flatten()
 }
@@ -1896,7 +1959,7 @@ pub fn backfill_transcript_descriptor_records_from_history_range(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| smelt_store::StoreError::Integrity("session directory has no id".into()))?;
-    let maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
+    let mut maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
     let reader = smelt_store::SessionReader::open_existing(session_dir)?;
     let history = reader.read_history_items_range(history_range.clone())?;
     let records = transcript_descriptor_records_from_history_items(
@@ -2352,6 +2415,21 @@ fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMet
     else {
         return Ok(None);
     };
+    let text_bytes = db
+        .history_text_bytes()
+        .map_err(|err| crate::session_store::store_error("read history size", &db_path, err))?;
+    let retained_history_len = db
+        .history_item_count()
+        .map_err(|err| crate::session_store::store_error("read history length", &db_path, err))?;
+    session_meta_from_store_state(path, state, text_bytes, retained_history_len).map(Some)
+}
+
+fn session_meta_from_store_state(
+    path: &Path,
+    state: smelt_store::SessionState,
+    text_bytes: u64,
+    retained_history_len: usize,
+) -> SessionStoreResult<SessionMeta> {
     crate::session_id::SessionId::parse(&state.id).map_err(|err| SessionStoreError::Corrupt {
         context: format!("invalid persisted session id: {err}"),
     })?;
@@ -2364,21 +2442,20 @@ fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMet
             ),
         });
     }
-    let text_bytes =
-        Some(db.history_text_bytes().map_err(|err| {
-            crate::session_store::store_error("read history size", &db_path, err)
-        })?);
-    let retained_history_len = db
-        .history_item_count()
-        .map_err(|err| crate::session_store::store_error("read history length", &db_path, err))?
-        .min(state.history_len as usize);
-    let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), retained_history_len);
+    let history_len =
+        usize::try_from(state.history_len).map_err(|_| SessionStoreError::Corrupt {
+            context: "session history length exceeds platform limits".into(),
+        })?;
+    let checkpoint = checkpoint_from_json(
+        state.checkpoint_json.clone(),
+        retained_history_len.min(history_len),
+    );
     let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
     let context_token_identity = context_state.context_token_identity;
     let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
-    Ok(Some(SessionMeta {
+    Ok(SessionMeta {
         id: state.id,
         title: state.title,
         slug: state.slug,
@@ -2400,10 +2477,10 @@ fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMet
             .and_then(|tokens| u32::try_from(tokens).ok()),
         context_token_identity,
         display_context_token_identity,
-        history_len: Some(state.history_len as usize),
+        history_len: Some(history_len),
         checkpoint,
-        text_bytes,
-    }))
+        text_bytes: Some(text_bytes),
+    })
 }
 
 /// Read searchable text from canonical SQLite without refreshing derived files.
@@ -2646,6 +2723,30 @@ mod tests {
     }
 
     #[test]
+    fn side_table_suffix_includes_turn_meta_at_final_history_boundary() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user_item("hello")];
+        let meta = TurnMeta {
+            elapsed_ms: 10,
+            avg_tps: Some(2.0),
+            display_tps: Some(2.0),
+            interrupted: false,
+            tool_elapsed: std::collections::HashMap::new(),
+        };
+        session.finish_turn_state(session.history.len(), meta.clone(), false, false);
+
+        let suffix = store_side_table_suffixes_from_session(&session, session.history.len())
+            .expect("serialize final-boundary turn metadata");
+
+        assert_eq!(suffix.turn_metas.len(), 1);
+        assert_eq!(suffix.turn_metas[0].0, smelt_store::HistoryIndex::new(1));
+        assert_eq!(
+            suffix.turn_metas[0].1,
+            serde_json::to_value(meta).expect("serialize expected turn metadata")
+        );
+    }
+
+    #[test]
     fn side_table_suffix_rejects_snapshots_past_final_history_len() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![user_item("hello")];
@@ -2670,7 +2771,7 @@ mod tests {
             .push(HistoryItem::note(protocol::HistoryNote::context(
                 "cwd changed",
             )));
-        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
         db.replace_transcript_descriptor_records_for_repair(&[
@@ -2727,7 +2828,7 @@ mod tests {
         let mut s = fixture_session();
         s.id = TEST_SESSION_ID.into();
         s.history = vec![user_item("old prompt"), assistant_text_item("recent reply")];
-        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
         let checkpoint = serde_json::json!({
@@ -3054,7 +3155,7 @@ mod tests {
         let mut session = fixture_session();
         session.id = persisted_id;
         session.history.push(user_item("mismatched id"));
-        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&session, 0).unwrap())
             .unwrap();
         drop(db);
@@ -3194,7 +3295,7 @@ mod tests {
         s.session_cost_usd = 1.5;
         s.history.push(user_item("hello sqlite"));
         s.record_context_tokens(42, test_context_identity());
-        let db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
+        let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
         db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
             .unwrap();
 

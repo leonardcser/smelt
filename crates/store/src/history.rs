@@ -690,41 +690,6 @@ pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     Ok(out)
 }
 
-#[cfg(any(test, feature = "test-util"))]
-pub(crate) fn replace_transcript_descriptor_records(
-    conn: &Connection,
-    records: &[TranscriptDescriptorRecord],
-    compression: ObjectCompression,
-) -> Result<()> {
-    replace_transcript_descriptor_suffix(conn, 0, records, compression)
-}
-
-#[cfg(any(test, feature = "test-util"))]
-pub(crate) fn replace_transcript_descriptor_suffix(
-    conn: &Connection,
-    start_descriptor_idx: usize,
-    records: &[TranscriptDescriptorRecord],
-    compression: ObjectCompression,
-) -> Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = replace_transcript_descriptor_suffix_in_transaction(
-        conn,
-        start_descriptor_idx,
-        records,
-        compression,
-    );
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(())
-        }
-        Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
-        }
-    }
-}
-
 pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     conn: &Connection,
     start_descriptor_idx: usize,

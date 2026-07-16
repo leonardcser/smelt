@@ -324,23 +324,30 @@ impl TuiApp {
 
     /// Load a saved session by id, refresh screen, and scroll to bottom.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        let (header, store_ref) = match smelt_core::session::load_store_header_result(id) {
-            Ok(Some(store)) => store,
-            Ok(None) => {
-                self.notify_error_sticky(format!("session {id:?} has no stored state"));
-                return;
-            }
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to load session: {err}"));
-                return;
-            }
-        };
+        let target_rows = crate::app::transcript::descriptor_tail_target_rows(self.last_height);
+        let resume =
+            match smelt_core::session::load_store_resume_result(id, self.last_width, target_rows) {
+                Ok(Some(resume)) => resume,
+                Ok(None) => {
+                    self.notify_error_sticky(format!("session {id:?} has no stored state"));
+                    return;
+                }
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to load session: {err}"));
+                    return;
+                }
+            };
+        let smelt_core::session::SessionStoreResume {
+            header,
+            store_ref,
+            descriptor_tail,
+            ..
+        } = resume;
         let degraded_warnings = header.degraded_warnings.clone();
         let (transcript, persisted_descriptor_len) =
-            match crate::app::history::load_transcript_tail_from_sqlite_dir(
+            match crate::app::transcript::LoadedTranscript::from_descriptor_slice(
+                descriptor_tail,
                 store_ref.session_dir.clone(),
-                self.last_width,
-                self.last_height,
             ) {
                 Some(transcript) => (transcript, None),
                 None => match crate::app::history::materialize_full_transcript_read_only_result(

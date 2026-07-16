@@ -360,7 +360,7 @@ impl AppStoryCtx {
             .expect("XDG_STATE_HOME set by test harness");
         let dir = state_home.join("smelt").join("sessions").join(&meta.id);
         std::fs::create_dir_all(&dir).expect("create session fixture dir");
-        let db = smelt_store::SessionDb::open(dir.join("session.db"))
+        let mut db = smelt_store::SessionDb::open(dir.join("session.db"))
             .expect("create session fixture database");
         let history_len = meta.history_len.unwrap_or_default();
         let history = (0..history_len)

@@ -621,12 +621,12 @@ fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
 
 fn with_session_maintenance<T>(
     reference: &str,
-    action: impl FnOnce(&smelt_store::SessionMaintenance, &std::path::Path) -> Result<T, String>,
+    action: impl FnOnce(&mut smelt_store::SessionMaintenance, &std::path::Path) -> Result<T, String>,
 ) -> Result<T, String> {
     let (session_id, dir) = resolve_session_target(reference)?;
-    let maintenance = smelt_store::SessionMaintenance::open(&dir, session_id)
+    let mut maintenance = smelt_store::SessionMaintenance::open(&dir, session_id)
         .map_err(|err| format!("failed to acquire session maintenance ownership: {err}"))?;
-    let result = action(&maintenance, &dir);
+    let result = action(&mut maintenance, &dir);
     let release = maintenance
         .release()
         .map_err(|err| format!("failed to release session maintenance ownership: {err}"));

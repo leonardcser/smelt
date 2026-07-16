@@ -87,6 +87,15 @@ impl SessionReader {
         self.db.session_state()
     }
 
+    pub fn load_session_resume_snapshot(
+        &self,
+        descriptor_width: u16,
+        descriptor_target_rows: u16,
+    ) -> Result<Option<crate::SessionResumeSnapshot>> {
+        self.db
+            .load_session_resume_snapshot(descriptor_width, descriptor_target_rows)
+    }
+
     pub fn session_meta(&self) -> Result<Option<SessionMeta>> {
         self.db.session_meta()
     }
@@ -196,6 +205,15 @@ impl SessionReader {
     ) -> Result<TranscriptDescriptorSlice> {
         self.db
             .read_transcript_descriptor_tail_slice_with_total(total_count, count)
+    }
+
+    pub fn read_transcript_descriptor_tail_for_rows(
+        &self,
+        width: u16,
+        target_rows: u16,
+    ) -> Result<TranscriptDescriptorSlice> {
+        self.db
+            .read_transcript_descriptor_tail_for_rows(width, target_rows)
     }
 
     pub fn read_transcript_descriptor_centered_slice(
@@ -474,7 +492,15 @@ impl OwnedSessionWriter {
         let session_dir = session_dir.as_ref().to_path_buf();
         let session_id = session_id.into();
         let lock = SessionLock::acquire(&session_dir)?;
-        let db = SessionDb::open(session_dir.join("session.db"))?;
+        let mut db = SessionDb::open(session_dir.join("session.db"))?;
+        if let Some(state) = db.session_state()? {
+            if state.id != session_id {
+                return Err(StoreError::Integrity(format!(
+                    "session id mismatch: requested {session_id}, stored {}",
+                    state.id
+                )));
+            }
+        }
         let token = random_token()?;
         let owner = current_writer_owner();
         db.claim_writer_owner(&token, &owner)?;
@@ -516,7 +542,7 @@ impl OwnedSessionWriter {
     }
 
     pub fn commit_session(
-        &self,
+        &mut self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         self.recover_staged_blobs()
@@ -526,7 +552,7 @@ impl OwnedSessionWriter {
 
     #[cfg(test)]
     pub(crate) fn commit_session_with_blobs(
-        &self,
+        &mut self,
         command: &SessionCommit,
         blobs: &[SessionBlob],
     ) -> std::result::Result<SessionCommitOutcome, SessionWriteFailure> {
@@ -554,7 +580,7 @@ impl OwnedSessionWriter {
     }
 
     fn commit_canonical(
-        &self,
+        &mut self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         if command.session_id != self.session_id || command.state.id != self.session_id {
@@ -563,7 +589,8 @@ impl OwnedSessionWriter {
                 actual: Some(command.state.id.clone()),
             });
         }
-        self.db.commit_session_owned(self.token(), command)
+        let token = self.token.as_deref().expect("owned writer token");
+        self.db.commit_session_owned(token, command)
     }
 
     // COMPAT(legacy-attachment-blobs): finish or discard external attachment
@@ -574,12 +601,13 @@ impl OwnedSessionWriter {
     }
 
     pub fn append_request_attempt(
-        &self,
+        &mut self,
         entry: &protocol::request_log::RequestLogEntry,
         payload_mode: RequestAuditPayloadMode,
     ) -> Result<i64> {
+        let token = self.token.as_deref().expect("owned writer token");
         self.db
-            .append_request_attempt_owned(self.token(), entry, payload_mode)
+            .append_request_attempt_owned(token, entry, payload_mode)
     }
 
     pub fn release(mut self) -> Result<()> {
@@ -598,6 +626,7 @@ impl OwnedSessionWriter {
         }
     }
 
+    #[cfg(test)]
     fn token(&self) -> &str {
         self.token.as_deref().expect("owned writer token")
     }
@@ -655,53 +684,58 @@ impl SessionMaintenance {
         self.writer.session_id()
     }
 
-    pub fn import_snapshot(&self, snapshot: &SessionSnapshot) -> Result<SessionSaveReport> {
+    pub fn import_snapshot(&mut self, snapshot: &SessionSnapshot) -> Result<SessionSaveReport> {
         if snapshot.state.id != self.writer.session_id {
             return Err(StoreError::Integrity(format!(
                 "import session id mismatch: expected {}, got {}",
                 self.writer.session_id, snapshot.state.id
             )));
         }
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer
             .db
-            .save_session_snapshot_for_import_owned(self.writer.token(), snapshot)
+            .save_session_snapshot_for_import_owned(token, snapshot)
     }
 
-    pub fn repair_transcript_history_links(&self) -> Result<usize> {
+    pub fn repair_transcript_history_links(&mut self) -> Result<usize> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer
             .db
-            .repair_mismatched_transcript_descriptor_history_links_owned(self.writer.token())
+            .repair_mismatched_transcript_descriptor_history_links_owned(token)
     }
 
-    pub fn repair_checkpoint(&self) -> Result<usize> {
+    pub fn repair_checkpoint(&mut self) -> Result<usize> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer
             .db
-            .repair_checkpoint_first_live_index_past_history_owned(self.writer.token())
+            .repair_checkpoint_first_live_index_past_history_owned(token)
     }
 
     pub fn replace_transcript_descriptors(
-        &self,
+        &mut self,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer
             .db
-            .replace_transcript_descriptor_records_owned(self.writer.token(), records)
+            .replace_transcript_descriptor_records_owned(token, records)
     }
 
     pub fn replace_transcript_descriptor_suffix(
-        &self,
+        &mut self,
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer.db.replace_transcript_descriptor_suffix_owned(
-            self.writer.token(),
+            token,
             start_descriptor_idx,
             records,
         )
     }
 
     pub fn copy_prefix_from(
-        &self,
+        &mut self,
         source: &SessionReader,
         state: &SessionState,
         history_len: usize,
@@ -712,12 +746,13 @@ impl SessionMaintenance {
                 self.writer.session_id, state.id
             )));
         }
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer
             .db
-            .copy_prefix_from(&source.db, state, history_len, Some(self.writer.token()))
+            .copy_prefix_from(&source.db, state, history_len, Some(token))
     }
 
-    pub fn import_legacy_attachments(&self) -> Result<usize> {
+    pub fn import_legacy_attachments(&mut self) -> Result<usize> {
         let history_len = self.writer.db.history_item_count()?;
         let references = self.writer.db.legacy_attachment_references(history_len)?;
         let mut attachments = std::collections::BTreeMap::new();
@@ -727,25 +762,25 @@ impl SessionMaintenance {
                 read_legacy_attachment(&self.writer.session_dir, &reference)?.data_url,
             );
         }
+        let token = self.writer.token.as_deref().expect("owned writer token");
         self.writer
             .db
-            .import_legacy_attachments_owned(self.writer.token(), &attachments)
+            .import_legacy_attachments_owned(token, &attachments)
     }
 
-    pub fn garbage_collect_objects(&self) -> Result<usize> {
-        self.writer
-            .db
-            .garbage_collect_objects_owned(self.writer.token())
+    pub fn garbage_collect_objects(&mut self) -> Result<usize> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
+        self.writer.db.garbage_collect_objects_owned(token)
     }
 
-    pub fn rebuild_search_index(&self) -> Result<()> {
-        self.writer
-            .db
-            .rebuild_search_index_owned(self.writer.token())
+    pub fn rebuild_search_index(&mut self) -> Result<()> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
+        self.writer.db.rebuild_search_index_owned(token)
     }
 
-    pub fn vacuum(&self) -> Result<()> {
-        self.writer.db.vacuum_owned(self.writer.token())
+    pub fn vacuum(&mut self) -> Result<()> {
+        let token = self.writer.token.as_deref().expect("owned writer token");
+        self.writer.db.vacuum_owned(token)
     }
 
     pub fn release(self) -> Result<()> {
@@ -754,9 +789,7 @@ impl SessionMaintenance {
 }
 
 fn session_commit_failure_from_blob_error(err: StoreError) -> SessionCommitFailure {
-    SessionCommitFailure::Integrity {
-        message: format!("prepare staged session blobs: {err}"),
-    }
+    crate::db::session_commit_failure_from_store_error(err)
 }
 
 #[derive(Debug)]
@@ -987,6 +1020,31 @@ mod tests {
     }
 
     #[test]
+    fn writer_rejects_an_id_that_disagrees_with_existing_state() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        fs::create_dir(&session_dir).unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        writer
+            .commit_session(&empty_commit("session-a", 1, 0))
+            .unwrap();
+        writer.release().unwrap();
+
+        let err = OwnedSessionWriter::open(&session_dir, "session-b").unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::Integrity(message)
+                if message == "session id mismatch: requested session-b, stored session-a"
+        ));
+        assert!(SessionReader::open_existing(&session_dir)
+            .unwrap()
+            .writer_owner()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn maintenance_delete_requires_ownership_and_removes_tombstone() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("session");
@@ -1036,7 +1094,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("session");
         fs::create_dir(&session_dir).unwrap();
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         let command = empty_commit("session", 1, 9);
         let blobs = vec![SessionBlob {
             filename: "attachment.png".into(),
@@ -1046,7 +1104,7 @@ mod tests {
         assert!(matches!(
             writer.commit_session_with_blobs(&command, &blobs),
             Err(SessionWriteFailure::Commit(
-                SessionCommitFailure::StaleRevision { .. }
+                SessionCommitFailure::StaleBase { .. }
             ))
         ));
         assert!(!session_dir.join("blobs/attachment.png").exists());
@@ -1064,7 +1122,7 @@ mod tests {
         let session_dir = root.path().join("session");
         fs::create_dir(&session_dir).unwrap();
         fs::write(session_dir.join("blobs"), b"publication blocker").unwrap();
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         let command = empty_commit("session", 1, 0);
         let blobs = vec![SessionBlob {
             filename: "attachment.png".into(),
@@ -1129,7 +1187,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("session");
         fs::create_dir(&session_dir).unwrap();
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         let command = empty_commit("session", 1, 0);
         let blobs = vec![SessionBlob {
             filename: "../escape".into(),
@@ -1162,7 +1220,7 @@ mod tests {
             "legacy".into(),
             vec![("attachment.png".into(), reference.clone())],
         ))];
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         writer.commit_session(&command).unwrap();
         writer.release().unwrap();
         fs::create_dir(session_dir.join("blobs")).unwrap();
@@ -1186,7 +1244,7 @@ mod tests {
         fs::write(&blob_path, data_url).unwrap();
         drop(reader);
 
-        let maintenance = SessionMaintenance::open(&session_dir, "session").unwrap();
+        let mut maintenance = SessionMaintenance::open(&session_dir, "session").unwrap();
         assert_eq!(maintenance.import_legacy_attachments().unwrap(), 1);
         assert_eq!(maintenance.import_legacy_attachments().unwrap(), 0);
         maintenance.release().unwrap();
@@ -1213,7 +1271,7 @@ mod tests {
             "attached".into(),
             vec![("attachment.png".into(), data_url.into())],
         ))];
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         writer.commit_session(&command).unwrap();
         let hash = crate::object::sha256_hex(data_url.as_bytes());
         writer
@@ -1247,10 +1305,10 @@ mod tests {
             "attached".into(),
             vec![("attachment.png".into(), data_url.into())],
         ))];
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         writer.commit_session(&command).unwrap();
         writer.db.put_object("orphan", b"unreachable").unwrap();
-        let maintenance = SessionMaintenance { writer };
+        let mut maintenance = SessionMaintenance { writer };
 
         assert_eq!(maintenance.garbage_collect_objects().unwrap(), 1);
         assert_eq!(maintenance.garbage_collect_objects().unwrap(), 0);
@@ -1281,7 +1339,7 @@ mod tests {
         initial.state.history_len = 129;
         initial.history.final_len = crate::HistoryLen::new(129);
         initial.history.items = vec![item; 129];
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         writer.commit_session(&initial).unwrap();
         let object_hash = crate::object::sha256_hex(data_url.as_bytes());
         assert!(writer.db.object(&object_hash).unwrap().is_some());
@@ -1298,7 +1356,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("session");
         fs::create_dir(&session_dir).unwrap();
-        let writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
+        let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         writer
             .db
             .set_meta(

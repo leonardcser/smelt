@@ -289,7 +289,7 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
     let state = reader.session_state().unwrap().unwrap();
     let descriptor_len = reader.transcript_descriptor_count().unwrap();
     drop(reader);
-    let writer = smelt_store::OwnedSessionWriter::open(&source_dir, &session_id).unwrap();
+    let mut writer = smelt_store::OwnedSessionWriter::open(&source_dir, &session_id).unwrap();
     writer
         .commit_session(&smelt_store::SessionCommit {
             session_id: session_id.clone(),
@@ -882,6 +882,10 @@ fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
         "stale ack must not clear transcript blocks appended after the save began"
     );
     resumed.app.save_session_and_flush();
+    assert!(
+        !resumed.app.session_document_has_unflushed_work(),
+        "flush must wait for stale-head retries enqueued while draining reports"
+    );
 
     let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
@@ -934,6 +938,10 @@ fn stale_live_save_ack_does_not_drop_later_streaming_text() {
     );
     resumed.cancel();
     resumed.app.save_session_and_flush();
+    assert!(
+        !resumed.app.session_document_has_unflushed_work(),
+        "flush must wait for stale-head retries enqueued while draining reports"
+    );
 
     let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
@@ -994,6 +1002,10 @@ fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
 
     resumed.cancel();
     resumed.app.save_session_and_flush();
+    assert!(
+        !resumed.app.session_document_has_unflushed_work(),
+        "flush must wait for stale-head retries enqueued while draining reports"
+    );
 
     let db = smelt_store::SessionReader::open_database(
         smelt_core::session::dir_for_id(&session_id).join("session.db"),
@@ -1052,6 +1064,12 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
 fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
+    let reader =
+        smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
+            .unwrap();
+    let persisted_state = reader.session_state().unwrap().unwrap();
+    let persisted_descriptor_len = reader.transcript_descriptor_count().unwrap();
+    drop(reader);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.app.load_session_by_id(&session_id);
@@ -1067,9 +1085,17 @@ fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
         save_id: 901,
         session_id: session_id.clone(),
         message: "save session database: stale descriptor base: base 303, current 1".into(),
-        commit_failure: Some(smelt_store::SessionCommitFailure::StaleDescriptorBase {
-            base: smelt_store::DescriptorLen::new(303),
-            current: smelt_store::DescriptorLen::new(before_len as u64),
+        commit_failure: Some(smelt_store::SessionCommitFailure::StaleBase {
+            expected: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(persisted_state.revision),
+                history_len: smelt_store::HistoryLen::new(before_len as u64),
+                descriptor_len: smelt_store::DescriptorLen::new(303),
+            },
+            current: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(persisted_state.revision),
+                history_len: smelt_store::HistoryLen::new(persisted_state.history_len),
+                descriptor_len: smelt_store::DescriptorLen::new(persisted_descriptor_len as u64),
+            },
         }),
     });
 

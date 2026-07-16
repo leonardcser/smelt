@@ -19,7 +19,7 @@ fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) ->
     let session_id = app.app.core.session.id.clone();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     std::fs::create_dir_all(&session_dir).unwrap();
-    let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+    let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
     let records = (0..200)
         .map(|idx| {
             let content = match idx {

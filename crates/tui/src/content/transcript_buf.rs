@@ -6787,7 +6787,7 @@ mod tests {
         let session_dir = smelt_core::session::dir_for_id(session_id);
         let _ = std::fs::remove_dir_all(&session_dir);
         std::fs::create_dir_all(&session_dir).expect("create descriptor resume fixture dir");
-        let db = smelt_store::SessionDb::open(session_dir.join("session.db"))
+        let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))
             .expect("open descriptor resume fixture db");
         let target_bytes = target_bytes.max(RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES);
         let mut generated_bytes = 0usize;

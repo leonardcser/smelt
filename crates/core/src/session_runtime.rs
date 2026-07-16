@@ -332,7 +332,7 @@ mod tests {
     fn store_backed_live_session_reads_persisted_range_and_live_suffix() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("session.db");
-        let db = smelt_store::SessionDb::open(&db_path).expect("open db");
+        let mut db = smelt_store::SessionDb::open(&db_path).expect("open db");
         let persisted = vec![
             HistoryItem::user(protocol::Content::text("one")),
             HistoryItem::user(protocol::Content::text("two")),
@@ -445,7 +445,7 @@ mod tests {
     fn store_backed_live_session_scans_mode_and_visibility_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("session.db");
-        let db = smelt_store::SessionDb::open(&db_path).expect("open db");
+        let mut db = smelt_store::SessionDb::open(&db_path).expect("open db");
         let history = vec![
             HistoryItem::user(protocol::Content::text("hello")),
             HistoryItem::Note(protocol::HistoryNote::mode_change_for_transition(
