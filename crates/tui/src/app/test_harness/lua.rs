@@ -161,7 +161,7 @@ impl TestApp {
         check_reg("hooks.lifecycle", &hooks.lifecycle);
     }
 
-    /// Net live `LuaHandle` count, taken from the global drop-counter
+    /// Net live `LuaHandle` count, taken from this session's drop-counter
     /// ledger (`created - dropped`). Complements [`assert_lua_handles_alive`]:
     /// that function walks named registries and asserts each handle
     /// resolves; this one counts *every* handle that's ever crossed
@@ -169,7 +169,7 @@ impl TestApp {
     /// so it catches leaks the named walk can't see (anonymous closures
     /// stashed only in Lua tables, etc.).
     pub fn lua_handles_live(&self) -> u64 {
-        smelt_core::lua::lua_handles_live()
+        self.app.lua.core_shared().lua_handles_live()
     }
 
     /// Reload the Lua context once, snapshot the live handle count,
@@ -190,11 +190,11 @@ impl TestApp {
         self.reload_lua();
         self.app.lua.lua.gc_collect().ok();
         self.app.lua.lua.gc_collect().ok();
-        let baseline = smelt_core::lua::lua_handles_live();
+        let baseline = self.app.lua.core_shared().lua_handles_live();
         self.reload_lua();
         self.app.lua.lua.gc_collect().ok();
         self.app.lua.lua.gc_collect().ok();
-        let after = smelt_core::lua::lua_handles_live();
+        let after = self.app.lua.core_shared().lua_handles_live();
         if after > baseline {
             panic!(
                 "FFI-LEDGER: handle leak across reload - count went {baseline} -> {after} on second consecutive reload (steady state should be stable)"
@@ -204,7 +204,7 @@ impl TestApp {
 
     /// Repeatedly load a candidate that allocates handles and then fails. The
     /// committed generation and named resources must remain unchanged, and
-    /// discarding each candidate must return the global handle ledger to its
+    /// discarding each candidate must return the session handle ledger to its
     /// baseline.
     pub fn assert_no_handle_leak_across_failed_reload(&mut self, init_path: &std::path::Path) {
         let original = std::fs::read(init_path).unwrap_or_default();
@@ -212,7 +212,7 @@ impl TestApp {
         let named_resources = self.named_resource_counts();
         self.app.lua.lua.gc_collect().ok();
         self.app.lua.lua.gc_collect().ok();
-        let baseline = smelt_core::lua::lua_handles_live();
+        let baseline = self.app.lua.core_shared().lua_handles_live();
         let failing_candidate = r#"
             local buffer = smelt.buf.new({ name = "fuzz.failed.buffer" })
             buffer:source("discarded")
@@ -231,7 +231,7 @@ impl TestApp {
             self.app.lua.lua.gc_collect().ok();
             assert_eq!(self.app.core.lua_generation, generation);
             assert_eq!(self.named_resource_counts(), named_resources);
-            let after = smelt_core::lua::lua_handles_live();
+            let after = self.app.lua.core_shared().lua_handles_live();
             if after > baseline {
                 panic!(
                     "FFI-LEDGER: handle leak across failed reload - count went {baseline} -> {after}"

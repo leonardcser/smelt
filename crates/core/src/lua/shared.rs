@@ -1,7 +1,7 @@
 //! Shared Lua state: the `Arc<LuaShared>` that outlives callbacks and lets tokio tasks post resume payloads.
 
 use super::hooks::HookRegistry;
-use super::{LuaHandle, LuaTaskRuntime, TaskEvent};
+use super::{LuaHandle, LuaHandleLedger, LuaTaskRuntime, TaskEvent};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -191,6 +191,7 @@ pub struct LuaShared {
     /// call_id only ever lands in one of them.
     pub ask_callbacks: Mutex<HashMap<u64, AskCallbacks>>,
     pub next_id: Arc<AtomicU64>,
+    lua_handle_ledger: Arc<LuaHandleLedger>,
     pub next_registry_token: AtomicU64,
     /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
     /// Shared across Lua generations so candidate allocations cannot collide
@@ -351,6 +352,7 @@ pub struct LuaHostServices {
     pub messages: Arc<Mutex<crate::messages::Messages>>,
     pub next_buf_id: Arc<AtomicU64>,
     pub next_callback_id: Arc<AtomicU64>,
+    lua_handle_ledger: Arc<LuaHandleLedger>,
 }
 
 impl Default for LuaHostServices {
@@ -360,6 +362,7 @@ impl Default for LuaHostServices {
             messages: Arc::new(Mutex::new(crate::messages::Messages::new())),
             next_buf_id: Arc::new(AtomicU64::new(LUA_BUF_ID_BASE)),
             next_callback_id: Arc::new(AtomicU64::new(1)),
+            lua_handle_ledger: Arc::new(LuaHandleLedger::default()),
         }
     }
 }
@@ -383,6 +386,7 @@ impl Default for LuaShared {
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
             next_id: Arc::new(AtomicU64::new(1)),
+            lua_handle_ledger: Arc::new(LuaHandleLedger::default()),
             next_registry_token: AtomicU64::new(1),
             next_buf_id: Arc::new(AtomicU64::new(LUA_BUF_ID_BASE)),
             next_external_id: AtomicU64::new(1),
@@ -427,6 +431,7 @@ impl LuaShared {
             messages: host.messages,
             next_buf_id: host.next_buf_id,
             next_id: host.next_callback_id,
+            lua_handle_ledger: host.lua_handle_ledger,
             ..Self::default()
         }
     }
@@ -437,7 +442,16 @@ impl LuaShared {
             messages: Arc::clone(&self.messages),
             next_buf_id: Arc::clone(&self.next_buf_id),
             next_callback_id: Arc::clone(&self.next_id),
+            lua_handle_ledger: Arc::clone(&self.lua_handle_ledger),
         }
+    }
+
+    pub(crate) fn lua_handle_ledger(&self) -> Arc<LuaHandleLedger> {
+        Arc::clone(&self.lua_handle_ledger)
+    }
+
+    pub fn lua_handles_live(&self) -> u64 {
+        self.lua_handle_ledger.live()
     }
 
     pub fn generation_id(&self) -> u64 {

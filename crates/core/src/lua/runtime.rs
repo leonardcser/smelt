@@ -283,6 +283,7 @@ impl LuaRuntime {
     ) -> Self {
         shared.set_project_cwd(load_paths.project_cwd.as_deref());
         let lua = Lua::new();
+        lua.set_app_data(shared.lua_handle_ledger());
         let load_error = Self::register_api(&lua, &shared)
             .err()
             .map(|error| error.to_string());
