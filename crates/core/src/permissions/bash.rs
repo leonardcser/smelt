@@ -8,7 +8,10 @@ use smelt_buffer::text::{next_char_boundary, slice};
 
 use super::{workspace, PathAccess, PathEffect, PathResolution, PathTargetKind, ShellRisk};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
+
+const MAX_GLOB_ENTRIES: usize = 4096;
 
 const SHELL_OPERATORS: &[(&str, usize)] = &[
     ("&&", 2),
@@ -61,6 +64,11 @@ pub(super) struct ShellAnalysis {
     pub paths: Vec<PathEffect>,
 }
 
+struct GlobPathAnalysis {
+    effects: Vec<PathEffect>,
+    matches: Vec<PathResolution>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellState {
     cwd: PathResolution,
@@ -105,6 +113,7 @@ impl ShellState {
 struct ShellWord {
     raw: String,
     expanded: Option<String>,
+    has_glob: bool,
 }
 
 impl ShellWord {
@@ -113,6 +122,7 @@ impl ShellWord {
         Self {
             raw: value.clone(),
             expanded: Some(value),
+            has_glob: false,
         }
     }
 
@@ -126,7 +136,11 @@ impl ShellWord {
             Some(value) => Some(value.strip_prefix(prefix)?.to_string()),
             None => None,
         };
-        Some(Self { raw, expanded })
+        Some(Self {
+            raw,
+            expanded,
+            has_glob: self.has_glob,
+        })
     }
 
     fn assignment(&self) -> Option<(String, Option<String>)> {
@@ -146,6 +160,8 @@ impl ShellWord {
 struct ShellWordBuilder {
     raw: String,
     expanded: String,
+    has_glob: bool,
+    has_literal_glob: bool,
     unresolved: bool,
     started: bool,
     tilde_at: Option<usize>,
@@ -154,6 +170,14 @@ struct ShellWordBuilder {
 impl ShellWordBuilder {
     fn push_literal(&mut self, ch: char) {
         self.started = true;
+        self.raw.push(ch);
+        self.expanded.push(ch);
+        self.has_literal_glob |= matches!(ch, '*' | '?' | '[');
+    }
+
+    fn push_glob_syntax(&mut self, ch: char) {
+        self.started = true;
+        self.has_glob = true;
         self.raw.push(ch);
         self.expanded.push(ch);
     }
@@ -166,15 +190,18 @@ impl ShellWordBuilder {
     fn push_expansion(&mut self, value: Option<String>, unquoted: bool) {
         self.started = true;
         match value {
-            Some(value)
-                if unquoted
-                    && value
-                        .chars()
-                        .any(|ch| ch.is_whitespace() || matches!(ch, '*' | '?' | '[')) =>
-            {
+            Some(value) if unquoted && value.chars().any(char::is_whitespace) => {
                 self.unresolved = true;
             }
-            Some(value) => self.expanded.push_str(&value),
+            Some(value) => {
+                let has_glob = value.chars().any(|ch| matches!(ch, '*' | '?' | '['));
+                self.expanded.push_str(&value);
+                if unquoted {
+                    self.has_glob |= has_glob;
+                } else {
+                    self.has_literal_glob |= has_glob;
+                }
+            }
             None => self.unresolved = true,
         }
     }
@@ -185,7 +212,9 @@ impl ShellWordBuilder {
         }
         let raw = std::mem::take(&mut self.raw);
         let expanded = std::mem::take(&mut self.expanded);
-        let unresolved = std::mem::take(&mut self.unresolved);
+        let has_glob = std::mem::take(&mut self.has_glob);
+        let has_literal_glob = std::mem::take(&mut self.has_literal_glob);
+        let unresolved = std::mem::take(&mut self.unresolved) || has_glob && has_literal_glob;
         let tilde_at = self.tilde_at.take();
         self.started = false;
         let expanded = if unresolved {
@@ -196,7 +225,11 @@ impl ShellWordBuilder {
         } else {
             Some(expanded)
         };
-        Some(ShellWord { raw, expanded })
+        Some(ShellWord {
+            raw,
+            expanded,
+            has_glob,
+        })
     }
 }
 
@@ -740,6 +773,7 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
             Some(ShellWord {
                 raw: word.raw.clone(),
                 expanded: state.variable("OLDPWD"),
+                has_glob: false,
             })
         } else if !options_done && word.raw().starts_with('-') {
             None
@@ -750,18 +784,18 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
     let target = target.unwrap_or_else(|| ShellWord {
         raw: "~".to_string(),
         expanded: state.variable("HOME"),
+        has_glob: false,
     });
-    let effect = path_effect(
-        &target,
-        &state.cwd,
-        PathAccess::Unknown,
-        PathTargetKind::Directory,
-    );
     let previous_cwd = state.cwd.clone();
-    match &effect.resolution {
+    let (effects, target) = directory_operand_effects(&target, &state.cwd, PathAccess::Unknown);
+    paths.extend(effects);
+    let Some(target) = target else {
+        return;
+    };
+    match &target {
         PathResolution::Resolved(path) if path.is_dir() => {
             let pwd = path.to_string_lossy().into_owned();
-            state.cwd = effect.resolution.clone();
+            state.cwd = target;
             state.set_variable(
                 "OLDPWD".to_string(),
                 previous_cwd
@@ -772,12 +806,11 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
         }
         PathResolution::Resolved(_) => {}
         PathResolution::Unresolved(_) => {
-            state.cwd = effect.resolution.clone();
+            state.cwd = target;
             state.set_variable("OLDPWD".to_string(), None);
             state.set_variable("PWD".to_string(), None);
         }
     }
-    paths.push(effect);
 }
 
 fn merge_risk(a: ShellRisk, b: ShellRisk) -> ShellRisk {
@@ -894,17 +927,26 @@ fn env_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
             }
             "-C" | "--chdir" => {
                 if let Some(path) = words.get(i + 1) {
-                    let effect =
-                        path_effect(path, cwd, PathAccess::Read, PathTargetKind::Directory);
-                    command_cwd = cwd_after_chdir(cwd, &effect.resolution);
-                    out.push(effect);
+                    let (effects, target) = directory_operand_effects(path, cwd, PathAccess::Read);
+                    if let Some(target) = target {
+                        command_cwd = cwd_after_chdir(cwd, &target);
+                    }
+                    out.extend(effects);
                 }
                 i += 2;
             }
             option if option.starts_with("--chdir=") => {
                 if let Some(path) = words[i].strip_literal_prefix("--chdir=") {
-                    let effect =
-                        path_effect(&path, cwd, PathAccess::Read, PathTargetKind::Directory);
+                    let effect = if path.has_glob {
+                        unresolved_path_effect(
+                            &path,
+                            cwd,
+                            PathAccess::Read,
+                            PathTargetKind::Directory,
+                        )
+                    } else {
+                        path_effect(&path, cwd, PathAccess::Read, PathTargetKind::Directory)
+                    };
                     command_cwd = cwd_after_chdir(cwd, &effect.resolution);
                     out.push(effect);
                 }
@@ -1681,7 +1723,229 @@ fn push_path(
     {
         return;
     }
-    out.push(path_effect(word, cwd, access, target_kind));
+    if word.has_glob {
+        if let Some(analysis) = glob_path_effects(word, cwd, access.clone(), target_kind.clone()) {
+            out.extend(analysis.effects);
+        } else {
+            out.push(unresolved_path_effect(word, cwd, access, target_kind));
+        }
+    } else {
+        out.push(path_effect(word, cwd, access, target_kind));
+    }
+}
+
+fn glob_path_effects(
+    word: &ShellWord,
+    cwd: &PathResolution,
+    access: PathAccess,
+    target_kind: PathTargetKind,
+) -> Option<GlobPathAnalysis> {
+    let pattern = absolute_glob_path(word.expanded.as_deref()?, cwd)?;
+    let components: Vec<_> = pattern.components().collect();
+
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: true,
+    };
+    let mut out = Vec::new();
+    let mut matches = Vec::new();
+    let mut candidates = vec![PathBuf::new()];
+    let mut saw_glob = false;
+    let mut entries_seen = 0;
+
+    // Resolve every matched component so an intermediate symlink cannot hide
+    // an outside-workspace directory when the complete pattern has no match.
+    for (index, component) in components.iter().enumerate() {
+        let is_last = index + 1 == components.len();
+        match component {
+            Component::Prefix(prefix) => {
+                for candidate in &mut candidates {
+                    candidate.push(prefix.as_os_str());
+                }
+            }
+            Component::RootDir => {
+                for candidate in &mut candidates {
+                    candidate.push(Path::new("/"));
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                for candidate in &mut candidates {
+                    candidate.push("..");
+                }
+            }
+            Component::Normal(component) => {
+                let pattern = component.to_str()?;
+                let component_has_glob = pattern.chars().any(|ch| matches!(ch, '*' | '?' | '['));
+                if component_has_glob {
+                    saw_glob = true;
+                    let pattern = glob::Pattern::new(pattern).ok()?;
+                    let mut next = Vec::new();
+                    for candidate in candidates {
+                        push_concrete_glob_effect(
+                            &mut out,
+                            word,
+                            &candidate,
+                            cwd,
+                            access.clone(),
+                            PathTargetKind::Directory,
+                        )?;
+                        let entries = match std::fs::read_dir(&candidate) {
+                            Ok(entries) => entries,
+                            Err(err)
+                                if matches!(
+                                    err.kind(),
+                                    ErrorKind::NotFound
+                                        | ErrorKind::NotADirectory
+                                        | ErrorKind::PermissionDenied
+                                ) =>
+                            {
+                                continue;
+                            }
+                            Err(_) => return None,
+                        };
+                        for entry in entries {
+                            entries_seen += 1;
+                            if entries_seen > MAX_GLOB_ENTRIES {
+                                return None;
+                            }
+                            let entry = entry.ok()?;
+                            let name = entry.file_name();
+                            let name = name.to_str()?;
+                            if pattern.matches_with(name, options) {
+                                let path = entry.path();
+                                let resolution = push_concrete_glob_effect(
+                                    &mut out,
+                                    word,
+                                    &path,
+                                    cwd,
+                                    access.clone(),
+                                    if is_last {
+                                        target_kind.clone()
+                                    } else {
+                                        PathTargetKind::Directory
+                                    },
+                                )?;
+                                if is_last {
+                                    matches.push(resolution);
+                                }
+                                next.push(path);
+                            }
+                        }
+                    }
+                    if next.len() > MAX_GLOB_ENTRIES {
+                        return None;
+                    }
+                    candidates = dedupe_paths(next);
+                } else {
+                    for candidate in &mut candidates {
+                        candidate.push(component);
+                    }
+                    if saw_glob {
+                        let mut next = Vec::new();
+                        for candidate in candidates {
+                            match std::fs::symlink_metadata(&candidate) {
+                                Ok(_) => {
+                                    let resolution = push_concrete_glob_effect(
+                                        &mut out,
+                                        word,
+                                        &candidate,
+                                        cwd,
+                                        access.clone(),
+                                        if is_last {
+                                            target_kind.clone()
+                                        } else {
+                                            PathTargetKind::Directory
+                                        },
+                                    )?;
+                                    if is_last {
+                                        matches.push(resolution);
+                                    }
+                                    next.push(candidate);
+                                }
+                                Err(err)
+                                    if matches!(
+                                        err.kind(),
+                                        ErrorKind::NotFound | ErrorKind::NotADirectory
+                                    ) => {}
+                                Err(_) => return None,
+                            }
+                        }
+                        candidates = dedupe_paths(next);
+                    }
+                }
+            }
+        }
+    }
+
+    saw_glob.then_some(GlobPathAnalysis {
+        effects: out,
+        matches,
+    })
+}
+
+fn directory_operand_effects(
+    word: &ShellWord,
+    cwd: &PathResolution,
+    access: PathAccess,
+) -> (Vec<PathEffect>, Option<PathResolution>) {
+    if word.has_glob {
+        return match glob_path_effects(word, cwd, access.clone(), PathTargetKind::Directory) {
+            Some(mut analysis) => {
+                let target = if analysis.matches.len() == 1 {
+                    analysis.matches.pop()
+                } else {
+                    None
+                };
+                (analysis.effects, target)
+            }
+            None => {
+                let effect = unresolved_path_effect(word, cwd, access, PathTargetKind::Directory);
+                let resolution = effect.resolution.clone();
+                (vec![effect], Some(resolution))
+            }
+        };
+    }
+
+    let effect = path_effect(word, cwd, access, PathTargetKind::Directory);
+    let resolution = effect.resolution.clone();
+    (vec![effect], Some(resolution))
+}
+
+fn absolute_glob_path(path: &str, cwd: &PathResolution) -> Option<PathBuf> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        cwd.resolved().map(|cwd| cwd.join(path))
+    }
+}
+
+fn push_concrete_glob_effect(
+    out: &mut Vec<PathEffect>,
+    word: &ShellWord,
+    path: &Path,
+    cwd: &PathResolution,
+    access: PathAccess,
+    target_kind: PathTargetKind,
+) -> Option<PathResolution> {
+    let path = path.to_str()?;
+    let effect =
+        PathEffect::from_shell_path(word.raw.clone(), Some(path), cwd, access, target_kind);
+    let resolution = effect.resolution.clone();
+    if !out.contains(&effect) {
+        out.push(effect);
+    }
+    Some(resolution)
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
 }
 
 fn path_effect(
@@ -1693,6 +1957,24 @@ fn path_effect(
     PathEffect::from_shell_path(
         word.raw.clone(),
         word.expanded.as_deref(),
+        cwd,
+        access,
+        target_kind,
+    )
+}
+
+fn unresolved_path_effect(
+    word: &ShellWord,
+    cwd: &PathResolution,
+    access: PathAccess,
+    target_kind: PathTargetKind,
+) -> PathEffect {
+    path_effect(
+        &ShellWord {
+            raw: word.raw.clone(),
+            expanded: None,
+            has_glob: false,
+        },
         cwd,
         access,
         target_kind,
@@ -1807,6 +2089,7 @@ fn shell_words(cmd: &str, state: &ShellState) -> Vec<ShellWord> {
                     out.push(ShellWord {
                         raw: ch.to_string(),
                         expanded: None,
+                        has_glob: false,
                     });
                     i += 1;
                 }
@@ -1857,8 +2140,7 @@ fn shell_words(cmd: &str, state: &ShellState) -> Vec<ShellWord> {
                 '$' => push_parameter_expansion(&chars, &mut i, state, &mut word, true),
                 '`' => push_backtick_expansion(&chars, &mut i, &mut word),
                 '*' | '?' | '[' => {
-                    word.push_literal(ch);
-                    word.unresolved = true;
+                    word.push_glob_syntax(ch);
                     i += 1;
                 }
                 '{' | '}' => {

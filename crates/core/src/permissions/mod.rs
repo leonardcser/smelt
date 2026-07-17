@@ -776,18 +776,18 @@ impl Permissions {
     fn shell_effect_decision(
         &self,
         mode: &AgentMode,
-        command: &str,
+        effects: &[ToolEffect],
         background: bool,
     ) -> Option<Decision> {
         if background {
             return self.effect_decision(mode, ToolEffectKind::Process);
         }
-        let analysis = bash::analyze_shell_command(command, &self.active_root);
-        let writes_path = analysis
-            .paths
-            .iter()
-            .any(|path| path.access == PathAccess::Write);
-        let effect = match analysis.risk {
+        let (risk, paths) = effects.iter().find_map(|effect| match effect {
+            ToolEffect::Shell { risk, paths, .. } => Some((risk, paths)),
+            _ => None,
+        })?;
+        let writes_path = paths.iter().any(|path| path.access == PathAccess::Write);
+        let effect = match risk {
             ShellRisk::ReadOnly if !writes_path => ToolEffectKind::Read,
             ShellRisk::ReadOnly | ShellRisk::Writes | ShellRisk::Destructive => {
                 ToolEffectKind::Write
@@ -1084,7 +1084,12 @@ fn base_evaluation(permissions: &Permissions, request: &PermissionRequest<'_>) -
             }
         }
         ToolOrigin::Lua | ToolOrigin::Core => match request.tool_name {
-            "bash" => bash_evaluation(permissions, request.mode.clone(), request.args),
+            "bash" => bash_evaluation(
+                permissions,
+                request.mode.clone(),
+                request.args,
+                &request.effects,
+            ),
             "web_fetch" => web_fetch_evaluation(permissions, request.mode.clone(), request.args),
             tool => {
                 let decision = permissions.check_tool(request.mode.clone(), tool);
@@ -1117,6 +1122,7 @@ fn bash_evaluation(
     permissions: &Permissions,
     mode: AgentMode,
     args: &HashMap<String, Value>,
+    effects: &[ToolEffect],
 ) -> BaseEvaluation {
     let tool = permissions.check_tool(mode.clone(), "bash");
     let command = args.get("command").and_then(Value::as_str).unwrap_or("");
@@ -1140,7 +1146,7 @@ fn bash_evaluation(
                 .unwrap_or(tool)
         } else {
             permissions
-                .shell_effect_decision(&mode, command, background)
+                .shell_effect_decision(&mode, effects, background)
                 .unwrap_or(tool)
         }
     });

@@ -1390,6 +1390,70 @@ fn workspace_path_shell_keeps_cwd_after_failed_cd() {
 }
 
 #[test]
+fn workspace_path_shell_globbed_cd_updates_cwd_for_one_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let child = workspace.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("note.txt"), "note\n").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", "cd child*; cat note.txt");
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
+    let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
+        panic!("expected shell paths, got {effects:?}");
+    };
+
+    assert_eq!(
+        paths.last().unwrap().resolution.path(),
+        resolved_filesystem_path(&child.join("note.txt"))
+    );
+    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Allow);
+}
+
+#[test]
+fn workspace_path_shell_globbed_cd_keeps_cwd_for_multiple_matches() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("child-a")).unwrap();
+    std::fs::create_dir_all(workspace.join("child-b")).unwrap();
+    std::fs::write(workspace.join("note.txt"), "note\n").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", "cd child-*; cat note.txt");
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
+    let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
+        panic!("expected shell paths, got {effects:?}");
+    };
+
+    assert_eq!(
+        paths.last().unwrap().resolution.path(),
+        resolved_filesystem_path(&workspace.join("note.txt"))
+    );
+}
+
+#[test]
+fn workspace_path_shell_globbed_env_chdir_updates_command_cwd() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let child = workspace.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("note.txt"), "note\n").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", "env -C child* cat note.txt");
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
+    let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
+        panic!("expected shell paths, got {effects:?}");
+    };
+
+    assert_eq!(
+        paths.last().unwrap().resolution.path(),
+        resolved_filesystem_path(&child.join("note.txt"))
+    );
+}
+
+#[test]
 fn workspace_path_shell_tracks_oldpwd_for_cd_and_tilde() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -1491,9 +1555,47 @@ fn workspace_path_brace_expansion_fails_closed() {
     assert_eq!(decide(&p, normal(), "bash", &args), Decision::Ask);
 }
 
+#[test]
+fn workspace_path_shell_resolves_matching_globs_inside_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    for dir in [
+        "fuzz/fuzz_targets",
+        "fuzz/src",
+        "fuzz/src/bin",
+        "crates/xtask/src/fuzz",
+    ] {
+        std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        std::fs::write(workspace.join(dir).join("target.rs"), "fn main() {}\n").unwrap();
+    }
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = concat!(
+        "printf 'HEAD: '; git log -1 --format='%h %cI %s'; ",
+        "printf '\\nFuzz directory history:\\n'; ",
+        "git log --format='%h %cI %s' -25 -- fuzz; ",
+        "printf '\\nTarget sizes:\\n'; ",
+        "wc -l fuzz/fuzz_targets/*.rs fuzz/src/*.rs fuzz/src/bin/*.rs ",
+        "crates/xtask/src/fuzz/*.rs | sort -n",
+    );
+    let args = args_with("command", command);
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
+    let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
+        panic!("expected shell paths, got {effects:?}");
+    };
+    let workspace = resolved_filesystem_path(&workspace);
+
+    assert!(!paths.is_empty());
+    assert!(paths.iter().all(|path| {
+        path.resolution
+            .resolved()
+            .is_some_and(|path| path.starts_with(&workspace))
+    }));
+    assert_eq!(decide(&p, normal(), "bash", &args), Decision::Allow);
+}
+
 #[cfg(unix)]
 #[test]
-fn workspace_path_shell_globs_fail_closed_before_symlink_expansion() {
+fn workspace_path_shell_globs_resolve_symlinked_prefixes() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     let outside = temp.path().join("outside");
@@ -1501,19 +1603,82 @@ fn workspace_path_shell_globs_fail_closed_before_symlink_expansion() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, workspace.join("alias")).unwrap();
     let p = perms_with_workspace(workspace.to_str().unwrap());
+    let outside = resolved_filesystem_path(&outside);
 
-    let args = args_with("command", "cat alias/*");
-    let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
-    let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
-        panic!("expected shell paths, got {effects:?}");
-    };
+    for command in ["cat alias/*", "cd alias*; cat secret"] {
+        let args = args_with("command", command);
+        let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
+        let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
+            panic!("expected shell paths, got {effects:?}");
+        };
+        let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.resolution.resolved() == Some(outside.as_path())),
+            "command={command} paths={paths:?}"
+        );
+        assert_eq!(
+            outcome.missing_requirements,
+            vec![PermissionRequirement::PathPrefix {
+                dir: outside.clone()
+            }],
+            "command={command}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_path_shell_globs_resolve_matching_symlinks() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(workspace.join("links")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("secret.rs");
+    std::fs::write(&outside_file, "secret\n").unwrap();
+    std::os::unix::fs::symlink(&outside_file, workspace.join("links/escape.rs")).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+
+    let args = args_with("command", "wc -l links/*.rs");
     let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
 
-    assert!(matches!(paths[0].resolution, PathResolution::Unresolved(_)));
     assert_eq!(
         outcome.missing_requirements,
         vec![PermissionRequirement::PathPrefix {
-            dir: PathBuf::from("/")
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+
+    let quoted = args_with("command", "wc -l 'links/*.rs'");
+    assert_eq!(decide(&p, normal(), "bash", &quoted), Decision::Allow);
+}
+
+#[test]
+fn workspace_path_shell_glob_mutation_is_not_covered_by_read_trust() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("delete.txt"), "delete me\n").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    p.approvals
+        .write()
+        .unwrap()
+        .add_session_path_trust("bash", PathAccess::Read, outside.clone());
+
+    let command = format!("rm {}/*.txt", outside.display());
+    let args = args_with("command", &command);
+    let outcome = p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
         }]
     );
 }
