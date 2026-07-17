@@ -3,11 +3,11 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
-    let rebuild = matches!(current, 1 | 2);
+    let rebuild = (1..SCHEMA_VERSION).contains(&current);
     if rebuild {
         conn.pragma_update(None, "foreign_keys", false)?;
     }
@@ -51,11 +51,8 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
         conn.execute_batch(SCHEMA)?;
         current = 2;
     }
-    if current == 2 {
-        migrate_v2_to_v3(conn)?;
-    }
-    if (1..=2).contains(&current) {
-        migrate_v2_to_v3(conn)?;
+    if (2..SCHEMA_VERSION).contains(&current) {
+        migrate_to_v4(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -266,7 +263,6 @@ fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
         .map_err(Into::into)
 }
 
-#[cfg(test)]
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(table_columns(conn, table)?
         .iter()
@@ -275,13 +271,6 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 
 fn set_user_version(conn: &Connection, version: i32) -> Result<()> {
     conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
-    Ok(())
-}
-
-fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
-    if table_exists(conn, "session_state")? && !column_exists(conn, "session_state", "fast_mode")? {
-        conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
-    }
     Ok(())
 }
 
@@ -363,7 +352,10 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+fn migrate_to_v4(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "session_state", "fast_mode")? {
+        conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
+    }
     conn.pragma_update(None, "legacy_alter_table", true)?;
     let result: Result<()> = (|| {
         conn.execute_batch(
@@ -393,7 +385,18 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"
             INSERT INTO store_meta SELECT * FROM store_meta_v2;
-            INSERT INTO session_state SELECT * FROM session_state_v2;
+            INSERT INTO session_state (
+                singleton, id, title, slug, first_user_message, cwd, mode, reasoning_effort,
+                model, fast_mode, parent_id, accounting_json, checkpoint_json, context_tokens,
+                context_tokens_history_len, display_context_tokens, session_cost_usd, revision,
+                history_len, created_at, updated_at
+            )
+                SELECT singleton, id, title, slug, first_user_message, cwd, mode,
+                       reasoning_effort, model, fast_mode, parent_id, accounting_json,
+                       checkpoint_json, context_tokens, context_tokens_history_len,
+                       display_context_tokens, session_cost_usd, revision, history_len,
+                       created_at, updated_at
+                FROM session_state_v2;
             INSERT INTO history_items (idx, kind, json, hash, search_text, created_at)
                 SELECT idx, kind, json, hash, search_text, created_at FROM history_items_v2;
             INSERT INTO transcript_blocks (
@@ -674,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v3_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v4_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -756,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v3_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_to_v4_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn, "test").unwrap();
         conn.execute_batch(
@@ -819,9 +822,9 @@ mod tests {
         )
         .unwrap();
 
-        migrate(&mut conn, "test-v3").unwrap();
+        migrate(&mut conn, "test-v4").unwrap();
 
-        assert_eq!(user_version(&conn).unwrap(), 3);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(!column_exists(&conn, "history_items", "model_visible_hash").unwrap());
         assert!(!column_exists(&conn, "transcript_blocks", "sidecar_hash").unwrap());
         assert!(!table_exists(&conn, "turn_tool_elapsed").unwrap());
@@ -862,6 +865,68 @@ mod tests {
             )
             .unwrap(),
             0
+        );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v3_to_v4_migration_preserves_fast_mode_appended_by_v3() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn, "test").unwrap();
+        conn.execute_batch(
+            r#"
+            ALTER TABLE session_state RENAME TO session_state_v4;
+            CREATE TABLE session_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                id TEXT NOT NULL UNIQUE,
+                title TEXT,
+                slug TEXT,
+                first_user_message TEXT,
+                cwd TEXT,
+                mode TEXT,
+                reasoning_effort TEXT,
+                model TEXT,
+                parent_id TEXT,
+                accounting_json TEXT,
+                checkpoint_json TEXT,
+                context_tokens INTEGER,
+                context_tokens_history_len INTEGER,
+                display_context_tokens INTEGER,
+                session_cost_usd REAL NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 0,
+                history_len INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                fast_mode INTEGER
+            );
+            INSERT INTO session_state (
+                singleton, id, model, parent_id, session_cost_usd, revision, history_len,
+                created_at, updated_at, fast_mode
+            ) VALUES (1, 'session', 'model', 'parent', 1.5, 4, 7, 10, 20, 1);
+            DROP TABLE session_state_v4;
+            PRAGMA user_version = 3;
+            "#,
+        )
+        .unwrap();
+
+        migrate(&mut conn, "test-v4").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT id, fast_mode, parent_id, updated_at FROM session_state",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                }
+            )
+            .unwrap(),
+            ("session".to_string(), true, "parent".to_string(), 20)
         );
         validate_read_only_schema(&conn).unwrap();
     }

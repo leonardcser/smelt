@@ -3100,6 +3100,7 @@ mod tests {
                 mode: None,
                 reasoning_effort: None,
                 model: None,
+                fast_mode: None,
                 parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
