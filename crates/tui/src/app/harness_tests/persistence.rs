@@ -14,6 +14,17 @@ fn loaded_session(id: &str) -> smelt_core::session::Session {
     .expect("session saved")
 }
 
+fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
+    app.app.notification.as_ref().is_some_and(|notification| {
+        notification.lifetime.is_sticky()
+            && matches!(
+                notification.owner.as_ref(),
+                Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
+                    if owner_session_id == session_id
+            )
+    })
+}
+
 fn save_receipt(
     save_id: u64,
     session_id: &str,
@@ -100,6 +111,32 @@ fn saved_one_row_session(guard: &std::sync::MutexGuard<'static, ()>) -> String {
         .session_append_history(HistoryItem::user(Content::text("persisted before resume")));
     app.app.save_session_and_flush();
     app.app.core.session.id.clone()
+}
+
+#[test]
+fn session_save_notification_dismissal_uses_typed_ownership() {
+    let mut app = TestApp::builder().build();
+    let session_id = app.app.core.session.id.clone();
+
+    app.app.notify_error_sticky(format!(
+        "failed to save session {session_id}: unrelated diagnostic"
+    ));
+    app.app
+        .dismiss_session_save_failure_notification(&session_id);
+    assert!(
+        app.app.notification.is_some(),
+        "matching copy without persistence ownership must remain visible"
+    );
+
+    app.app
+        .notify_session_save_failure(&session_id, "database busy");
+    app.app
+        .dismiss_session_save_failure_notification("another-session");
+    assert!(has_sticky_session_save_failure(&app, &session_id));
+
+    app.app
+        .dismiss_session_save_failure_notification(&session_id);
+    assert!(app.app.notification.is_none());
 }
 
 #[test]
@@ -585,6 +622,95 @@ fn cancel_or_shutdown_preserves_committed_tool_invocations() {
 }
 
 #[test]
+fn long_agent_turn_retries_transient_writer_failure_without_more_history() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.start_turn(42);
+
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 42,
+        delta: protocol::CanonicalHistoryDelta::new(0, tool_history()),
+    }));
+    for (index, text) in ["first long-running update", "second long-running update"]
+        .into_iter()
+        .enumerate()
+    {
+        app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+            turn_id: 42,
+            delta: protocol::CanonicalHistoryDelta::new(
+                2 + index,
+                vec![HistoryItem::Assistant(AssistantStep::terminal(
+                    Some(Content::text(text)),
+                    None,
+                    Vec::new(),
+                ))],
+            ),
+        }));
+    }
+    app.app.save_session_and_flush();
+    assert!(!app.app.session_document_has_unflushed_work());
+
+    app.app.persister.inject_transient_open_failure();
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id: 42,
+        delta: protocol::CanonicalHistoryDelta::new(
+            4,
+            vec![HistoryItem::Assistant(AssistantStep::terminal(
+                Some(Content::text("later agent update")),
+                None,
+                Vec::new(),
+            ))],
+        ),
+    }));
+    assert!(matches!(
+        app.app.flush_persist(),
+        crate::persist::PersistFlushOutcome::CommitFailed(_)
+    ));
+    assert!(app.agent_running());
+    assert!(app.app.session_document_has_unflushed_work());
+    assert!(!has_sticky_session_save_failure(&app, &session_id));
+
+    app.app.persister.inject_transient_open_failure();
+    app.feed_one(SourceEvent::Tick(
+        crate::app::PERSIST_RETRY_INITIAL_DELAY.as_millis() as u64,
+    ));
+    assert!(matches!(
+        app.app.flush_persist(),
+        crate::persist::PersistFlushOutcome::CommitFailed(_)
+    ));
+    assert!(
+        has_sticky_session_save_failure(&app, &session_id),
+        "repeated failure must remain visible while retries continue"
+    );
+
+    app.feed_one(SourceEvent::Tick(
+        crate::app::PERSIST_RETRY_INITIAL_DELAY.as_millis() as u64 * 2,
+    ));
+    assert_eq!(
+        app.app.flush_persist(),
+        crate::persist::PersistFlushOutcome::Drained
+    );
+
+    assert!(
+        !app.app.session_document_has_unflushed_work(),
+        "scheduled recovery must make the session fully durable"
+    );
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), 5);
+    assert!(matches!(
+        loaded.history.last(),
+        Some(HistoryItem::Assistant(step))
+            if step.content.as_ref().is_some_and(|content| content.text_content() == "later agent update")
+    ));
+    assert!(
+        !has_sticky_session_save_failure(&app, &session_id),
+        "successful recovery must clear its owned save notification"
+    );
+    assert!(app.app.next_persistence_retry_delay().is_none());
+}
+
+#[test]
 fn store_backed_resume_restores_tool_calls_for_model_history() {
     let guard = test_home_guard();
     let session_id = {
@@ -1039,6 +1165,7 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
         session_id: session_id.clone(),
         message: "save session database: integrity error: history unchanged prefix exceeds stored rows: prefix 2, stored 1".into(),
         commit_failure: None,
+        disposition: smelt_store::SessionPersistenceDisposition::Reopen,
     });
     assert_eq!(
         resumed.app.session_document.dirty_history_from_for_test(),
@@ -1049,6 +1176,10 @@ fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
         resumed.app.session_document.durable_history_len_for_test(),
         before_len,
         "save failure must not make the durable cursor forget stored rows"
+    );
+    assert!(
+        resumed.app.next_persistence_retry_delay().is_none(),
+        "reopen-only failures must not schedule automatic retries"
     );
 
     resumed.app.save_session_and_flush();
@@ -1097,6 +1228,7 @@ fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
                 descriptor_len: smelt_store::DescriptorLen::new(persisted_descriptor_len as u64),
             },
         }),
+        disposition: smelt_store::SessionPersistenceDisposition::Retry,
     });
 
     assert!(
@@ -1126,9 +1258,11 @@ fn ownership_loss_moves_session_to_read_only_and_releases_lock() {
         session_id: session_id.clone(),
         message: "session writer ownership was lost".into(),
         commit_failure: Some(smelt_store::SessionCommitFailure::OwnershipLost),
+        disposition: smelt_store::SessionPersistenceDisposition::OwnershipLost,
     });
 
     assert!(resumed.app.session_is_read_only());
+    assert!(resumed.app.next_persistence_retry_delay().is_none());
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     let replacement = smelt_store::OwnedSessionWriter::open(&session_dir, &session_id)
         .expect("ownership loss releases the lifetime lock");

@@ -1641,52 +1641,83 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn next_persistence_retry_delay(&self) -> Option<Duration> {
+        self.persistence_retry
+            .next_delay(self.core.clock.instant_now())
+    }
+
+    pub(crate) fn try_persistence_retry(&mut self) -> bool {
+        let now = self.core.clock.instant_now();
+        let Some(session_id) = self.persistence_retry.start_due(now) else {
+            return false;
+        };
+        if session_id != self.core.session.id
+            || self.session_access.is_read_only()
+            || self.ephemeral()
+        {
+            self.persistence_retry.reset();
+            return true;
+        }
+        if self.session_document.has_pending_save() {
+            return true;
+        }
+        self.session_document.queue_save();
+        self.save_session();
+        if !self.session_document.has_pending_save() {
+            self.persistence_retry.reset();
+        }
+        true
+    }
+
     pub(crate) fn ack_persist_save(&mut self, receipt: smelt_store::SaveReceipt) {
+        let session_id = receipt.session_id.clone();
         let save_queued = self
             .session_document
             .mark_persisted(&receipt, self.core.session.checkpoint.as_ref());
+        if session_id == self.core.session.id {
+            self.persistence_retry.reset();
+        }
+        self.dismiss_session_save_failure_notification(&session_id);
         if save_queued {
             self.save_session();
         }
     }
 
     pub(crate) fn fail_persist_save(&mut self, err: crate::persist::PersistFailure) {
-        let ownership_lost = matches!(
-            err.commit_failure.as_ref(),
-            Some(smelt_store::SessionCommitFailure::OwnershipLost)
-        );
-        let recoverable = err
-            .commit_failure
-            .as_ref()
-            .is_some_and(smelt_store::SessionCommitFailure::is_recoverable_stale_base);
         self.session_document.mark_persist_failed(&err);
-        if ownership_lost {
-            let reason = "session writer ownership was lost".to_string();
-            if let Err(release_err) = self.persister.release() {
-                self.notify_error_sticky(format!(
-                    "failed to release session writer after ownership loss: {release_err}"
-                ));
+        let show_notification = match err.disposition {
+            smelt_store::SessionPersistenceDisposition::Retry => {
+                smelt_perf::perf::record_value("session:save:retryable_failure", 1);
+                self.persistence_retry
+                    .schedule(&err.session_id, self.core.clock.instant_now())
+                    > 1
             }
-            self.session_access = SessionAccess::ReadOnly {
-                reason: reason.clone(),
-            };
-            self.notify_error_sticky(format!(
-                "failed to save session {}: {reason}",
-                err.session_id
-            ));
-            return;
-        }
-        if recoverable {
-            smelt_perf::perf::record_value("session:save:recoverable_failure", 1);
-            if self.session_document.is_save_queued() && !self.prompt_input_is_busy() {
-                self.save_session();
+            smelt_store::SessionPersistenceDisposition::Reopen => {
+                self.persistence_retry.reset();
+                true
             }
-            return;
+            smelt_store::SessionPersistenceDisposition::ReadOnly => {
+                self.persistence_retry.reset();
+                self.session_access = SessionAccess::ReadOnly {
+                    reason: err.message.clone(),
+                };
+                true
+            }
+            smelt_store::SessionPersistenceDisposition::OwnershipLost => {
+                self.persistence_retry.reset();
+                let reason = "session writer ownership was lost".to_string();
+                if let Err(release_err) = self.persister.release() {
+                    self.notify_error_sticky(format!(
+                        "failed to release session writer after ownership loss: {release_err}"
+                    ));
+                }
+                self.session_access = SessionAccess::ReadOnly { reason };
+                true
+            }
+        };
+        if show_notification {
+            self.notify_session_save_failure(&err.session_id, &err.message);
         }
-        self.notify_error_sticky(format!(
-            "failed to save session {}: {}",
-            err.session_id, err.message
-        ));
     }
 
     pub(crate) fn save_session(&mut self) {
@@ -1700,6 +1731,10 @@ impl TuiApp {
         }
         if self.session_access.is_read_only() {
             self.session_document.clear_queued_save();
+            return;
+        }
+        if self.persistence_retry.delays_save(&self.core.session.id) {
+            self.session_document.queue_save();
             return;
         }
         if self.session_document.has_pending_save() {
@@ -1868,26 +1903,39 @@ impl TuiApp {
     /// Save the current session, then block until all persistence work triggered by
     /// that save has either completed or the document can no longer make progress.
     pub(crate) fn save_session_and_flush(&mut self) {
+        const MAX_FAILURE_RETRIES: usize = 2;
+
+        let mut failure_retries = 0;
+        self.persistence_retry.start_now(&self.core.session.id);
         self.save_session();
         loop {
             let outcome = self.flush_persist();
             if !self.session_document_has_unflushed_work() {
                 break;
             }
-            let retryable = match &outcome {
-                crate::persist::PersistFlushOutcome::Drained => true,
+            let retry_delay = match &outcome {
+                crate::persist::PersistFlushOutcome::Drained => Some(Duration::ZERO),
                 crate::persist::PersistFlushOutcome::CommitFailed(failures) => {
-                    failures.iter().all(|failure| {
-                        failure.commit_failure.as_ref().is_some_and(
-                            smelt_store::SessionCommitFailure::is_recoverable_stale_base,
-                        )
-                    })
+                    if failure_retries >= MAX_FAILURE_RETRIES
+                        || !failures
+                            .iter()
+                            .all(|failure| failure.disposition.should_retry_automatically())
+                    {
+                        None
+                    } else {
+                        failure_retries += 1;
+                        Some(crate::app::persistence_retry_delay(failure_retries as u32))
+                    }
                 }
                 crate::persist::PersistFlushOutcome::WorkerExited
-                | crate::persist::PersistFlushOutcome::Disconnected => false,
+                | crate::persist::PersistFlushOutcome::Disconnected => None,
             };
-            if !retryable {
+            let Some(retry_delay) = retry_delay else {
                 break;
+            };
+            if retry_delay != Duration::ZERO {
+                std::thread::sleep(retry_delay);
+                self.persistence_retry.start_now(&self.core.session.id);
             }
             if !self.session_document.has_pending_save() {
                 self.save_session();

@@ -602,7 +602,6 @@ impl SessionPersistState {
                 self.durable.descriptor_len = descriptor_len;
                 plan.reconcile_descriptor_len = Some(descriptor_len);
             }
-            self.queue_save();
         }
         plan
     }
@@ -1150,8 +1149,37 @@ mod tests {
             }
         );
         assert!(!state.has_pending_save());
-        assert!(state.is_save_queued());
+        assert!(!state.is_save_queued());
         assert_eq!(state.durable.descriptor_len, 111);
+        assert_eq!(state.dirty_history_from, Some(3));
+    }
+
+    #[test]
+    fn save_failure_marks_work_dirty_without_owning_retry_policy() {
+        let mut state = SessionPersistState::new();
+        state.install_loaded_store_session(true, 3, 3, 7);
+        state.set_pending_save_submission_for_test(
+            1,
+            "session-a".into(),
+            SessionSaveKind::History,
+            DocumentGeneration::new(0, 0),
+            SubmittedHistoryRange::new(3, 4),
+            None,
+        );
+
+        state.record_save_failure(
+            1,
+            "session-a",
+            Some(&smelt_store::SessionCommitFailure::Busy {
+                operation: "commit session".into(),
+                attempts: 6,
+                waited_ms: 250,
+            }),
+        );
+
+        assert!(!state.has_pending_save());
+        assert!(!state.is_save_queued());
+        assert!(state.session_dirty);
         assert_eq!(state.dirty_history_from, Some(3));
     }
 
@@ -1277,7 +1305,7 @@ mod tests {
             }
         );
         assert!(!state.has_pending_save());
-        assert!(state.is_save_queued());
+        assert!(!state.is_save_queued());
         assert!(state.session_dirty);
         assert_eq!(state.dirty_history_from, Some(3));
         assert_eq!(state.durable.revision, 7);

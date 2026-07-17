@@ -1273,6 +1273,7 @@ fn estimated_descriptor_rows(records: &[TranscriptDescriptorRecord], width: u16)
 }
 
 pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> SessionCommitFailure {
+    let disposition = err.session_persistence_disposition();
     match err {
         StoreError::OwnershipLost => SessionCommitFailure::OwnershipLost,
         StoreError::Busy {
@@ -1298,21 +1299,17 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
         }
         StoreError::Io(err) => SessionCommitFailure::Io {
             message: err.to_string(),
+            disposition,
         },
         StoreError::Sqlite(err) => SessionCommitFailure::Sqlite {
             message: err.to_string(),
+            disposition,
         },
         StoreError::TransactionCleanup { operation, message } => SessionCommitFailure::Sqlite {
             message: format!("transaction cleanup failed during {operation}: {message}"),
+            disposition,
         },
-        StoreError::OwnershipConflict { owner } => SessionCommitFailure::Busy {
-            operation: owner.map_or_else(
-                || "claim session ownership".to_string(),
-                |owner| format!("claim session ownership held by {owner}"),
-            ),
-            attempts: 1,
-            waited_ms: 0,
-        },
+        StoreError::OwnershipConflict { .. } => SessionCommitFailure::OwnershipLost,
     }
 }
 

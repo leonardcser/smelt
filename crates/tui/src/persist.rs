@@ -45,6 +45,7 @@ pub(crate) struct PersistFailure {
     pub(crate) session_id: String,
     pub(crate) message: String,
     pub(crate) commit_failure: Option<smelt_store::SessionCommitFailure>,
+    pub(crate) disposition: smelt_store::SessionPersistenceDisposition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,6 +74,9 @@ enum SessionBackendCommand {
     ),
     CommitSession(Box<PersistRequest>),
     AppendRequestAudit(Box<PersistRequestAudit>),
+    #[cfg(any(test, feature = "harness"))]
+    #[allow(dead_code)]
+    InjectTransientOpenFailure(Sender<()>),
     Flush(Sender<Vec<PersistFailure>>),
     Release(Sender<Result<(), String>>),
     Shutdown(Sender<Result<(), String>>),
@@ -84,6 +88,8 @@ impl SessionBackendCommand {
             Self::CommitSession(req) => serialized_size(&req.command),
             Self::AppendRequestAudit(req) => serialized_size(&req.entry),
             Self::OpenOwned(..) | Self::Flush(_) | Self::Release(_) | Self::Shutdown(_) => 0,
+            #[cfg(any(test, feature = "harness"))]
+            Self::InjectTransientOpenFailure(_) => 0,
         }
     }
 }
@@ -265,6 +271,20 @@ impl Persister {
         let _ = self.enqueue(SessionBackendCommand::CommitSession(Box::new(req)), 0);
     }
 
+    #[cfg(any(test, feature = "harness"))]
+    #[allow(dead_code)]
+    pub(crate) fn inject_transient_open_failure(&self) {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.enqueue(
+            SessionBackendCommand::InjectTransientOpenFailure(done_tx),
+            0,
+        )
+        .expect("persistence worker accepts transient failure injection");
+        done_rx
+            .recv()
+            .expect("persistence worker acknowledges transient failure injection");
+    }
+
     pub(crate) fn append_request_audit(&self, mut req: PersistRequestAudit) {
         if self.tx.is_none() {
             return;
@@ -374,11 +394,46 @@ impl Drop for Persister {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SessionBackendError {
+    message: String,
+    disposition: smelt_store::SessionPersistenceDisposition,
+}
+
+impl SessionBackendError {
+    fn from_store_error(context: &str, err: smelt_store::StoreError) -> Self {
+        let disposition = err.session_persistence_disposition();
+        Self {
+            message: format!("{context}: {err}"),
+            disposition,
+        }
+    }
+
+    fn reopenable(message: String) -> Self {
+        Self {
+            message,
+            disposition: smelt_store::SessionPersistenceDisposition::Reopen,
+        }
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    fn injected_transient() -> Self {
+        Self::from_store_error(
+            "injected transient session writer open failure",
+            smelt_store::StoreError::Busy {
+                operation: "open session writer",
+                attempts: 1,
+                waited_ms: 0,
+            },
+        )
+    }
+}
+
 enum SessionBackendState {
     Closed,
     ReadOnly {
         session_id: smelt_core::session_id::SessionId,
-        reason: String,
+        error: SessionBackendError,
     },
     Owned {
         session_id: smelt_core::session_id::SessionId,
@@ -389,16 +444,37 @@ enum SessionBackendState {
 
 struct SessionBackend {
     state: SessionBackendState,
+    #[cfg(any(test, feature = "harness"))]
+    fail_next_open: bool,
 }
 
 impl SessionBackend {
     fn new() -> Self {
         Self {
             state: SessionBackendState::Closed,
+            #[cfg(any(test, feature = "harness"))]
+            fail_next_open: false,
         }
     }
 
-    fn open_owned(&mut self, session_id: smelt_core::session_id::SessionId) -> Result<(), String> {
+    fn record_open_failure(
+        &mut self,
+        session_id: smelt_core::session_id::SessionId,
+        error: SessionBackendError,
+    ) -> SessionBackendError {
+        if error.disposition == smelt_store::SessionPersistenceDisposition::ReadOnly {
+            self.state = SessionBackendState::ReadOnly {
+                session_id,
+                error: error.clone(),
+            };
+        }
+        error
+    }
+
+    fn open_owned(
+        &mut self,
+        session_id: smelt_core::session_id::SessionId,
+    ) -> Result<(), SessionBackendError> {
         if matches!(
             &self.state,
             SessionBackendState::Owned {
@@ -408,21 +484,41 @@ impl SessionBackend {
         ) {
             return Ok(());
         }
-        self.release()?;
+        self.release().map_err(|message| {
+            SessionBackendError::reopenable(format!("release previous session writer: {message}"))
+        })?;
+        #[cfg(any(test, feature = "harness"))]
+        if std::mem::take(&mut self.fail_next_open) {
+            let error = SessionBackendError::injected_transient();
+            return Err(self.record_open_failure(session_id, error));
+        }
         let session_dir = smelt_core::session::session_dir(&session_id);
         let staged = match std::fs::symlink_metadata(&session_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => None,
             Ok(_) => {
-                return Err(format!(
-                    "session path is not a directory: {}",
-                    session_dir.display()
-                ));
+                let message = format!("session path is not a directory: {}", session_dir.display());
+                let error = SessionBackendError::reopenable(message);
+                return Err(self.record_open_failure(session_id, error));
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(
-                smelt_core::session::StagedSessionDir::create(&session_id)
-                    .map_err(|err| format!("stage session directory: {err}"))?,
-            ),
-            Err(err) => return Err(format!("inspect session directory: {err}")),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                match smelt_core::session::StagedSessionDir::create(&session_id) {
+                    Ok(staged) => Some(staged),
+                    Err(err) => {
+                        let error = SessionBackendError::from_store_error(
+                            "stage session directory",
+                            smelt_store::StoreError::Io(err),
+                        );
+                        return Err(self.record_open_failure(session_id, error));
+                    }
+                }
+            }
+            Err(err) => {
+                let error = SessionBackendError::from_store_error(
+                    "inspect session directory",
+                    smelt_store::StoreError::Io(err),
+                );
+                return Err(self.record_open_failure(session_id, error));
+            }
         };
         let writer_dir = staged
             .as_ref()
@@ -437,12 +533,8 @@ impl SessionBackend {
                 Ok(())
             }
             Err(err) => {
-                let reason = err.to_string();
-                self.state = SessionBackendState::ReadOnly {
-                    session_id,
-                    reason: reason.clone(),
-                };
-                Err(reason)
+                let error = SessionBackendError::from_store_error("open session writer", err);
+                Err(self.record_open_failure(session_id, error))
             }
         }
     }
@@ -450,14 +542,14 @@ impl SessionBackend {
     fn writer(
         &mut self,
         session_id: &str,
-    ) -> Result<(&mut smelt_store::OwnedSessionWriter, PathBuf), String> {
+    ) -> Result<(&mut smelt_store::OwnedSessionWriter, PathBuf), SessionBackendError> {
         let session_id = smelt_core::session_id::SessionId::parse(session_id)
-            .map_err(|err| format!("invalid session id: {err}"))?;
+            .map_err(|err| SessionBackendError::reopenable(format!("invalid session id: {err}")))?;
         let already_owned = match &self.state {
             SessionBackendState::ReadOnly {
                 session_id: current,
-                reason,
-            } if current == &session_id => return Err(reason.clone()),
+                error,
+            } if current == &session_id => return Err(error.clone()),
             SessionBackendState::Owned {
                 session_id: current,
                 ..
@@ -478,7 +570,9 @@ impl SessionBackend {
                     .to_path_buf();
                 Ok((writer, session_dir))
             }
-            _ => Err("persistence backend did not enter owned state".into()),
+            _ => Err(SessionBackendError::reopenable(
+                "persistence backend did not enter owned state".into(),
+            )),
         }
     }
 
@@ -519,14 +613,13 @@ impl SessionBackend {
                 Ok(None)
             }
             Err(err) => {
-                let reason = format!(
-                    "session was saved and published, but write ownership could not be reacquired: {err}"
+                let error = SessionBackendError::from_store_error(
+                    "session was saved and published, but write ownership could not be reacquired",
+                    err,
                 );
-                self.state = SessionBackendState::ReadOnly {
-                    session_id,
-                    reason: reason.clone(),
-                };
-                Ok(Some(reason))
+                let warning = error.message.clone();
+                self.record_open_failure(session_id, error);
+                Ok(Some(warning))
             }
         }
     }
@@ -574,12 +667,15 @@ fn worker_loop(
         let mut shutdown = false;
         match queued.command {
             SessionBackendCommand::OpenOwned(session_id, reply) => {
-                let _ = reply.send(backend.open_owned(session_id));
+                let result = backend
+                    .open_owned(session_id)
+                    .map_err(|error| error.message);
+                let _ = reply.send(result);
             }
             SessionBackendCommand::CommitSession(req) => {
                 let result = backend
                     .writer(&req.command.session_id)
-                    .map_err(persist_write_error)
+                    .map_err(PersistWriteError::Backend)
                     .and_then(|(writer, session_dir)| write(&req, writer, &session_dir));
                 let result = result.and_then(|mut success| {
                     let publish_warning = backend.publish_staged().map_err(persist_write_error)?;
@@ -604,7 +700,7 @@ fn worker_loop(
             SessionBackendCommand::AppendRequestAudit(req) => {
                 let result = backend
                     .writer(&req.session_id)
-                    .map_err(PersistRequestAuditError::Message)
+                    .map_err(|error| PersistRequestAuditError::Message(error.message))
                     .and_then(|(writer, _)| write_request_audit(&req, writer));
                 if result
                     .as_ref()
@@ -613,6 +709,12 @@ fn worker_loop(
                     backend.discard_owned_writer();
                 }
                 report_request_audit_result(result, &req, &reports);
+            }
+            #[cfg(any(test, feature = "harness"))]
+            SessionBackendCommand::InjectTransientOpenFailure(done) => {
+                backend.discard_owned_writer();
+                backend.fail_next_open = true;
+                let _ = done.send(());
             }
             SessionBackendCommand::Flush(done) => {
                 let _ = done.send(std::mem::take(&mut failures_since_flush));
@@ -663,6 +765,7 @@ fn report_save_result(
                 session_id: req.command.session_id.clone(),
                 message: err.message(),
                 commit_failure: err.commit_failure(),
+                disposition: err.disposition(),
             };
             (SessionBackendEvent::Failed(failure.clone()), Some(failure))
         }
@@ -701,6 +804,7 @@ fn report_request_audit_result(
 #[derive(Clone, Debug)]
 enum PersistWriteError {
     Message(String),
+    Backend(SessionBackendError),
     Commit(smelt_store::SessionCommitFailure),
 }
 
@@ -708,6 +812,7 @@ impl PersistWriteError {
     fn message(&self) -> String {
         match self {
             Self::Message(message) => message.clone(),
+            Self::Backend(error) => error.message.clone(),
             Self::Commit(failure) => format!(
                 "save session database: {}",
                 describe_commit_failure(failure)
@@ -717,8 +822,22 @@ impl PersistWriteError {
 
     fn commit_failure(&self) -> Option<smelt_store::SessionCommitFailure> {
         match self {
+            Self::Backend(error)
+                if error.disposition
+                    == smelt_store::SessionPersistenceDisposition::OwnershipLost =>
+            {
+                Some(smelt_store::SessionCommitFailure::OwnershipLost)
+            }
             Self::Commit(failure) => Some(failure.clone()),
-            Self::Message(_) => None,
+            Self::Message(_) | Self::Backend(_) => None,
+        }
+    }
+
+    fn disposition(&self) -> smelt_store::SessionPersistenceDisposition {
+        match self {
+            Self::Backend(error) => error.disposition,
+            Self::Commit(failure) => failure.disposition(),
+            Self::Message(_) => smelt_store::SessionPersistenceDisposition::Reopen,
         }
     }
 
@@ -822,8 +941,8 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
         }
         smelt_store::SessionCommitFailure::InvalidCommand { message }
         | smelt_store::SessionCommitFailure::Integrity { message }
-        | smelt_store::SessionCommitFailure::Io { message }
-        | smelt_store::SessionCommitFailure::Sqlite { message } => message.clone(),
+        | smelt_store::SessionCommitFailure::Io { message, .. }
+        | smelt_store::SessionCommitFailure::Sqlite { message, .. } => message.clone(),
     }
 }
 
@@ -1224,6 +1343,26 @@ mod tests {
 
         backend.discard_owned_writer();
 
+        backend.open_owned(session_id).unwrap();
+        backend.release().unwrap();
+    }
+
+    #[test]
+    fn transient_open_failure_leaves_backend_reopenable() {
+        let _serial = crate::app::test_harness::test_home_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _state_home = StateHomeGuard::install(dir.path());
+        let session_id = smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap();
+        let mut backend = SessionBackend::new();
+        backend.fail_next_open = true;
+
+        let error = backend.open_owned(session_id.clone()).unwrap_err();
+
+        assert_eq!(
+            error.disposition,
+            smelt_store::SessionPersistenceDisposition::Retry
+        );
+        assert!(matches!(backend.state, SessionBackendState::Closed));
         backend.open_owned(session_id).unwrap();
         backend.release().unwrap();
     }

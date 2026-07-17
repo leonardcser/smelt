@@ -252,6 +252,38 @@ fn root_dialog_pauses_notification_visibility_and_ttl() {
 }
 
 #[test]
+fn root_dialog_preserves_notification_ownership() {
+    let mut app = TestApp::builder().build();
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .notify_session_save_failure(&session_id, "database busy");
+
+    open_root_test_dialog(&mut app);
+
+    assert!(app
+        .app
+        .suspended_notification
+        .as_ref()
+        .is_some_and(|notification| {
+            matches!(
+                notification.owner.as_ref(),
+                Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
+                    if owner_session_id == &session_id
+            )
+        }));
+
+    assert!(app.run_lua("smelt.dialog.current().close()"));
+
+    assert!(app.app.notification.as_ref().is_some_and(|notification| {
+        matches!(
+            notification.owner.as_ref(),
+            Some(crate::app::NotificationOwner::SessionPersistence(owner_session_id))
+                if owner_session_id == &session_id
+        )
+    }));
+}
+
+#[test]
 fn readonly_dialog_arrows_move_without_vim() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(

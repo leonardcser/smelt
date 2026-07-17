@@ -1030,7 +1030,10 @@ impl SessionDocument {
             &failure.session_id,
             failure.commit_failure.as_ref(),
         );
-        if live_session.is_some() && failure.commit_failure.is_none() {
+        if live_session.is_some()
+            && failure.commit_failure.is_none()
+            && !failure.disposition.should_retry_automatically()
+        {
             persist.mark_history_dirty_from(0);
         }
         if let Some(current) = plan.reconcile_descriptor_len {
@@ -3986,6 +3989,7 @@ mod tests {
                 session_id: "session-a".into(),
                 message: "disk full".into(),
                 commit_failure: None,
+                disposition: smelt_store::SessionPersistenceDisposition::Reopen,
             },
         );
 
@@ -4043,12 +4047,13 @@ mod tests {
                         descriptor_len: smelt_store::DescriptorLen::new(111),
                     },
                 }),
+                disposition: smelt_store::SessionPersistenceDisposition::Retry,
             },
         );
 
         assert_eq!(state.durable.descriptor_len, 111);
         assert_eq!(transcript.descriptor_total_count(), Some(111));
-        assert!(state.is_save_queued());
+        assert!(!state.is_save_queued());
     }
 
     #[test]

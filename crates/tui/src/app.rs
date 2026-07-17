@@ -50,6 +50,8 @@ use std::time::{Duration, Instant};
 
 const TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME: usize = 64;
 const TERMINAL_EVENT_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
+pub(crate) const PERSIST_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const PERSIST_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 pub(crate) const DOCKED_DIALOG_TRANSCRIPT_ROWS: u16 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -278,6 +280,7 @@ pub struct TuiApp {
     pub(crate) persister: crate::persist::Persister,
     pub(crate) session_access: SessionAccess,
     pub(crate) session_persistence: SessionPersistence,
+    persistence_retry: PersistenceRetryState,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
     pub(crate) last_width: u16,
@@ -416,11 +419,124 @@ pub enum AppEvent {
     ShutdownSignal,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum PersistenceRetryState {
+    #[default]
+    Idle,
+    Waiting {
+        session_id: String,
+        failures: u32,
+        deadline: Instant,
+    },
+    InFlight {
+        session_id: String,
+        failures: u32,
+    },
+}
+
+impl PersistenceRetryState {
+    fn schedule(&mut self, session_id: &str, now: Instant) -> u32 {
+        let failures = match self {
+            Self::Waiting {
+                session_id: current,
+                failures,
+                ..
+            }
+            | Self::InFlight {
+                session_id: current,
+                failures,
+            } if current == session_id => failures.saturating_add(1),
+            _ => 1,
+        };
+        *self = Self::Waiting {
+            session_id: session_id.to_string(),
+            failures,
+            deadline: now + persistence_retry_delay(failures),
+        };
+        failures
+    }
+
+    fn start_due(&mut self, now: Instant) -> Option<String> {
+        let Self::Waiting {
+            session_id,
+            failures,
+            deadline,
+        } = self
+        else {
+            return None;
+        };
+        if *deadline > now {
+            return None;
+        }
+        let session_id = session_id.clone();
+        let failures = *failures;
+        *self = Self::InFlight {
+            session_id: session_id.clone(),
+            failures,
+        };
+        Some(session_id)
+    }
+
+    fn start_now(&mut self, session_id: &str) -> bool {
+        let failures = match self {
+            Self::Waiting {
+                session_id: current,
+                failures,
+                ..
+            }
+            | Self::InFlight {
+                session_id: current,
+                failures,
+            } if current == session_id => *failures,
+            _ => return false,
+        };
+        *self = Self::InFlight {
+            session_id: session_id.to_string(),
+            failures,
+        };
+        true
+    }
+
+    fn delays_save(&self, session_id: &str) -> bool {
+        matches!(
+            self,
+            Self::Waiting {
+                session_id: current,
+                ..
+            } if current == session_id
+        )
+    }
+
+    fn next_delay(&self, now: Instant) -> Option<Duration> {
+        match self {
+            Self::Waiting { deadline, .. } => Some(deadline.saturating_duration_since(now)),
+            Self::Idle | Self::InFlight { .. } => None,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::Idle;
+    }
+}
+
+fn persistence_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(31);
+    PERSIST_RETRY_INITIAL_DELAY
+        .saturating_mul(1_u32 << exponent)
+        .min(PERSIST_RETRY_MAX_DELAY)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NotificationOwner {
+    SessionPersistence(String),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SuspendedNotification {
     pub(crate) lifetime: SuspendedNotificationLifetime,
     pub(crate) kind: smelt_core::messages::MessageKind,
     pub(crate) summary: String,
+    pub(crate) owner: Option<NotificationOwner>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -435,6 +551,7 @@ pub(crate) struct Notification {
     pub(crate) lifetime: NotificationLifetime,
     pub(crate) kind: smelt_core::messages::MessageKind,
     pub(crate) summary: String,
+    pub(crate) owner: Option<NotificationOwner>,
     pub(crate) rendered_width: usize,
 }
 
@@ -1647,6 +1764,7 @@ impl TuiApp {
             persister: crate::persist::Persister::spawn(),
             session_access: SessionAccess::Owned,
             session_persistence,
+            persistence_retry: PersistenceRetryState::default(),
             transient_render_requested: false,
             last_width: term_w,
             last_height: term_h,
@@ -2456,6 +2574,19 @@ impl TuiApp {
             "smelt".into(),
             message,
             NotificationLifetime::Sticky,
+            None,
+        );
+    }
+
+    pub(crate) fn notify_session_save_failure(&mut self, session_id: &str, message: &str) {
+        self.record_notice_with_lifetime(
+            smelt_core::messages::MessageKind::Error,
+            "smelt".into(),
+            format!("failed to save session {session_id}: {message}"),
+            NotificationLifetime::Sticky,
+            Some(NotificationOwner::SessionPersistence(
+                session_id.to_string(),
+            )),
         );
     }
 
@@ -2508,6 +2639,7 @@ impl TuiApp {
             source,
             body,
             NotificationLifetime::timed(self.core.clock.instant_now()),
+            None,
         );
     }
 
@@ -2517,11 +2649,12 @@ impl TuiApp {
         source: String,
         body: String,
         lifetime: NotificationLifetime,
+        owner: Option<NotificationOwner>,
     ) {
         if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
             messages.append(kind, source, body.clone());
         }
-        self.open_notification(kind, &body, lifetime);
+        self.open_notification(kind, &body, lifetime, owner);
     }
 
     fn open_notification(
@@ -2529,6 +2662,7 @@ impl TuiApp {
         kind: smelt_core::messages::MessageKind,
         body: &str,
         lifetime: NotificationLifetime,
+        owner: Option<NotificationOwner>,
     ) {
         if let Some(notification) = self.notification.take() {
             self.close_overlay_leaf(notification.win);
@@ -2547,6 +2681,7 @@ impl TuiApp {
                 lifetime,
                 kind,
                 summary: summary.to_string(),
+                owner,
             });
             return;
         }
@@ -2593,6 +2728,7 @@ impl TuiApp {
             lifetime,
             kind,
             summary: summary.to_string(),
+            owner,
             rendered_width: width,
         });
     }
@@ -2671,6 +2807,27 @@ impl TuiApp {
         self.suspended_notification = None;
         if let Some(notification) = self.notification.take() {
             self.close_overlay_leaf(notification.win);
+        }
+    }
+
+    pub(crate) fn dismiss_session_save_failure_notification(&mut self, session_id: &str) {
+        let belongs_to_session = |owner: Option<&NotificationOwner>| {
+            matches!(
+                owner,
+                Some(NotificationOwner::SessionPersistence(owner_session_id))
+                    if owner_session_id == session_id
+            )
+        };
+        let active_failure = self
+            .notification
+            .as_ref()
+            .is_some_and(|notification| belongs_to_session(notification.owner.as_ref()));
+        let suspended_failure = self
+            .suspended_notification
+            .as_ref()
+            .is_some_and(|notification| belongs_to_session(notification.owner.as_ref()));
+        if active_failure || suspended_failure {
+            self.dismiss_notification();
         }
     }
 
@@ -3006,11 +3163,13 @@ impl TuiApp {
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
             let next_draft_render_delay = self.next_tool_draft_render_delay();
+            let next_persist_retry_delay = self.next_persistence_retry_delay();
             let next_idle_delay = [
                 next_timer_delay,
                 next_notification_delay,
                 next_keymap_delay,
                 next_draft_render_delay,
+                next_persist_retry_delay,
             ]
             .into_iter()
             .flatten()
@@ -3213,6 +3372,7 @@ impl TuiApp {
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
                     self.flush_due_tool_drafts();
+                    self.try_persistence_retry();
                     self.publish_diff_signals();
                     self.render_normal();
                 }
@@ -3268,6 +3428,31 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistence_retry_backoff_increases_and_caps() {
+        assert_eq!(persistence_retry_delay(1), Duration::from_millis(250));
+        assert_eq!(persistence_retry_delay(2), Duration::from_millis(500));
+        assert_eq!(persistence_retry_delay(3), Duration::from_secs(1));
+        assert_eq!(persistence_retry_delay(32), PERSIST_RETRY_MAX_DELAY);
+    }
+
+    #[test]
+    fn persistence_retry_success_resets_deadline_state() {
+        let now = Instant::now();
+        let mut retry = PersistenceRetryState::default();
+        assert_eq!(retry.schedule("session-a", now), 1);
+        assert_eq!(retry.next_delay(now), Some(PERSIST_RETRY_INITIAL_DELAY));
+        assert_eq!(
+            retry.start_due(now + PERSIST_RETRY_INITIAL_DELAY),
+            Some("session-a".into())
+        );
+        assert_eq!(retry.next_delay(now), None);
+
+        retry.reset();
+
+        assert_eq!(retry, PersistenceRetryState::Idle);
+    }
 
     #[test]
     fn worktree_display_path_is_relative_to_project_root() {

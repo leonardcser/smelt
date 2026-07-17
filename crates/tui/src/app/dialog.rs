@@ -151,6 +151,7 @@ impl TuiApp {
             lifetime,
             kind: notification.kind,
             summary: notification.summary,
+            owner: notification.owner,
         });
     }
 
@@ -169,6 +170,11 @@ impl TuiApp {
             }
             SuspendedNotificationLifetime::Sticky => NotificationLifetime::Sticky,
         };
-        self.open_notification(notification.kind, &notification.summary, lifetime);
+        self.open_notification(
+            notification.kind,
+            &notification.summary,
+            lifetime,
+            notification.owner,
+        );
     }
 }

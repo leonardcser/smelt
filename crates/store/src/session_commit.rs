@@ -126,6 +126,21 @@ pub enum HistoryIndexBound {
     AtOrBeforeFinalLen,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum SessionPersistenceDisposition {
+    Retry,
+    #[default]
+    Reopen,
+    ReadOnly,
+    OwnershipLost,
+}
+
+impl SessionPersistenceDisposition {
+    pub const fn should_retry_automatically(self) -> bool {
+        matches!(self, Self::Retry)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SessionCommitFailure {
     SessionMismatch {
@@ -173,15 +188,35 @@ pub enum SessionCommitFailure {
     },
     Io {
         message: String,
+        #[serde(default)]
+        disposition: SessionPersistenceDisposition,
     },
     Sqlite {
         message: String,
+        #[serde(default)]
+        disposition: SessionPersistenceDisposition,
     },
 }
 
 impl SessionCommitFailure {
     pub fn is_recoverable_stale_base(&self) -> bool {
         matches!(self, Self::StaleBase { .. })
+    }
+
+    pub const fn disposition(&self) -> SessionPersistenceDisposition {
+        match self {
+            Self::StaleBase { .. } | Self::Busy { .. } => SessionPersistenceDisposition::Retry,
+            Self::OwnershipLost => SessionPersistenceDisposition::OwnershipLost,
+            Self::Io { disposition, .. } | Self::Sqlite { disposition, .. } => *disposition,
+            Self::SessionMismatch { .. }
+            | Self::InvalidHistorySuffix { .. }
+            | Self::InvalidDescriptorSuffix { .. }
+            | Self::InvalidSideTableSuffix { .. }
+            | Self::InvalidSideTableRow { .. }
+            | Self::UnsupportedSchema { .. }
+            | Self::InvalidCommand { .. }
+            | Self::Integrity { .. } => SessionPersistenceDisposition::ReadOnly,
+        }
     }
 
     pub fn invalidates_connection(&self) -> bool {
@@ -194,7 +229,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn commit_failure_classifies_recoverable_stale_base() {
+    fn commit_failure_preserves_persistence_disposition() {
         let stale = SessionCommitFailure::StaleBase {
             expected: StoreHead {
                 revision: Revision::new(1),
@@ -213,13 +248,45 @@ mod tests {
         };
         let sqlite = SessionCommitFailure::Sqlite {
             message: "connection failed".into(),
+            disposition: SessionPersistenceDisposition::Reopen,
+        };
+        let busy = SessionCommitFailure::Busy {
+            operation: "commit session".into(),
+            attempts: 6,
+            waited_ms: 250,
+        };
+        let io = SessionCommitFailure::Io {
+            message: "temporary filesystem failure".into(),
+            disposition: SessionPersistenceDisposition::Retry,
         };
 
         assert!(stale.is_recoverable_stale_base());
         assert!(!ownership_lost.is_recoverable_stale_base());
         assert!(!integrity.is_recoverable_stale_base());
+        assert_eq!(stale.disposition(), SessionPersistenceDisposition::Retry);
+        assert_eq!(busy.disposition(), SessionPersistenceDisposition::Retry);
+        assert_eq!(io.disposition(), SessionPersistenceDisposition::Retry);
+        assert_eq!(sqlite.disposition(), SessionPersistenceDisposition::Reopen);
+        assert_eq!(
+            ownership_lost.disposition(),
+            SessionPersistenceDisposition::OwnershipLost
+        );
+        assert_eq!(
+            integrity.disposition(),
+            SessionPersistenceDisposition::ReadOnly
+        );
         assert!(sqlite.invalidates_connection());
         assert!(!stale.invalidates_connection());
+    }
+
+    #[test]
+    fn commit_failure_without_disposition_defaults_to_manual_reopen() {
+        let failure: SessionCommitFailure = serde_json::from_value(serde_json::json!({
+            "Io": { "message": "legacy failure" }
+        }))
+        .expect("deserialize commit failure");
+
+        assert_eq!(failure.disposition(), SessionPersistenceDisposition::Reopen);
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub use request_audit::{
 pub use schema::SCHEMA_VERSION;
 pub use session_commit::{
     DescriptorIndex, DescriptorLen, HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix,
-    Revision, SaveId, SaveReceipt, SessionCommit, SessionCommitFailure, SideTableSuffixes,
-    StoreHead, TranscriptDescriptorSuffix,
+    Revision, SaveId, SaveReceipt, SessionCommit, SessionCommitFailure,
+    SessionPersistenceDisposition, SideTableSuffixes, StoreHead, TranscriptDescriptorSuffix,
 };
 pub use session_snapshot::{SessionSaveReport, SessionSnapshot};

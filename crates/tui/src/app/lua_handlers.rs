@@ -132,6 +132,7 @@ impl TuiApp {
         let mut did_work = self.dismiss_expired_notification();
         did_work |= self.expire_pending_keymap_chord();
         did_work |= self.flush_due_tool_drafts();
+        did_work |= self.try_persistence_retry();
         did_work |= self.poll_managed_auth();
         did_work |= self.try_perform_scheduled_runtime_reconcile();
         did_work |= self.try_perform_scheduled_cwd_change();
