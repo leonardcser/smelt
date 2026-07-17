@@ -272,9 +272,10 @@ local function right_spans(opts)
   local status = smelt.session.status and smelt.session.status() or {}
   local model = status.model or smelt.model.current()
   if model and model ~= "" then
-    if status.fast and status.fast.active then
+    local fast_active = status.fast and status.fast.active
+    if fast_active then
       spans[#spans + 1] = {
-        text = " ⚡",
+        text = " >>",
         style = { fg = "Comment", bold = true },
         priority = SECONDARY_PRIORITY,
       }

@@ -605,7 +605,7 @@ mod tests {
             display_name: "Codex Mini".into(),
             description: Some("desc".into()),
             context_window: Some(1234),
-            supports_fast_mode: true,
+            supports_fast_mode: Some(true),
         }
         .into();
 

@@ -110,7 +110,7 @@ impl ProviderClient {
                 (url, body)
             }
             ProviderKind::Codex => {
-                let url = request.api_base.to_string();
+                let url = endpoint_url(request.api_base, "responses");
                 let body = openai::build_codex_body(
                     request.messages,
                     request.tools,
@@ -450,12 +450,8 @@ impl ProviderClient {
 }
 
 fn apply_fast_mode(body: &mut Value, provider_kind: ProviderKind, enabled: bool) {
-    if provider_kind == ProviderKind::Codex {
-        body["service_tier"] = serde_json::json!(if enabled {
-            codex::FAST_SERVICE_TIER
-        } else {
-            codex::DEFAULT_SERVICE_TIER
-        });
+    if provider_kind == ProviderKind::Codex && enabled {
+        body["service_tier"] = serde_json::json!(codex::FAST_SERVICE_TIER);
     }
 }
 
@@ -813,6 +809,10 @@ mod tests {
                 }
             };
             let headers = String::from_utf8_lossy(&request[..header_end]);
+            assert_eq!(
+                headers.lines().next(),
+                Some("POST /codex/responses HTTP/1.1")
+            );
             let content_length = headers
                 .lines()
                 .find_map(|line| {
@@ -851,7 +851,7 @@ mod tests {
             .chat(
                 ChatRequest {
                     provider: ChatProvider::codex(&tokens, None),
-                    api_base: &format!("http://{addr}/codex/responses"),
+                    api_base: &format!("http://{addr}/codex"),
                     model: "gpt-test",
                     messages: &messages,
                     tools: &[],
@@ -869,15 +869,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_http_request_emits_fast_and_default_service_tiers() {
+    async fn codex_http_request_normalizes_endpoint_and_emits_only_fast_service_tier() {
         assert_eq!(
             capture_codex_request(true).await["service_tier"],
             "priority"
         );
-        assert_eq!(
-            capture_codex_request(false).await["service_tier"],
-            "default"
-        );
+        assert!(capture_codex_request(false)
+            .await
+            .get("service_tier")
+            .is_none());
     }
 
     #[test]

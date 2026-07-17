@@ -25,3 +25,9 @@ pub struct AppConfig {
     pub remember: config::RememberConfig,
     pub context_window: Option<u32>,
 }
+
+impl AppConfig {
+    pub fn supports_fast_mode(&self) -> bool {
+        self.provider_type == "codex" && self.model_config.supports_fast_mode == Some(true)
+    }
+}

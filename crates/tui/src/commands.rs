@@ -611,7 +611,7 @@ impl TuiApp {
     }
 
     pub(crate) fn fast_mode_supported(&self) -> bool {
-        self.core.config.model_config.supports_fast_mode == Some(true)
+        self.core.config.supports_fast_mode()
     }
 
     pub(crate) fn fast_mode_active(&self) -> bool {

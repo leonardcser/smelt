@@ -358,7 +358,7 @@ impl HeadlessApp {
                 mode: self.core.config.mode.clone(),
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,
-                fast_mode: self.core.config.model_config.supports_fast_mode == Some(true)
+                fast_mode: self.core.config.supports_fast_mode()
                     && self
                         .core
                         .session

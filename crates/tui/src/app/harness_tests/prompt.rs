@@ -36,11 +36,12 @@ fn slash_completion_tab_accepts_command_name() {
 }
 
 #[test]
-fn fast_slash_command_toggles_session_state_for_supported_model() {
+fn fast_slash_command_updates_session_state_for_supported_model() {
     let mut app = TestApp::builder().build();
+    app.app.core.config.provider_type = "codex".into();
     app.app.core.config.model_config.supports_fast_mode = Some(true);
 
-    app.type_text("/fast");
+    app.type_text("/fast on");
     app.press(KeyCode::Enter);
 
     assert_eq!(app.app.core.session.fast_mode, Some(true));
@@ -51,9 +52,42 @@ fn fast_slash_command_toggles_session_state_for_supported_model() {
             if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { enabled: true })
     )));
 
+    app.type_text("/fast off");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.app.core.session.fast_mode, Some(false));
+
+    app.type_text("/fast toggle");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.app.core.session.fast_mode, Some(true));
+
     app.type_text("/fast");
     app.press(KeyCode::Enter);
     assert_eq!(app.app.core.session.fast_mode, Some(false));
+}
+
+#[test]
+fn fast_slash_command_enables_the_next_turn_payload() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.provider_type = "codex".into();
+    app.app.core.config.model_config.supports_fast_mode = Some(true);
+
+    app.type_text("/fast on");
+    app.press(KeyCode::Enter);
+    app.type_text("verify fast request");
+    app.press(KeyCode::Enter);
+
+    let fast_mode = app
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(cmd) => match cmd.as_ref() {
+                protocol::UiCommand::StartTurn(payload) => Some(payload.fast_mode),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("prompt submission should start a turn");
+    assert!(fast_mode);
 }
 
 #[test]
@@ -63,6 +97,24 @@ fn fast_slash_command_rejects_unsupported_model() {
     app.app.core.config.model_config.supports_fast_mode = Some(false);
 
     app.type_text("/fast");
+    app.press(KeyCode::Enter);
+
+    assert_eq!(app.app.core.session.fast_mode, Some(false));
+    assert!(app.state().notification.is_some());
+    assert!(!app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(cmd)
+            if matches!(cmd.as_ref(), protocol::UiCommand::SetFastMode { .. })
+    )));
+}
+
+#[test]
+fn fast_slash_command_rejects_non_codex_provider() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.provider_type = "openai".into();
+    app.app.core.config.model_config.supports_fast_mode = Some(true);
+
+    app.type_text("/fast on");
     app.press(KeyCode::Enter);
 
     assert_eq!(app.app.core.session.fast_mode, Some(false));

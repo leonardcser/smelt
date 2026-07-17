@@ -211,6 +211,18 @@ fn inject_managed_models(
     }
 }
 
+fn managed_model_metadata_needs_refresh(
+    provider: engine::auth::AuthProvider,
+    models: &[smelt_core::config::DynamicModel],
+    refresh_if_empty: bool,
+) -> bool {
+    (refresh_if_empty && models.is_empty())
+        || (provider == engine::auth::AuthProvider::Codex
+            && models
+                .iter()
+                .any(|model| model.supports_fast_mode.is_none()))
+}
+
 async fn inject_managed_provider_models(
     cfg: &smelt_core::config::Config,
     available_models: &mut Vec<smelt_core::config::ResolvedModel>,
@@ -223,7 +235,7 @@ async fn inject_managed_provider_models(
     }
 
     let mut models = engine::auth::cached_model_info(provider);
-    if refresh_if_empty && models.is_empty() {
+    if managed_model_metadata_needs_refresh(provider, &models, refresh_if_empty) {
         models = engine::auth::refresh_model_info(provider, http_client).await;
     }
     if !models.is_empty() {
@@ -558,5 +570,35 @@ mod tests {
             bootstrap(&["smelt", "--", "--worktree=x"]),
             BootstrapArgs::default()
         );
+    }
+
+    fn dynamic_model(supports_fast_mode: Option<bool>) -> smelt_core::config::DynamicModel {
+        smelt_core::config::DynamicModel {
+            id: "gpt-test".into(),
+            display_name: None,
+            context_window: None,
+            supports_reasoning: None,
+            supports_fast_mode,
+            input_modalities: None,
+        }
+    }
+
+    #[test]
+    fn legacy_codex_cache_requires_metadata_refresh() {
+        assert!(managed_model_metadata_needs_refresh(
+            engine::auth::AuthProvider::Codex,
+            &[dynamic_model(None)],
+            false,
+        ));
+        assert!(!managed_model_metadata_needs_refresh(
+            engine::auth::AuthProvider::Codex,
+            &[dynamic_model(Some(false))],
+            false,
+        ));
+        assert!(!managed_model_metadata_needs_refresh(
+            engine::auth::AuthProvider::Copilot,
+            &[dynamic_model(None)],
+            false,
+        ));
     }
 }

@@ -6,7 +6,6 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
 pub const CHATGPT_BACKEND_API_BASE: &str = "https://chatgpt.com/backend-api";
 pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
-pub const DEFAULT_SERVICE_TIER: &str = "default";
 pub const FAST_SERVICE_TIER: &str = "priority";
 pub const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600;
 pub const OAUTH_PORT: u16 = 1455;
@@ -32,8 +31,8 @@ pub struct CodexModel {
     pub display_name: String,
     pub description: Option<String>,
     pub context_window: Option<u32>,
-    #[serde(default)]
-    pub supports_fast_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_fast_mode: Option<bool>,
 }
 
 impl From<CodexModel> for protocol::ModelMetadata {
@@ -43,7 +42,7 @@ impl From<CodexModel> for protocol::ModelMetadata {
             display_name: Some(model.display_name),
             context_window: model.context_window,
             supports_reasoning: None,
-            supports_fast_mode: Some(model.supports_fast_mode),
+            supports_fast_mode: model.supports_fast_mode,
             input_modalities: None,
         }
     }
@@ -501,7 +500,7 @@ pub async fn fetch_models(
             let context_window = m["context_window"].as_u64().map(|v| v as u32);
             let visibility = m["visibility"].as_str().unwrap_or("none");
             let priority = m["priority"].as_i64().unwrap_or(999);
-            let supports_fast_mode = model_supports_fast_mode(m);
+            let supports_fast_mode = Some(model_supports_fast_mode(m));
             (visibility == "list").then_some((
                 priority,
                 CodexModel {
@@ -813,5 +812,18 @@ mod tests {
             "service_tiers": [{"id": "flex"}],
             "additional_speed_tiers": []
         })));
+    }
+
+    #[test]
+    fn legacy_cached_model_preserves_unknown_fast_capability() {
+        let model: CodexModel = serde_json::from_value(serde_json::json!({
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "description": "Latest frontier agentic coding model.",
+            "context_window": 272000
+        }))
+        .unwrap();
+
+        assert_eq!(model.supports_fast_mode, None);
     }
 }
