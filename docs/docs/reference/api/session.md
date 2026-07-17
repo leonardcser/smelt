@@ -80,7 +80,7 @@ Unix-epoch timestamp (milliseconds) at which this session was started.
 fun(): string
 ```
 
-Current working directory. Updated when Smelt enters a managed worktree.
+Current working directory. Updated when smelt enters a managed worktree.
 
 ## `smelt.session.delete`
 

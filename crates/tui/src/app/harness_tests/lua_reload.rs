@@ -293,6 +293,39 @@ fn candidate_rejects_unstaged_perf_mutations() {
 }
 
 #[test]
+fn candidate_rejects_raw_lua_external_effects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    let protected = tmp.path().join("protected.txt");
+    let protected_lua = serde_json::to_string(&protected.to_string_lossy()).unwrap();
+    std::fs::write(
+        &init,
+        r#"smelt.cmd.register("committed_before_raw_effect_candidate", function() end)"#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let committed_generation = app.app.lua.id;
+
+    for effect in [
+        format!("local f = assert(io.open({protected_lua}, 'w')); f:write('mutated'); f:close()"),
+        format!("assert(os.remove({protected_lua}))"),
+    ] {
+        std::fs::write(&protected, "preserved").unwrap();
+        std::fs::write(&init, effect).unwrap();
+        app.reload_lua();
+        assert_eq!(std::fs::read_to_string(&protected).unwrap(), "preserved");
+        assert_eq!(app.app.lua.id, committed_generation);
+        assert!(app
+            .app
+            .lua
+            .command_names_handle()
+            .lock()
+            .unwrap()
+            .contains("committed_before_raw_effect_candidate"));
+    }
+}
+
+#[test]
 fn candidate_filesystem_watchers_activate_only_at_commit() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
@@ -1103,6 +1136,10 @@ fn cwd_request_during_turn_commits_project_context_only_after_idle() {
             assert(smelt.trust.status() == "trusted")
             assert(smelt.fs.read("candidate-context.txt") == "target project")
             assert(smelt.path.canonical("candidate-context.txt") == {marker_lua})
+            assert(smelt.files.status().root == {expected_lua})
+            local file = assert(io.open("candidate-context.txt", "r"))
+            assert(file:read("*a") == "target project")
+            file:close()
             local skill = smelt.skills.content("target-context")
             assert(skill and skill:find("Target cwd content", 1, true))
             smelt.cmd.register("deferred_cwd_project", function() end)

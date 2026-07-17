@@ -938,16 +938,17 @@ impl LuaRuntime {
     /// evaluation. Generation-owned registrations and reads remain available;
     /// guarded functions become live automatically when the generation commits.
     fn install_candidate_effect_guards(&mut self) -> LuaResult<()> {
-        const BLOCKED_NAMESPACES: &[&str] = &[
-            "smelt.clipboard",
-            "smelt.history",
-            "smelt.messages",
-            "smelt.metrics",
-            "smelt.search",
-            "smelt.vim",
-            "smelt.work",
-        ];
+        const BLOCKED_NAMESPACES: &[&str] = &["smelt.clipboard"];
         const BLOCKED_FUNCTIONS: &[&str] = &[
+            "io.output",
+            "io.popen",
+            "io.tmpfile",
+            "os.execute",
+            "os.exit",
+            "os.remove",
+            "os.rename",
+            "os.setlocale",
+            "os.tmpname",
             "smelt.auth.managed_usage",
             "smelt.auth.request",
             "smelt.cmd.run",
@@ -968,6 +969,11 @@ impl LuaRuntime {
             "smelt.inspect.__open_url",
             "smelt.inspect.__start",
             "smelt.inspect.__stop",
+            "smelt.messages.append",
+            "smelt.messages.clear",
+            "smelt.messages.mark_read",
+            "smelt.metrics.perf.clear",
+            "smelt.metrics.perf.set_enabled",
             "smelt.fs.copy",
             "smelt.fs.file_state.record_read",
             "smelt.fs.file_state.record_read_with_mtime",
@@ -1020,10 +1026,13 @@ impl LuaRuntime {
             "smelt.session.switch_cwd",
             "smelt.session.title.set",
             "smelt.signal.set",
+            "smelt.search.clear",
             "smelt.state.__save",
             "smelt.terminal.bell",
             "smelt.terminal.osc9_notify",
             "smelt.trust.mark",
+            "smelt.vim.set_mode",
+            "smelt.work.busy",
         ];
 
         let namespaces = self.lua.create_table()?;
@@ -1077,6 +1086,55 @@ impl LuaRuntime {
                             elseif type(child) == "table" then
                                 guard_tree(child, child_path)
                             end
+                        end
+                    end
+
+                    local candidate_cwd = smelt.os.cwd()
+                    local path_is_absolute = smelt.path.is_absolute
+                    local path_join = smelt.path.join
+                    local function candidate_path(path)
+                        if state.committed or type(path) ~= "string" then return path end
+                        if path_is_absolute(path) then return path end
+                        return path_join(candidate_cwd, path)
+                    end
+
+                    if io and type(io.open) == "function" then
+                        local original_open = io.open
+                        io.open = function(path, mode)
+                            if not state.committed then
+                                mode = mode or "r"
+                                if string.find(mode, "[wa+]") then
+                                    error("io.open is read-only while loading a Lua candidate", 2)
+                                end
+                                path = candidate_path(path)
+                            end
+                            return original_open(path, mode)
+                        end
+                    end
+                    if io and type(io.lines) == "function" then
+                        local original_lines = io.lines
+                        io.lines = function(path, ...)
+                            if path == nil then return original_lines() end
+                            return original_lines(candidate_path(path), ...)
+                        end
+                    end
+                    if io and type(io.input) == "function" then
+                        local original_input = io.input
+                        io.input = function(path)
+                            if path == nil then return original_input() end
+                            return original_input(candidate_path(path))
+                        end
+                    end
+                    if type(loadfile) == "function" then
+                        local original_loadfile = loadfile
+                        loadfile = function(path, ...)
+                            return original_loadfile(candidate_path(path), ...)
+                        end
+                    end
+                    if type(dofile) == "function" then
+                        local original_dofile = dofile
+                        dofile = function(path)
+                            return original_dofile(candidate_path(path))
                         end
                     end
 

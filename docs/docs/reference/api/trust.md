@@ -22,5 +22,5 @@ Mark the current working directory as trusted, persisting it in the user's trust
 fun(): string
 ```
 
-Return the trust state of the current working directory: `"trusted"`, `"untrusted"`, or `"no_content"`. Raises if the cwd cannot be read.
+Return the trust state of the current working directory: `"trusted"`, `"untrusted"`, or `"no_content"`.
 

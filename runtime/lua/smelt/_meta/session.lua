@@ -42,7 +42,7 @@ session.cost = nil
 ---@type fun(): integer
 session.created_at_ms = nil
 
---- Current working directory. Updated when Smelt enters a managed worktree.
+--- Current working directory. Updated when smelt enters a managed worktree.
 ---@type fun(): string
 session.cwd = nil
 

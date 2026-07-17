@@ -2,13 +2,15 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::LuaShared;
 use crate::workspace_files::{
     AcceptRequest, ItemKind, SearchRequest, SearchResponse, WorkspaceFilesStatus,
 };
 use mlua::prelude::*;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let files = LuaMod::under(
         lua,
         smelt,
@@ -17,15 +19,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         Tier::Host,
     )?;
 
+    let search_context = Arc::clone(shared);
     files.fn_(
         "search",
         "Search workspace files. Returns `{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`. Items are `{ label, path, insert_text, kind, score }`. Options: `{ limit?, offset?, include_dirs?, cwd? }`.",
         &["query", "opts"],
-        |lua, (query, opts): (String, Option<mlua::Table>)| -> LuaResult<mlua::Table> {
+        move |lua, (query, opts): (String, Option<mlua::Table>)| -> LuaResult<mlua::Table> {
             let _perf = smelt_perf::perf::begin("files:search");
             let opts = SearchOpts::from_lua(opts)?;
             let response = crate::host::try_with_core(|core| {
-                let cwd = opts.cwd.unwrap_or_else(|| core.env.cwd());
+                let cwd = opts
+                    .cwd
+                    .map(|cwd| search_context.resolve_project_path(cwd))
+                    .unwrap_or_else(|| {
+                        if search_context.external_effects_active() {
+                            core.env.cwd()
+                        } else {
+                            search_context.evaluation_cwd()
+                        }
+                    });
                 core.workspace_files.search_interactive(SearchRequest {
                     query,
                     cwd,
@@ -70,17 +82,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    let status_context = Arc::clone(shared);
     files.fn_(
         "status",
         "Return indexing status for the current workspace or `opts.cwd`: `{ root, initialized, files, scanned, scanning, watcher_ready, warmup_complete }`.",
         &["opts"],
-        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
+        move |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let cwd = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("cwd").ok().flatten())
                 .map(PathBuf::from);
             let result = crate::host::try_with_core(|core| {
-                let cwd = cwd.unwrap_or_else(|| core.env.cwd());
+                let cwd = cwd
+                    .map(|cwd| status_context.resolve_project_path(cwd))
+                    .unwrap_or_else(|| {
+                        if status_context.external_effects_active() {
+                            core.env.cwd()
+                        } else {
+                            status_context.evaluation_cwd()
+                        }
+                    });
                 core.workspace_files.status(&cwd)
             });
             match result {

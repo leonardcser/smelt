@@ -11,7 +11,7 @@ local trust = {}
 ---@type fun(): string
 trust.mark = nil
 
---- Return the trust state of the current working directory: `"trusted"`, `"untrusted"`, or `"no_content"`. Raises if the cwd cannot be read.
+--- Return the trust state of the current working directory: `"trusted"`, `"untrusted"`, or `"no_content"`.
 ---@type fun(): string
 trust.status = nil
 

@@ -53,6 +53,8 @@ as the registry they support.
 | `hooks` | Tool/provider/engine/lifecycle callback registries | Generation |
 | `default_shell` | Default process shell declaration | Declaration |
 | `watchers`, `next_watcher_id` | Live `notify` watchers and ids | Generation; candidate watchers stay paused until commit |
+| `candidate_skills`, `project_cwd` | Candidate project inputs for cwd-sensitive reads | Generation-local explicit project context |
+| `staged_logs` | Log records emitted during candidate evaluation | Generation; publish at commit and discard on failure |
 | `phase` | Early/init/running API guard | Generation-local load state |
 
 The TUI wrapper `crates/tui/src/lua/mod.rs::LuaShared` adds
@@ -147,6 +149,8 @@ a candidate may stage ready-hook work but may not show it before commit.
 | `smelt.process` spawn/run/kill/stop/detach | External effect |
 | `smelt.os` metadata/getenv/path reads | Pure read over explicit candidate context or immutable host data |
 | `smelt.os.setenv`, `unsetenv`, `set_cwd`, URL opening | External effect |
+| Lua `io.open`/`io.lines`/`io.input`, `loadfile`, `dofile` | Pure reads resolve relative paths against explicit candidate cwd; write modes are rejected during candidate evaluation |
+| Lua `io.popen`/`io.output`/`io.tmpfile` and mutating `os` functions | External effect; reject during candidate evaluation |
 | `smelt.clipboard` | Runtime-only external effect |
 | `smelt.files.search`, `status` | Committed session-service read; `accept` and `rescan` are runtime-only effects |
 | `smelt.agent.add_system_prompt` | Declaration feeding future prompt resolution |

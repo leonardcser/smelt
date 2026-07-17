@@ -145,7 +145,7 @@ pub fn register_host_api(
     cmd::register(lua, smelt, shared)?;
     defaults::register(lua, smelt, shared)?;
     events::register(lua, smelt, shared)?;
-    files::register(lua, smelt)?;
+    files::register(lua, smelt, shared)?;
     frontend::register(lua, smelt)?;
     fs::register(lua, smelt, shared)?;
     fuzzy::register(lua, smelt)?;
