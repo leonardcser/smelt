@@ -56,11 +56,11 @@ impl TestApp {
         self.app.drain_signals_pending();
     }
 
-    /// Counts of bound names across the four reload-survival registries:
-    /// `(bufs, wins, overlays, paints)`. Reload-survival post-checks
-    /// snapshot these before and after `reload_lua()` and assert
-    /// equality - anonymous slots get reaped but every name in the
-    /// registry must survive with a stable id.
+    /// Counts of bound names across the four reload-managed registries:
+    /// `(bufs, wins, overlays, paints)`. Failed-reload checks snapshot
+    /// these before and after `reload_lua()` and assert equality. Successful
+    /// reloads may add declared resources and retire names omitted by the
+    /// candidate.
     pub fn named_resource_counts(&self) -> (usize, usize, usize, usize) {
         let (bufs, wins, overlays) = self.app.ui.named_counts();
         (bufs, wins, overlays, self.app.paint_registry.named_count())

@@ -2257,24 +2257,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         FuzzOp::TogglePaneFocus => app.toggle_pane_focus(),
         FuzzOp::OpenOverlay { variant } => app.open_synthetic_overlay(variant),
         FuzzOp::ReloadLua => {
-            // Targeted reload-survival check: every named slot in the
-            // four reload-survival registries (bufs, wins, overlays,
-            // paints) that existed before reload must still exist
-            // after. New names may be added (the first reload runs
-            // `on_ready` which lets bundled plugins register named
-            // resources for the first time); anonymous slots get
-            // reaped (they don't contribute to these counters).
-            // Strictly: post >= pre component-wise. This is the
-            // `ce76000e`-class regression detector - cheap and specific.
-            let pre = app.named_resource_counts();
             app.reload_lua();
-            let post = app.named_resource_counts();
-            assert!(
-                post.0 >= pre.0 && post.1 >= pre.1 && post.2 >= pre.2 && post.3 >= pre.3,
-                "reload dropped a named resource: pre=(bufs,wins,overlays,paints)={:?} post={:?}",
-                pre,
-                post,
-            );
         }
         FuzzOp::ApproveFirstConfirm => {
             let pre = Snapshot::capture(app);
