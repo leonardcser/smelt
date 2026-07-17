@@ -3046,6 +3046,8 @@ mod tests {
         };
 
         let receipt = db.commit_session(&command).unwrap();
+        drop(db);
+        let db = SessionDb::open_read_only(dir.path().join("session.db")).unwrap();
         let snapshot = db.load_full_session_snapshot().unwrap().unwrap();
 
         assert_eq!(receipt.history_len, HistoryLen::new(1));
