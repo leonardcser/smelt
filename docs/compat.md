@@ -69,6 +69,18 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/store/src/meta.rs`: writer ownership claim removes the legacy row
 
+## request-audit-zero-based-attempts
+
+- Remove after: schema v2/v3 sessions written by zero-based request-audit
+  producers no longer need to open in supported versions
+- Why: shift each persisted request attempt from zero-based to one-based during
+  the v4 schema rebuild, preserving retry order while satisfying the hardened
+  `attempt >= 1` invariant
+- Code:
+  - `crates/store/src/schema.rs`: v2/v3 to v4 request-attempt migration
+- Tests:
+  - `v2_to_v4_migration_preserves_data_and_removes_dead_schema`
+
 ## allowed-session-full-materialization
 
 - Scope: full session materialization is allowed only for explicit

@@ -410,7 +410,19 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
                 FROM transcript_blocks_v2;
             INSERT INTO objects SELECT * FROM objects_v2;
             INSERT INTO history_object_refs SELECT * FROM history_object_refs_v2;
-            INSERT INTO request_attempts SELECT * FROM request_attempts_v2;
+            -- COMPAT(request-audit-zero-based-attempts): v2/v3 provider audits
+            -- stored zero-based attempt ordinals.
+            INSERT INTO request_attempts (
+                id, request_id, turn_id, ask_id, started_at, completed_at, provider, model,
+                history_len, body_hash, response_hash, error_hash, error_summary, background,
+                raw_body_size, kind, api_base, url, http_status, prompt_cache_key, stream,
+                attempt, response_summary
+            )
+                SELECT id, request_id, turn_id, ask_id, started_at, completed_at, provider, model,
+                       history_len, body_hash, response_hash, error_hash, error_summary, background,
+                       raw_body_size, kind, api_base, url, http_status, prompt_cache_key, stream,
+                       attempt + 1, response_summary
+                FROM request_attempts_v2;
             INSERT INTO request_object_refs SELECT * FROM request_object_refs_v2;
             INSERT INTO request_stats SELECT * FROM request_stats_v2;
             INSERT INTO turn_metas SELECT * FROM turn_metas_v2;
@@ -762,6 +774,8 @@ mod tests {
     fn v2_to_v4_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn, "test").unwrap();
+        conn.pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
         conn.execute_batch(
             r#"
             INSERT INTO history_items (idx, kind, json, hash, search_text)
@@ -797,11 +811,13 @@ mod tests {
                 );
             INSERT INTO request_attempts (
                 id, request_id, started_at, body_hash, raw_body_size, attempt
-            ) VALUES (
-                1, 'request', 40,
-                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                1, 1
-            );
+            ) VALUES
+                (
+                    1, 'request', 40,
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    1, 0
+                ),
+                (2, 'request', 41, NULL, 0, 1);
             INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
                 VALUES (
                     1,
@@ -821,6 +837,8 @@ mod tests {
             "#,
         )
         .unwrap();
+        conn.pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
 
         migrate(&mut conn, "test-v4").unwrap();
 
@@ -837,13 +855,22 @@ mod tests {
             .unwrap(),
             "hello"
         );
+        assert_eq!(
+            conn.query_row(
+                "SELECT MIN(attempt), MAX(attempt) FROM request_attempts",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (1, 2)
+        );
         for (table, expected) in [
             ("session_state", 1),
             ("transcript_blocks", 1),
             ("transcript_search", 1),
             ("objects", 1),
             ("history_object_refs", 1),
-            ("request_attempts", 1),
+            ("request_attempts", 2),
             ("request_object_refs", 1),
             ("request_stats", 1),
             ("turn_metas", 1),

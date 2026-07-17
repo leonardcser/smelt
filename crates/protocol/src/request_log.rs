@@ -49,6 +49,7 @@ pub struct RequestLogEntry {
     pub tokens_per_sec: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// One-based number of this attempt within the logical request.
     pub attempt: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RequestError>,

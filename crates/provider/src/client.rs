@@ -256,7 +256,7 @@ impl ProviderClient {
                     provider_kind: request.provider_kind,
                     model: request.model,
                     body: &request.body,
-                    attempt: event.attempt,
+                    attempt: event.attempt.saturating_add(1),
                     elapsed_ms: event.elapsed_ms,
                     result: event.result,
                     http_status: event.http_status,
@@ -736,6 +736,7 @@ pub struct RequestAttemptInfo<'a> {
     pub provider_kind: ProviderKind,
     pub model: &'a str,
     pub body: &'a serde_json::Value,
+    /// One-based number of this attempt within the logical request.
     pub attempt: u32,
     pub elapsed_ms: u64,
     pub result: Result<&'a ChatResponse, &'a ProviderError>,
@@ -791,7 +792,7 @@ mod tests {
         );
     }
 
-    async fn capture_codex_request(fast_mode: bool) -> Value {
+    async fn capture_codex_request(fast_mode: bool) -> (Value, Vec<u32>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -847,37 +848,47 @@ mod tests {
         };
         let messages = [user_msg("hi")];
         let cancel = CancellationToken::new();
-        ProviderClient::new(reqwest::Client::new())
-            .chat(
-                ChatRequest {
-                    provider: ChatProvider::codex(&tokens, None),
-                    api_base: &format!("http://{addr}/codex"),
-                    model: "gpt-test",
-                    messages: &messages,
-                    tools: &[],
-                    effort: ReasoningEffort::Off,
-                    config: &ModelConfig::default(),
-                    cache: CacheConfig::default(),
-                    response_format: None,
-                    fast_mode,
-                },
-                &ChatOptions::new(&cancel),
-            )
-            .await
-            .unwrap();
-        server.await.unwrap()
+        let attempts = std::sync::Mutex::new(Vec::new());
+        {
+            let on_attempt = |info: RequestAttemptInfo<'_>| {
+                attempts.lock().unwrap().push(info.attempt);
+            };
+            let mut opts = ChatOptions::new(&cancel);
+            opts.on_attempt = Some(&on_attempt);
+            ProviderClient::new(reqwest::Client::new())
+                .chat(
+                    ChatRequest {
+                        provider: ChatProvider::codex(&tokens, None),
+                        api_base: &format!("http://{addr}/codex"),
+                        model: "gpt-test",
+                        messages: &messages,
+                        tools: &[],
+                        effort: ReasoningEffort::Off,
+                        config: &ModelConfig::default(),
+                        cache: CacheConfig::default(),
+                        response_format: None,
+                        fast_mode,
+                    },
+                    &opts,
+                )
+                .await
+                .unwrap();
+        }
+        (
+            server.await.unwrap(),
+            attempts.into_inner().expect("attempt callback mutex"),
+        )
     }
 
     #[tokio::test]
-    async fn codex_http_request_normalizes_endpoint_and_emits_only_fast_service_tier() {
-        assert_eq!(
-            capture_codex_request(true).await["service_tier"],
-            "priority"
-        );
-        assert!(capture_codex_request(false)
-            .await
-            .get("service_tier")
-            .is_none());
+    async fn codex_http_request_normalizes_endpoint_and_emits_one_based_attempts() {
+        let (fast_body, fast_attempts) = capture_codex_request(true).await;
+        assert_eq!(fast_body["service_tier"], "priority");
+        assert_eq!(fast_attempts, vec![1]);
+
+        let (standard_body, standard_attempts) = capture_codex_request(false).await;
+        assert!(standard_body.get("service_tier").is_none());
+        assert_eq!(standard_attempts, vec![1]);
     }
 
     #[test]
