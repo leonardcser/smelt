@@ -801,6 +801,7 @@ mod tests {
             ("worktree_root", SettingEffect::Permissions),
             ("auto_reload", SettingEffect::AutoReload),
             ("redact_secrets", SettingEffect::FutureRequests),
+            ("fast_mode", SettingEffect::FutureRequests),
             ("cache_ttl_long", SettingEffect::FutureRequests),
             ("request_audit", SettingEffect::FutureRequests),
             ("auto_compact", SettingEffect::Compaction),

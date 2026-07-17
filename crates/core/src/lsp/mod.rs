@@ -2127,7 +2127,7 @@ mod tests {
         );
         ready.join().unwrap();
         assert_eq!(request["method"], "workspace/symbol");
-        let path = std::env::current_dir().unwrap().join("src/app_config.rs");
+        let path = std::env::current_dir().unwrap().join("src/config.rs");
         let uri = path_to_uri(&path).unwrap();
         write_fake_lsp_message(&fake_workspace_symbol_response(&request, &uri));
 
@@ -2194,7 +2194,7 @@ mod tests {
             .unwrap();
         assert_eq!(result["total"], 1);
         assert_eq!(result["symbols"][0]["name"], "ReadySymbol");
-        assert_eq!(result["symbols"][0]["file_path"], "src/app_config.rs");
+        assert_eq!(result["symbols"][0]["file_path"], "src/config.rs");
 
         let inspected = manager
             .dispatch_local(
@@ -2203,7 +2203,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(inspected["position"]["file_path"], "src/app_config.rs");
+        assert_eq!(inspected["position"]["file_path"], "src/config.rs");
         assert_eq!(inspected["hover"], "ReadySymbol hover");
         manager.shutdown_all().await;
     }
