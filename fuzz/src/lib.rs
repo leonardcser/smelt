@@ -17,8 +17,8 @@ use crossterm::event::{
 };
 use protocol::UiCommand;
 use protocol::{
-    AgentMode, Content, EngineAskError, EngineAskErrorKind, EngineEvent, Message, ReasoningBlock,
-    ReasoningKind, TokenUsage, ToolOutcome,
+    AgentMode, CanonicalHistoryDelta, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
+    Message, ReasoningBlock, ReasoningKind, TokenUsage, ToolOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -2439,10 +2439,13 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         FuzzOp::EngineTurnComplete { msg_count } => {
             let count = usize::from(msg_count);
             let id = app.current_turn_id().unwrap_or(0);
+            let first_index = pre.checkpoint_first_live_index.unwrap_or(0);
             let ev = SourceEvent::engine(EngineEvent::TurnComplete {
                 turn_id: id,
-                first_changed_index: 0,
-                history: Some(synth_history(count)),
+                history: Some(CanonicalHistoryDelta::new(
+                    first_index,
+                    synth_history(count),
+                )),
                 meta: None,
             });
             (
@@ -2456,10 +2459,10 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         FuzzOp::EngineMessages { msg_count } => {
             let count = usize::from(msg_count);
             let id = app.current_turn_id().unwrap_or(0);
+            let first_index = pre.checkpoint_first_live_index.unwrap_or(0);
             let ev = SourceEvent::engine(EngineEvent::HistoryUpdated {
                 turn_id: id,
-                first_changed_index: 0,
-                history: synth_history(count),
+                update: CanonicalHistoryDelta::new(first_index, synth_history(count)),
             });
             (
                 Some(ev),

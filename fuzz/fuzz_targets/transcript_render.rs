@@ -6,7 +6,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use protocol::{Content, EngineEvent, HistoryItem, ReasoningKind};
+use protocol::{CanonicalHistoryDelta, Content, EngineEvent, HistoryItem, ReasoningKind};
 use smelt_fuzz::{runtime::with_current_thread_runtime, TestApp};
 use tui::app::test_harness::SourceEvent;
 
@@ -79,8 +79,7 @@ fn run_with_app(input: Input) {
                 let turn_id = app.current_turn_id().unwrap_or(0);
                 app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
                     turn_id,
-                    first_changed_index: 0,
-                    history: Some(history(count)),
+                    history: Some(CanonicalHistoryDelta::new(0, history(count))),
                     meta: None,
                 }));
             }
