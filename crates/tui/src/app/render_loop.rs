@@ -25,12 +25,27 @@ impl TuiApp {
         true
     }
 
-    pub(crate) fn render_transient_frame_before_engine_event(
+    pub(crate) fn dispatch_engine_event_in_render_loop(
         &mut self,
-        ev: &protocol::EngineEvent,
+        ev: protocol::EngineEvent,
     ) -> bool {
         let mut stdout = std::io::stdout();
-        self.render_transient_frame_before_engine_event_to(ev, &mut stdout)
+        self.dispatch_engine_event_in_render_loop_to(ev, &mut stdout, |_| {})
+    }
+
+    pub(crate) fn dispatch_engine_event_in_render_loop_to<
+        W: std::io::Write,
+        F: FnOnce(&mut Self),
+    >(
+        &mut self,
+        ev: protocol::EngineEvent,
+        out: &mut W,
+        on_transient_frame: F,
+    ) -> bool {
+        if self.render_transient_frame_before_engine_event_to(&ev, out) {
+            on_transient_frame(self);
+        }
+        self.dispatch_engine_event(ev)
     }
 
     pub(crate) fn render_transient_frame_before_engine_event_to<W: std::io::Write>(

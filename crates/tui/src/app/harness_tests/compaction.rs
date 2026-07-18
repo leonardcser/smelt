@@ -88,15 +88,19 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
         )),
         error: None,
     };
+    let mut transient_frame = None;
     {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         let mut sink = std::io::sink();
-        assert!(app
-            .app
-            .render_transient_frame_before_engine_event_to(&response, &mut sink));
+        app.app
+            .dispatch_engine_event_in_render_loop_to(response, &mut sink, |app| {
+                transient_frame = Some(app.ui.snapshot())
+            });
     }
 
-    let streamed_frame = app.app.ui.snapshot().text();
+    let streamed_frame = transient_frame
+        .expect("response should render the requested transient frame")
+        .text();
     assert!(
         streamed_frame.contains("compacting"),
         "frame: {streamed_frame}"
@@ -106,7 +110,6 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
         "frame: {streamed_frame}"
     );
 
-    app.app.dispatch_engine_event(response);
     assert!(app
         .app
         .session_document
@@ -246,6 +249,117 @@ fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
         Some(smelt_core::transcript_model::Block::CompactionPreview { summary })
             if summary == "# Goal\nstream the summary"
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    for scrolled_up in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(80, 24);
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+        app.push_assistant_text("a1");
+        for index in 0..40 {
+            app.push_user_block(&format!("transcript row {index}: {}", "content ".repeat(8)));
+            app.app
+                .push_block(smelt_core::transcript_model::Block::Text {
+                    content: format!("assistant row {index}: {}", "response ".repeat(8)),
+                });
+        }
+        app.app.core.session.context_tokens = Some(500);
+        app.app.core.session.context_tokens_history_len = Some(app.app.core.session.history.len());
+        app.app.transcript_win_mut().follow_tail();
+        app.render_to_frame();
+
+        assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+        let ask_id = app
+            .pending_ask_id()
+            .expect("/compact registered ask callback");
+
+        if scrolled_up {
+            let viewport = app
+                .app
+                .transcript_win()
+                .viewport
+                .expect("rendered transcript viewport");
+            for _ in 0..6 {
+                app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: viewport.rect.left.saturating_add(2),
+                    row: viewport.rect.top.saturating_add(2),
+                    modifiers: KeyModifiers::NONE,
+                })));
+                app.render_to_frame();
+            }
+            assert!(
+                !app.app.transcript_win().is_following_tail(),
+                "wheel input should pin the transcript before streaming"
+            );
+        } else {
+            assert!(app.app.transcript_win().is_following_tail());
+        }
+
+        let marker = "render-loop preview marker";
+        let mut source = crate::event_source::ScriptedSource::new([
+            SourceEvent::Tick(20),
+            SourceEvent::engine(protocol::EngineEvent::EngineAskDelta {
+                id: ask_id,
+                delta: "# Goal\n".into(),
+            }),
+            SourceEvent::Tick(20),
+            SourceEvent::engine(protocol::EngineEvent::EngineAskDelta {
+                id: ask_id,
+                delta: marker.into(),
+            }),
+            SourceEvent::Tick(20),
+            SourceEvent::engine(protocol::EngineEvent::EngineAskResponse {
+                id: ask_id,
+                message: Some(protocol::Message::assistant(
+                    Some(protocol::Content::text("# Goal\nfinal checkpoint")),
+                    None,
+                    None,
+                )),
+                error: None,
+            }),
+        ]);
+        let frames = app.run_scripted_render_loop(&mut source).await;
+        let preview_frames: Vec<_> = frames
+            .iter()
+            .map(|frame| (frame.kind, frame.snapshot.text()))
+            .filter(|(_, frame)| frame.contains(marker))
+            .collect();
+
+        if scrolled_up {
+            assert!(
+                preview_frames.is_empty(),
+                "pinned transcript should not jump to the preview: {preview_frames:?}"
+            );
+            assert!(
+                !app.app.transcript_win().is_following_tail(),
+                "streaming preview should preserve the pinned viewport"
+            );
+        } else {
+            assert!(
+                preview_frames.iter().any(|(kind, frame)| {
+                    *kind == RenderLoopFrameKind::Normal && frame.contains("compacting")
+                }),
+                "no normal frame rendered the streaming preview body: {frames:#?}"
+            );
+        }
+        assert!(
+            app.app
+                .session_document
+                .transcript
+                .compaction_preview_id()
+                .is_none(),
+            "response should replace the transient preview"
+        );
+    }
 }
 
 #[test]

@@ -40,6 +40,20 @@ pub enum Action {
     Quit,
 }
 
+/// Render phase that produced a scripted-loop terminal snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderLoopFrameKind {
+    Normal,
+    Transient,
+}
+
+/// One compositor frame captured while driving a scripted event source.
+#[derive(Debug, Clone)]
+pub struct RenderLoopFrame {
+    pub kind: RenderLoopFrameKind,
+    pub snapshot: crate::smelt_edit::SnapshotFrame,
+}
+
 /// Immutable snapshot of state observable by tests.
 #[derive(Debug, Clone)]
 pub struct AppSnapshot {

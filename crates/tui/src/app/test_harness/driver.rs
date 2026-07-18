@@ -5,6 +5,13 @@ impl TestApp {
     /// produced into the action log. Captures the per-thread allocation
     /// delta for this event into [`Self::last_alloc_delta`].
     pub fn feed_one(&mut self, ev: SourceEvent) {
+        self.feed_one_with_transient_observer(ev, |_| {});
+    }
+
+    fn feed_one_with_transient_observer<F>(&mut self, ev: SourceEvent, on_transient_frame: F)
+    where
+        F: FnOnce(&mut TuiApp),
+    {
         let (a0, b0) = smelt_perf::alloc::thread_snapshot();
         {
             // Install the TLS app pointer so Lua bindings (e.g. `:quit`
@@ -20,7 +27,12 @@ impl TestApp {
                     }
                 }
                 SourceEvent::Engine { event } => {
-                    self.app.dispatch_engine_event(*event);
+                    let mut sink = std::io::sink();
+                    self.app.dispatch_engine_event_in_render_loop_to(
+                        *event,
+                        &mut sink,
+                        on_transient_frame,
+                    );
                 }
                 SourceEvent::Tick(ms) => {
                     self.clock.advance(Duration::from_millis(ms));
@@ -119,6 +131,36 @@ impl TestApp {
         let mut sink = std::io::sink();
         self.app.render_normal_to(&mut sink);
         self.app.ui.snapshot()
+    }
+
+    /// Consume a scripted source through the event and compositor paths used
+    /// by the main loop, recording both pre-response transient frames and the
+    /// normal frame produced after every event-loop turn.
+    pub async fn run_scripted_render_loop(
+        &mut self,
+        source: &mut impl crate::event_source::EventSource,
+    ) -> Vec<RenderLoopFrame> {
+        let mut frames = vec![RenderLoopFrame {
+            kind: RenderLoopFrameKind::Normal,
+            snapshot: self.render_to_frame(),
+        }];
+        while let Some(event) = source.next().await {
+            let mut transient_frame = None;
+            self.feed_one_with_transient_observer(event, |app| {
+                transient_frame = Some(app.ui.snapshot());
+            });
+            if let Some(snapshot) = transient_frame {
+                frames.push(RenderLoopFrame {
+                    kind: RenderLoopFrameKind::Transient,
+                    snapshot,
+                });
+            }
+            frames.push(RenderLoopFrame {
+                kind: RenderLoopFrameKind::Normal,
+                snapshot: self.render_to_frame(),
+            });
+        }
+        frames
     }
 
     /// Resize the app's surface to `(width, height)`. Used by replay

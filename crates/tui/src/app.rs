@@ -3068,8 +3068,7 @@ impl TuiApp {
                         break;
                     }
                 };
-                self.render_transient_frame_before_engine_event(&ev);
-                let action = self.dispatch_engine_event(ev);
+                let action = self.dispatch_engine_event_in_render_loop(ev);
                 if !action {
                     break;
                 }
@@ -3268,8 +3267,7 @@ impl TuiApp {
                 }
 
                 Some(ev) = self.core.engine.recv() => {
-                    self.render_transient_frame_before_engine_event(&ev);
-                    self.dispatch_engine_event(ev);
+                    self.dispatch_engine_event_in_render_loop(ev);
                 }
 
                 Some(call) = self.host_rx.recv() => {
