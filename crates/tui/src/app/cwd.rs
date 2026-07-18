@@ -15,6 +15,7 @@ pub(crate) enum SessionCwdRestore {
 pub(crate) struct PendingCwdChange {
     path: std::path::PathBuf,
     mark_session_dirty: bool,
+    tool_invocation: Option<smelt_core::lua::ToolInvocationContext>,
 }
 
 pub(crate) struct StagedProcessCwd {
@@ -49,8 +50,8 @@ impl Drop for StagedProcessCwd {
 
 impl TuiApp {
     /// Request a coherent project-context transition. Only the latest target
-    /// is retained, and it commits after the Lua callback returns and the app
-    /// reaches a safe point. Active turns retain their cwd and static policy.
+    /// is retained. Ordinary callers commit at the next idle safe point; model
+    /// tool calls use their completion boundary as an explicit safe point.
     pub(crate) fn change_cwd(
         &mut self,
         path: std::path::PathBuf,
@@ -60,6 +61,7 @@ impl TuiApp {
         self.pending_cwd_change = Some(PendingCwdChange {
             path,
             mark_session_dirty: true,
+            tool_invocation: smelt_core::lua::current_tool_invocation(),
         });
         Ok((target, true))
     }
@@ -75,35 +77,82 @@ impl TuiApp {
 
     pub(crate) fn try_perform_scheduled_cwd_change(&mut self) -> bool {
         if self.pending_cwd_change.is_none()
+            || self
+                .pending_cwd_change
+                .as_ref()
+                .is_some_and(|pending| pending.tool_invocation.is_some())
             || self.prompt_input_is_busy()
             || self.ui.active_modal().is_some()
         {
             return false;
         }
-        let pending = self
+        let _ = self.commit_pending_cwd_change();
+        true
+    }
+
+    /// Commit a transaction requested by this model tool. A direct Lua request
+    /// cannot be pulled forward accidentally by an unrelated tool completion.
+    pub(crate) fn commit_tool_cwd_change(
+        &mut self,
+        invocation: smelt_core::lua::ToolInvocationContext,
+        tool_succeeded: bool,
+    ) -> Result<bool, String> {
+        if self
             .pending_cwd_change
-            .take()
-            .expect("pending cwd checked above");
+            .as_ref()
+            .and_then(|pending| pending.tool_invocation)
+            != Some(invocation)
+        {
+            return Ok(false);
+        }
+        if !tool_succeeded {
+            self.pending_cwd_change = None;
+            return Ok(false);
+        }
+        if invocation.execution_mode != protocol::ToolExecutionMode::Sequential {
+            self.pending_cwd_change = None;
+            return Err("cwd-changing model tools must use sequential execution".into());
+        }
+        self.commit_pending_cwd_change()
+    }
+
+    pub(crate) fn discard_model_tool_cwd_change(&mut self) {
+        if self
+            .pending_cwd_change
+            .as_ref()
+            .is_some_and(|pending| pending.tool_invocation.is_some())
+        {
+            self.pending_cwd_change = None;
+        }
+    }
+
+    /// Commit the pending transaction without applying the idle gate. Callers
+    /// must own a safe boundary, such as a completed model tool callback.
+    fn commit_pending_cwd_change(&mut self) -> Result<bool, String> {
+        let Some(pending) = self.pending_cwd_change.take() else {
+            return Ok(false);
+        };
         let requested = pending.path.to_string_lossy().into_owned();
         if let Some(error) = self.bring_up_lua_for_cwd(pending.path, pending.mark_session_dirty) {
-            if pending.mark_session_dirty {
-                self.notify_error_sticky(format!("cwd change: {error}"));
+            let message = if pending.mark_session_dirty {
+                format!("cwd change: {error}")
             } else {
                 let fallback = self.cwd.clone();
                 if !self.session_is_read_only() {
                     self.apply_session_cwd(fallback.clone(), false);
                 }
-                self.notify_error_sticky(format!(
-                    "session cwd unavailable: {requested}: {error}; using {fallback}"
-                ));
-            }
-        } else if self.notification.as_ref().is_some_and(|notification| {
+                format!("session cwd unavailable: {requested}: {error}; using {fallback}")
+            };
+            self.notify_error_sticky(message.clone());
+            return Err(message);
+        }
+        if self.notification.as_ref().is_some_and(|notification| {
             notification.summary.starts_with("cwd change:")
                 || notification.summary.starts_with("session cwd unavailable:")
         }) {
             self.dismiss_notification();
         }
-        true
+        Ok(true)
     }
 
     /// Restore the working directory stored on a loaded session. Unlike
@@ -129,6 +178,7 @@ impl TuiApp {
                 self.pending_cwd_change = Some(PendingCwdChange {
                     path,
                     mark_session_dirty: false,
+                    tool_invocation: None,
                 });
                 SessionCwdRestore::Restored
             }
@@ -205,9 +255,7 @@ impl TuiApp {
     }
 
     pub(crate) fn publish_cwd_change(&mut self, user_visible: bool) {
-        self.core.engine.send(protocol::UiCommand::SetCwd {
-            cwd: self.cwd.clone(),
-        });
+        self.publish_agent_project_context();
         if user_visible && !self.session_is_read_only() {
             self.ensure_current_context_note();
             self.save_session();

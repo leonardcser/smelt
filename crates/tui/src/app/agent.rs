@@ -31,6 +31,26 @@ fn is_resumable_turn_error(
         )
 }
 
+fn annotate_cwd_metadata(
+    metadata: &mut Option<serde_json::Value>,
+    committed: bool,
+    error: Option<&str>,
+) {
+    let Some(serde_json::Value::Object(fields)) = metadata else {
+        return;
+    };
+    fields.insert("pending".into(), serde_json::Value::Bool(false));
+    fields.insert("cwd_committed".into(), serde_json::Value::Bool(committed));
+    if let Some(error) = error {
+        fields.insert(
+            "cwd_error".into(),
+            serde_json::Value::String(error.to_string()),
+        );
+    } else {
+        fields.remove("cwd_error");
+    }
+}
+
 impl TuiApp {
     /// Send a permission decision to the local engine.
     pub(crate) fn send_permission_decision(
@@ -56,20 +76,44 @@ impl TuiApp {
             .unwrap_or_else(|| self.core.permissions.snapshot())
     }
 
-    fn prepare_turn_context(&mut self) -> (String, Vec<protocol::ToolDef>) {
-        let system_prompt = {
-            let _perf = smelt_perf::perf::begin("agent:rebuild_prompt");
-            self.rebuild_system_prompt()
-        };
-        let tools = {
-            let _perf = smelt_perf::perf::begin("agent:tool_defs");
-            self.lua.tool_defs(
+    fn refresh_active_turn_permissions(&mut self) {
+        let permissions = self.core.permissions.snapshot();
+        if self.dispatching_turn_id.is_some() {
+            self.dispatching_turn_permissions = Some(permissions);
+        } else if let Some(turn) = self.agent.as_mut() {
+            turn.permissions = permissions;
+        }
+    }
+
+    fn agent_project_context(&self) -> protocol::AgentProjectContext {
+        protocol::AgentProjectContext {
+            cwd: self.core.env.cwd(),
+            instructions: self.prompt_inputs.instructions.clone(),
+            skill_section: self.prompt_inputs.skill_section.clone(),
+            system_prompt_override: self.prompt_inputs.system_prompt_override.clone(),
+            system_prompt: self.assemble_system_prompt(),
+            tools: self.lua.tool_defs(
                 self.core.config.mode.clone(),
                 smelt_core::lua::ToolVisibility::Interactive,
-            )
+            ),
+        }
+    }
+
+    pub(crate) fn publish_agent_project_context(&self) {
+        self.core
+            .engine
+            .send(protocol::UiCommand::UpdateAgentProjectContext(Box::new(
+                self.agent_project_context(),
+            )));
+    }
+
+    fn prepare_turn_context(&mut self) -> (String, Vec<protocol::ToolDef>) {
+        let context = {
+            let _perf = smelt_perf::perf::begin("agent:project_context");
+            self.agent_project_context()
         };
         self.apply_pending_history_appends_for_request();
-        (system_prompt, tools)
+        (context.system_prompt, context.tools)
     }
 
     fn prepare_user_visible_turn(&mut self) {
@@ -483,11 +527,16 @@ impl TuiApp {
         );
     }
 
+    fn cancel_turn_lua_tasks(&mut self) {
+        self.lua.cancel_turn_tasks();
+        self.discard_model_tool_cwd_change();
+    }
+
     /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
-        self.lua.cancel_turn_tasks();
+        self.cancel_turn_lua_tasks();
         self.cancel_generation = self.cancel_generation.wrapping_add(1);
         self.busy_stack.clear();
         // A turn is ending without going through `finish_turn`. Commit any
@@ -527,7 +576,7 @@ impl TuiApp {
             // engine and kill any stale turn-owned Lua tasks (tool calls,
             // bash executions, etc.). App-scoped background work survives.
             self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_turn_tasks();
+            self.cancel_turn_lua_tasks();
             self.cancel_generation = self.cancel_generation.wrapping_add(1);
             self.busy_stack.clear();
             self.clear_compaction_preview();
@@ -545,7 +594,7 @@ impl TuiApp {
         match end {
             TurnEnd::Cancelled => {
                 self.core.engine.send(UiCommand::Cancel);
-                self.lua.cancel_turn_tasks();
+                self.cancel_turn_lua_tasks();
                 self.cancel_generation = self.cancel_generation.wrapping_add(1);
                 self.busy_stack.clear();
             }
@@ -650,7 +699,7 @@ impl TuiApp {
         let mode = self.core.config.mode.clone();
         let session_id = self.core.session.id.clone();
         let session_dir = self.current_session_dir();
-        match self.lua.execute_tool(
+        let (invocation, result) = self.lua.execute_tool_with_context(
             &tool_name,
             &args,
             request_id,
@@ -661,22 +710,50 @@ impl TuiApp {
                 session_dir: &session_dir,
             },
             self.core.clock.instant_now(),
-        ) {
+        );
+        match result {
             crate::lua::ToolExecResult::Immediate {
                 content,
                 is_error,
                 metadata,
             } => {
-                self.core.engine.send(protocol::UiCommand::ToolResult {
-                    request_id,
-                    call_id,
-                    content,
-                    is_error,
-                    metadata,
-                });
+                self.complete_lua_tool(invocation, call_id, content, is_error, metadata);
             }
             crate::lua::ToolExecResult::Pending => {}
         }
+    }
+
+    pub(crate) fn complete_lua_tool(
+        &mut self,
+        invocation: smelt_core::lua::ToolInvocationContext,
+        call_id: String,
+        mut content: String,
+        mut is_error: bool,
+        mut metadata: Option<serde_json::Value>,
+    ) {
+        match self.commit_tool_cwd_change(invocation, !is_error) {
+            Ok(true) => {
+                self.refresh_active_turn_permissions();
+                annotate_cwd_metadata(&mut metadata, true, None);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                if !content.trim().is_empty() {
+                    content = format!("{error}\n\nOriginal tool result:\n{content}");
+                } else {
+                    content.clone_from(&error);
+                }
+                is_error = true;
+                annotate_cwd_metadata(&mut metadata, false, Some(&error));
+            }
+        }
+        self.core.engine.send(protocol::UiCommand::ToolResult {
+            request_id: invocation.request_id,
+            call_id,
+            content,
+            is_error,
+            metadata,
+        });
     }
 
     pub(crate) fn resolve_model_target(&mut self) -> Option<protocol::ModelTarget> {

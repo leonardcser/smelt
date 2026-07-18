@@ -239,6 +239,11 @@ impl TuiApp {
                 .replace(ag.permissions.clone());
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
             let end = self.dispatch_control(ctrl, &mut ag);
+            if let Some(permissions) = &self.dispatching_turn_permissions {
+                if !std::sync::Arc::ptr_eq(permissions, &ag.permissions) {
+                    ag.permissions = permissions.clone();
+                }
+            }
             self.dispatching_turn_id = prev_dispatching_turn_id;
             self.dispatching_turn_permissions = prev_dispatching_permissions;
             self.agent = Some(ag);

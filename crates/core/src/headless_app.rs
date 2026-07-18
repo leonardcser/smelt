@@ -210,7 +210,7 @@ impl HeadlessApp {
         lua.pump_task_events();
         for out in lua.drive_tasks(self.core.clock.instant_now()) {
             if let crate::lua::TaskDriveOutput::ToolComplete {
-                request_id,
+                invocation,
                 call_id,
                 content,
                 is_error,
@@ -218,7 +218,7 @@ impl HeadlessApp {
             } = out
             {
                 self.core.engine.send(UiCommand::ToolResult {
-                    request_id,
+                    request_id: invocation.request_id,
                     call_id,
                     content,
                     is_error,

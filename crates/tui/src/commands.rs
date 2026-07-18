@@ -532,6 +532,7 @@ impl TuiApp {
                     .target(api_key);
                 self.core.engine.send(UiCommand::SetTurnModel {
                     target: Box::new(target),
+                    system_prompt: self.assemble_system_prompt(),
                 });
             }
         }

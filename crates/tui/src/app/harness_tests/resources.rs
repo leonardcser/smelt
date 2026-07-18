@@ -386,8 +386,9 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
 }
 
 #[test]
-fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
+fn explicit_model_switch_sends_complete_context_only_for_an_active_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
+    assert!(app.run_lua(r#"smelt.agent.add_system_prompt("model switch Lua prompt fragment")"#));
     app.app
         .core
         .config
@@ -424,12 +425,16 @@ fn explicit_model_switch_sends_complete_target_only_for_an_active_turn() {
         .find(|cmd| matches!(cmd, protocol::UiCommand::SetTurnModel { .. }))
         .expect("active turn model switch should notify the engine");
     match command {
-        protocol::UiCommand::SetTurnModel { target } => {
+        protocol::UiCommand::SetTurnModel {
+            target,
+            system_prompt,
+        } => {
             assert_eq!(target.model, "switched");
             assert_eq!(target.api_base, "https://switch.example/v1");
             assert_eq!(target.provider_type, "anthropic");
             assert_eq!(target.config.context_window, Some(200_000));
             assert_eq!(target.config.tool_calling, Some(false));
+            assert!(system_prompt.contains("model switch Lua prompt fragment"));
         }
         _ => unreachable!(),
     }

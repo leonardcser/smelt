@@ -327,8 +327,8 @@ pub struct TuiApp {
     pub prompt_inputs: crate::prompt_inputs::PromptInputs,
     /// Latest-desired owner for filesystem watcher setup and events.
     pub(crate) auto_reload: crate::auto_reload::AutoReloadController,
-    /// Latest requested cwd transition. It is committed only when no turn or
-    /// modal can observe a half-updated project and permission context.
+    /// Latest requested cwd transition. It commits at idle or at the explicit
+    /// completion barrier of a model tool that requested the transition.
     pub(crate) pending_cwd_change: Option<crate::app::cwd::PendingCwdChange>,
     /// Coalesced live desired-state writes waiting for the current Lua callback
     /// to return before runtime effects are applied.
@@ -1831,11 +1831,6 @@ impl TuiApp {
             context_window: ContextWindowController::default(),
             placeholder_opts: HashMap::new(),
         }
-    }
-
-    /// Returns the system prompt that will be sent on the next turn.
-    pub(crate) fn rebuild_system_prompt(&mut self) -> String {
-        self.assemble_system_prompt()
     }
 
     /// Returns the system prompt without mutating app state.

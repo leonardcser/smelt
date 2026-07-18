@@ -703,6 +703,20 @@ pub struct StartTurnPayload {
     pub tools: Vec<ToolDef>,
 }
 
+/// Complete frontend-owned context that changes with Lua project configuration.
+///
+/// Cwd transitions publish this as one ordered command so an active turn cannot
+/// observe a new cwd with stale prompt inputs or plugin tool definitions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProjectContext {
+    pub cwd: PathBuf,
+    pub instructions: Option<String>,
+    pub skill_section: Option<String>,
+    pub system_prompt_override: Option<String>,
+    pub system_prompt: String,
+    pub tools: Vec<ToolDef>,
+}
+
 /// Commands sent from the UI to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UiCommand {
@@ -738,22 +752,17 @@ pub enum UiCommand {
     /// Toggle accelerated provider inference for subsequent requests.
     SetFastMode { enabled: bool },
 
-    /// Apply an explicit user-selected target to the active turn at the next
-    /// provider-request boundary. Ignored when no turn is active.
-    SetTurnModel { target: Box<ModelTarget> },
-
-    /// Replace cached prompt inputs after `/reload`. Updates
-    /// `EngineConfig::instructions`, `EngineConfig::skill_section`, and
-    /// `EngineConfig::system_prompt_override` so subsequent turns and
-    /// compactions see the refreshed values.
-    ReloadAgentConfig {
-        instructions: Option<String>,
-        skill_section: Option<String>,
-        system_prompt_override: Option<String>,
+    /// Apply an explicit user-selected target and fully assembled system prompt
+    /// to the active turn at the next provider-request boundary. Ignored when no
+    /// turn is active.
+    SetTurnModel {
+        target: Box<ModelTarget>,
+        system_prompt: String,
     },
 
-    /// Update the engine's cached cwd after the UI changes the process working directory.
-    SetCwd { cwd: String },
+    /// Atomically replace the engine's frontend-owned project context.
+    /// Active turns apply this before consuming the following tool result.
+    UpdateAgentProjectContext(Box<AgentProjectContext>),
 
     /// One-shot LLM call initiated by Lua. The engine spawns a
     /// fire-and-forget request and returns the response as
@@ -1102,13 +1111,18 @@ mod tests {
 
         let switch = UiCommand::SetTurnModel {
             target: Box::new(target.clone()),
+            system_prompt: "assembled system prompt".into(),
         };
         let decoded: UiCommand =
             serde_json::from_value(serde_json::to_value(switch).unwrap()).unwrap();
         match decoded {
             UiCommand::SetTurnModel {
                 target: decoded_target,
-            } => assert_eq!(*decoded_target, target),
+                system_prompt,
+            } => {
+                assert_eq!(*decoded_target, target);
+                assert_eq!(system_prompt, "assembled system prompt");
+            }
             other => panic!("expected SetTurnModel, got {other:?}"),
         }
     }

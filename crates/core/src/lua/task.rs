@@ -25,6 +25,12 @@ pub enum CommandQueueTarget {
     Request,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolInvocationContext {
+    pub request_id: u64,
+    pub execution_mode: protocol::ToolExecutionMode,
+}
+
 pub enum TaskCompletion {
     FireAndForget,
     /// Slash-command dispatch. `name` carries the cmd name so an error
@@ -34,7 +40,7 @@ pub enum TaskCompletion {
         queue_target: CommandQueueTarget,
     },
     ToolResult {
-        request_id: u64,
+        invocation: ToolInvocationContext,
         call_id: String,
     },
 }
@@ -50,6 +56,13 @@ impl TaskCompletion {
     fn command_queue_target(&self) -> Option<CommandQueueTarget> {
         match self {
             TaskCompletion::Command { queue_target, .. } => Some(*queue_target),
+            _ => None,
+        }
+    }
+
+    fn tool_invocation(&self) -> Option<ToolInvocationContext> {
+        match self {
+            TaskCompletion::ToolResult { invocation, .. } => Some(*invocation),
             _ => None,
         }
     }
@@ -75,7 +88,7 @@ pub(crate) struct LuaTask {
 #[derive(Debug)]
 pub enum TaskDriveOutput {
     ToolComplete {
-        request_id: u64,
+        invocation: ToolInvocationContext,
         call_id: String,
         content: String,
         is_error: bool,
@@ -361,10 +374,12 @@ pub(crate) fn step_task_owned(
     };
     let cancel = task.cancel.clone();
     let queue_target = task.completion.command_queue_target();
+    let tool_invocation = task.completion.tool_invocation();
     let scope = task.scope;
-    let result: LuaResult<LuaValue> = with_task_context(cancel, queue_target, scope, || {
-        task.thread.resume(resume_args)
-    });
+    let result: LuaResult<LuaValue> =
+        with_task_context(cancel, queue_target, tool_invocation, scope, || {
+            task.thread.resume(resume_args)
+        });
 
     match result {
         Ok(v) => {
@@ -372,7 +387,7 @@ pub(crate) fn step_task_owned(
                 match &task.completion {
                     TaskCompletion::FireAndForget | TaskCompletion::Command { .. } => {}
                     TaskCompletion::ToolResult {
-                        request_id,
+                        invocation,
                         call_id,
                     } => {
                         let (content, is_error, metadata_lua) = coerce_tool_result(&v);
@@ -380,7 +395,7 @@ pub(crate) fn step_task_owned(
                             .as_ref()
                             .and_then(|mv| crate::lua::lua_to_serde::<serde_json::Value>(lua, mv));
                         outputs.push(TaskDriveOutput::ToolComplete {
-                            request_id: *request_id,
+                            invocation: *invocation,
                             call_id: call_id.clone(),
                             content,
                             is_error,
@@ -438,6 +453,7 @@ pub(crate) fn step_task_owned(
 thread_local! {
     static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
     static CURRENT_COMMAND_QUEUE_TARGET: RefCell<Option<CommandQueueTarget>> = const { RefCell::new(None) };
+    static CURRENT_TOOL_INVOCATION: RefCell<Option<ToolInvocationContext>> = const { RefCell::new(None) };
     static CURRENT_TASK_SCOPE: RefCell<Option<TaskScope>> = const { RefCell::new(None) };
 }
 
@@ -445,14 +461,17 @@ thread_local! {
 fn with_task_context<R>(
     cancel: CancellationToken,
     queue_target: Option<CommandQueueTarget>,
+    tool_invocation: Option<ToolInvocationContext>,
     scope: TaskScope,
     f: impl FnOnce() -> R,
 ) -> R {
     let previous_cancel = CURRENT_TASK_CANCEL.with(|c| c.replace(Some(cancel)));
     let previous_target = CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(queue_target));
+    let previous_tool_invocation = CURRENT_TOOL_INVOCATION.with(|c| c.replace(tool_invocation));
     let previous_scope = CURRENT_TASK_SCOPE.with(|c| c.replace(Some(scope)));
     let r = f();
     CURRENT_TASK_SCOPE.with(|c| c.replace(previous_scope));
+    CURRENT_TOOL_INVOCATION.with(|c| c.replace(previous_tool_invocation));
     CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(previous_target));
     CURRENT_TASK_CANCEL.with(|c| c.replace(previous_cancel));
     r
@@ -460,7 +479,7 @@ fn with_task_context<R>(
 
 /// Install the task's cancellation token for the closure's duration.
 pub fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> R {
-    with_task_context(cancel, None, TaskScope::App, f)
+    with_task_context(cancel, None, None, TaskScope::App, f)
 }
 
 /// Current task's cancellation token; `None` when called outside `step_task`.
@@ -471,6 +490,21 @@ pub fn current_task_cancel() -> Option<CancellationToken> {
 /// Current slash-command queue target; `None` outside slash-command tasks.
 pub fn current_command_queue_target() -> Option<CommandQueueTarget> {
     CURRENT_COMMAND_QUEUE_TARGET.with(|c| *c.borrow())
+}
+
+pub(crate) fn with_tool_invocation_context<R>(
+    invocation: ToolInvocationContext,
+    f: impl FnOnce() -> R,
+) -> R {
+    let previous = CURRENT_TOOL_INVOCATION.with(|current| current.replace(Some(invocation)));
+    let result = f();
+    CURRENT_TOOL_INVOCATION.with(|current| current.replace(previous));
+    result
+}
+
+/// Current model tool invocation; `None` outside a tool callback or middleware.
+pub fn current_tool_invocation() -> Option<ToolInvocationContext> {
+    CURRENT_TOOL_INVOCATION.with(|current| *current.borrow())
 }
 
 /// Current task scope; `None` outside the Lua task runtime.
@@ -507,12 +541,12 @@ fn is_cancelled_lua_error(err: &mlua::Error) -> bool {
 
 fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<TaskDriveOutput>) {
     if let TaskCompletion::ToolResult {
-        request_id,
+        invocation,
         call_id,
     } = completion
     {
         outputs.push(TaskDriveOutput::ToolComplete {
-            request_id: *request_id,
+            invocation: *invocation,
             call_id: call_id.clone(),
             content: format!("tool error: {msg}"),
             is_error: true,
@@ -572,7 +606,10 @@ fn coerce_tool_result(v: &LuaValue) -> (String, bool, Option<mlua::Value>) {
         LuaValue::Table(t) => {
             let content: String = t.get("content").unwrap_or_default();
             let is_error: bool = t.get("is_error").unwrap_or(false);
-            let metadata: Option<mlua::Value> = t.get("metadata").ok();
+            let metadata = match t.get::<mlua::Value>("metadata") {
+                Ok(mlua::Value::Nil) | Err(_) => None,
+                Ok(metadata) => Some(metadata),
+            };
             (content, is_error, metadata)
         }
         LuaValue::Nil => (String::new(), false, None),
@@ -587,6 +624,13 @@ fn coerce_tool_result(v: &LuaValue) -> (String, bool, Option<mlua::Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_invocation(request_id: u64) -> ToolInvocationContext {
+        ToolInvocationContext {
+            request_id,
+            execution_mode: protocol::ToolExecutionMode::Concurrent,
+        }
+    }
 
     fn lua_with_sleep() -> Lua {
         let lua = Lua::new();
@@ -754,7 +798,7 @@ mod tests {
             func,
             LuaMultiValue::new(),
             TaskCompletion::ToolResult {
-                request_id: 7,
+                invocation: tool_invocation(7),
                 call_id: "c1".into(),
             },
         )
@@ -763,13 +807,13 @@ mod tests {
         assert_eq!(out.len(), 1);
         match &out[0] {
             TaskDriveOutput::ToolComplete {
-                request_id,
+                invocation,
                 call_id,
                 content,
                 is_error,
                 metadata,
             } => {
-                assert_eq!(*request_id, 7);
+                assert_eq!(invocation.request_id, 7);
                 assert_eq!(call_id, "c1");
                 assert_eq!(content, "hello");
                 assert!(!*is_error);
@@ -792,7 +836,7 @@ mod tests {
             func,
             LuaMultiValue::new(),
             TaskCompletion::ToolResult {
-                request_id: 1,
+                invocation: tool_invocation(1),
                 call_id: "x".into(),
             },
         )
@@ -814,7 +858,7 @@ mod tests {
             func,
             LuaMultiValue::new(),
             TaskCompletion::ToolResult {
-                request_id: 2,
+                invocation: tool_invocation(2),
                 call_id: "y".into(),
             },
         )
@@ -1020,7 +1064,7 @@ mod tests {
             func,
             LuaMultiValue::new(),
             TaskCompletion::ToolResult {
-                request_id: 42,
+                invocation: tool_invocation(42),
                 call_id: "call-cancel".into(),
             },
             TaskScope::Turn,

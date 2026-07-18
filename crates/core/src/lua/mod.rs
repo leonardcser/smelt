@@ -27,9 +27,9 @@ pub use shared::{
 };
 pub(crate) use task::step_task_owned;
 pub use task::{
-    current_command_queue_target, current_task_cancel, current_task_scope, with_task_cancel,
-    CommandQueueTarget, LuaTaskRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, TaskScope,
-    ToolEnv,
+    current_command_queue_target, current_task_cancel, current_task_scope, current_tool_invocation,
+    with_task_cancel, CommandQueueTarget, LuaTaskRuntime, TaskCompletion, TaskDriveOutput,
+    TaskEvent, TaskScope, ToolEnv, ToolInvocationContext,
 };
 
 /// Outcome of invoking a plugin tool handler.

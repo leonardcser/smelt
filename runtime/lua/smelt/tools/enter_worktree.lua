@@ -13,8 +13,9 @@ end
 
 smelt.tools.register({
   name = "enter_worktree",
-  description = "Create or open a managed git worktree and switch Smelt's actual process working directory into it. Use this when the user asks to implement in a new worktree.",
+  description = "Create or open a managed git worktree and switch smelt's actual process working directory into it. Use this when the user asks to implement in a new worktree.",
   effect = "write",
+  execution_mode = "sequential",
   headless = false,
   parameters = {
     type = "object",

@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn autoload_registers_ask_user_question_as_sequential() {
+    fn autoload_registers_context_barrier_tools_as_sequential() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
@@ -1603,11 +1603,13 @@ mod tests {
             protocol::AgentMode::normal(),
             smelt_core::lua::ToolVisibility::Interactive,
         );
-        let ask = defs
-            .iter()
-            .find(|d| d.name == "ask_user_question")
-            .expect("ask_user_question should be auto-registered");
-        assert_eq!(ask.execution_mode, protocol::ToolExecutionMode::Sequential);
+        for name in ["ask_user_question", "enter_worktree", "switch_cwd"] {
+            let tool = defs
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap_or_else(|| panic!("{name} should be auto-registered"));
+            assert_eq!(tool.execution_mode, protocol::ToolExecutionMode::Sequential);
+        }
     }
 
     #[test]
@@ -1815,13 +1817,13 @@ mod tests {
             .expect("expected ToolComplete");
         match complete {
             TaskDriveOutput::ToolComplete {
-                request_id,
+                invocation,
                 call_id,
                 content,
                 is_error,
                 metadata,
             } => {
-                assert_eq!(*request_id, 7);
+                assert_eq!(invocation.request_id, 7);
                 assert_eq!(call_id, "c9");
                 assert_eq!(content, "yes");
                 assert!(!*is_error);
@@ -1867,12 +1869,16 @@ mod tests {
                 .into_iter()
                 .find_map(|out| match out {
                     TaskDriveOutput::ToolComplete {
-                        request_id: 11,
+                        invocation,
                         call_id,
                         content,
                         is_error,
                         ..
-                    } if call_id == "call-read-file-utf8-boundary" => Some((content, is_error)),
+                    } if invocation.request_id == 11
+                        && call_id == "call-read-file-utf8-boundary" =>
+                    {
+                        Some((content, is_error))
+                    }
                     _ => None,
                 });
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;

@@ -155,19 +155,13 @@ impl TuiApp {
         for out in outs {
             match out {
                 crate::lua::TaskDriveOutput::ToolComplete {
-                    request_id,
+                    invocation,
                     call_id,
                     content,
                     is_error,
                     metadata,
                 } => {
-                    self.core.engine.send(protocol::UiCommand::ToolResult {
-                        request_id,
-                        call_id,
-                        content,
-                        is_error,
-                        metadata,
-                    });
+                    self.complete_lua_tool(invocation, call_id, content, is_error, metadata);
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.notify_error(msg);

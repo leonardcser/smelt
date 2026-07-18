@@ -716,10 +716,11 @@ Cwd changes currently rebuild permission roots but do not replace the loaded pro
 2. Validate the target directory and determine project/trust state.
 3. Load a candidate generation against the target cwd using explicit paths rather than temporarily changing process-global cwd during candidate evaluation. Config-time cwd/project APIs read the candidate context, not live app globals.
 4. Resolve candidate runtime and permission policy for the target project.
-5. At the Lua safe point, when no turn or callback can observe an intermediate state, commit process cwd, project context, Lua generation, permission policy, engine cwd, session metadata, prompt inputs, and watcher desired paths together.
-6. If candidate config fails, reject the cwd transition and keep the previous cwd/generation. Report the config error and allow retry after the file is fixed.
+5. Commit at one of two explicit Lua safe points. Session restore and ordinary Lua callers wait for idle. A sequential model tool commits after its Lua callback finishes but before its tool result is released. Both paths atomically install process cwd, project context, Lua generation, permission policy, engine context, session metadata, prompt inputs, and watcher desired paths.
+6. The tool boundary sends one complete engine project-context update before `ToolResult`, so the active turn uses the new cwd, prompt, and Lua tool definitions for its next request. The TUI replaces that turn's permission snapshot at the same boundary.
+7. If candidate config fails, reject the cwd transition and keep the previous cwd/generation. A model tool receives an error result instead of apparent success. Report the config error and allow retry after the file is fixed.
 
-The Lua cwd/worktree API must complete asynchronously after commit or return a clearly pending operation; it must not return the old cwd as if the switch succeeded. A request made during an active turn waits until that turn ends. If asynchronous API migration is staged, reject busy-state cwd changes until it lands rather than updating a running turn's cwd and permission policy in place.
+The Lua cwd/worktree API returns a clearly pending operation inside its callback; it must not return the old cwd as if the switch succeeded. Model-facing cwd tools are sequential so no sibling tool can race a process-global transition. Direct callers remain idle-deferred rather than mutating a running turn at an arbitrary callback boundary.
 
 A trust denial is not a load failure: commit the target cwd with global config only and record that project config was skipped. A later trust-state change queues a new candidate reload. `worktree_root` changes workspace/worktree policy but does not itself pretend that cwd changed. Worktree creation can succeed even if entering it is later rejected by target project config; report both facts clearly.
 
@@ -733,8 +734,8 @@ Turn snapshot contract:
 
 | Data | Active-turn behavior |
 | --- | --- |
-| Lua tool definitions and tool hooks | Snapshot during turn preparation |
-| Static permission policy and cwd/project context | Snapshot at turn start; cwd transactions wait for the turn to finish |
+| Lua tool definitions and tool hooks | Snapshot during turn preparation; replaced at an explicit cwd tool barrier |
+| Static permission policy and cwd/project context | Snapshot at turn start; replaced together at an explicit cwd tool barrier |
 | Session/workspace approvals | Shared and live |
 | Mode used for tool evaluation | Event/turn mode, not current UI mode |
 | Model target, mode/reasoning, and request runtime config | Snapshot at turn start |
@@ -742,7 +743,7 @@ Turn snapshot contract:
 | Background model metadata, settings reload, provider/mode catalog | Future turns only |
 | MCP/LSP server/tool state | Long-lived manager observes latest committed desired revision |
 
-Provider middleware and engine hooks follow the same generation safety rule: an invocation snapshots the hook list it will call. Candidate work cannot replace live hooks. Generation commit waits for the existing Lua safe point so no in-flight Lua callback is stranded.
+Provider middleware and engine hooks follow the same generation safety rule: an invocation snapshots the hook list it will call. Candidate work cannot replace live hooks. Generation commit waits for an idle safe point or a completed sequential tool callback, so no in-flight Lua callback is stranded.
 
 `smelt.lifecycle.on("ready", ...)` runs only for a successfully committed generation, after coherent signals and layout are current. Hooks observe updated value state and desired service revisions, but MCP/LSP network convergence may still be pending. Failed candidates do not drain old or candidate `ready` hooks.
 

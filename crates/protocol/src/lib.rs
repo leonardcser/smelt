@@ -21,8 +21,8 @@ pub mod usage;
 
 pub use content::{Content, ContentPart};
 pub use event::{
-    AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex, Decision, EngineAskError,
-    EngineAskErrorKind, EngineEvent, ModelHistoryCoordinates, ModelHistoryIndex,
+    AgentProjectContext, AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex, Decision,
+    EngineAskError, EngineAskErrorKind, EngineEvent, ModelHistoryCoordinates, ModelHistoryIndex,
     ModelHistorySource, ReasoningKind, StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation,
     ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };

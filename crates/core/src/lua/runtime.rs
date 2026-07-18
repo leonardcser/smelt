@@ -2612,11 +2612,59 @@ impl LuaRuntime {
         }
     }
 
+    fn tool_invocation_context(
+        &self,
+        tool_name: &str,
+        request_id: u64,
+    ) -> super::task::ToolInvocationContext {
+        let execution_mode = self
+            .shared
+            .tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(tool_name)
+            .map(|tool| tool.execution_mode)
+            .unwrap_or_default();
+        super::task::ToolInvocationContext {
+            request_id,
+            execution_mode,
+        }
+    }
+
     pub fn execute_tool(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
         request_id: u64,
+        call_id: &str,
+        env: ToolEnv<'_>,
+        now: Instant,
+    ) -> ToolExecResult {
+        self.execute_tool_with_context(tool_name, args, request_id, call_id, env, now)
+            .1
+    }
+
+    pub fn execute_tool_with_context(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        request_id: u64,
+        call_id: &str,
+        env: ToolEnv<'_>,
+        now: Instant,
+    ) -> (super::task::ToolInvocationContext, ToolExecResult) {
+        let invocation = self.tool_invocation_context(tool_name, request_id);
+        let result = super::task::with_tool_invocation_context(invocation, || {
+            self.execute_tool_inner(tool_name, args, invocation, call_id, env, now)
+        });
+        (invocation, result)
+    }
+
+    fn execute_tool_inner(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        invocation: super::task::ToolInvocationContext,
         call_id: &str,
         env: ToolEnv<'_>,
         now: Instant,
@@ -2708,7 +2756,7 @@ impl LuaRuntime {
                 func,
                 initial,
                 TaskCompletion::ToolResult {
-                    request_id,
+                    invocation,
                     call_id: call_id.to_string(),
                 },
                 super::task::TaskScope::Turn,
@@ -2745,12 +2793,12 @@ impl LuaRuntime {
         for out in outputs {
             match out {
                 TaskDriveOutput::ToolComplete {
-                    request_id: rid,
+                    invocation: completed_invocation,
                     call_id: cid,
                     content,
                     is_error,
                     metadata,
-                } if rid == request_id && cid == call_id => {
+                } if completed_invocation == invocation && cid == call_id => {
                     immediate = Some((content, is_error, metadata));
                 }
                 TaskDriveOutput::ToolComplete { .. } => {}

@@ -161,13 +161,14 @@ pub(crate) async fn engine_task(
                             });
                         let _dispatcher_turn =
                             DispatcherTurnGuard::new(dispatcher.as_ref(), turn_id);
+                        let started_at = config.clock.instant_now();
                         let mut turn = Turn {
                             provider,
                             dispatcher: &*dispatcher,
                             cmd_rx: &mut cmd_rx,
                             event_tx: &event_tx,
                             host_tx: &host_tx,
-                            config: &config,
+                            config: &mut config,
                             http_client: &client,
                             cancel: CancellationToken::new(),
                             bg_cancel: bg_cancel.clone(),
@@ -188,24 +189,15 @@ pub(crate) async fn engine_task(
                             next_history_changed_from: 0,
                             session_id,
                             session_dir,
-                            started_at: config.clock.instant_now(),
+                            started_at,
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
                         };
                         turn.run(input, loaded_history.items).await;
                     }
                     UiCommand::SetTurnModel { .. } => {}
-                    UiCommand::ReloadAgentConfig {
-                        instructions,
-                        skill_section,
-                        system_prompt_override,
-                    } => {
-                        config.instructions = instructions;
-                        config.skill_section = skill_section;
-                        config.system_prompt_override = system_prompt_override;
-                    }
-                    UiCommand::SetCwd { cwd } => {
-                        config.cwd = std::path::PathBuf::from(cwd);
+                    UiCommand::UpdateAgentProjectContext(context) => {
+                        config.install_project_context(&context);
                     }
                     UiCommand::SetMode { .. } => {}
                     UiCommand::SetFastMode { .. } => {}
@@ -795,7 +787,7 @@ struct Turn<'a> {
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
     /// Host-callback channel for provider middleware and request preparation.
     host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
-    config: &'a EngineConfig,
+    config: &'a mut EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: CancellationToken,
     bg_cancel: CancellationToken,
@@ -878,6 +870,17 @@ impl<'a> Turn<'a> {
     /// received them succeeds; callers decide whether to apply them.
     fn is_turn_injection(cmd: &UiCommand) -> bool {
         matches!(cmd, UiCommand::Steer { .. } | UiCommand::Unsteer { .. })
+    }
+
+    fn is_turn_config_update(cmd: &UiCommand) -> bool {
+        matches!(
+            cmd,
+            UiCommand::SetReasoningEffort { .. }
+                | UiCommand::SetFastMode { .. }
+                | UiCommand::SetMode { .. }
+                | UiCommand::SetTurnModel { .. }
+                | UiCommand::UpdateAgentProjectContext(_)
+        )
     }
 
     /// Drain `deferred` back through `handle_turn_cmd`.
@@ -1009,30 +1012,19 @@ impl<'a> Turn<'a> {
         self.history.push(HistoryItem::Assistant(step));
     }
 
-    /// Rebuilds the system prompt after `/reload`. Mode changes alone
-    /// don't reach here: the base prompt is mode-agnostic so its bytes
-    /// stay stable across `/mode` switches, preserving the cache.
-    fn regenerate_system_prompt(&mut self) {
-        let new = self
-            .config
-            .system_prompt_override
-            .clone()
-            .unwrap_or_else(|| {
-                crate::build_system_prompt(
-                    self.config.system_prompt_behavior,
-                    crate::SystemPromptCapabilities::from_tool_calling(
-                        self.provider.tool_calling(),
-                    ),
-                    self.config.instructions.as_deref(),
-                    self.config.skill_section.as_deref(),
-                )
-            });
-        self.system_prompt = new;
+    fn install_system_prompt(&mut self, system_prompt: String) {
+        self.system_prompt = system_prompt;
         if let Some(first) = self.history.first_mut() {
             if matches!(first, HistoryItem::System { .. }) {
                 *first = HistoryItem::system(&self.system_prompt);
             }
         }
+    }
+
+    fn install_project_context(&mut self, mut context: Box<protocol::AgentProjectContext>) {
+        self.config.install_project_context(&context);
+        self.tools = std::mem::take(&mut context.tools);
+        self.install_system_prompt(std::mem::take(&mut context.system_prompt));
     }
 
     fn emit_history_appended_from(&mut self, first_index: usize) {
@@ -1232,7 +1224,7 @@ impl<'a> Turn<'a> {
         }
     }
 
-    fn apply_model_change(&mut self, target: ModelTarget) {
+    fn apply_model_change(&mut self, target: ModelTarget, system_prompt: String) {
         self.provider = build_provider(
             &target,
             self.http_client,
@@ -1240,6 +1232,7 @@ impl<'a> Turn<'a> {
         );
         self.model_target = target;
         self.target_revision = self.target_revision.wrapping_add(1);
+        self.install_system_prompt(system_prompt);
     }
 
     async fn prepare_request_with_host(
@@ -1365,8 +1358,15 @@ impl<'a> Turn<'a> {
                 self.mode = mode;
                 true
             }
-            UiCommand::SetTurnModel { target } => {
-                self.apply_model_change(*target);
+            UiCommand::SetTurnModel {
+                target,
+                system_prompt,
+            } => {
+                self.apply_model_change(*target, system_prompt);
+                true
+            }
+            UiCommand::UpdateAgentProjectContext(context) => {
+                self.install_project_context(context);
                 true
             }
             UiCommand::Cancel => {
@@ -1411,7 +1411,6 @@ impl<'a> Turn<'a> {
             first = false;
 
             let request_target_revision = self.target_revision;
-            self.regenerate_system_prompt();
 
             // Sorted by name so the request prefix stays byte-identical
             // across turns. Anything that reorders tools busts the cache.
@@ -2265,10 +2264,7 @@ impl<'a> Turn<'a> {
                     UiCommand::AppendHistoryItem { append } => {
                         deferred.push(UiCommand::AppendHistoryItem { append });
                     }
-                    UiCommand::SetReasoningEffort { .. }
-                    | UiCommand::SetFastMode { .. }
-                    | UiCommand::SetMode { .. }
-                    | UiCommand::SetTurnModel { .. } => deferred.push(cmd),
+                    cmd if Self::is_turn_config_update(&cmd) => deferred.push(cmd),
                     other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
                 },
                 Some((idx, result)) = futs.next(), if !futs.is_empty() => {
@@ -2484,9 +2480,9 @@ impl<'a> Turn<'a> {
         &mut self,
         tool_defs: &[ToolDefinition],
     ) -> (Result<(ChatResponse, bool), ProviderError>, String, String) {
-        // The chat future borrows the provider and target model, so target
-        // changes received mid-request are deferred until the future resolves.
-        let mut pending_target: Option<ModelTarget> = None;
+        // Config updates received while the provider is borrowed are replayed
+        // in channel order after the request resolves.
+        let mut deferred_config_updates: Vec<UiCommand> = Vec::new();
         // Speculative steer/unsteer commands received while the request is
         // in flight. Applied only if the request succeeds so the app can
         // preserve its queue on failure.
@@ -2499,9 +2495,7 @@ impl<'a> Turn<'a> {
         let partial_reasoning = std::sync::Mutex::new(String::new());
         let reasoning_stream = std::sync::Mutex::new(ReasoningStreamState::default());
 
-        let reasoning_changes_apply_now = self.provider.supports_mid_turn_reasoning_changes();
-
-        // Model changes received mid-request are applied after the future resolves.
+        // Deferred config updates apply after the future resolves.
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
                 let _ = self.event_tx.send(EngineEvent::Retrying {
@@ -2638,21 +2632,14 @@ impl<'a> Turn<'a> {
                             cancel_received = true;
                             self.bg_cancel.cancel();
                         }
-                        UiCommand::SetReasoningEffort { effort } => {
-                            if reasoning_changes_apply_now {
-                                self.reasoning_effort = effort;
-                            }
-                        }
-                        UiCommand::SetMode { mode } => self.mode = mode,
-                        UiCommand::SetFastMode { enabled } => self.fast_mode = enabled,
-                        UiCommand::SetTurnModel { target } => {
-                            pending_target = Some(*target);
-                        }
                         UiCommand::AppendHistoryItem { append } => {
                             deferred_appends.push(append);
                         }
                         UiCommand::Steer { .. } | UiCommand::Unsteer { .. } => {
                             deferred_turn_cmds.push(cmd)
+                        }
+                        cmd if Self::is_turn_config_update(&cmd) => {
+                            deferred_config_updates.push(cmd)
                         }
                         other => {
                             let _ = dispatch_background_cmd(other, &self.bg_ctx());
@@ -2669,11 +2656,7 @@ impl<'a> Turn<'a> {
         let pt = partial_text.into_inner().unwrap_or_default();
         let pr = partial_reasoning.into_inner().unwrap_or_default();
 
-        if let Some(target) = pending_target {
-            self.handle_turn_cmd(UiCommand::SetTurnModel {
-                target: Box::new(target),
-            });
-        }
+        self.apply_deferred_turn_cmds(deferred_config_updates);
         for append in deferred_appends {
             self.queue_history_item(append);
         }
@@ -2704,12 +2687,9 @@ impl<'a> Turn<'a> {
                 Some(UiCommand::AppendHistoryItem { append }) => {
                     self.queue_history_item(append);
                 }
-                Some(cmd @ UiCommand::SetReasoningEffort { .. })
-                | Some(cmd @ UiCommand::SetMode { .. })
-                | Some(cmd @ UiCommand::SetTurnModel { .. }) => {
+                Some(cmd) if Self::is_turn_config_update(&cmd) => {
                     self.handle_turn_cmd(cmd);
                 }
-                Some(UiCommand::SetFastMode { enabled }) => self.fast_mode = enabled,
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     self.bg_cancel.cancel();
@@ -3184,7 +3164,7 @@ mod tests {
         let (host_tx, _host_rx) = mpsc::unbounded_channel();
         let clock: std::sync::Arc<dyn crate::clock::Clock> =
             std::sync::Arc::new(crate::clock::RealClock);
-        let config = test_engine_config(clock.clone());
+        let mut config = test_engine_config(clock.clone());
         let provider = EngineProvider::new(
             "https://x".into(),
             "k".into(),
@@ -3198,7 +3178,7 @@ mod tests {
             cmd_rx: &mut cmd_rx,
             event_tx: &event_tx,
             host_tx: &host_tx,
-            config: &config,
+            config: &mut config,
             http_client: &client,
             cancel: CancellationToken::new(),
             bg_cancel: CancellationToken::new(),
@@ -3254,6 +3234,157 @@ mod tests {
             &turn.history[3],
             HistoryItem::Note(note) if note == &typed_note
         ));
+    }
+
+    #[test]
+    fn turn_config_classifier_covers_every_active_turn_update() {
+        let context = || {
+            Box::new(protocol::AgentProjectContext {
+                cwd: std::path::PathBuf::from("/target"),
+                instructions: None,
+                skill_section: None,
+                system_prompt_override: None,
+                system_prompt: "prompt".into(),
+                tools: Vec::new(),
+            })
+        };
+        for command in [
+            UiCommand::SetReasoningEffort {
+                effort: ReasoningEffort::Off,
+            },
+            UiCommand::SetFastMode { enabled: true },
+            UiCommand::SetMode {
+                mode: AgentMode::normal(),
+            },
+            UiCommand::SetTurnModel {
+                target: Box::new(model_target()),
+                system_prompt: "prompt".into(),
+            },
+            UiCommand::UpdateAgentProjectContext(context()),
+        ] {
+            assert!(Turn::is_turn_config_update(&command), "{command:?}");
+        }
+        assert!(!Turn::is_turn_config_update(&UiCommand::Cancel));
+    }
+
+    #[tokio::test]
+    async fn sequential_tool_wait_replays_ordered_context_updates_before_result() {
+        let client = reqwest::Client::new();
+        let dispatcher = crate::tools::EmptyDispatcher::new();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+        let clock: std::sync::Arc<dyn crate::clock::Clock> =
+            std::sync::Arc::new(crate::clock::RealClock);
+        let mut config = test_engine_config(clock.clone());
+        let provider = EngineProvider::new(
+            "https://x".into(),
+            "k".into(),
+            "openai",
+            client.clone(),
+            clock,
+        );
+        let target_tool = protocol::ToolDef {
+            name: "target_tool".into(),
+            description: "target".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            modes: None,
+            execution_mode: protocol::ToolExecutionMode::Sequential,
+            override_core: false,
+            hooks: protocol::ToolHookFlags::default(),
+            headless: true,
+        };
+        let mut turn = Turn {
+            provider,
+            dispatcher: &dispatcher,
+            cmd_rx: &mut cmd_rx,
+            event_tx: &event_tx,
+            host_tx: &host_tx,
+            config: &mut config,
+            http_client: &client,
+            cancel: CancellationToken::new(),
+            bg_cancel: CancellationToken::new(),
+            history: vec![HistoryItem::system("old prompt")],
+            history_coordinates: protocol::ModelHistoryCoordinates::canonical(),
+            mode: AgentMode::normal(),
+            reasoning_effort: ReasoningEffort::Off,
+            fast_mode: false,
+            turn_id: 1,
+            model_target: model_target(),
+            target_revision: 0,
+            request_config: RequestRuntimeConfig::default(),
+            display: None,
+            system_prompt: "old prompt".into(),
+            tools: Vec::new(),
+            permission_overrides: None,
+            pending_history_items: Vec::new(),
+            next_history_changed_from: 0,
+            session_id: "s".into(),
+            session_dir: std::path::PathBuf::from("/tmp/s"),
+            started_at: Instant::now(),
+            tps_samples: Vec::new(),
+            tool_elapsed: HashMap::new(),
+        };
+
+        cmd_tx
+            .send(UiCommand::UpdateAgentProjectContext(Box::new(
+                protocol::AgentProjectContext {
+                    cwd: std::path::PathBuf::from("/first-target"),
+                    instructions: Some("first instructions".into()),
+                    skill_section: None,
+                    system_prompt_override: None,
+                    system_prompt: "first project prompt".into(),
+                    tools: Vec::new(),
+                },
+            )))
+            .unwrap();
+        let mut switched_target = model_target();
+        switched_target.model = "switched-model".into();
+        cmd_tx
+            .send(UiCommand::SetTurnModel {
+                target: Box::new(switched_target),
+                system_prompt: "model prompt with Lua fragment".into(),
+            })
+            .unwrap();
+        cmd_tx
+            .send(UiCommand::UpdateAgentProjectContext(Box::new(
+                protocol::AgentProjectContext {
+                    cwd: std::path::PathBuf::from("/target"),
+                    instructions: Some("target instructions".into()),
+                    skill_section: Some("target skills".into()),
+                    system_prompt_override: None,
+                    system_prompt: "target prompt with Lua fragment".into(),
+                    tools: vec![target_tool],
+                },
+            )))
+            .unwrap();
+        cmd_tx
+            .send(UiCommand::ToolResult {
+                request_id: 7,
+                call_id: "switch".into(),
+                content: "cwd: /target".into(),
+                is_error: false,
+                metadata: None,
+            })
+            .unwrap();
+
+        let result = turn.wait_for_tool_result(7).await;
+
+        assert_eq!(result, Some(("cwd: /target".into(), false, None)));
+        assert_eq!(turn.config.cwd, std::path::PathBuf::from("/target"));
+        assert_eq!(
+            turn.config.instructions.as_deref(),
+            Some("target instructions")
+        );
+        assert_eq!(turn.model_target.model, "switched-model");
+        assert_eq!(turn.system_prompt, "target prompt with Lua fragment");
+        assert!(matches!(
+            &turn.history[0],
+            HistoryItem::System { content }
+                if content.text_content() == "target prompt with Lua fragment"
+        ));
+        assert_eq!(turn.tools.len(), 1);
+        assert_eq!(turn.tools[0].name, "target_tool");
     }
 
     #[tokio::test]

@@ -242,6 +242,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let preview_handle = def.preview.map(stash).transpose()?;
                 let preview_output_handle = def.preview_output.map(stash).transpose()?;
                 let has_draft_preview = def.draft_preview.is_some();
+                let execution_mode = match def.execution_mode.as_deref() {
+                    Some("sequential") => protocol::ToolExecutionMode::Sequential,
+                    _ => protocol::ToolExecutionMode::Concurrent,
+                };
 
                 let meta = lua.create_table()?;
                 meta.set("description", def.description)?;
@@ -296,6 +300,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         name.clone(),
                         ToolHandles {
                             execute: execute_handle,
+                            execution_mode,
                             approval_patterns: approval_patterns_handle,
                             preflight: preflight_handle,
                             paths_for_workspace: paths_for_workspace_handle,

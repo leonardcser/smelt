@@ -1141,12 +1141,222 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
         )));
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
-        protocol::UiCommand::SetCwd { cwd } if cwd == expected
+        protocol::UiCommand::UpdateAgentProjectContext(context)
+            if context.cwd.to_string_lossy() == expected
     )));
 }
 
 #[test]
-fn cwd_request_during_turn_commits_project_context_only_after_idle() {
+fn switch_cwd_tool_commits_project_context_before_releasing_its_result() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create tool cwd tempdir");
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let expected = target.to_string_lossy().into_owned();
+    let smelt_dir = target.join(".smelt");
+    std::fs::create_dir_all(&smelt_dir).unwrap();
+    std::fs::write(target.join("AGENTS.md"), "target cwd instructions").unwrap();
+    std::fs::write(
+        smelt_dir.join("init.lua"),
+        r#"
+            smelt.agent.add_system_prompt("target cwd prompt fragment")
+            smelt.tools.register({
+                name = "target_cwd_probe",
+                description = "target-only tool",
+                parameters = { type = "object", properties = {} },
+                execute = function() return "target" end,
+            })
+        "#,
+    )
+    .unwrap();
+
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    smelt_core::trust::mark_trusted(&target).unwrap();
+    app.start_turn(42);
+    let original_generation = app.app.lua.id;
+    let original_permissions = app.app.active_permissions();
+    let _ = app.drain_engine_sends();
+    app.clear_actions();
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        request_id: 91,
+        call_id: "switch-cwd".into(),
+        tool_name: "switch_cwd".into(),
+        args: std::collections::HashMap::from([(
+            "path".into(),
+            serde_json::Value::String(expected.clone()),
+        )]),
+    }));
+
+    assert_eq!(app.app.cwd, expected);
+    assert_eq!(app.app.core.env.cwd(), target);
+    assert_eq!(std::env::current_dir().unwrap(), target);
+    assert_eq!(app.app.lua.id, original_generation.wrapping_add(1));
+    assert!(app.app.pending_cwd_change.is_none());
+    assert!(app
+        .app
+        .lua
+        .tool_defs(
+            app.app.core.config.mode.clone(),
+            smelt_core::lua::ToolVisibility::Interactive,
+        )
+        .iter()
+        .any(|tool| tool.name == "target_cwd_probe"));
+
+    let active_permissions = app.app.active_permissions();
+    assert!(!std::sync::Arc::ptr_eq(
+        &active_permissions,
+        &original_permissions
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &active_permissions,
+        &app.app.core.permissions.snapshot()
+    ));
+
+    let commands: Vec<_> = app
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::EngineSend(command) => Some(command.as_ref()),
+            _ => None,
+        })
+        .collect();
+    let context_index = commands
+        .iter()
+        .position(|command| matches!(
+            command,
+            protocol::UiCommand::UpdateAgentProjectContext(context)
+                if context.cwd == target
+                    && context.instructions.as_deref().is_some_and(|text| text.contains("target cwd instructions"))
+                    && context.system_prompt.contains("target cwd prompt fragment")
+                    && context.tools.iter().any(|tool| tool.name == "target_cwd_probe")
+        ))
+        .expect("committed project context command");
+    let result_index = commands
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                protocol::UiCommand::ToolResult {
+                    request_id: 91,
+                    call_id,
+                    is_error: false,
+                    metadata: Some(metadata),
+                    ..
+                } if call_id == "switch-cwd"
+                    && metadata["pending"] == false
+                    && metadata["cwd_committed"] == true
+            )
+        })
+        .expect("successful switch_cwd tool result");
+    assert!(context_index < result_index);
+}
+
+#[test]
+fn concurrent_model_tool_cannot_commit_a_cwd_change() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create concurrent tool cwd tempdir");
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let original_cwd = app.app.cwd.clone();
+    let original_process_cwd = std::env::current_dir().unwrap();
+    assert!(app.run_lua(
+        r#"
+            smelt.tools.register({
+                name = "concurrent_cwd_probe",
+                description = "attempt a concurrent cwd transition",
+                parameters = {
+                    type = "object",
+                    properties = { path = { type = "string" } },
+                    required = { "path" },
+                },
+                execute = function(args)
+                    return smelt.session.switch_cwd(args.path)
+                end,
+            })
+        "#,
+    ));
+    app.start_turn(42);
+    let _ = app.drain_engine_sends();
+    app.clear_actions();
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        request_id: 93,
+        call_id: "concurrent-cwd".into(),
+        tool_name: "concurrent_cwd_probe".into(),
+        args: std::collections::HashMap::from([(
+            "path".into(),
+            serde_json::Value::String(target.to_string_lossy().into_owned()),
+        )]),
+    }));
+
+    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
+    assert!(app.app.pending_cwd_change.is_none());
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(command)
+            if matches!(
+                command.as_ref(),
+                protocol::UiCommand::ToolResult {
+                    request_id: 93,
+                    call_id,
+                    content,
+                    is_error: true,
+                    metadata: None,
+                } if call_id == "concurrent-cwd"
+                    && content == "cwd-changing model tools must use sequential execution"
+            )
+    )));
+}
+
+#[test]
+fn cancelled_sequential_tool_discards_its_pending_cwd_change() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create cancelled tool cwd tempdir");
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let original_cwd = app.app.cwd.clone();
+    assert!(app.run_lua(
+        r#"
+            smelt.tools.register({
+                name = "cancelled_cwd_probe",
+                description = "request a cwd transition before sleeping",
+                execution_mode = "sequential",
+                parameters = {
+                    type = "object",
+                    properties = { path = { type = "string" } },
+                    required = { "path" },
+                },
+                execute = function(args)
+                    smelt.session.switch_cwd(args.path)
+                    smelt.sleep(60000)
+                    return "unexpected completion"
+                end,
+            })
+        "#,
+    ));
+    app.start_turn(42);
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        request_id: 94,
+        call_id: "cancelled-cwd".into(),
+        tool_name: "cancelled_cwd_probe".into(),
+        args: std::collections::HashMap::from([(
+            "path".into(),
+            serde_json::Value::String(target.to_string_lossy().into_owned()),
+        )]),
+    }));
+    assert!(app.app.pending_cwd_change.is_some());
+
+    app.app.discard_turn(crate::app::TurnEnd::Cancelled);
+    assert_eq!(app.app.cwd, original_cwd);
+    assert!(app.app.pending_cwd_change.is_none());
+    app.drain_idle_work();
+    assert_eq!(app.app.cwd, original_cwd);
+}
+
+#[test]
+fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
     let environment_guard = test_environment_guard();
     let target_dir = tempfile::TempDir::new().expect("create deferred cwd tempdir");
     let target = std::fs::canonicalize(target_dir.path()).unwrap();
@@ -1209,7 +1419,35 @@ fn cwd_request_during_turn_commits_project_context_only_after_idle() {
     assert!(!app
         .drain_engine_sends()
         .into_iter()
-        .any(|cmd| matches!(cmd, protocol::UiCommand::SetCwd { .. })));
+        .any(|cmd| matches!(cmd, protocol::UiCommand::UpdateAgentProjectContext(_))));
+
+    app.app.complete_lua_tool(
+        smelt_core::lua::ToolInvocationContext {
+            request_id: 99,
+            execution_mode: protocol::ToolExecutionMode::Concurrent,
+        },
+        "unrelated-tool".into(),
+        "unrelated result".into(),
+        false,
+        None,
+    );
+    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.app.lua.id, original_generation);
+    assert!(app.app.pending_cwd_change.is_some());
+    let commands = app.drain_engine_sends();
+    assert!(!commands
+        .iter()
+        .any(|cmd| matches!(cmd, protocol::UiCommand::UpdateAgentProjectContext(_))));
+    assert!(commands.iter().any(|cmd| matches!(
+        cmd,
+        protocol::UiCommand::ToolResult {
+            request_id: 99,
+            call_id,
+            content,
+            is_error: false,
+            ..
+        } if call_id == "unrelated-tool" && content == "unrelated result"
+    )));
 
     app.app.discard_turn(crate::app::TurnEnd::Complete);
     assert!(app.drain_idle_work());
@@ -1227,8 +1465,190 @@ fn cwd_request_during_turn_commits_project_context_only_after_idle() {
         .contains("deferred_cwd_project"));
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
-        protocol::UiCommand::SetCwd { cwd } if cwd == expected
+        protocol::UiCommand::UpdateAgentProjectContext(context)
+            if context.cwd.to_string_lossy() == expected
     )));
+}
+
+#[test]
+fn failed_switch_cwd_tool_reports_error_without_publishing_partial_context() {
+    let environment_guard = test_environment_guard();
+    let target_dir = tempfile::TempDir::new().expect("create failed tool cwd tempdir");
+    let smelt_dir = target_dir.path().join(".smelt");
+    std::fs::create_dir_all(&smelt_dir).unwrap();
+    std::fs::write(smelt_dir.join("init.lua"), "this is invalid target Lua @@@").unwrap();
+
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    smelt_core::trust::mark_trusted(target_dir.path()).unwrap();
+    app.start_turn(42);
+    let target = std::fs::canonicalize(target_dir.path()).unwrap();
+    let original_cwd = app.app.cwd.clone();
+    let original_runtime_cwd = app.app.core.env.cwd();
+    let original_process_cwd = std::env::current_dir().unwrap();
+    let original_generation = app.app.lua.id;
+    let original_permissions = app.app.active_permissions();
+    let _ = app.drain_engine_sends();
+    app.clear_actions();
+
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        request_id: 92,
+        call_id: "failed-switch-cwd".into(),
+        tool_name: "switch_cwd".into(),
+        args: std::collections::HashMap::from([(
+            "path".into(),
+            serde_json::Value::String(target.to_string_lossy().into_owned()),
+        )]),
+    }));
+
+    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(app.app.core.env.cwd(), original_runtime_cwd);
+    assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
+    assert_eq!(app.app.lua.id, original_generation);
+    assert!(app.app.pending_cwd_change.is_none());
+    assert!(std::sync::Arc::ptr_eq(
+        &app.app.active_permissions(),
+        &original_permissions
+    ));
+
+    let commands: Vec<_> = app
+        .actions()
+        .iter()
+        .filter_map(|action| match action {
+            Action::EngineSend(command) => Some(command.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert!(!commands
+        .iter()
+        .any(|command| matches!(command, protocol::UiCommand::UpdateAgentProjectContext(_))));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        protocol::UiCommand::ToolResult {
+            request_id: 92,
+            call_id,
+            content,
+            is_error: true,
+            metadata: Some(metadata),
+        } if call_id == "failed-switch-cwd"
+            && content.starts_with("cwd change:")
+            && content.contains("Original tool result:\ncwd:")
+            && metadata["pending"] == false
+            && metadata["cwd_committed"] == false
+            && metadata["cwd_error"].as_str().is_some_and(|error| error.starts_with("cwd change:"))
+    )));
+}
+
+#[test]
+fn failed_worktree_cwd_commit_preserves_creation_result_metadata() {
+    let environment_guard = test_environment_guard();
+    let repo = tempfile::TempDir::new().expect("create worktree repository");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "smelt test")
+            .env("GIT_AUTHOR_EMAIL", "smelt-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "smelt test")
+            .env("GIT_COMMITTER_EMAIL", "smelt-test@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-b", "main"]);
+    std::fs::write(repo.path().join("README.md"), "fixture\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "initial"]);
+
+    let mut app = TestApp::builder()
+        .with_cwd(repo.path())
+        .build_with_test_environment_guard(&environment_guard);
+    app.app.core.config.settings.worktree_root = ".worktrees".into();
+    let original_cwd = app.app.cwd.clone();
+    let original_process_cwd = std::env::current_dir().unwrap();
+    let invalid_init = "this is invalid target Lua @@@";
+    let project_config = repo.path().join(".smelt");
+    std::fs::create_dir_all(&project_config).unwrap();
+    std::fs::write(project_config.join("init.lua"), invalid_init).unwrap();
+    git(&["add", ".smelt/init.lua"]);
+    git(&["commit", "-m", "add target config"]);
+
+    let target = repo.path().join(".worktrees").join("broken-context");
+    std::fs::create_dir_all(target.join(".smelt")).unwrap();
+    std::fs::write(target.join(".smelt/init.lua"), invalid_init).unwrap();
+    smelt_core::trust::mark_trusted(&target).unwrap();
+    std::fs::remove_dir_all(&target).unwrap();
+
+    app.start_turn(42);
+    let _ = app.drain_engine_sends();
+    app.clear_actions();
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+        request_id: 95,
+        call_id: "enter-broken-worktree".into(),
+        tool_name: "enter_worktree".into(),
+        args: std::collections::HashMap::from([(
+            "name".into(),
+            serde_json::Value::String("broken-context".into()),
+        )]),
+    }));
+
+    assert_eq!(app.app.cwd, original_cwd);
+    assert_eq!(std::env::current_dir().unwrap(), original_process_cwd);
+    assert!(
+        target.is_dir(),
+        "worktree creation side effect should remain"
+    );
+    assert!(app.app.pending_cwd_change.is_none());
+    assert!(!app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(command)
+            if matches!(command.as_ref(), protocol::UiCommand::UpdateAgentProjectContext(_))
+    )));
+
+    let result = app
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::ToolResult {
+                    request_id: 95,
+                    call_id,
+                    content,
+                    is_error,
+                    metadata,
+                } if call_id == "enter-broken-worktree" => {
+                    Some((content, *is_error, metadata.as_ref()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("failed enter_worktree result");
+    assert!(result.1);
+    assert!(result.0.starts_with("cwd change:"), "{}", result.0);
+    assert!(
+        result
+            .0
+            .contains("Original tool result:\nentered managed worktree broken-context"),
+        "{}",
+        result.0
+    );
+    let metadata = result
+        .2
+        .expect("worktree metadata should survive cwd failure");
+    assert_eq!(metadata["name"], "broken-context");
+    assert_eq!(metadata["branch"], "broken-context");
+    assert_eq!(metadata["base"], "main");
+    assert_eq!(metadata["path"], target.to_string_lossy().as_ref());
+    assert_eq!(metadata["created"], true);
+    assert_eq!(metadata["pending"], false);
+    assert_eq!(metadata["cwd_committed"], false);
+    assert!(metadata["cwd_error"]
+        .as_str()
+        .is_some_and(|error| error.starts_with("cwd change:")));
 }
 
 #[test]
@@ -1315,7 +1735,8 @@ fn loading_session_restores_persisted_cwd() {
     assert!(app.app.session_document.live_session.is_none());
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
-        protocol::UiCommand::SetCwd { cwd } if cwd == expected
+        protocol::UiCommand::UpdateAgentProjectContext(context)
+            if context.cwd.to_string_lossy() == expected
     )));
 
     let display_target_dir = tempfile::TempDir::new().expect("create display-only cwd tempdir");
@@ -1352,7 +1773,8 @@ fn loading_session_restores_persisted_cwd() {
     );
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
-        protocol::UiCommand::SetCwd { cwd } if cwd == display_expected
+        protocol::UiCommand::UpdateAgentProjectContext(context)
+            if context.cwd.to_string_lossy() == display_expected
     )));
 
     let missing_dir = tempfile::TempDir::new().expect("create missing cwd tempdir");

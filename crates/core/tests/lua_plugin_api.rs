@@ -231,6 +231,147 @@ fn agent_system_prompt_fragments_are_registered_and_removed() {
 }
 
 #[test]
+fn tool_invocation_context_spans_synchronous_middleware_and_handler() {
+    let rt = fresh();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture_observed = observed.clone();
+    let capture = rt
+        .lua
+        .create_function(move |_, stage: String| {
+            let invocation = smelt_core::lua::current_tool_invocation()
+                .expect("tool invocation context inside callback");
+            capture_observed.lock().unwrap().push((stage, invocation));
+            Ok(())
+        })
+        .unwrap();
+    rt.lua.globals().set("capture_invocation", capture).unwrap();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "invocation_probe",
+                execution_mode = "sequential",
+                execute = function()
+                    capture_invocation("handler")
+                    return "ok"
+                end,
+            })
+            smelt.tools.middleware("invocation_probe", {
+                before = function()
+                    capture_invocation("before")
+                end,
+                after = function()
+                    capture_invocation("after")
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register invocation probe");
+
+    let result = rt.execute_tool(
+        "invocation_probe",
+        &HashMap::new(),
+        83,
+        "call-invocation-probe",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+
+    assert!(matches!(
+        result,
+        ToolExecResult::Immediate {
+            content,
+            is_error: false,
+            ..
+        } if content == "ok"
+    ));
+    let observed = observed.lock().unwrap();
+    assert_eq!(
+        observed
+            .iter()
+            .map(|(stage, _)| stage.as_str())
+            .collect::<Vec<_>>(),
+        ["before", "handler", "after"]
+    );
+    assert!(observed.iter().all(|(_, invocation)| {
+        invocation.request_id == 83
+            && invocation.execution_mode == protocol::ToolExecutionMode::Sequential
+    }));
+    assert!(smelt_core::lua::current_tool_invocation().is_none());
+}
+
+#[test]
+fn tool_invocation_context_survives_a_yield() {
+    let rt = fresh();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture_observed = observed.clone();
+    let capture = rt
+        .lua
+        .create_function(move |_, ()| {
+            capture_observed
+                .lock()
+                .unwrap()
+                .push(smelt_core::lua::current_tool_invocation());
+            Ok(())
+        })
+        .unwrap();
+    rt.lua.globals().set("capture_invocation", capture).unwrap();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "yielding_invocation_probe",
+                execution_mode = "sequential",
+                execute = function()
+                    capture_invocation()
+                    smelt.sleep(0)
+                    capture_invocation()
+                    return "ok"
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register yielding invocation probe");
+
+    let result = rt.execute_tool(
+        "yielding_invocation_probe",
+        &HashMap::new(),
+        84,
+        "call-yielding-invocation-probe",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+    assert!(matches!(result, ToolExecResult::Pending));
+    let outputs = rt.drive_tasks(Instant::now());
+    assert!(outputs.iter().any(|output| matches!(
+        output,
+        TaskDriveOutput::ToolComplete { invocation, .. }
+            if invocation.request_id == 84
+                && invocation.execution_mode == protocol::ToolExecutionMode::Sequential
+    )));
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(observed.iter().all(|invocation| {
+        invocation.is_some_and(|invocation| {
+            invocation.request_id == 84
+                && invocation.execution_mode == protocol::ToolExecutionMode::Sequential
+        })
+    }));
+    assert!(smelt_core::lua::current_tool_invocation().is_none());
+}
+
+#[test]
 fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
     #[derive(Debug)]
     enum Msg {
@@ -285,14 +426,14 @@ fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
             rt.pump_task_events();
             for out in rt.drive_tasks(Instant::now()) {
                 if let TaskDriveOutput::ToolComplete {
-                    request_id,
+                    invocation,
                     call_id,
                     content,
                     is_error,
                     ..
                 } = out
                 {
-                    assert_eq!(request_id, 42);
+                    assert_eq!(invocation.request_id, 42);
                     assert_eq!(call_id, "call-1");
                     tx.send(Msg::Completed(content, is_error)).unwrap();
                     return;
@@ -378,12 +519,12 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
         .into_iter()
         .filter_map(|out| match out {
             TaskDriveOutput::ToolComplete {
-                request_id,
+                invocation,
                 call_id,
                 content,
                 is_error,
                 ..
-            } => Some((request_id, call_id, content, is_error)),
+            } => Some((invocation.request_id, call_id, content, is_error)),
             _ => None,
         })
         .collect();
@@ -508,12 +649,14 @@ fn lsp_plugin_formats_semantic_results_as_text() {
                 .into_iter()
                 .find_map(|out| match out {
                     TaskDriveOutput::ToolComplete {
-                        request_id: 4,
+                        invocation,
                         call_id,
                         content,
                         is_error,
                         metadata,
-                    } if call_id == "call-get-file-outline" => Some((content, is_error, metadata)),
+                    } if invocation.request_id == 4 && call_id == "call-get-file-outline" => {
+                        Some((content, is_error, metadata))
+                    }
                     _ => None,
                 })
                 .expect("outline completion")
@@ -582,12 +725,14 @@ fn lsp_plugin_formats_null_outline_result_as_empty_outline() {
                 .into_iter()
                 .find_map(|out| match out {
                     TaskDriveOutput::ToolComplete {
-                        request_id: 7,
+                        invocation,
                         call_id,
                         content,
                         is_error,
                         ..
-                    } if call_id == "call-null-outline" => Some((content, is_error)),
+                    } if invocation.request_id == 7 && call_id == "call-null-outline" => {
+                        Some((content, is_error))
+                    }
                     _ => None,
                 })
                 .expect("outline completion")
@@ -759,12 +904,12 @@ fn lsp_plugin_formats_reference_summaries_as_text() {
                 .into_iter()
                 .find_map(|out| match out {
                     TaskDriveOutput::ToolComplete {
-                        request_id: 6,
+                        invocation,
                         call_id,
                         content,
                         is_error,
                         metadata,
-                    } if call_id == "call-lsp-references-text" => {
+                    } if invocation.request_id == 6 && call_id == "call-lsp-references-text" => {
                         Some((content, is_error, metadata))
                     }
                     _ => None,
@@ -850,12 +995,14 @@ fn lsp_plugin_truncates_large_structured_results() {
                 .into_iter()
                 .find_map(|out| match out {
                     TaskDriveOutput::ToolComplete {
-                        request_id: 5,
+                        invocation,
                         call_id,
                         content,
                         is_error,
                         metadata,
-                    } if call_id == "call-lsp-references" => Some((content, is_error, metadata)),
+                    } if invocation.request_id == 5 && call_id == "call-lsp-references" => {
+                        Some((content, is_error, metadata))
+                    }
                     _ => None,
                 })
                 .expect("find_references completion")
@@ -908,12 +1055,14 @@ fn tool_timeout_completes_a_parked_tool_with_error() {
     assert!(outs.iter().any(|out| matches!(
         out,
         TaskDriveOutput::ToolComplete {
-            request_id: 9,
+            invocation,
             call_id,
             content,
             is_error: true,
             ..
-        } if call_id == "call-timeout" && content.contains("timed out")
+        } if invocation.request_id == 9
+            && call_id == "call-timeout"
+            && content.contains("timed out")
     )));
 }
 
@@ -960,12 +1109,14 @@ fn tool_watchdog_uses_explicit_timeout_arg_metadata() {
     assert!(outs.iter().any(|out| matches!(
         out,
         TaskDriveOutput::ToolComplete {
-            request_id: 10,
+            invocation,
             call_id,
             content,
             is_error: true,
             ..
-        } if call_id == "call-deadline" && content.contains("timed out after 1.0s")
+        } if invocation.request_id == 10
+            && call_id == "call-deadline"
+            && content.contains("timed out after 1.0s")
     )));
 }
 

@@ -84,6 +84,7 @@ pub struct RegisteredKeymap {
 
 pub struct ToolHandles {
     pub execute: LuaHandle,
+    pub execution_mode: protocol::ToolExecutionMode,
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
     pub paths_for_workspace: Option<LuaHandle>,

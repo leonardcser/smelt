@@ -209,9 +209,9 @@ pub struct EngineConfig {
     pub system_prompt_behavior: SystemPromptBehavior,
     pub cwd: PathBuf,
     /// Pre-rendered "# Skills" block injected into the system prompt.
-    /// Built once on startup from the [`SkillLoader`] and refreshed on
-    /// `/reload` through [`protocol::UiCommand::ReloadAgentConfig`]. The
-    /// loader itself lives on `Core::skills` for tool execution.
+    /// Built once on startup from the [`SkillLoader`] and refreshed through
+    /// [`protocol::UiCommand::UpdateAgentProjectContext`]. The loader itself
+    /// lives on `Core::skills` for tool execution.
     pub skill_section: Option<String>,
     /// Source of monotonic + wall-clock time. Production uses
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
@@ -229,6 +229,14 @@ impl EngineConfig {
             skill_section: None,
             clock,
         }
+    }
+
+    fn install_project_context(&mut self, context: &protocol::AgentProjectContext) {
+        self.cwd.clone_from(&context.cwd);
+        self.instructions.clone_from(&context.instructions);
+        self.skill_section.clone_from(&context.skill_section);
+        self.system_prompt_override
+            .clone_from(&context.system_prompt_override);
     }
 }
 

@@ -245,6 +245,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                         sent_engine_ask = true;
                         handle.send(UiCommand::SetTurnModel {
                             target: Box::new(switched_target.clone()),
+                            system_prompt: "switched system".into(),
                         });
                         handle.send(UiCommand::EngineAsk {
                             id: ask_id,
@@ -397,6 +398,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
     assert_eq!(first_request["max_tokens"], 111);
     handle.send(UiCommand::SetTurnModel {
         target: Box::new(switched_target),
+        system_prompt: "switched system with Lua fragment".into(),
     });
     handle.send(UiCommand::Steer {
         text: "use the new target".into(),
@@ -406,6 +408,10 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
     let second_request = second_request_rx.await.unwrap();
     assert_eq!(second_request["model"], "next-model");
     assert_eq!(second_request["max_tokens"], 222);
+    assert_eq!(
+        second_request["system"][0]["text"],
+        "switched system with Lua fragment"
+    );
 
     loop {
         match handle.recv().await {
@@ -500,6 +506,7 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
             }) => {
                 handle.send(UiCommand::SetTurnModel {
                     target: Box::new(switched_target.clone()),
+                    system_prompt: "sequential switched system".into(),
                 });
                 handle.send(UiCommand::ToolResult {
                     request_id,
@@ -523,4 +530,8 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
         .find(|request| request["model"] == "sequential-next")
         .expect("follow-up request should use switched sequential target");
     assert_eq!(next_request["max_tokens"], 654);
+    assert_eq!(
+        next_request["system"][0]["text"],
+        "sequential switched system"
+    );
 }

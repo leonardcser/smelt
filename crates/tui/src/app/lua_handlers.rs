@@ -333,16 +333,18 @@ impl TuiApp {
         };
         self.submit_managed_model_refreshes();
         self.reconcile_auto_reload();
+        if refresh_agent_inputs {
+            self.refresh_agent_inputs();
+        }
         if let Some(mark_session_dirty) = committed_cwd {
             self.sync_inline_options();
             self.publish_cwd_change(mark_session_dirty);
             self.pending_lua_reload = false;
             self.pending_lua_reload_refresh_agent_inputs = false;
+        } else if refresh_agent_inputs {
+            self.publish_agent_project_context();
         }
         self.publish_diff_signals();
-        if refresh_agent_inputs {
-            self.refresh_agent_inputs();
-        }
         self.reconcile_runtime_controllers();
 
         // Make layout geometry current before `ready` hooks open overlays or
@@ -365,19 +367,15 @@ impl TuiApp {
         self.core.timers.clear_generation(generation);
     }
 
-    /// Re-read filesystem-backed inputs that feed the agent's system prompt
-    /// and ship them to the engine. Runs as the last step of `/reload` so
-    /// the engine sees fresh AGENTS.md / SKILL.md / `--system-prompt` bytes
-    /// on the next turn, compaction, mid-turn mode change, or `EngineAsk`.
+    /// Re-read filesystem-backed inputs that feed the agent's system prompt.
+    /// The caller publishes them with the rest of the project context after
+    /// every part of the transaction has committed.
     pub(crate) fn refresh_agent_inputs(&mut self) {
         let outcome = self.prompt_inputs.refresh();
         self.core.skills = Some(outcome.loader);
         if let Some(err) = outcome.system_prompt_read_error {
             self.notify_error_sticky(err);
         }
-        self.core
-            .engine
-            .send(self.prompt_inputs.to_reload_command());
     }
 
     pub(crate) fn reconcile_committed_lua_runtime(&mut self) -> Result<(), String> {
