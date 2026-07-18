@@ -143,8 +143,8 @@ fn count_delta(summary: &mut FuzzProviderSummary, event: ProviderStreamEvent<'_>
 }
 
 #[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
-    sse::drain_sse_events(buf)
+pub fn fuzz_drain_sse_bytes(buf: &mut Vec<u8>) -> Vec<serde_json::Value> {
+    sse::drain_sse_bytes(buf)
 }
 
 #[cfg(any(test, feature = "fuzz"))]
@@ -181,6 +181,17 @@ pub fn fuzz_build_anthropic_body(
 }
 
 #[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_build_chat_completions_body(
+    messages: &[protocol::Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: protocol::ReasoningEffort,
+    config: &ModelConfig,
+) -> serde_json::Value {
+    chat_completions::build_body(messages, tools, model, effort, config)
+}
+
+#[cfg(any(test, feature = "fuzz"))]
 pub fn fuzz_build_openai_body(
     messages: &[protocol::Message],
     tools: &[ToolDefinition],
@@ -194,4 +205,20 @@ pub fn fuzz_build_openai_body(
         body["prompt_cache_key"] = serde_json::json!(clamp_prompt_cache_key(key));
     }
     body
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_parse_catalog(json: &str) -> Option<usize> {
+    catalog::fuzz_parse_len(json)
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_extract_tool_calls(text: &str) -> (usize, Option<String>) {
+    let (calls, cleaned) = extract::extract_tool_calls_from_text(Some(text));
+    (calls.len(), cleaned)
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_api_key_auth(kind: ProviderKind, api_key: &str) -> Option<ApiKeyAuth> {
+    kind::api_key_auth(kind, api_key)
 }

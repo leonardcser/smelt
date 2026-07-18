@@ -389,6 +389,11 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
     Some(map)
 }
 
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) fn fuzz_parse_len(json: &str) -> Option<usize> {
+    parse(json).map(|entries| entries.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

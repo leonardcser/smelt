@@ -5,6 +5,12 @@ pub struct ApiBaseNormalizationHint {
     pub endpoint: &'static str,
 }
 
+fn trim_api_base(api_base: &str) -> &str {
+    api_base
+        .trim()
+        .trim_end_matches(|ch: char| ch == '/' || ch.is_whitespace())
+}
+
 fn strip_known_endpoint(base: &str) -> Option<(&str, &'static str)> {
     for (suffix, endpoint) in [
         ("/chat/completions", "chat/completions"),
@@ -12,15 +18,23 @@ fn strip_known_endpoint(base: &str) -> Option<(&str, &'static str)> {
         ("/messages", "messages"),
     ] {
         if let Some(stripped) = base.strip_suffix(suffix) {
-            return Some((stripped.trim_end_matches('/'), endpoint));
+            return Some((trim_api_base(stripped), endpoint));
         }
     }
     None
 }
 
+fn strip_known_endpoints(base: &str) -> Option<(&str, &'static str)> {
+    let (mut normalized, endpoint) = strip_known_endpoint(base)?;
+    while let Some((next, _)) = strip_known_endpoint(normalized) {
+        normalized = next;
+    }
+    Some((normalized, endpoint))
+}
+
 pub fn api_base_normalization_hint(api_base: &str) -> Option<ApiBaseNormalizationHint> {
-    let original = api_base.trim().trim_end_matches('/');
-    let (normalized, endpoint) = strip_known_endpoint(original)?;
+    let original = trim_api_base(api_base);
+    let (normalized, endpoint) = strip_known_endpoints(original)?;
     Some(ApiBaseNormalizationHint {
         original: original.to_string(),
         normalized: normalized.to_string(),
@@ -31,7 +45,7 @@ pub fn api_base_normalization_hint(api_base: &str) -> Option<ApiBaseNormalizatio
 pub fn normalize_api_base(api_base: &str) -> String {
     api_base_normalization_hint(api_base)
         .map(|hint| hint.normalized)
-        .unwrap_or_else(|| api_base.trim().trim_end_matches('/').to_string())
+        .unwrap_or_else(|| trim_api_base(api_base).to_string())
 }
 
 pub fn endpoint_url(api_base: &str, endpoint: &str) -> String {
@@ -65,6 +79,21 @@ mod tests {
             endpoint_url("https://api.anthropic.com/v1/messages/", "messages"),
             "https://api.anthropic.com/v1/messages"
         );
+    }
+
+    #[test]
+    fn api_base_normalization_is_idempotent() {
+        for (input, expected) in [
+            (" /go / ", "/go"),
+            (
+                "https://example.test/v1/responses/messages",
+                "https://example.test/v1",
+            ),
+        ] {
+            let normalized = normalize_api_base(input);
+            assert_eq!(normalized, expected);
+            assert_eq!(normalize_api_base(&normalized), expected);
+        }
     }
 
     #[test]
