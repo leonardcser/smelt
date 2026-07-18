@@ -3116,6 +3116,7 @@ dependencies = [
  "smelt-engine",
  "smelt-protocol",
  "smelt-provider",
+ "smelt-store",
  "smelt-style",
  "smelt-term",
  "smelt-tui",

@@ -29,6 +29,7 @@ crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["rt"] }
+smelt-store = { version = "0.5.0-alpha.8", path = "../crates/store", features = ["test-util"] }
 tempfile = "3.27.0"
 
 [[bin]]
@@ -137,6 +138,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "store_state"
+path = "fuzz_targets/store_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_events"
+path = "fuzz_targets/engine_events.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "crash_to_scenario"
 path = "src/bin/crash_to_scenario.rs"
 test = false
@@ -166,7 +181,7 @@ bench = false
 
 [profile.release]
 debug = 1
-lto = true
+lto = false
 codegen-units = 1
 
 [profile.release.build-override]

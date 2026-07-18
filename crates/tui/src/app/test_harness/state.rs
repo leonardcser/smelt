@@ -83,6 +83,13 @@ impl TestApp {
         self.app.session_history_len()
     }
 
+    /// Canonical session history as seen by the TUI. Focused engine-event and
+    /// persistence state machines compare this against independent suffix and
+    /// append models after every transition.
+    pub fn session_history(&self) -> &[protocol::HistoryItem] {
+        &self.app.core.session.history
+    }
+
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
     /// synthesize engine events whose dispatch is gated on a matching id
     /// (e.g. `TurnComplete`, `Messages`).
