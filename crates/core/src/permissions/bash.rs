@@ -4,59 +4,20 @@
 //! aware), extracts embedded commands from `$(...)`, backticks, and `(...)`
 //! subshells, parses heredocs, and detects output redirections.
 
-use smelt_buffer::text::{next_char_boundary, slice};
+use brush_parser::ast::{
+    self, CommandPrefixOrSuffixItem, CompoundCommand, IoFileRedirectKind, IoFileRedirectTarget,
+    IoRedirect,
+};
+use brush_parser::word::{Parameter, ParameterExpr, WordPiece, WordPieceWithSource};
 
-use super::{workspace, PathAccess, PathEffect, PathResolution, PathTargetKind, ShellRisk};
+use super::{
+    shell_parse, workspace, PathAccess, PathEffect, PathResolution, PathTargetKind, ShellRisk,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_GLOB_ENTRIES: usize = 4096;
-
-const SHELL_OPERATORS: &[(&str, usize)] = &[
-    ("&&", 2),
-    ("||", 2),
-    (";", 1),
-    ("|", 1),
-    ("&", 1),
-    ("\n", 1),
-];
-
-const READ_ONLY_COMMANDS: &[&str] = &[
-    "basename",
-    "cat",
-    "cut",
-    "date",
-    "df",
-    "diff",
-    "dirname",
-    "du",
-    "file",
-    "find",
-    "grep",
-    "head",
-    "hexdump",
-    "jq",
-    "less",
-    "ls",
-    "md5sum",
-    "pwd",
-    "realpath",
-    "rg",
-    "sha256sum",
-    "sort",
-    "stat",
-    "strings",
-    "tail",
-    "test",
-    "tr",
-    "tree",
-    "uniq",
-    "wc",
-    "which",
-    "whoami",
-    "xxd",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ShellAnalysis {
@@ -114,18 +75,10 @@ struct ShellWord {
     raw: String,
     expanded: Option<String>,
     has_glob: bool,
+    embedded_commands: Vec<String>,
 }
 
 impl ShellWord {
-    fn literal(value: impl Into<String>) -> Self {
-        let value = value.into();
-        Self {
-            raw: value.clone(),
-            expanded: Some(value),
-            has_glob: false,
-        }
-    }
-
     fn raw(&self) -> &str {
         &self.raw
     }
@@ -140,6 +93,7 @@ impl ShellWord {
             raw,
             expanded,
             has_glob: self.has_glob,
+            embedded_commands: self.embedded_commands.clone(),
         })
     }
 
@@ -156,534 +110,679 @@ impl ShellWord {
     }
 }
 
+/// Split a Bash program into commands and their following operators.
+pub fn split_shell_commands_with_ops(command: &str) -> Vec<(String, Option<String>)> {
+    super::shell_parse::split_with_ops(command)
+}
+
+/// Split a Bash program into commands, including nested and substituted commands.
+pub fn split_shell_commands(command: &str) -> Vec<String> {
+    super::shell_parse::split(command)
+}
+
 #[derive(Default)]
-struct ShellWordBuilder {
+struct WordExpansion {
     raw: String,
     expanded: String,
+    resolved: bool,
     has_glob: bool,
-    has_literal_glob: bool,
-    unresolved: bool,
-    started: bool,
-    tilde_at: Option<usize>,
+    embedded_commands: Vec<String>,
 }
 
-impl ShellWordBuilder {
-    fn push_literal(&mut self, ch: char) {
-        self.started = true;
-        self.raw.push(ch);
-        self.expanded.push(ch);
-        self.has_literal_glob |= matches!(ch, '*' | '?' | '[');
-    }
-
-    fn push_glob_syntax(&mut self, ch: char) {
-        self.started = true;
-        self.has_glob = true;
-        self.raw.push(ch);
-        self.expanded.push(ch);
-    }
-
-    fn push_raw(&mut self, ch: char) {
-        self.started = true;
-        self.raw.push(ch);
-    }
-
-    fn push_expansion(&mut self, value: Option<String>, unquoted: bool) {
-        self.started = true;
-        match value {
-            Some(value) if unquoted && value.chars().any(char::is_whitespace) => {
-                self.unresolved = true;
-            }
-            Some(value) => {
-                let has_glob = value.chars().any(|ch| matches!(ch, '*' | '?' | '['));
-                self.expanded.push_str(&value);
-                if unquoted {
-                    self.has_glob |= has_glob;
-                } else {
-                    self.has_literal_glob |= has_glob;
-                }
-            }
-            None => self.unresolved = true,
-        }
-    }
-
-    fn finish(&mut self, state: &ShellState) -> Option<ShellWord> {
-        if !self.started {
-            return None;
-        }
-        let raw = std::mem::take(&mut self.raw);
-        let expanded = std::mem::take(&mut self.expanded);
-        let has_glob = std::mem::take(&mut self.has_glob);
-        let has_literal_glob = std::mem::take(&mut self.has_literal_glob);
-        let unresolved = std::mem::take(&mut self.unresolved) || has_glob && has_literal_glob;
-        let tilde_at = self.tilde_at.take();
-        self.started = false;
-        let expanded = if unresolved {
-            None
-        } else if let Some(at) = tilde_at {
-            let (prefix, tilde) = expanded.split_at(at);
-            expand_shell_tilde(tilde, state).map(|tilde| format!("{prefix}{tilde}"))
-        } else {
-            Some(expanded)
+fn shell_word(raw: &str, state: &ShellState) -> ShellWord {
+    let Some(pieces) = shell_parse::parse_word(raw) else {
+        return ShellWord {
+            raw: raw.to_string(),
+            expanded: None,
+            has_glob: false,
+            embedded_commands: Vec::new(),
         };
-        Some(ShellWord {
-            raw,
-            expanded,
-            has_glob,
-        })
+    };
+    let mut expansion = WordExpansion {
+        resolved: true,
+        ..WordExpansion::default()
+    };
+    expand_word_pieces(raw, &pieces, state, false, &mut expansion);
+    ShellWord {
+        raw: expansion.raw,
+        expanded: (expansion.resolved && !shell_parse::has_brace_expansion(raw))
+            .then_some(expansion.expanded),
+        has_glob: expansion.has_glob,
+        embedded_commands: expansion.embedded_commands,
     }
 }
 
-/// Split on shell operators; pairs each sub-command with the following operator (`None` for last).
-pub fn split_shell_commands_with_ops(cmd: &str) -> Vec<(String, Option<String>)> {
-    let (commands, operators) = split_impl(cmd);
-    commands
-        .into_iter()
-        .enumerate()
-        .map(|(i, c)| (c, operators.get(i).cloned()))
-        .collect()
-}
-
-/// Split on shell operators (`&&`, `||`, `;`, `|`, `&`, newline), quote-aware.
-/// Also extracts commands embedded in `$(...)`, backticks, and `(...)` subshells.
-pub fn split_shell_commands(cmd: &str) -> Vec<String> {
-    let mut result = split_impl(cmd).0;
-    let mut i = 0;
-    while i < result.len() {
-        for embedded in extract_embedded_shells(&result[i]) {
-            result.extend(split_impl(&embedded).0);
-        }
-        i += 1;
-    }
-    result
-}
-
-fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut commands = Vec::new();
-    let mut operators = Vec::new();
-    let mut start = 0;
-    let mut i = 0;
-    let mut paren_depth = 0usize;
-
-    while i < len {
-        match bytes[i] {
-            b'\'' => {
-                i += 1;
-                while i < len && bytes[i] != b'\'' {
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
+fn expand_word_pieces(
+    source: &str,
+    pieces: &[WordPieceWithSource],
+    state: &ShellState,
+    quoted: bool,
+    out: &mut WordExpansion,
+) {
+    for piece in pieces {
+        let source_piece = smelt_buffer::text::slice(source, piece.start_index..piece.end_index);
+        match &piece.piece {
+            WordPiece::Text(value) => {
+                out.raw.push_str(value);
+                out.expanded.push_str(value);
+                if !quoted && value.chars().any(|ch| matches!(ch, '*' | '?' | '[')) {
+                    out.has_glob = true;
                 }
             }
-            b'"' => {
-                i += 1;
-                while i < len && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < len {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
+            WordPiece::SingleQuotedText(value) | WordPiece::AnsiCQuotedText(value) => {
+                out.raw.push_str(value);
+                out.expanded.push_str(value);
             }
-            b'\\' if i + 1 < len => {
-                i += 2;
+            WordPiece::DoubleQuotedSequence(inner)
+            | WordPiece::GettextDoubleQuotedSequence(inner) => {
+                expand_word_pieces(source, inner, state, true, out);
             }
-            _ => {
-                let rest = slice(cmd, i..cmd.len());
-
-                // Heredoc: skip body so its content isn't parsed as operators or grouping.
-                if rest.starts_with("<<") {
-                    if let Some((_header_end, body_end)) = parse_heredoc(cmd, i) {
-                        i = body_end;
-                        continue;
-                    }
-                }
-
-                match bytes[i] {
-                    b'(' => {
-                        paren_depth += 1;
-                        i += 1;
-                        continue;
-                    }
-                    b')' if paren_depth > 0 => {
-                        paren_depth -= 1;
-                        i += 1;
-                        continue;
-                    }
-                    _ if paren_depth > 0 => {
-                        i = next_char_boundary(cmd, i);
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                // Redirections involving & (2>&1, 0<&3, >&2, <&0, &>, &>>) - not an operator.
-                if rest.starts_with("&>") {
-                    i += if rest.starts_with("&>>") { 3 } else { 2 };
-                    continue;
-                }
-                if bytes[i] == b'&' && i > 0 && matches!(bytes[i - 1], b'>' | b'<') {
-                    // >& / <& fd duplication or close (e.g. 2>&1, 0<&3, <&-).
-                    i += 1;
-                    while i < len && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    continue;
-                }
-
-                if let Some(&(op, op_len)) =
-                    SHELL_OPERATORS.iter().find(|(op, _)| rest.starts_with(op))
-                {
-                    let part = slice(cmd, start..i).trim();
-                    if !part.is_empty() {
-                        commands.push(part.to_string());
-                        operators.push(op.to_string());
-                    }
-                    i += op_len;
-                    start = i;
+            WordPiece::TildeExpansion(_) => {
+                out.raw.push_str(source_piece);
+                if let Some(value) = expand_shell_tilde(source_piece, state) {
+                    out.expanded.push_str(&value);
                 } else {
-                    i = next_char_boundary(cmd, i);
+                    out.resolved = false;
                 }
             }
-        }
-    }
-
-    let part = slice(cmd, start..cmd.len()).trim();
-    if !part.is_empty() {
-        commands.push(part.to_string());
-    }
-    (commands, operators)
-}
-
-/// Parse a heredoc at `cmd[i..]` (must start with `<<`).
-/// Returns `(header_end, body_end)`: byte offsets past the delimiter word and past the
-/// closing delimiter line respectively (`cmd.len()` if no closing delimiter found).
-fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
-    let rest = slice(cmd, i..cmd.len());
-    let bytes = cmd.as_bytes();
-    let len = cmd.len();
-
-    let mut hi = 2; // skip "<<"
-    if hi < rest.len() && rest.as_bytes()[hi] == b'-' {
-        hi += 1; // <<- strips leading tabs
-    }
-    while hi < rest.len() && rest.as_bytes()[hi] == b' ' {
-        hi += 1;
-    }
-    let mut delim_start = hi;
-    let mut strip_quotes = false;
-    if hi < rest.len() && (rest.as_bytes()[hi] == b'\'' || rest.as_bytes()[hi] == b'"') {
-        let q = rest.as_bytes()[hi];
-        strip_quotes = true;
-        hi += 1;
-        delim_start = hi;
-        while hi < rest.len() && rest.as_bytes()[hi] != q {
-            hi += 1;
-        }
-    } else {
-        while hi < rest.len()
-            && !rest.as_bytes()[hi].is_ascii_whitespace()
-            && rest.as_bytes()[hi] != b';'
-            && rest.as_bytes()[hi] != b'&'
-            && rest.as_bytes()[hi] != b'|'
-        {
-            hi += 1;
-        }
-    }
-    let delim = slice(rest, delim_start..hi);
-    if delim.is_empty() {
-        return None;
-    }
-    if strip_quotes && hi < rest.len() {
-        hi += 1; // skip closing quote
-    }
-    let header_end = i + hi;
-
-    let mut si = header_end;
-    while si < len {
-        if bytes[si] == b'\n' {
-            let line_start = si + 1;
-            let line_end = slice(cmd, line_start..len)
-                .find('\n')
-                .map(|p| line_start + p)
-                .unwrap_or(len);
-            let line = slice(cmd, line_start..line_end).trim();
-            if line == delim {
-                return Some((header_end, line_end));
-            }
-        }
-        si += 1;
-    }
-    Some((header_end, len)) // no closing delimiter - consume rest
-}
-
-/// Strip heredoc bodies so downstream parsing doesn't misinterpret body content as shell constructs.
-pub(super) fn strip_heredoc_bodies(cmd: &str) -> String {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut out = String::with_capacity(len);
-    let mut i = 0;
-
-    while i < len {
-        match bytes[i] {
-            b'\'' => {
-                let start = i;
-                i += 1;
-                while i < len && bytes[i] != b'\'' {
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-                out.push_str(slice(cmd, start..i));
-            }
-            b'"' => {
-                let start = i;
-                i += 1;
-                while i < len && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < len {
-                        i += 1;
+            WordPiece::ParameterExpansion(parameter) => {
+                out.raw.push_str(source_piece);
+                match parameter_value(parameter, state) {
+                    Some(value) if !quoted && value.chars().any(char::is_whitespace) => {
+                        out.resolved = false;
                     }
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-                out.push_str(slice(cmd, start..i));
-            }
-            b'\\' if i + 1 < len => {
-                let ch_end = next_char_boundary(cmd, i + 1);
-                out.push_str(slice(cmd, i..ch_end));
-                i = ch_end;
-            }
-            _ => {
-                let rest = slice(cmd, i..cmd.len());
-                if rest.starts_with("<<") {
-                    if let Some((header_end, body_end)) = parse_heredoc(cmd, i) {
-                        // Emit header and closing delimiter line; drop the body.
-                        out.push_str(slice(cmd, i..header_end));
-                        let body = slice(cmd, header_end..body_end);
-                        if body_end < len || body.contains('\n') {
-                            if let Some(last_nl) = body.rfind('\n') {
-                                out.push_str(slice(cmd, header_end + last_nl..body_end));
-                            }
+                    Some(value) => {
+                        if !quoted && value.chars().any(|ch| matches!(ch, '*' | '?' | '[')) {
+                            out.has_glob = true;
                         }
-                        i = body_end;
-                        continue;
+                        out.expanded.push_str(&value);
                     }
+                    None => out.resolved = false,
                 }
-                let ch_end = next_char_boundary(cmd, i);
-                out.push_str(slice(cmd, i..ch_end));
-                i = ch_end;
+            }
+            WordPiece::CommandSubstitution(command)
+            | WordPiece::BackquotedCommandSubstitution(command) => {
+                out.raw.push_str(source_piece);
+                out.resolved = false;
+                out.embedded_commands.push(command.clone());
+            }
+            WordPiece::EscapeSequence(value) => {
+                out.raw.push_str(value);
+                out.expanded.push_str(value);
+            }
+            WordPiece::ArithmeticExpression(_) => {
+                out.raw.push_str(source_piece);
+                out.resolved = false;
             }
         }
     }
-    out
 }
 
-/// Extract the contents of `$(...)`, backticks, and `(...)` subshells.
-fn extract_embedded_shells(raw_cmd: &str) -> Vec<String> {
-    let stripped = strip_heredoc_bodies(raw_cmd);
-    let cmd: &str = &stripped;
-    let mut extra = Vec::new();
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_dquote = false;
-
-    while i < len {
-        match bytes[i] {
-            // Single quotes: fully opaque (no expansions). Not applicable inside double quotes.
-            b'\'' if !in_dquote => {
-                i += 1;
-                while i < len && bytes[i] != b'\'' {
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-            }
-            // Double quotes: $() and backticks still expand inside; plain (...) subshells do not.
-            b'"' => {
-                in_dquote = !in_dquote;
-                i += 1;
-            }
-            b'\\' if i + 1 < len => {
-                i += 2;
-            }
-            b'$' if i + 1 < len && bytes[i + 1] == b'(' => {
-                i += 2;
-                if let Some((inner, end)) = find_matching_paren(cmd, i) {
-                    extra.push(inner.to_string());
-                    i = end + 1;
-                }
-            }
-            b'`' => {
-                i += 1;
-                let start = i;
-                while i < len && bytes[i] != b'`' {
-                    if bytes[i] == b'\\' && i + 1 < len {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < len {
-                    let inner = slice(cmd, start..i);
-                    extra.push(inner.to_string());
-                    i += 1;
-                }
-            }
-            b'(' if !in_dquote => {
-                i += 1;
-                if let Some((inner, end)) = find_matching_paren(cmd, i) {
-                    extra.push(inner.to_string());
-                    i = end + 1;
-                }
-            }
-            _ => {
-                i += 1;
-            }
-        }
+fn parameter_value(parameter: &ParameterExpr, state: &ShellState) -> Option<String> {
+    let ParameterExpr::Parameter {
+        parameter,
+        indirect: false,
+    } = parameter
+    else {
+        return None;
+    };
+    match parameter {
+        Parameter::Named(name) => state.variable(name),
+        Parameter::NamedWithIndex { .. }
+        | Parameter::NamedWithAllIndices { .. }
+        | Parameter::Positional(_)
+        | Parameter::Special(_) => None,
     }
-    extra
 }
 
-/// Find the closing `)` for an already-consumed `(`. Returns the inner slice and close index.
-fn find_matching_paren(cmd: &str, start: usize) -> Option<(&str, usize)> {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut depth = 1;
-    let mut i = start;
-
-    while i < len && depth > 0 {
-        match bytes[i] {
-            b'\'' => {
-                i += 1;
-                while i < len && bytes[i] != b'\'' {
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-            }
-            b'"' => {
-                i += 1;
-                while i < len && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < len {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-            }
-            b'\\' if i + 1 < len => {
-                i += 2;
-            }
-            b'(' => {
-                depth += 1;
-                i += 1;
-            }
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((slice(cmd, start..i), i));
-                }
-                i += 1;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    None
-}
+const MAX_SHELL_STATES: usize = 32;
+const MAX_SHELL_NESTING: usize = 32;
+const LOOP_UNROLL_LIMIT: usize = 4;
 
 pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnalysis {
-    analyze_shell_command_with_state(command, &ShellState::new(base_dir))
+    let mut analysis = ShellAnalysis {
+        risk: ShellRisk::ReadOnly,
+        paths: Vec::new(),
+    };
+    let initial_state = ShellState::new(base_dir);
+    let initial_states = vec![initial_state.clone()];
+    let Ok(program) = shell_parse::parse(command) else {
+        record_unknown_shell(command, &initial_state.cwd, &mut analysis);
+        return analysis;
+    };
+    eval_program(&program, initial_states, &mut analysis, 0);
+    analysis.paths.dedup();
+    analysis
 }
 
-fn analyze_shell_command_with_state(command: &str, initial_state: &ShellState) -> ShellAnalysis {
-    let command = strip_heredoc_bodies(command);
-    let mut state = initial_state.clone();
-    let mut conditional_states = Vec::new();
-    let mut paths = Vec::new();
-    let mut risk = ShellRisk::ReadOnly;
-    let mut previous_op = None;
+fn record_unknown_shell(raw: &str, cwd: &PathResolution, analysis: &mut ShellAnalysis) {
+    analysis.risk = merge_risk(analysis.risk.clone(), ShellRisk::Unknown);
+    analysis.paths.push(PathEffect::from_shell_path(
+        raw.to_string(),
+        None,
+        cwd,
+        PathAccess::Unknown,
+        PathTargetKind::Unknown,
+    ));
+}
 
-    for (subcmd, next_op) in split_shell_commands_with_ops(&command) {
-        let previous_state = state.clone();
-        let words = shell_words(&subcmd, &state);
-        let assignment_count = words
-            .iter()
-            .take_while(|word| word.assignment().is_some())
-            .count();
-        if assignment_count == words.len() {
-            apply_assignments(&mut state, &words);
+fn eval_program(
+    program: &ast::Program,
+    mut states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    if depth >= MAX_SHELL_NESTING {
+        if let Some(state) = states.first() {
+            record_unknown_shell("<shell nesting limit>", &state.cwd, analysis);
+        }
+        return states;
+    }
+    for command in &program.complete_commands {
+        states = eval_list(command, states, analysis, depth + 1);
+    }
+    states
+}
+
+fn eval_list(
+    list: &ast::CompoundList,
+    mut states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    for item in &list.0 {
+        let entry = states.clone();
+        let output = eval_and_or(&item.0, states, analysis, depth);
+        states = if matches!(item.1, ast::SeparatorOperator::Async) {
+            entry
         } else {
-            let words = &words[assignment_count..];
-            let raw_words: Vec<_> = words.iter().map(|word| word.raw.clone()).collect();
-            risk = merge_risk(risk, classify_risk(&raw_words));
-            let effective_words = effective_command_words(words);
-            match effective_words.first().map(ShellWord::raw) {
-                Some("cd") => apply_cd(&mut state, effective_words, &mut paths),
-                Some("export") => apply_assignments(&mut state, &effective_words[1..]),
-                Some("unset") => {
-                    for word in &effective_words[1..] {
-                        state.unset_variable(word.raw());
+            output
+        };
+    }
+    states
+}
+
+fn eval_and_or(
+    list: &ast::AndOrList,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    let mut states = eval_pipeline(&list.first, states, analysis, depth);
+    for item in &list.additional {
+        let pipeline = match item {
+            ast::AndOr::And(pipeline) | ast::AndOr::Or(pipeline) => pipeline,
+        };
+        let ran = eval_pipeline(pipeline, states.clone(), analysis, depth);
+        states = union_states(states, ran);
+    }
+    states
+}
+
+fn eval_pipeline(
+    pipeline: &ast::Pipeline,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    if pipeline.seq.len() == 1 {
+        return eval_command(&pipeline.seq[0], states, analysis, depth);
+    }
+    for command in &pipeline.seq {
+        eval_command(command, states.clone(), analysis, depth);
+    }
+    states
+}
+
+fn eval_command(
+    command: &ast::Command,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    match command {
+        ast::Command::Simple(command) => eval_simple_command(command, states, analysis, depth),
+        ast::Command::Compound(command, redirects) => {
+            analyze_redirect_list(redirects.as_ref(), &states, analysis, depth);
+            eval_compound_command(command, states, analysis, depth)
+        }
+        ast::Command::Function(function) => {
+            analyze_redirect_list(function.body.1.as_ref(), &states, analysis, depth);
+            eval_compound_command(&function.body.0, states.clone(), analysis, depth);
+            states
+        }
+        ast::Command::ExtendedTest(test, redirects) => {
+            analyze_redirect_list(redirects.as_ref(), &states, analysis, depth);
+            for state in &states {
+                analyze_extended_test(&test.expr, state, analysis, depth);
+            }
+            states
+        }
+    }
+}
+
+#[derive(Default)]
+struct SimpleCommandWords {
+    assignments: Vec<ShellWord>,
+    words: Vec<ShellWord>,
+}
+
+fn eval_simple_command(
+    command: &ast::SimpleCommand,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    let mut output = Vec::new();
+    for mut state in states {
+        let mut command_words = SimpleCommandWords::default();
+        if let Some(prefix) = &command.prefix {
+            for item in &prefix.0 {
+                analyze_simple_item(item, &state, &mut command_words, analysis, depth, true);
+            }
+        }
+        if let Some(word) = &command.word_or_name {
+            let word = shell_word(&word.value, &state);
+            analyze_embedded_commands(&word, &state, analysis, depth);
+            command_words.words.push(word);
+        }
+        if let Some(suffix) = &command.suffix {
+            for item in &suffix.0 {
+                analyze_simple_item(item, &state, &mut command_words, analysis, depth, false);
+            }
+        }
+
+        if command.word_or_name.is_none() {
+            apply_assignments(&mut state, &command_words.assignments);
+            output.push(state);
+            continue;
+        }
+
+        let effective_words = effective_command_words(&command_words.words);
+        analysis.risk = merge_risk(analysis.risk.clone(), classify_risk(effective_words));
+        match effective_words.first().map(ShellWord::raw) {
+            Some("cd") => apply_cd(&mut state, effective_words, &mut analysis.paths),
+            Some("export") => apply_assignments(&mut state, &effective_words[1..]),
+            Some("unset") => {
+                for word in &effective_words[1..] {
+                    state.unset_variable(word.raw());
+                }
+            }
+            Some(_) => analysis
+                .paths
+                .extend(command_operand_paths(effective_words, &state.cwd)),
+            None => {}
+        }
+        output.push(state);
+    }
+    normalize_states(output)
+}
+
+fn analyze_simple_item(
+    item: &CommandPrefixOrSuffixItem,
+    state: &ShellState,
+    command_words: &mut SimpleCommandWords,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+    is_prefix: bool,
+) {
+    match item {
+        CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
+            analyze_redirect(redirect, state, analysis, depth);
+        }
+        CommandPrefixOrSuffixItem::Word(word) => {
+            let word = shell_word(&word.value, state);
+            analyze_embedded_commands(&word, state, analysis, depth);
+            command_words.words.push(word);
+        }
+        CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
+            let word = shell_word(&word.value, state);
+            analyze_embedded_commands(&word, state, analysis, depth);
+            if is_prefix {
+                command_words.assignments.push(word);
+            } else {
+                command_words.words.push(word);
+            }
+        }
+        CommandPrefixOrSuffixItem::ProcessSubstitution(_, command) => {
+            eval_list(&command.list, vec![state.clone()], analysis, depth + 1);
+        }
+    }
+}
+
+fn eval_compound_command(
+    command: &CompoundCommand,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    match command {
+        CompoundCommand::Arithmetic(_) => states,
+        CompoundCommand::ArithmeticForClause(command) => {
+            eval_loop(None, &command.body.list, states, analysis, depth)
+        }
+        CompoundCommand::BraceGroup(command) => {
+            eval_list(&command.list, states, analysis, depth + 1)
+        }
+        CompoundCommand::Subshell(command) => {
+            eval_list(&command.list, states.clone(), analysis, depth + 1);
+            states
+        }
+        CompoundCommand::ForClause(command) => {
+            for state in &states {
+                if let Some(values) = &command.values {
+                    for value in values {
+                        let word = shell_word(&value.value, state);
+                        analyze_embedded_commands(&word, state, analysis, depth);
                     }
                 }
-                Some(_) => paths.extend(paths_for_command(effective_words, &state.cwd)),
-                None => {}
             }
+            eval_loop(None, &command.body.list, states, analysis, depth)
         }
-
-        for embedded in extract_embedded_shells(&subcmd) {
-            let embedded = analyze_shell_command_with_state(&embedded, &previous_state);
-            risk = merge_risk(risk, embedded.risk);
-            paths.extend(embedded.paths);
-        }
-
-        let runs_in_subshell = matches!(previous_op.as_deref(), Some("|"))
-            || matches!(next_op.as_deref(), Some("|") | Some("&"));
-        if runs_in_subshell {
-            state = previous_state.clone();
-        }
-
-        match next_op.as_deref() {
-            Some("&&") => conditional_states.push(previous_state),
-            Some("||") => {
-                conditional_states.push(state);
-                state = previous_state;
+        CompoundCommand::CaseClause(command) => {
+            for state in &states {
+                let value = shell_word(&command.value.value, state);
+                analyze_embedded_commands(&value, state, analysis, depth);
             }
-            Some("|") => {}
-            _ if !conditional_states.is_empty() => {
-                conditional_states.push(state);
-                state = merge_shell_states(std::mem::take(&mut conditional_states));
+            let mut output = states.clone();
+            for case in &command.cases {
+                for state in &states {
+                    for pattern in &case.patterns {
+                        let word = shell_word(&pattern.value, state);
+                        analyze_embedded_commands(&word, state, analysis, depth);
+                    }
+                }
+                if let Some(body) = &case.cmd {
+                    output =
+                        union_states(output, eval_list(body, states.clone(), analysis, depth + 1));
+                }
             }
-            _ => {}
+            output
         }
-        previous_op = next_op;
+        CompoundCommand::IfClause(command) => eval_if_clause(command, states, analysis, depth),
+        CompoundCommand::WhileClause(command) | CompoundCommand::UntilClause(command) => {
+            eval_loop(Some(&command.0), &command.1.list, states, analysis, depth)
+        }
+        CompoundCommand::Coprocess(command) => {
+            eval_command(&command.body, states.clone(), analysis, depth + 1);
+            states
+        }
     }
-
-    ShellAnalysis { risk, paths }
 }
 
-fn merge_shell_states(mut states: Vec<ShellState>) -> ShellState {
-    states.dedup();
-    if states.len() == 1 {
-        return states.pop().unwrap();
+fn eval_if_clause(
+    command: &ast::IfClauseCommand,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    let condition_states = eval_list(&command.condition, states, analysis, depth + 1);
+    let mut output = eval_list(&command.then, condition_states.clone(), analysis, depth + 1);
+    let mut unmatched = condition_states;
+    if let Some(elses) = &command.elses {
+        for else_clause in elses {
+            if let Some(condition) = &else_clause.condition {
+                let conditioned = eval_list(condition, unmatched, analysis, depth + 1);
+                output = union_states(
+                    output,
+                    eval_list(&else_clause.body, conditioned.clone(), analysis, depth + 1),
+                );
+                unmatched = conditioned;
+            } else {
+                output = union_states(
+                    output,
+                    eval_list(&else_clause.body, unmatched, analysis, depth + 1),
+                );
+                return output;
+            }
+        }
     }
+    union_states(output, unmatched)
+}
 
-    let cwd = if states.iter().all(|state| state.cwd == states[0].cwd) {
-        states[0].cwd.clone()
+fn eval_loop(
+    condition: Option<&ast::CompoundList>,
+    body: &ast::CompoundList,
+    states: Vec<ShellState>,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) -> Vec<ShellState> {
+    let entry = if let Some(condition) = condition {
+        eval_list(condition, states, analysis, depth + 1)
     } else {
-        PathResolution::Unresolved(states[0].cwd.path().to_path_buf())
+        states
+    };
+    let mut output = entry.clone();
+    let mut frontier = entry;
+    for _ in 0..LOOP_UNROLL_LIMIT {
+        let body_states = eval_list(body, frontier, analysis, depth + 1);
+        let next = if let Some(condition) = condition {
+            eval_list(condition, body_states, analysis, depth + 1)
+        } else {
+            body_states
+        };
+        let new_states = next
+            .iter()
+            .filter(|state| !output.contains(state))
+            .cloned()
+            .collect::<Vec<_>>();
+        output = union_states(output, next);
+        if new_states.is_empty() {
+            return output;
+        }
+        frontier = new_states;
+    }
+    if output.len() > 1 {
+        let widened = merge_shell_states(&output);
+        output = union_states(output, vec![widened]);
+    }
+    output
+}
+
+fn analyze_redirect_list(
+    redirects: Option<&ast::RedirectList>,
+    states: &[ShellState],
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    let Some(redirects) = redirects else {
+        return;
+    };
+    for state in states {
+        for redirect in &redirects.0 {
+            analyze_redirect(redirect, state, analysis, depth);
+        }
+    }
+}
+
+fn analyze_redirect(
+    redirect: &IoRedirect,
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    match redirect {
+        IoRedirect::File(_, kind, target) => {
+            let access = match kind {
+                IoFileRedirectKind::Read | IoFileRedirectKind::DuplicateInput => PathAccess::Read,
+                IoFileRedirectKind::Write
+                | IoFileRedirectKind::Append
+                | IoFileRedirectKind::Clobber
+                | IoFileRedirectKind::DuplicateOutput => PathAccess::Write,
+                IoFileRedirectKind::ReadAndWrite => PathAccess::Unknown,
+            };
+            match target {
+                IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
+                    if matches!(target, IoFileRedirectTarget::Duplicate(_))
+                        && (word.value == "-" || word.value.chars().all(|ch| ch.is_ascii_digit()))
+                    {
+                        return;
+                    }
+                    let word = shell_word(&word.value, state);
+                    analyze_embedded_commands(&word, state, analysis, depth);
+                    push_path(
+                        &mut analysis.paths,
+                        &word,
+                        &state.cwd,
+                        access,
+                        PathTargetKind::Unknown,
+                    );
+                }
+                IoFileRedirectTarget::ProcessSubstitution(_, command) => {
+                    eval_list(&command.list, vec![state.clone()], analysis, depth + 1);
+                }
+                IoFileRedirectTarget::Fd(_) => {}
+            }
+        }
+        IoRedirect::HereDocument(_, heredoc) => {
+            if heredoc.requires_expansion {
+                analyze_heredoc_commands(&heredoc.doc.value, state, analysis, depth);
+            }
+        }
+        IoRedirect::HereString(_, word) | IoRedirect::OutputAndError(word, _) => {
+            let word = shell_word(&word.value, state);
+            analyze_embedded_commands(&word, state, analysis, depth);
+            if matches!(redirect, IoRedirect::OutputAndError(_, _)) {
+                push_path(
+                    &mut analysis.paths,
+                    &word,
+                    &state.cwd,
+                    PathAccess::Write,
+                    PathTargetKind::Unknown,
+                );
+            }
+        }
+    }
+}
+
+fn analyze_heredoc_commands(
+    value: &str,
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    let Some(pieces) = shell_parse::parse_heredoc_word(value) else {
+        record_unknown_shell(value, &state.cwd, analysis);
+        return;
+    };
+    for command in shell_parse::embedded_commands(&pieces) {
+        analyze_embedded_command(command, state, analysis, depth);
+    }
+}
+
+fn analyze_embedded_commands(
+    word: &ShellWord,
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    for command in &word.embedded_commands {
+        analyze_embedded_command(command, state, analysis, depth);
+    }
+}
+
+fn analyze_embedded_command(
+    command: &str,
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    let Ok(program) = shell_parse::parse(command) else {
+        record_unknown_shell(command, &state.cwd, analysis);
+        return;
+    };
+    eval_program(&program, vec![state.clone()], analysis, depth + 1);
+}
+
+fn analyze_extended_test(
+    expr: &ast::ExtendedTestExpr,
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    match expr {
+        ast::ExtendedTestExpr::And(left, right) | ast::ExtendedTestExpr::Or(left, right) => {
+            analyze_extended_test(left, state, analysis, depth);
+            analyze_extended_test(right, state, analysis, depth);
+        }
+        ast::ExtendedTestExpr::Not(expr) | ast::ExtendedTestExpr::Parenthesized(expr) => {
+            analyze_extended_test(expr, state, analysis, depth);
+        }
+        ast::ExtendedTestExpr::UnaryTest(predicate, word) => {
+            let word = shell_word(&word.value, state);
+            analyze_embedded_commands(&word, state, analysis, depth);
+            if !matches!(
+                predicate,
+                ast::UnaryPredicate::FdIsOpenTerminal
+                    | ast::UnaryPredicate::ShellOptionEnabled
+                    | ast::UnaryPredicate::ShellVariableIsSetAndAssigned
+                    | ast::UnaryPredicate::ShellVariableIsSetAndNameRef
+                    | ast::UnaryPredicate::StringHasZeroLength
+                    | ast::UnaryPredicate::StringHasNonZeroLength
+            ) {
+                push_path(
+                    &mut analysis.paths,
+                    &word,
+                    &state.cwd,
+                    PathAccess::Read,
+                    PathTargetKind::Unknown,
+                );
+            }
+        }
+        ast::ExtendedTestExpr::BinaryTest(predicate, left, right) => {
+            let left = shell_word(&left.value, state);
+            let right = shell_word(&right.value, state);
+            analyze_embedded_commands(&left, state, analysis, depth);
+            analyze_embedded_commands(&right, state, analysis, depth);
+            if matches!(
+                predicate,
+                ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers
+                    | ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot
+                    | ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes
+            ) {
+                for word in [&left, &right] {
+                    push_path(
+                        &mut analysis.paths,
+                        word,
+                        &state.cwd,
+                        PathAccess::Read,
+                        PathTargetKind::Unknown,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn union_states(mut first: Vec<ShellState>, second: Vec<ShellState>) -> Vec<ShellState> {
+    first.extend(second);
+    normalize_states(first)
+}
+
+fn normalize_states(states: Vec<ShellState>) -> Vec<ShellState> {
+    let mut unique = Vec::new();
+    for state in states {
+        if !unique.contains(&state) {
+            unique.push(state);
+        }
+    }
+    if unique.len() <= MAX_SHELL_STATES {
+        return unique;
+    }
+    let summary = merge_shell_states(&unique);
+    unique.truncate(MAX_SHELL_STATES - 1);
+    if !unique.contains(&summary) {
+        unique.push(summary);
+    }
+    unique
+}
+
+fn merge_shell_states(states: &[ShellState]) -> ShellState {
+    let first = &states[0];
+    let cwd = if states.iter().all(|state| state.cwd == first.cwd) {
+        first.cwd.clone()
+    } else {
+        PathResolution::Unresolved(first.cwd.path().to_path_buf())
     };
     let variable_names: HashSet<_> = states
         .iter()
@@ -692,7 +791,7 @@ fn merge_shell_states(mut states: Vec<ShellState>) -> ShellState {
     let variables = variable_names
         .into_iter()
         .map(|name| {
-            let value = states[0].variable(&name);
+            let value = first.variable(&name);
             let value = states
                 .iter()
                 .skip(1)
@@ -702,7 +801,6 @@ fn merge_shell_states(mut states: Vec<ShellState>) -> ShellState {
             (name, value)
         })
         .collect();
-
     ShellState { cwd, variables }
 }
 
@@ -774,6 +872,7 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
                 raw: word.raw.clone(),
                 expanded: state.variable("OLDPWD"),
                 has_glob: false,
+                embedded_commands: Vec::new(),
             })
         } else if !options_done && word.raw().starts_with('-') {
             None
@@ -785,6 +884,7 @@ fn apply_cd(state: &mut ShellState, words: &[ShellWord], paths: &mut Vec<PathEff
         raw: "~".to_string(),
         expanded: state.variable("HOME"),
         has_glob: false,
+        embedded_commands: Vec::new(),
     });
     let previous_cwd = state.cwd.clone();
     let (effects, target) = directory_operand_effects(&target, &state.cwd, PathAccess::Unknown);
@@ -823,80 +923,238 @@ fn merge_risk(a: ShellRisk, b: ShellRisk) -> ShellRisk {
     }
 }
 
-fn classify_risk(words: &[String]) -> ShellRisk {
-    let Some(cmd) = words.first().map(String::as_str) else {
-        return ShellRisk::ReadOnly;
-    };
-    match cmd {
-        "rm" | "rmdir" | "mv" | "chmod" | "chown" => ShellRisk::Destructive,
-        "cp" | "touch" | "mkdir" | "ln" => ShellRisk::Writes,
-        "sed" if words.iter().any(|w| w == "-i" || w.starts_with("-i")) => ShellRisk::Writes,
-        "perl" if words.iter().any(|w| w == "-pi" || w == "-p -i") => ShellRisk::Writes,
-        "git" => match words.get(1).map(String::as_str) {
-            Some(
-                "commit" | "reset" | "checkout" | "clean" | "stash" | "apply" | "am" | "merge"
-                | "rebase",
-            ) => ShellRisk::Writes,
-            Some("status" | "diff" | "log" | "show" | "grep" | "ls-files") => ShellRisk::ReadOnly,
-            _ => ShellRisk::Unknown,
-        },
-        "cargo" => match cargo_subcommand(words) {
-            Some("metadata" | "tree" | "version" | "--version" | "-V") => ShellRisk::ReadOnly,
-            Some(
-                "build" | "check" | "test" | "run" | "bench" | "doc" | "clippy" | "fmt" | "fix"
-                | "clean" | "install" | "add" | "remove" | "update" | "publish" | "nextest"
-                | "llvm-cov" | "xtask",
-            ) => ShellRisk::Writes,
-            _ => ShellRisk::Unknown,
-        },
-        "curl" | "wget" | "scp" | "rsync" | "ssh" => ShellRisk::Unknown,
-        "python" | "python3" | "node" | "ruby" | "perl" | "bash" | "sh" => ShellRisk::Unknown,
-        cmd if is_read_only_command(cmd) => ShellRisk::ReadOnly,
-        _ => ShellRisk::Unknown,
+struct CommandSpec {
+    risk: CommandRisk,
+    operands: OperandPolicy,
+}
+
+enum CommandRisk {
+    Fixed(ShellRisk),
+    Sed,
+    Perl,
+    Git,
+    Cargo,
+}
+
+enum OperandPolicy {
+    None,
+    ReadOperands,
+    UnknownOperands,
+    ReadExplicit,
+    UnknownExplicit,
+    Specialized(fn(&[ShellWord], &PathResolution) -> Vec<PathEffect>),
+}
+
+impl CommandRisk {
+    fn classify(self, words: &[ShellWord]) -> ShellRisk {
+        match self {
+            Self::Fixed(risk) => risk,
+            Self::Sed => {
+                if words
+                    .iter()
+                    .any(|word| word.raw() == "-i" || word.raw().starts_with("-i"))
+                {
+                    ShellRisk::Writes
+                } else {
+                    ShellRisk::ReadOnly
+                }
+            }
+            Self::Perl => {
+                if words
+                    .iter()
+                    .any(|word| matches!(word.raw(), "-pi" | "-p -i"))
+                {
+                    ShellRisk::Writes
+                } else {
+                    ShellRisk::Unknown
+                }
+            }
+            Self::Git => match words.get(1).map(ShellWord::raw) {
+                Some(
+                    "commit" | "reset" | "checkout" | "clean" | "stash" | "apply" | "am" | "merge"
+                    | "rebase",
+                ) => ShellRisk::Writes,
+                Some("status" | "diff" | "log" | "show" | "grep" | "ls-files") => {
+                    ShellRisk::ReadOnly
+                }
+                _ => ShellRisk::Unknown,
+            },
+            Self::Cargo => match cargo_subcommand(words) {
+                Some("metadata" | "tree" | "version" | "--version" | "-V") => ShellRisk::ReadOnly,
+                Some(
+                    "build" | "check" | "test" | "run" | "bench" | "doc" | "clippy" | "fmt" | "fix"
+                    | "clean" | "install" | "add" | "remove" | "update" | "publish" | "nextest"
+                    | "llvm-cov" | "xtask",
+                ) => ShellRisk::Writes,
+                _ => ShellRisk::Unknown,
+            },
+        }
     }
 }
 
-fn is_read_only_command(cmd: &str) -> bool {
-    READ_ONLY_COMMANDS.contains(&cmd)
+impl OperandPolicy {
+    fn paths(self, words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
+        match self {
+            Self::None => Vec::new(),
+            Self::ReadOperands => operand_paths(words, cwd, PathAccess::Read),
+            Self::UnknownOperands => operand_paths(words, cwd, PathAccess::Unknown),
+            Self::ReadExplicit => explicit_paths(words, cwd, PathAccess::Read),
+            Self::UnknownExplicit => explicit_paths(words, cwd, PathAccess::Unknown),
+            Self::Specialized(analyze) => analyze(words, cwd),
+        }
+    }
 }
 
-fn cargo_subcommand(words: &[String]) -> Option<&str> {
+fn command_spec(command: &str) -> CommandSpec {
+    use OperandPolicy::*;
+
+    match command {
+        "rm" | "rmdir" | "mv" | "chmod" | "chown" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Destructive),
+            operands: UnknownOperands,
+        },
+        "cp" | "touch" | "ln" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Writes),
+            operands: UnknownOperands,
+        },
+        "mkdir" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Writes),
+            operands: Specialized(mkdir_paths),
+        },
+        "sed" => CommandSpec {
+            risk: CommandRisk::Sed,
+            operands: Specialized(sed_paths),
+        },
+        "perl" => CommandSpec {
+            risk: CommandRisk::Perl,
+            operands: UnknownExplicit,
+        },
+        "git" => CommandSpec {
+            risk: CommandRisk::Git,
+            operands: Specialized(git_paths),
+        },
+        "cargo" => CommandSpec {
+            risk: CommandRisk::Cargo,
+            operands: Specialized(cargo_paths),
+        },
+        "env" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Unknown),
+            operands: Specialized(env_paths),
+        },
+        "[" | "[[" | "test" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: Specialized(test_paths),
+        },
+        "." | "source" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Unknown),
+            operands: ReadOperands,
+        },
+        "ssh" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Unknown),
+            operands: Specialized(ssh_paths),
+        },
+        "grep" | "rg" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: Specialized(grep_paths),
+        },
+        "find" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: Specialized(find_paths),
+        },
+        "ls" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: Specialized(ls_paths),
+        },
+        "cat" | "df" | "diff" | "du" | "file" | "head" | "hexdump" | "less" | "md5sum"
+        | "realpath" | "sha256sum" | "sort" | "stat" | "strings" | "tail" | "tree" | "uniq"
+        | "wc" | "xxd" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: ReadOperands,
+        },
+        "cut" | "date" | "jq" | "tr" | "which" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: ReadExplicit,
+        },
+        ":" | "alias" | "basename" | "break" | "caller" | "continue" | "declare" | "dirname"
+        | "echo" | "exit" | "export" | "false" | "getopts" | "hash" | "help" | "jobs" | "let"
+        | "local" | "printf" | "pwd" | "read" | "readonly" | "return" | "set" | "shift"
+        | "shopt" | "true" | "typeset" | "ulimit" | "umask" | "unalias" | "unset" | "wait"
+        | "whoami" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
+            operands: None,
+        },
+        "curl" | "wget" | "scp" | "rsync" | "python" | "python3" | "node" | "ruby" | "bash"
+        | "sh" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Unknown),
+            operands: UnknownExplicit,
+        },
+        _ => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Unknown),
+            operands: UnknownExplicit,
+        },
+    }
+}
+
+fn classify_risk(words: &[ShellWord]) -> ShellRisk {
+    let Some(command) = words.first().map(command_name) else {
+        return ShellRisk::ReadOnly;
+    };
+    command_spec(command).risk.classify(words)
+}
+
+fn cargo_subcommand(words: &[ShellWord]) -> Option<&str> {
     words
         .iter()
         .skip(1)
-        .map(String::as_str)
+        .map(ShellWord::raw)
         .find(|word| !word.starts_with('+') && !word.starts_with('-'))
 }
 
-fn paths_for_command(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
-    let mut paths = redirection_paths(words, cwd);
-    paths.extend(command_operand_paths(words, cwd));
-    paths
-}
-
 fn command_operand_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
-    let Some(cmd) = words.first().map(command_name) else {
+    let Some(command) = words.first().map(command_name) else {
         return Vec::new();
     };
-    match cmd {
-        "env" => env_paths(words, cwd),
-        "git" => git_paths(words, cwd),
-        "cargo" => cargo_paths(words, cwd),
-        "ssh" => ssh_paths(words, cwd),
-        "sed" => sed_paths(words, cwd),
-        "grep" | "rg" => grep_paths(words, cwd),
-        "find" => find_paths(words, cwd),
-        "mkdir" => mkdir_paths(words, cwd),
-        "ls" => ls_paths(words, cwd),
-        "cat" | "df" | "diff" | "du" | "file" | "head" | "hexdump" | "less" | "md5sum"
-        | "realpath" | "sha256sum" | "sort" | "stat" | "strings" | "tail" | "tree" | "uniq"
-        | "wc" | "xxd" => operand_paths(words, cwd, PathAccess::Read),
-        "rm" | "rmdir" | "touch" | "cp" | "mv" | "ln" | "chmod" | "chown" => {
-            operand_paths(words, cwd, PathAccess::Unknown)
+    command_spec(command).operands.paths(words, cwd)
+}
+
+fn test_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
+    const UNARY_PATH_OPERATORS: &[&str] = &[
+        "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-L", "-N", "-O", "-G", "-p", "-r",
+        "-S", "-s", "-u", "-w", "-x",
+    ];
+    const BINARY_PATH_OPERATORS: &[&str] = &["-ef", "-nt", "-ot"];
+
+    let mut out = Vec::new();
+    for (index, word) in words.iter().enumerate().skip(1) {
+        if UNARY_PATH_OPERATORS.contains(&word.raw()) {
+            if let Some(path) = words.get(index + 1) {
+                push_path(
+                    &mut out,
+                    path,
+                    cwd,
+                    PathAccess::Read,
+                    PathTargetKind::Unknown,
+                );
+            }
+        } else if BINARY_PATH_OPERATORS.contains(&word.raw()) {
+            for path in [
+                index.checked_sub(1).and_then(|i| words.get(i)),
+                words.get(index + 1),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                push_path(
+                    &mut out,
+                    path,
+                    cwd,
+                    PathAccess::Read,
+                    PathTargetKind::Unknown,
+                );
+            }
         }
-        cmd if is_read_only_command(cmd) => explicit_paths(words, cwd, PathAccess::Read),
-        _ => explicit_paths(words, cwd, PathAccess::Unknown),
     }
+    out
 }
 
 fn command_name(word: &ShellWord) -> &str {
@@ -1195,10 +1453,6 @@ fn grep_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
     let mut i = 1;
     while i < words.len() {
         let word = &words[i];
-        if is_redirection_operator(word) {
-            i += 2;
-            continue;
-        }
         if !options_done && word.raw() == "--" {
             options_done = true;
             i += 1;
@@ -1340,9 +1594,6 @@ fn find_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
     let mut i = 1;
     while i < words.len() {
         let word = &words[i];
-        if is_redirection_operator(word) {
-            break;
-        }
         match word.raw() {
             "--" => {
                 i += 1;
@@ -1356,10 +1607,7 @@ fn find_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
         }
     }
     while let Some(word) = words.get(i) {
-        if word.raw().starts_with('-')
-            || matches!(word.raw(), "!" | "(" | ")")
-            || is_redirection_operator(word)
-        {
+        if word.raw().starts_with('-') || matches!(word.raw(), "!" | "(" | ")") {
             break;
         }
         push_path(
@@ -1403,9 +1651,6 @@ fn ls_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
     let mut i = 1;
     while i < words.len() {
         let word = &words[i];
-        if is_redirection_operator(word) {
-            break;
-        }
         if !options_done && word.raw() == "--" {
             options_done = true;
             i += 1;
@@ -1429,42 +1674,6 @@ fn ls_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
             PathTargetKind::Directory,
         );
         i += 1;
-    }
-    out
-}
-
-fn redirection_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        match words[i].raw() {
-            ">" | ">>" | "&>" | "&>>" => {
-                if let Some(path) = words.get(i + 1) {
-                    push_path(
-                        &mut out,
-                        path,
-                        cwd,
-                        PathAccess::Write,
-                        PathTargetKind::Unknown,
-                    );
-                }
-                i += 2;
-            }
-            "<<" => i += 2,
-            "<" => {
-                if let Some(path) = words.get(i + 1) {
-                    push_path(
-                        &mut out,
-                        path,
-                        cwd,
-                        PathAccess::Read,
-                        PathTargetKind::Unknown,
-                    );
-                }
-                i += 2;
-            }
-            _ => i += 1,
-        }
     }
     out
 }
@@ -1628,22 +1837,6 @@ fn operand_paths(words: &[ShellWord], cwd: &PathResolution, access: PathAccess) 
     let command = words.first().map(command_name).unwrap_or_default();
     while i < words.len() {
         let word = &words[i];
-        if word.raw().chars().all(|ch| ch.is_ascii_digit())
-            && words
-                .get(i + 1)
-                .is_some_and(|next| is_redirection_operator(next) || is_fd_redirection(next))
-        {
-            i += 1;
-            continue;
-        }
-        if is_redirection_operator(word) {
-            i += 2;
-            continue;
-        }
-        if is_fd_redirection(word) {
-            i += 1;
-            continue;
-        }
         if !options_done && word.raw() == "--" {
             options_done = true;
             i += 1;
@@ -1716,11 +1909,7 @@ fn push_path(
     access: PathAccess,
     target_kind: PathTargetKind,
 ) {
-    if is_redirection_operator(word)
-        || is_fd_redirection(word)
-        || is_process_substitution(word)
-        || is_shell_stream_word(word)
-    {
+    if is_shell_stream_word(word) {
         return;
     }
     if word.has_glob {
@@ -1974,6 +2163,7 @@ fn unresolved_path_effect(
             raw: word.raw.clone(),
             expanded: None,
             has_glob: false,
+            embedded_commands: word.embedded_commands.clone(),
         },
         cwd,
         access,
@@ -1991,30 +2181,12 @@ fn is_explicit_path(word: &ShellWord) -> bool {
                 || value.starts_with("~+/")
                 || value.starts_with("~-/")
                 || value.starts_with('/')
-                || value.starts_with('$')
                 || value.contains('/'))
     }
     let pure_command_substitution = (word.raw.starts_with("$(") && word.raw.ends_with(')'))
         || (word.raw.starts_with('`') && word.raw.ends_with('`'));
     (!pure_command_substitution && explicit(&word.raw))
         || word.expanded.as_deref().is_some_and(explicit)
-}
-
-fn is_redirection_operator(word: &ShellWord) -> bool {
-    matches!(word.raw(), ">" | ">>" | "&>" | "&>>" | "<" | "<<")
-}
-
-fn is_fd_redirection(word: &ShellWord) -> bool {
-    word.raw()
-        .strip_prefix(">&")
-        .or_else(|| word.raw().strip_prefix("<&"))
-        .is_some_and(|target| {
-            target == "-" || !target.is_empty() && target.chars().all(|ch| ch.is_ascii_digit())
-        })
-}
-
-fn is_process_substitution(word: &ShellWord) -> bool {
-    (word.raw().starts_with("<(") || word.raw().starts_with(">(")) && word.raw().ends_with(')')
 }
 
 fn is_shell_stream_word(word: &ShellWord) -> bool {
@@ -2026,251 +2198,6 @@ fn is_shell_stream_path(path: &str) -> bool {
         path,
         "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
     )
-}
-
-fn shell_words(cmd: &str, state: &ShellState) -> Vec<ShellWord> {
-    let chars: Vec<char> = cmd.chars().collect();
-    let mut out = Vec::new();
-    let mut word = ShellWordBuilder::default();
-    let mut quote = None;
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        match quote {
-            Some('\'') => {
-                if ch == '\'' {
-                    quote = None;
-                } else {
-                    word.push_literal(ch);
-                }
-                i += 1;
-            }
-            Some('"') => match ch {
-                '"' => {
-                    quote = None;
-                    i += 1;
-                }
-                '\\' if chars
-                    .get(i + 1)
-                    .is_some_and(|next| matches!(next, '$' | '`' | '"' | '\\')) =>
-                {
-                    word.push_literal(chars[i + 1]);
-                    i += 2;
-                }
-                '$' => push_parameter_expansion(&chars, &mut i, state, &mut word, false),
-                '`' => push_backtick_expansion(&chars, &mut i, &mut word),
-                _ => {
-                    word.push_literal(ch);
-                    i += 1;
-                }
-            },
-            None => match ch {
-                '\'' | '"' => {
-                    word.started = true;
-                    quote = Some(ch);
-                    i += 1;
-                }
-                '\\' if i + 1 < chars.len() => {
-                    word.push_literal(chars[i + 1]);
-                    i += 2;
-                }
-                '\\' => {
-                    word.push_literal(ch);
-                    word.unresolved = true;
-                    i += 1;
-                }
-                ch if ch.is_whitespace() => {
-                    finish_shell_word(&mut out, &mut word, state);
-                    i += 1;
-                }
-                '(' | ')' => {
-                    finish_shell_word(&mut out, &mut word, state);
-                    out.push(ShellWord {
-                        raw: ch.to_string(),
-                        expanded: None,
-                        has_glob: false,
-                    });
-                    i += 1;
-                }
-                '&' if chars.get(i + 1) == Some(&'>') => {
-                    finish_shell_word(&mut out, &mut word, state);
-                    if chars.get(i + 2) == Some(&'>') {
-                        out.push(ShellWord::literal("&>>"));
-                        i += 3;
-                    } else {
-                        out.push(ShellWord::literal("&>"));
-                        i += 2;
-                    }
-                }
-                '>' | '<' => {
-                    finish_shell_word(&mut out, &mut word, state);
-                    if chars.get(i + 1) == Some(&'(') {
-                        let mut process = ShellWordBuilder::default();
-                        process.push_raw(ch);
-                        i += 1;
-                        push_dynamic_parenthesized(&chars, &mut i, &mut process);
-                        finish_shell_word(&mut out, &mut process, state);
-                    } else if chars.get(i + 1) == Some(&'&')
-                        && chars
-                            .get(i + 2)
-                            .is_some_and(|target| target.is_ascii_digit() || *target == '-')
-                    {
-                        let start = i;
-                        i += 2;
-                        while chars
-                            .get(i)
-                            .is_some_and(|target| target.is_ascii_digit() || *target == '-')
-                        {
-                            i += 1;
-                        }
-                        out.push(ShellWord::literal(
-                            chars[start..i].iter().collect::<String>(),
-                        ));
-                    } else {
-                        let doubled = chars.get(i + 1) == Some(&ch);
-                        out.push(ShellWord::literal(if doubled {
-                            format!("{ch}{ch}")
-                        } else {
-                            ch.to_string()
-                        }));
-                        i += if doubled { 2 } else { 1 };
-                    }
-                }
-                '$' => push_parameter_expansion(&chars, &mut i, state, &mut word, true),
-                '`' => push_backtick_expansion(&chars, &mut i, &mut word),
-                '*' | '?' | '[' => {
-                    word.push_glob_syntax(ch);
-                    i += 1;
-                }
-                '{' | '}' => {
-                    word.push_literal(ch);
-                    word.unresolved = true;
-                    i += 1;
-                }
-                '~' => {
-                    if !word.started {
-                        word.tilde_at = Some(0);
-                    } else if word.raw.strip_suffix('=').is_some_and(is_variable_name) {
-                        word.tilde_at = Some(word.expanded.len());
-                    }
-                    word.push_literal(ch);
-                    i += 1;
-                }
-                _ => {
-                    word.push_literal(ch);
-                    i += 1;
-                }
-            },
-            Some(_) => unreachable!(),
-        }
-    }
-
-    if quote.is_some() {
-        word.unresolved = true;
-    }
-    finish_shell_word(&mut out, &mut word, state);
-    out
-}
-
-fn finish_shell_word(out: &mut Vec<ShellWord>, word: &mut ShellWordBuilder, state: &ShellState) {
-    if let Some(word) = word.finish(state) {
-        out.push(word);
-    }
-}
-
-fn push_parameter_expansion(
-    chars: &[char],
-    index: &mut usize,
-    state: &ShellState,
-    word: &mut ShellWordBuilder,
-    unquoted: bool,
-) {
-    word.push_raw('$');
-    *index += 1;
-    let Some(&next) = chars.get(*index) else {
-        word.expanded.push('$');
-        return;
-    };
-
-    if next == '(' {
-        push_dynamic_parenthesized(chars, index, word);
-        return;
-    }
-
-    if next == '{' {
-        word.push_raw('{');
-        *index += 1;
-        let start = *index;
-        while chars.get(*index).is_some_and(|ch| *ch != '}') {
-            word.push_raw(chars[*index]);
-            *index += 1;
-        }
-        let name: String = chars[start..*index].iter().collect();
-        if chars.get(*index) == Some(&'}') {
-            word.push_raw('}');
-            *index += 1;
-        } else {
-            word.unresolved = true;
-            return;
-        }
-        if is_variable_name(&name) {
-            word.push_expansion(state.variable(&name), unquoted);
-        } else {
-            word.unresolved = true;
-        }
-        return;
-    }
-
-    if next == '_' || next.is_ascii_alphabetic() {
-        let start = *index;
-        while chars
-            .get(*index)
-            .is_some_and(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
-        {
-            word.push_raw(chars[*index]);
-            *index += 1;
-        }
-        let name: String = chars[start..*index].iter().collect();
-        word.push_expansion(state.variable(&name), unquoted);
-        return;
-    }
-
-    word.push_raw(next);
-    word.unresolved = true;
-    *index += 1;
-}
-
-fn push_dynamic_parenthesized(chars: &[char], index: &mut usize, word: &mut ShellWordBuilder) {
-    let mut depth = 0usize;
-    while let Some(&ch) = chars.get(*index) {
-        word.push_raw(ch);
-        *index += 1;
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    word.unresolved = true;
-}
-
-fn push_backtick_expansion(chars: &[char], index: &mut usize, word: &mut ShellWordBuilder) {
-    word.push_raw('`');
-    *index += 1;
-    while let Some(&ch) = chars.get(*index) {
-        word.push_raw(ch);
-        *index += 1;
-        if ch == '`' {
-            break;
-        }
-    }
-    word.unresolved = true;
 }
 
 fn expand_shell_tilde(value: &str, state: &ShellState) -> Option<String> {
@@ -2317,112 +2244,11 @@ fn is_variable_name(name: &str) -> bool {
 }
 
 /// `cd` is always allowed at the command level; workspace path restriction handles the target.
-pub(super) fn is_cd_command(subcmd: &str) -> bool {
-    let trimmed = subcmd.trim();
-    trimmed == "cd" || trimmed.starts_with("cd ") || trimmed.starts_with("cd\t")
+pub(super) fn is_cd_command(command: &str) -> bool {
+    shell_parse::is_single_cd(command)
 }
 
-/// Returns true if `cmd` redirects output to a real file (`>`, `>>`, `&>`, `&>>`).
-/// Redirects to shell stream devices and fd duplications (`2>&1`) are ignored. Quote-aware.
-pub(super) fn has_output_redirection(cmd: &str) -> bool {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        match bytes[i] {
-            b'\'' => {
-                i += 1;
-                while i < len && bytes[i] != b'\'' {
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-            }
-            b'"' => {
-                i += 1;
-                while i < len && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < len {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
-            }
-            b'\\' if i + 1 < len => {
-                i += 2;
-            }
-            b'<' => {
-                // << is heredoc, < is input redirect - neither is output.
-                i += if i + 1 < len && bytes[i + 1] == b'<' {
-                    2
-                } else {
-                    1
-                };
-            }
-            b'&' if i + 1 < len && bytes[i + 1] == b'>' => {
-                i += 1; // now on '>'
-                if !redirect_is_shell_stream(bytes, &mut i) {
-                    return true;
-                }
-            }
-            b'>' => {
-                // >&N is fd duplication, not file output.
-                if i + 1 < len && bytes[i + 1] == b'&' {
-                    let j = i + 2;
-                    if j < len && bytes[j].is_ascii_digit() {
-                        i = j + 1;
-                        continue;
-                    }
-                    // >& without a digit - treat as real redirection.
-                }
-                if !redirect_is_shell_stream(bytes, &mut i) {
-                    return true;
-                }
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    false
-}
-
-/// True for characters that unambiguously end a shell word
-/// (whitespace or common operators).
-const fn is_shell_word_boundary(b: u8) -> bool {
-    b.is_ascii_whitespace() || matches!(b, b';' | b'|' | b'&' | b'>' | b'<' | b'(' | b')')
-}
-
-/// Starting at `bytes[*pos]` (`>`), check whether the redirection target is a
-/// shell stream device. Advances `*pos` past the target on a match.
-fn redirect_is_shell_stream(bytes: &[u8], pos: &mut usize) -> bool {
-    let len = bytes.len();
-    let mut j = *pos;
-    if j < len && bytes[j] == b'>' {
-        j += 1;
-    }
-    if j < len && bytes[j] == b'>' {
-        j += 1; // >>
-    }
-    while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
-        j += 1;
-    }
-    const SHELL_STREAM_PATHS: &[&[u8]] =
-        &[b"/dev/null", b"/dev/stdin", b"/dev/stdout", b"/dev/stderr"];
-    for path in SHELL_STREAM_PATHS {
-        if j + path.len() <= len && &bytes[j..j + path.len()] == *path {
-            let end = j + path.len();
-            // Must be followed by a word boundary (whitespace, shell operator, or end).
-            if end == len || is_shell_word_boundary(bytes[end]) {
-                *pos = end;
-                return true;
-            }
-        }
-    }
-    *pos += 1;
-    false
+/// Returns true if a Bash program redirects output to a real file.
+pub(super) fn has_output_redirection(command: &str) -> bool {
+    shell_parse::has_output_redirection(command)
 }

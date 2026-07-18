@@ -40,6 +40,38 @@ app_story!(permission_request_deferred_while_typing, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_lua_doc_validation_permission_targets_tmp, |ctx| {
+    ctx.set_viewport(120, 30);
+    ctx.restrict_permissions_to_cwd();
+    ctx.approve_tool_for_session("bash");
+    let command = concat!(
+        "set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; ",
+        "status=${PIPESTATUS[0]}; if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi; ",
+        "git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta ",
+        "docs/zensical.toml runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff || ",
+        "{ cat /tmp/smelt-doc-diff; exit 1; }",
+    );
+    ctx.request_permission(
+        "bash",
+        args([
+            ("command", json!(command)),
+            ("description", json!("Generate and validate Lua API docs")),
+        ]),
+        vec![],
+    );
+
+    let frame = ctx.frame_text();
+    assert!(
+        frame.contains("allow /tmp for this session"),
+        "expected a /tmp session grant: {frame}"
+    );
+    assert!(
+        !frame.contains("allow / for this session"),
+        "must not offer a root session grant: {frame}"
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(bash_permission_preserves_reasoning_context, |ctx| {
     ctx.set_viewport(80, 22);
     ctx.engine(EngineEvent::Reasoning {

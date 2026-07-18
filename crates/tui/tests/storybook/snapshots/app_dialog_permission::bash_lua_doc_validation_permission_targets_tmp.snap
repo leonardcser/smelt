@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; status=${PIPESTATUS[0]}; if [ "$status" -ne 0 ];
+  then exit "$status"; fi; git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta docs/zensical.toml
+  runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff || { cat /tmp/smelt-doc-diff; exit 1; }
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ bash: set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; status=${PIPESTATUS[0]}; if [ "$status" -ne 0 ];
+       then exit "$status"; fi; git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta
+       docs/zensical.toml runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff || { cat /tmp/smelt-doc-diff; exit 1;
+       }
+ Generate and validate Lua API docs
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow /tmp for this session
+  4. allow /tmp in ~/cwd
+
+  press tab to add a reason…
+ ○ normal  permission pending                                                                                     1:1 0%

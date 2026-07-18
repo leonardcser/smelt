@@ -552,7 +552,10 @@ fn single_ampersand_background() {
 
 #[test]
 fn split_shell_commands_nested_subshells_once_per_level() {
-    let command = format!("{}rm foo{}", "(".repeat(12), ")".repeat(12));
+    let mut command = "rm foo".to_string();
+    for _ in 0..12 {
+        command = format!("( {command}; )");
+    }
     let commands = split_shell_commands(&command);
     assert_eq!(commands.len(), 13);
     assert_eq!(commands[0], command);
@@ -1118,6 +1121,126 @@ fn workspace_allows_relative_path() {
 }
 
 #[test]
+fn workspace_path_bash_does_not_treat_shell_status_as_a_path() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = concat!(
+        "set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120; ",
+        "status=${PIPESTATUS[0]}; if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi; ",
+        "git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta ",
+        "docs/zensical.toml runtime/skills/customize/SKILL.md >/tmp/smelt-doc-diff || ",
+        "{ cat /tmp/smelt-doc-diff; exit 1; }",
+    );
+    let args = args_with("command", command);
+
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    let path_requirements: Vec<_> = outcome
+        .missing_requirements
+        .iter()
+        .filter_map(|requirement| match requirement {
+            PermissionRequirement::PathPrefix { dir } => Some(dir.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        path_requirements,
+        vec![resolved_filesystem_path(Path::new("/tmp"))]
+    );
+}
+
+#[test]
+fn workspace_path_bash_tracks_file_tests_inside_control_flow() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret"), "secret").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let args = args_with(
+        "command",
+        "candidate=../outside/secret; if [ -f \"$candidate\" ]; then echo found; fi",
+    );
+
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }]
+    );
+}
+
+#[test]
+fn workspace_path_bash_preserves_all_cwd_states_after_conditional_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let sibling = tempfile::tempdir_in(temp.path().parent().unwrap()).unwrap();
+    let workspace = temp.path().join("workspace");
+    let sibling_name = sibling.path().file_name().unwrap().to_str().unwrap();
+    let nested_outside = temp.path().join(sibling_name);
+    std::fs::create_dir_all(workspace.join("child")).unwrap();
+    std::fs::create_dir_all(&nested_outside).unwrap();
+    std::fs::write(sibling.path().join("secret"), "secret").unwrap();
+    std::fs::write(nested_outside.join("secret"), "secret").unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let args = args_with(
+        "command",
+        &format!("if maybe; then cd child; fi; cat ../../{sibling_name}/secret"),
+    );
+
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    for outside in [sibling.path(), nested_outside.as_path()] {
+        assert!(outcome
+            .missing_requirements
+            .contains(&PermissionRequirement::PathPrefix {
+                dir: resolved_filesystem_path(outside)
+            }));
+    }
+}
+
+#[test]
+fn workspace_path_bash_ignores_pathlike_data_for_pathless_builtins() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with(
+        "command",
+        "status=1; if [[ \"$status\" -ne 0 ]]; then printf '%s\\n' /tmp/report; else echo /etc/passwd; fi",
+    );
+
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert!(outcome
+        .missing_requirements
+        .iter()
+        .all(|requirement| !matches!(requirement, PermissionRequirement::PathPrefix { .. })));
+}
+
+#[test]
+fn workspace_path_bash_tracks_redirection_on_assignment_only_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let args = args_with("command", "RESULT=ok > ../outside/result.txt");
+
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert!(outcome
+        .missing_requirements
+        .contains(&PermissionRequirement::PathPrefix {
+            dir: resolved_filesystem_path(&outside)
+        }));
+}
+
+#[test]
 fn workspace_path_bash_detects_bare_parent_directory() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -1301,10 +1424,11 @@ fn workspace_path_shell_fails_closed_after_conditional_cd() {
         panic!("expected shell paths, got {effects:?}");
     };
 
-    assert!(matches!(
-        paths.last().unwrap().resolution,
-        PathResolution::Unresolved(_)
-    ));
+    assert!(paths.iter().any(|path| {
+        path.resolution
+            .resolved()
+            .is_some_and(|path| path.starts_with(&outside))
+    }));
     assert_eq!(decide(&p, normal(), "bash", &args), Decision::Ask);
 }
 
@@ -2608,6 +2732,17 @@ fn plan_policy_classifies_bash_by_effects() {
         (args_with("command", "cargo test"), Decision::Deny),
         (args_with("command", "cargo +nightly test"), Decision::Deny),
         (args_with("command", "rm -rf target"), Decision::Deny),
+        (
+            args_with("command", "env MODE=test rm -rf target"),
+            Decision::Deny,
+        ),
+        (
+            args_with(
+                "command",
+                "status=0; if [ \"$status\" -eq 0 ]; then cargo test; fi",
+            ),
+            Decision::Deny,
+        ),
         (background_pwd, Decision::Deny),
     ];
     for (args, expected) in cases {
@@ -2713,7 +2848,7 @@ fn has_output_redirection_heredoc_only() {
 #[test]
 fn has_output_redirection_heredoc_with_output_redirect() {
     // heredoc with output redirection to a file
-    assert!(has_output_redirection("cat << 'EOF' > file.txt"));
+    assert!(has_output_redirection("cat << 'EOF' > file.txt\nbody\nEOF"));
 }
 
 #[test]

@@ -38,6 +38,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 shellexpand = "3.1.2"
 smelt-store = { workspace = true }
 chrono = "0.4.45"
+brush-parser = "0.4.0"
 
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }

@@ -3,6 +3,7 @@
 pub(crate) mod approvals;
 pub(crate) mod bash;
 pub mod rules;
+mod shell_parse;
 pub mod store;
 pub(crate) mod workspace;
 

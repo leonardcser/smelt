@@ -52,6 +52,25 @@ impl AppStoryCtx {
         self.app.set_terminal_size(w, h);
     }
 
+    pub fn restrict_permissions_to_cwd(&mut self) {
+        assert_eq!(
+            self.turn_id, 0,
+            "configure permissions before starting a turn"
+        );
+        let mut permissions = self.app.app.core.permissions.snapshot().as_ref().clone();
+        permissions.set_workspace(std::path::PathBuf::from(self.app.cwd_str()));
+        permissions.set_restrict_to_workspace(true);
+        self.app.app.core.permissions.replace(permissions);
+    }
+
+    pub fn approve_tool_for_session(&mut self, tool: &str) {
+        let approvals = self.app.app.core.permissions.approvals();
+        approvals
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .add_session_tool(tool, Vec::new());
+    }
+
     /// Expand the active root-docked dialog while retaining a small transcript
     /// viewport above it.
     pub fn expand_active_dialog_to_max_height(&mut self) {
