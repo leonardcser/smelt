@@ -30,6 +30,14 @@ struct Input {
     extract_text: String,
 }
 
+struct ExpectedBodySchema<'a> {
+    model: &'a str,
+    message_count: usize,
+    tool_count: usize,
+    effort: ReasoningEffort,
+    cache_key_chars: Option<usize>,
+}
+
 fn run(input: Input) {
     assert_provider_helpers(&input);
     let expected_message_count = input.texts.len().min(12);
@@ -66,38 +74,38 @@ fn run(input: Input) {
     let chat = fuzz_build_chat_completions_body(&messages, &tools, model, effort, &cfg);
     let openai = fuzz_build_openai_body(&messages, &tools, model, effort, &cfg, &cache);
 
-    assert_provider_body_schema(
-        &anthropic,
-        &chat,
-        &openai,
+    let expected = ExpectedBodySchema {
         model,
-        expected_message_count,
-        tools.len(),
+        message_count: expected_message_count,
+        tool_count: tools.len(),
         effort,
-        expected_cache_key_chars,
-    );
+        cache_key_chars: expected_cache_key_chars,
+    };
+    assert_provider_body_schema(&anthropic, &chat, &openai, &expected);
 }
 
 fn assert_provider_body_schema(
     anthropic: &serde_json::Value,
     chat: &serde_json::Value,
     openai: &serde_json::Value,
-    model: &str,
-    expected_message_count: usize,
-    expected_tool_count: usize,
-    effort: ReasoningEffort,
-    expected_cache_key_chars: Option<usize>,
+    expected: &ExpectedBodySchema<'_>,
 ) {
-    assert_eq!(anthropic["model"], model, "anthropic body model changed");
-    assert_eq!(chat["model"], model, "chat completions body model changed");
-    assert_eq!(openai["model"], model, "openai body model changed");
+    assert_eq!(
+        anthropic["model"], expected.model,
+        "anthropic body model changed"
+    );
+    assert_eq!(
+        chat["model"], expected.model,
+        "chat completions body model changed"
+    );
+    assert_eq!(openai["model"], expected.model, "openai body model changed");
 
     let anthropic_messages = anthropic["messages"]
         .as_array()
         .expect("anthropic messages is an array");
     assert_eq!(
         anthropic_messages.len(),
-        expected_message_count,
+        expected.message_count,
         "anthropic message count changed"
     );
     for message in anthropic_messages {
@@ -116,7 +124,7 @@ fn assert_provider_body_schema(
         .expect("chat messages is an array");
     assert_eq!(
         chat_messages.len(),
-        expected_message_count + 1,
+        expected.message_count + 1,
         "chat completions message count changed"
     );
     for message in chat_messages {
@@ -145,7 +153,7 @@ fn assert_provider_body_schema(
         .expect("openai input is an array");
     assert_eq!(
         openai_input.len(),
-        expected_message_count,
+        expected.message_count,
         "openai input count changed"
     );
     for item in openai_input {
@@ -161,9 +169,9 @@ fn assert_provider_body_schema(
         );
     }
 
-    assert_tool_array(anthropic.get("tools"), expected_tool_count, "anthropic");
-    assert_chat_tool_array(chat.get("tools"), expected_tool_count);
-    assert_tool_array(openai.get("tools"), expected_tool_count, "openai");
+    assert_tool_array(anthropic.get("tools"), expected.tool_count, "anthropic");
+    assert_chat_tool_array(chat.get("tools"), expected.tool_count);
+    assert_tool_array(openai.get("tools"), expected.tool_count, "openai");
 
     assert!(
         count_cache_controls(anthropic) <= 4,
@@ -173,7 +181,7 @@ fn assert_provider_body_schema(
         anthropic.get("prompt_cache_key").is_none(),
         "anthropic body leaked OpenAI prompt_cache_key"
     );
-    match expected_cache_key_chars {
+    match expected.cache_key_chars {
         Some(chars) => {
             let key = openai["prompt_cache_key"]
                 .as_str()
@@ -190,7 +198,7 @@ fn assert_provider_body_schema(
         ),
     }
 
-    if effort == ReasoningEffort::Off {
+    if expected.effort == ReasoningEffort::Off {
         assert!(
             chat.get("reasoning_effort").is_none(),
             "chat completions body set reasoning while effort is off"
@@ -202,7 +210,7 @@ fn assert_provider_body_schema(
     } else {
         assert_eq!(
             chat["reasoning_effort"],
-            effort.label(),
+            expected.effort.label(),
             "chat completions reasoning effort changed"
         );
         assert!(

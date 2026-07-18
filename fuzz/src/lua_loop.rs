@@ -693,7 +693,7 @@ fn emit_cmd_register(out: &mut String, name_slot: u8, handler_kind: u8) {
         // Re-entrant: read+write state, then invoke another command.
         _ => "function() local s = smelt.state.get(\"fuzz.cmd_reentry\"); s.depth = (s.depth or 0) + 1; if (s.depth or 0) < 4 then pcall(smelt.cmd.run, \"fuzz.cmd.\" .. ((s.depth or 0) % 6)) end; s.depth = (s.depth or 1) - 1 end",
     };
-    let opts = if (handler_kind / 6) % 2 == 0 {
+    let opts = if (handler_kind / 6).is_multiple_of(2) {
         "nil"
     } else {
         "{ override = true }"
