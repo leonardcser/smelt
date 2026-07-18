@@ -125,7 +125,7 @@ byte targets keep the exact minimized artifact. CI replays both forms on every
 PR; running them locally is one command:
 
 ```sh
-# Replay only:
+# Build every target, then replay all regression seeds:
 cargo xtask fuzz replay-regression
 
 # CI gate: prepare, compile, and replay every registered target:

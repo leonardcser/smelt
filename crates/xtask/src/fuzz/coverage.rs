@@ -4,7 +4,8 @@
 //! args it snapshots every target that has a corpus.
 
 use super::{
-    all_target_names, count_files, die, die_with_status, iso_utc, repo_root, stamp, FuzzData,
+    all_target_names, count_files, die, die_with_status, iso_utc, nightly_host, repo_root, stamp,
+    FuzzData,
 };
 use std::fs::File;
 use std::io::Write;
@@ -368,19 +369,6 @@ fn find_llvm_cov() -> Option<std::path::PathBuf> {
     }
     let sysroot = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     walk_for("llvm-cov", &sysroot)
-}
-
-fn nightly_host() -> Option<String> {
-    let output = Command::new("rustc")
-        .args(["+nightly", "-vV"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
 }
 
 fn walk_for(name: &str, dir: &std::path::Path) -> Option<std::path::PathBuf> {

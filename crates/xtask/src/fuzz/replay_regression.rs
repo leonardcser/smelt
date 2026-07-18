@@ -3,17 +3,22 @@
 //! CI calls this on every PR; devs call it before sending changes.
 //!
 //! JSON-scenario targets (`smelt_loop`, `lua_loop`) replay via the in-tree
-//! `replay_scenario` binary. Byte-form targets replay via
-//! `cargo fuzz run --runs=0` which executes every file in the seed dir
-//! exactly once and exits.
+//! `replay_scenario` binary. Byte-form targets execute the prebuilt libFuzzer
+//! binaries directly, once per seed.
 
-use super::{die, repo_root, step, targets_of, TargetKind};
+use super::{build, die, nightly_host, repo_root, step, targets_of, FuzzData, TargetKind};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn run(args: Vec<String>) {
     if !args.is_empty() {
         die("usage: cargo xtask fuzz replay-regression");
     }
+    build(Vec::new());
+    run_prebuilt();
+}
+
+pub(super) fn run_prebuilt() {
     let root = repo_root();
     let seeds = root.join("fuzz/seeds");
 
@@ -69,6 +74,8 @@ pub fn run(args: Vec<String>) {
         }
     }
 
+    let host = nightly_host().unwrap_or_else(|| die("could not determine the nightly host triple"));
+    let data = FuzzData::for_repo(&root);
     for target in targets_of(TargetKind::Bytes) {
         let dir = seeds.join(&target).join("regression");
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -84,13 +91,24 @@ pub fn run(args: Vec<String>) {
             continue;
         }
         println!(">>> {target}: {} byte-form seed(s)", files.len());
-        let output = Command::new("cargo")
-            .args(["+nightly", "fuzz", "run", "--sanitizer=none", &target])
+        data.prepare_target(&target);
+        let binary = fuzz_binary(&root, &host, &target);
+        if !binary.is_file() {
+            die(&format!(
+                "prebuilt fuzz target not found: {}",
+                binary.display()
+            ));
+        }
+        let output = Command::new(&binary)
+            .arg("-runs=0")
+            .arg(format!(
+                "-artifact_prefix={}",
+                data.artifact_prefix(&target)
+            ))
             .args(&files)
-            .args(["--", "-runs=0"])
             .current_dir(&root)
             .output()
-            .unwrap_or_else(|e| die(&format!("spawn cargo fuzz run: {e}")));
+            .unwrap_or_else(|e| die(&format!("spawn {}: {e}", binary.display())));
         if output.status.success() {
             println!("  ok");
         } else {
@@ -107,6 +125,23 @@ pub fn run(args: Vec<String>) {
     }
     println!();
     println!("all regression seeds passed");
+}
+
+fn fuzz_binary(root: &Path, host: &str, target: &str) -> PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .unwrap_or_else(|| root.join("fuzz/target"));
+    target_dir
+        .join(host)
+        .join("release")
+        .join(format!("{target}{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn print_failure_output(output: &std::process::Output) {

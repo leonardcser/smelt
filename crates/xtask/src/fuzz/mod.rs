@@ -77,7 +77,7 @@ fn verify(args: Vec<String>) {
     }
     prepare(Vec::new());
     build(Vec::new());
-    replay_regression::run(Vec::new());
+    replay_regression::run_prebuilt();
 }
 
 fn build(args: Vec<String>) {
@@ -138,6 +138,19 @@ pub(super) fn repo_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("xtask is at crates/xtask/")
         .to_path_buf()
+}
+
+pub(super) fn nightly_host() -> Option<String> {
+    let output = Command::new("rustc")
+        .args(["+nightly", "-vV"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
 }
 
 /// Number of regular files directly under `dir` (non-recursive). `0` if `dir`
