@@ -49,7 +49,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "data_url_from_bytes",
         "Encode raw `bytes` as a base64 `data:` URL with the given `mime` type.",
         &["bytes", "mime"],
-        |_, (bytes, mime): (mlua::String, String)| -> LuaResult<String> {
+        |_, (bytes, mime): (mlua::LuaString, String)| -> LuaResult<String> {
             Ok(engine::image::data_url_from_bytes(&bytes.as_bytes(), &mime))
         },
     )?;

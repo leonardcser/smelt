@@ -54,7 +54,7 @@ impl Default for TruncateOptions {
     }
 }
 
-fn lua_string_lossy(s: mlua::String) -> String {
+fn lua_string_lossy(s: mlua::LuaString) -> String {
     let bytes = s.as_bytes();
     lossy_utf8(bytes.as_ref())
 }
@@ -179,7 +179,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "sanitize_utf8",
         "Return `s` as valid UTF-8, replacing malformed byte sequences with the Unicode replacement character. Useful when a Lua string came from raw bytes; prefer `smelt.text.truncate` when shortening text.",
         &["s"],
-        |_, s: mlua::String| {
+        |_, s: mlua::LuaString| {
             let bytes = s.as_bytes();
             Ok(lossy_utf8(bytes.as_ref()))
         },
@@ -194,7 +194,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "truncate",
         "Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = \"head\"|\"tail\", prefix?, suffix? }`; use `{ keep = \"tail\" }` for recent-message snippets. Lua string slicing is byte-based and can split multi-byte characters; this function snaps to UTF-8 boundaries and also accepts already-invalid Lua byte strings.",
         &["s", "max_bytes", "opts"],
-        |_, (s, max_bytes, opts): (mlua::String, usize, Option<mlua::Value>)| -> LuaResult<String> {
+        |_, (s, max_bytes, opts): (mlua::LuaString, usize, Option<mlua::Value>)| -> LuaResult<String> {
             let bytes = s.as_bytes();
             let opts = parse_truncate_options(opts)?;
             Ok(truncate_bytes(bytes.as_ref(), max_bytes, &opts))

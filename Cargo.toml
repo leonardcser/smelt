@@ -37,10 +37,10 @@ unicode-width = "0.2"
 
 # Cryptography / encoding
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Lua
-mlua = { version = "0.11", features = ["lua54", "vendored"] }
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
 
 # Globbing
 glob = "0.3"

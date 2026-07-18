@@ -242,14 +242,18 @@ pub(crate) fn checked_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::Integrity(format!("{field} overflows i64")))
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
     }
-    out
+    output
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
 }
 
 fn encode_object(bytes: &[u8], compression: ObjectCompression) -> Result<(ObjectCodec, Vec<u8>)> {

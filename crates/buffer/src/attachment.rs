@@ -1,5 +1,14 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write;
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
 
 pub type AttachmentId = u64;
 
@@ -33,7 +42,7 @@ impl Attachment {
                 hasher.update(data_url.as_bytes());
             }
         }
-        format!("{:x}", hasher.finalize())
+        hex_lower(&hasher.finalize())
     }
 }
 

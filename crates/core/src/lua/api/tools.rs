@@ -333,7 +333,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
                 let old_description: Option<String> = meta.get("description").ok();
                 let old_parameters_json: Option<String> = meta
-                    .get::<mlua::String>("parameters_json")
+                    .get::<mlua::LuaString>("parameters_json")
                     .ok()
                     .map(|s| s.to_string_lossy().to_string());
 

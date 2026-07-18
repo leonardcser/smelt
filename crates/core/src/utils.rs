@@ -22,6 +22,16 @@ pub fn hash_serializable<T: serde::Serialize>(value: &T) -> u64 {
     std::hash::Hasher::finish(&writer.0)
 }
 
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
 pub fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")

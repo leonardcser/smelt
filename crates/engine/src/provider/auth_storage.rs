@@ -2,6 +2,7 @@
 //! Load priority: env var → OS keyring → on-disk JSON (0600). Save writes to both keyring and disk.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone)]
 struct KeyringTarget {
@@ -28,6 +29,56 @@ pub(super) fn write_secure(path: &Path, json: &str) -> Result<(), String> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+fn native_credential_store() -> Result<&'static Arc<keyring_core::CredentialStore>, String> {
+    static STORE: OnceLock<Result<Arc<keyring_core::CredentialStore>, String>> = OnceLock::new();
+
+    STORE
+        .get_or_init(initialize_native_credential_store)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn initialize_native_credential_store() -> Result<Arc<keyring_core::CredentialStore>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let store: Arc<keyring_core::CredentialStore> =
+            apple_native_keyring_store::keychain::Store::new().map_err(|err| err.to_string())?;
+        Ok(store)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let store: Arc<keyring_core::CredentialStore> =
+            windows_native_keyring_store::Store::new().map_err(|err| err.to_string())?;
+        Ok(store)
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    {
+        let store: Arc<keyring_core::CredentialStore> =
+            zbus_secret_service_keyring_store::Store::new().map_err(|err| err.to_string())?;
+        Ok(store)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        )
+    )))]
+    {
+        Err("no native credential store is available on this platform".to_string())
+    }
+}
+
+fn keyring_entry(target: &KeyringTarget) -> Result<keyring_core::Entry, String> {
+    native_credential_store()?
+        .build(target.service, target.user, None)
+        .map_err(|err| err.to_string())
 }
 
 impl CredStore {
@@ -89,14 +140,13 @@ impl CredStore {
         let Some(keyring) = &self.keyring else {
             return Ok(());
         };
-        let entry =
-            keyring::Entry::new(keyring.service, keyring.user).map_err(|e| e.to_string())?;
+        let entry = keyring_entry(keyring)?;
         entry.set_password(json).map_err(|e| e.to_string())
     }
 
     fn keyring_load(&self) -> Option<String> {
         let keyring = self.keyring.as_ref()?;
-        let entry = keyring::Entry::new(keyring.service, keyring.user).ok()?;
+        let entry = keyring_entry(keyring).ok()?;
         entry.get_password().ok()
     }
 
@@ -104,8 +154,7 @@ impl CredStore {
         let Some(keyring) = &self.keyring else {
             return Ok(());
         };
-        let entry =
-            keyring::Entry::new(keyring.service, keyring.user).map_err(|e| e.to_string())?;
+        let entry = keyring_entry(keyring)?;
         entry.delete_credential().map_err(|e| e.to_string())
     }
 }

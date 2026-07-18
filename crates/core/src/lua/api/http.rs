@@ -45,7 +45,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                   (task_id, url, body, opts): (
                 u64,
                 String,
-                Option<mlua::String>,
+                Option<mlua::LuaString>,
                 Option<mlua::Table>,
             )|
                   -> LuaResult<()> {

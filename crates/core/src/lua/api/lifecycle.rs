@@ -47,7 +47,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "on",
             "Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `\"ready\"` (every Lua-context bring-up - cold start and after each `/reload`; `ctx = { kind = \"launch\" | \"reload\" }`) and `\"shutdown\"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns a `Reg` whose `:remove()` unregisters the hook before it fires; calling `:remove()` after the hook has already fired is a no-op returning `false`.",
             &["event", "fn"],
-            move |lua, (event, func): (mlua::String, mlua::Function)| -> LuaResult<LuaReg> {
+            move |lua, (event, func): (mlua::LuaString, mlua::Function)| -> LuaResult<LuaReg> {
                 let event = event.to_string_lossy().to_string();
                 let id = s.hooks.lifecycle.register(lua, func, event)?;
                 Ok(s.hooks.lifecycle.reg_for(id))

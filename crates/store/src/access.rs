@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 use crate::blob_staging::recover_blob_staging;
@@ -444,7 +443,7 @@ fn read_legacy_attachment(session_dir: &Path, reference: &str) -> Result<LegacyA
     let mut hasher = Sha256::new();
     hasher.update(b"image:");
     hasher.update(&bytes);
-    let actual_hash = format!("{:x}", hasher.finalize());
+    let actual_hash = crate::object::hex_lower(&hasher.finalize());
     if actual_hash != expected_hash {
         return Err(StoreError::Integrity(format!(
             "legacy attachment hash mismatch for {filename:?}"
@@ -827,15 +826,16 @@ impl SessionLock {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
-        if let Err(err) = file.try_lock_exclusive() {
-            if err.kind() == std::io::ErrorKind::WouldBlock {
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
                 let owner = SessionReader::open_existing(session_dir)
                     .ok()
                     .and_then(|reader| reader.writer_owner().ok().flatten())
                     .map(|owner| owner.summary());
                 return Err(StoreError::OwnershipConflict { owner });
             }
-            return Err(StoreError::Io(err));
+            Err(fs::TryLockError::Error(err)) => return Err(StoreError::Io(err)),
         }
         Ok(Self { _file: file })
     }
@@ -1212,7 +1212,7 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"image:");
         hasher.update(data_url.as_bytes());
-        let filename = format!("{:x}.png", hasher.finalize());
+        let filename = format!("{}.png", crate::object::hex_lower(&hasher.finalize()));
         let reference = format!("blob:{filename}");
         let mut command = empty_commit("session", 1, 0);
         command.state.history_len = 1;

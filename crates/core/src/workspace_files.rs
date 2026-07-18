@@ -195,7 +195,6 @@ struct FileEntry {
     path: String,
     lower_path: String,
     lower_file_name_start: usize,
-    padded_path: String,
     kind: ItemKind,
 }
 
@@ -1182,10 +1181,12 @@ fn rank_entries_window(
             sort: false,
             ..Default::default()
         };
+        let mut matcher = neo_frizbee::Matcher::new(query, &config);
         let query_lower = query.to_lowercase();
         let _perf = smelt_perf::perf::begin("workspace_files:fuzzy_match");
         if include_dirs {
-            neo_frizbee::match_list(query, entries, &config)
+            matcher
+                .match_list(entries)
                 .into_iter()
                 .map(|m| {
                     let index = m.index as usize;
@@ -1204,9 +1205,10 @@ fn rank_entries_window(
                 .collect::<Vec<_>>();
             let haystacks = candidates
                 .iter()
-                .map(|index| entries[*index].padded_path.as_str())
+                .map(|index| entries[*index].path.as_str())
                 .collect::<Vec<_>>();
-            neo_frizbee::match_list(query, &haystacks, &config)
+            matcher
+                .match_list(&haystacks)
                 .into_iter()
                 .map(|m| {
                     let index = candidates[m.index as usize];
@@ -1363,12 +1365,10 @@ impl FileEntry {
     fn new(path: String, kind: ItemKind) -> Self {
         let lower_path = path.to_lowercase();
         let lower_file_name_start = lower_path.rfind('/').map(|idx| idx + 1).unwrap_or(0);
-        let padded_path = crate::fuzzy::pad_for_simd(&path);
         Self {
             path,
             lower_path,
             lower_file_name_start,
-            padded_path,
             kind,
         }
     }
@@ -1378,9 +1378,9 @@ impl FileEntry {
     }
 }
 
-impl neo_frizbee::Matchable for FileEntry {
-    fn match_str(&self) -> Option<&str> {
-        Some(&self.padded_path)
+impl AsRef<str> for FileEntry {
+    fn as_ref(&self) -> &str {
+        &self.path
     }
 }
 

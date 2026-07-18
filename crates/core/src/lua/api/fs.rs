@@ -53,7 +53,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "write",
         "Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on success or `(false, err_string)` on failure.",
         &["p", "contents"],
-        |_, (p, contents): (String, mlua::String)| match crate::fs::write(&p, contents.as_bytes()) {
+        |_, (p, contents): (String, mlua::LuaString)| match crate::fs::write(&p, contents.as_bytes()) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         },
@@ -406,7 +406,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         fs.private_fn(
             "__start_write",
             &["task_id", "path", "contents"],
-            move |_, (task_id, path, contents): (u64, String, mlua::String)| -> LuaResult<()> {
+            move |_, (task_id, path, contents): (u64, String, mlua::LuaString)| -> LuaResult<()> {
                 let bytes = contents.as_bytes().to_vec();
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::write(&path, &bytes) {

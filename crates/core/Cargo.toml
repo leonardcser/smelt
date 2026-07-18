@@ -16,7 +16,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process"] }
 sha2 = { workspace = true }
 libc = { workspace = true }
 url = { workspace = true }
@@ -32,7 +32,7 @@ mlua = { workspace = true }
 scraper = "0.27"
 ego-tree = "0.11"
 include_dir = "0.7"
-neo_frizbee = "0.10"
+neo_frizbee = { version = "0.11", features = ["safe_read"] }
 notify = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 shellexpand = "3.1.2"

@@ -37,7 +37,7 @@ impl_lua_type!("nil", ());
 impl_lua_type!("boolean", bool);
 impl_lua_type!("integer", i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize,);
 impl_lua_type!("number", f32, f64);
-impl_lua_type!("string", String, &'static str, mlua::String);
+impl_lua_type!("string", String, &'static str, mlua::LuaString);
 impl_lua_type!("table", mlua::Table);
 impl_lua_type!("function", mlua::Function);
 impl_lua_type!("thread", mlua::Thread);
@@ -133,7 +133,7 @@ impl_lua_type_tuple_single!(
     f64,
     String,
     &'static str,
-    mlua::String,
+    mlua::LuaString,
     mlua::Table,
     mlua::Function,
     mlua::Thread,

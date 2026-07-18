@@ -69,7 +69,7 @@ fn parse_request(provider: String, opts: mlua::Table) -> LuaResult<AuthRequest> 
         .unwrap_or_else(|| "GET".to_string());
     let path = opts.get::<String>("path")?;
     let body = opts
-        .get::<Option<mlua::String>>("body")?
+        .get::<Option<mlua::LuaString>>("body")?
         .map(|s| s.as_bytes().to_vec());
     Ok(AuthRequest {
         provider,

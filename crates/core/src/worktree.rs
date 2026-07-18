@@ -437,7 +437,7 @@ fn repo_bucket(repo_root: &Path) -> String {
         .unwrap_or_else(|| "repo".to_string());
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = crate::utils::hex_lower(&hasher.finalize());
     format!("{name}-{}", &hash[..12])
 }
 

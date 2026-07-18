@@ -337,7 +337,7 @@ impl McpServer {
             .map_err(|_| "MCP tool call timed out".to_string())?
             .map_err(|e| format!("MCP tool call failed: {e}"))?;
 
-        let output = format_call_tool_content(result.content);
+        let output = format_call_tool_output(result.content, result.structured_content);
 
         if result.is_error.unwrap_or(false) {
             Err(output)
@@ -575,24 +575,30 @@ impl McpConnections {
     }
 }
 
-/// Flatten an MCP `call_tool` content list into a single text payload.
-/// Text and text-resource parts are kept verbatim; image and blob parts
-/// become placeholder labels; unknown variants are dropped. Empty parts
-/// are skipped so the joined output never contains blank lines.
-pub(crate) fn format_call_tool_content(content: Vec<rmcp::model::Content>) -> String {
-    let mut parts: Vec<String> = Vec::new();
+/// Flatten MCP tool content into a single text payload. Text and embedded
+/// text resources are kept verbatim; binary and linked content become labels.
+/// Empty parts are skipped so the joined output never contains blank lines.
+pub(crate) fn format_call_tool_content(content: Vec<rmcp::model::ContentBlock>) -> String {
+    let mut parts = Vec::new();
     for item in content {
-        let part = match item.raw {
-            rmcp::model::RawContent::Text(text) => text.text,
-            rmcp::model::RawContent::Image(img) => {
-                format!("[image: {}]", img.mime_type)
+        let part = match item {
+            rmcp::model::ContentBlock::Text(text) => text.text,
+            rmcp::model::ContentBlock::Image(image) => {
+                format!("[image: {}]", image.mime_type)
             }
-            rmcp::model::RawContent::Resource(res) => match res.resource {
+            rmcp::model::ContentBlock::Audio(audio) => {
+                format!("[audio: {}]", audio.mime_type)
+            }
+            rmcp::model::ContentBlock::Resource(resource) => match resource.resource {
                 rmcp::model::ResourceContents::TextResourceContents { text, .. } => text,
                 rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
                     format!("[blob: {} bytes]", blob.len())
                 }
+                _ => continue,
             },
+            rmcp::model::ContentBlock::ResourceLink(resource) => {
+                format!("[resource: {}]", resource.uri)
+            }
             _ => continue,
         };
         if !part.is_empty() {
@@ -600,6 +606,20 @@ pub(crate) fn format_call_tool_content(content: Vec<rmcp::model::Content>) -> St
         }
     }
     parts.join("\n")
+}
+
+fn format_call_tool_output(
+    content: Vec<rmcp::model::ContentBlock>,
+    structured_content: Option<serde_json::Value>,
+) -> String {
+    let output = format_call_tool_content(content);
+    if output.is_empty() {
+        structured_content
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    } else {
+        output
+    }
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -617,7 +637,7 @@ fn sanitize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::{Content, ResourceContents};
+    use rmcp::model::{ContentBlock, Resource, ResourceContents};
     use serde_json::json;
 
     // ── sanitize_name ────────────────────────────────────────────────
@@ -745,19 +765,52 @@ mod tests {
 
     #[test]
     fn format_text_content_passes_through_verbatim() {
-        let items = vec![Content::text("hello world")];
+        let items = vec![ContentBlock::text("hello world")];
         assert_eq!(format_call_tool_content(items), "hello world");
     }
 
     #[test]
     fn format_image_content_emits_mime_placeholder() {
-        let items = vec![Content::image("base64data", "image/png")];
+        let items = vec![ContentBlock::image("base64data", "image/png")];
         assert_eq!(format_call_tool_content(items), "[image: image/png]");
     }
 
     #[test]
+    fn format_audio_content_emits_mime_placeholder() {
+        let items = vec![ContentBlock::audio("base64data", "audio/wav")];
+        assert_eq!(format_call_tool_content(items), "[audio: audio/wav]");
+    }
+
+    #[test]
+    fn format_resource_link_emits_uri_placeholder() {
+        let items = vec![ContentBlock::resource_link(Resource::new(
+            "file:///report.txt",
+            "report.txt",
+        ))];
+        assert_eq!(
+            format_call_tool_content(items),
+            "[resource: file:///report.txt]"
+        );
+    }
+
+    #[test]
+    fn structured_content_is_used_when_text_content_is_empty() {
+        let output = format_call_tool_output(vec![], Some(json!({"answer": 42})));
+        assert_eq!(output, r#"{"answer":42}"#);
+    }
+
+    #[test]
+    fn text_content_takes_precedence_over_structured_content() {
+        let output = format_call_tool_output(
+            vec![ContentBlock::text("human-readable")],
+            Some(json!({"answer": 42})),
+        );
+        assert_eq!(output, "human-readable");
+    }
+
+    #[test]
     fn format_text_resource_keeps_inner_text() {
-        let items = vec![Content::resource(ResourceContents::text(
+        let items = vec![ContentBlock::resource(ResourceContents::text(
             "resource body",
             "file:///x",
         ))];
@@ -766,7 +819,7 @@ mod tests {
 
     #[test]
     fn format_blob_resource_emits_byte_count_placeholder() {
-        let items = vec![Content::resource(ResourceContents::blob(
+        let items = vec![ContentBlock::resource(ResourceContents::blob(
             "abcdefghij",
             "file:///x",
         ))];
@@ -776,9 +829,9 @@ mod tests {
     #[test]
     fn format_joins_parts_with_newline() {
         let items = vec![
-            Content::text("first"),
-            Content::text("second"),
-            Content::image("data", "image/jpeg"),
+            ContentBlock::text("first"),
+            ContentBlock::text("second"),
+            ContentBlock::image("data", "image/jpeg"),
         ];
         assert_eq!(
             format_call_tool_content(items),
@@ -788,15 +841,19 @@ mod tests {
 
     #[test]
     fn format_skips_empty_text_parts() {
-        let items = vec![Content::text(""), Content::text("only"), Content::text("")];
+        let items = vec![
+            ContentBlock::text(""),
+            ContentBlock::text("only"),
+            ContentBlock::text(""),
+        ];
         assert_eq!(format_call_tool_content(items), "only");
     }
 
     #[test]
     fn format_skips_empty_resource_text_parts() {
         let items = vec![
-            Content::resource(ResourceContents::text("", "file:///empty")),
-            Content::text("kept"),
+            ContentBlock::resource(ResourceContents::text("", "file:///empty")),
+            ContentBlock::text("kept"),
         ];
         assert_eq!(format_call_tool_content(items), "kept");
     }

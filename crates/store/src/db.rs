@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use rusqlite::{
     Connection, DropBehavior, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
-use sha2::{Digest, Sha256};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -1451,7 +1450,7 @@ fn commit_session_in_transaction(
 
 pub(crate) fn session_commit_fingerprint(command: &SessionCommit) -> Result<String> {
     let bytes = serde_json::to_vec(command)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(crate::object::sha256_hex(&bytes))
 }
 
 fn persisted_session_commit(conn: &Connection) -> Result<Option<PersistedSessionCommit>> {

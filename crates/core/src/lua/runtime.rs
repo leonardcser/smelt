@@ -1931,7 +1931,7 @@ impl LuaRuntime {
                 }
                 let description: String = meta_table.get("description").unwrap_or_default();
                 let parameters: serde_json::Value = meta_table
-                    .get::<mlua::String>("parameters_json")
+                    .get::<mlua::LuaString>("parameters_json")
                     .ok()
                     .and_then(|s| serde_json::from_str(&s.to_string_lossy()).ok())
                     .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));

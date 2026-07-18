@@ -383,7 +383,7 @@ pub(crate) fn step_task_owned(
 
     match result {
         Ok(v) => {
-            if task.thread.status() == mlua::ThreadStatus::Finished {
+            if task.thread.is_finished() {
                 match &task.completion {
                     TaskCompletion::FireAndForget | TaskCompletion::Command { .. } => {}
                     TaskCompletion::ToolResult {
