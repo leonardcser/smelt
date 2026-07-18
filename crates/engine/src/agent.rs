@@ -2491,9 +2491,7 @@ impl<'a> Turn<'a> {
         // regardless of whether the request succeeds or fails.
         let mut deferred_appends: Vec<protocol::HistoryAppend> = Vec::new();
 
-        let partial_text = std::sync::Mutex::new(String::new());
-        let partial_reasoning = std::sync::Mutex::new(String::new());
-        let reasoning_stream = std::sync::Mutex::new(ReasoningStreamState::default());
+        let provider_stream = ProviderStreamState::default();
 
         // Deferred config updates apply after the future resolves.
         let result = {
@@ -2503,60 +2501,8 @@ impl<'a> Turn<'a> {
                     attempt,
                 });
             };
-            let on_delta = |delta: ProviderStreamEvent| match delta {
-                ProviderStreamEvent::TextDelta(text) => {
-                    partial_text.lock().unwrap().push_str(text);
-                    let _ = self.event_tx.send(EngineEvent::TextDelta {
-                        delta: text.to_string(),
-                    });
-                }
-                ProviderStreamEvent::Reasoning(event) => {
-                    reasoning_stream.lock().unwrap().apply(
-                        event,
-                        self.event_tx,
-                        &partial_reasoning,
-                    );
-                }
-                ProviderStreamEvent::ToolCall(tool_event) => match tool_event {
-                    ToolCallStreamEvent::Started {
-                        stream_id,
-                        call_id,
-                        tool_name,
-                    } => {
-                        let _ = self.event_tx.send(EngineEvent::ToolCallDraftStarted {
-                            stream_id: stream_id.to_string(),
-                            call_id: call_id.map(str::to_string),
-                            tool_name: tool_name.map(str::to_string),
-                        });
-                    }
-                    ToolCallStreamEvent::ArgsDelta {
-                        stream_id,
-                        call_id,
-                        tool_name,
-                        delta,
-                    } => {
-                        let _ = self.event_tx.send(EngineEvent::ToolCallDraftDelta {
-                            stream_id: stream_id.to_string(),
-                            call_id: call_id.map(str::to_string),
-                            tool_name: tool_name.map(str::to_string),
-                            delta: delta.to_string(),
-                        });
-                    }
-                    ToolCallStreamEvent::Finished {
-                        stream_id,
-                        call_id,
-                        tool_name,
-                        arguments,
-                    } => {
-                        let _ = self.event_tx.send(EngineEvent::ToolCallDraftFinished {
-                            stream_id: stream_id.to_string(),
-                            call_id: call_id.to_string(),
-                            tool_name: tool_name.to_string(),
-                            arguments: arguments.to_string(),
-                        });
-                    }
-                },
-            };
+            let on_delta =
+                |delta: ProviderStreamEvent<'_>| provider_stream.apply(delta, self.event_tx);
             // Resolve pricing once so the request-log sidecar can record an
             // estimated cost alongside usage on success.
             let pricing = smelt_provider::resolve_pricing(
@@ -2649,12 +2595,7 @@ impl<'a> Turn<'a> {
             }
         };
 
-        reasoning_stream
-            .into_inner()
-            .unwrap_or_default()
-            .finish_all(self.event_tx);
-        let pt = partial_text.into_inner().unwrap_or_default();
-        let pr = partial_reasoning.into_inner().unwrap_or_default();
+        let (pt, pr) = provider_stream.finish(self.event_tx);
 
         self.apply_deferred_turn_cmds(deferred_config_updates);
         for append in deferred_appends {
@@ -2705,11 +2646,88 @@ impl<'a> Turn<'a> {
 }
 
 #[derive(Default)]
+struct ProviderStreamState {
+    text: std::sync::Mutex<String>,
+    reasoning: std::sync::Mutex<String>,
+    reasoning_parts: std::sync::Mutex<ReasoningStreamState>,
+}
+
+impl ProviderStreamState {
+    fn apply(&self, event: ProviderStreamEvent<'_>, event_tx: &mpsc::UnboundedSender<EngineEvent>) {
+        match event {
+            ProviderStreamEvent::TextDelta(text) => {
+                self.text.lock().unwrap().push_str(text);
+                let _ = event_tx.send(EngineEvent::TextDelta {
+                    delta: text.to_string(),
+                });
+            }
+            ProviderStreamEvent::Reasoning(event) => {
+                self.reasoning_parts
+                    .lock()
+                    .unwrap()
+                    .apply(event, event_tx, &self.reasoning);
+            }
+            ProviderStreamEvent::ToolCall(tool_event) => match tool_event {
+                ToolCallStreamEvent::Started {
+                    stream_id,
+                    call_id,
+                    tool_name,
+                } => {
+                    let _ = event_tx.send(EngineEvent::ToolCallDraftStarted {
+                        stream_id: stream_id.to_string(),
+                        call_id: call_id.map(str::to_string),
+                        tool_name: tool_name.map(str::to_string),
+                    });
+                }
+                ToolCallStreamEvent::ArgsDelta {
+                    stream_id,
+                    call_id,
+                    tool_name,
+                    delta,
+                } => {
+                    let _ = event_tx.send(EngineEvent::ToolCallDraftDelta {
+                        stream_id: stream_id.to_string(),
+                        call_id: call_id.map(str::to_string),
+                        tool_name: tool_name.map(str::to_string),
+                        delta: delta.to_string(),
+                    });
+                }
+                ToolCallStreamEvent::Finished {
+                    stream_id,
+                    call_id,
+                    tool_name,
+                    arguments,
+                } => {
+                    let _ = event_tx.send(EngineEvent::ToolCallDraftFinished {
+                        stream_id: stream_id.to_string(),
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        arguments: arguments.to_string(),
+                    });
+                }
+            },
+        }
+    }
+
+    fn finish(self, event_tx: &mpsc::UnboundedSender<EngineEvent>) -> (String, String) {
+        self.reasoning_parts
+            .into_inner()
+            .unwrap_or_default()
+            .finish_all(event_tx);
+        (
+            self.text.into_inner().unwrap_or_default(),
+            self.reasoning.into_inner().unwrap_or_default(),
+        )
+    }
+}
+
+#[derive(Default)]
 struct ReasoningStreamState {
     parts: HashMap<String, ActiveReasoningPart>,
 }
 
 struct ActiveReasoningPart {
+    item_id: String,
     kind: ReasoningKind,
     source: String,
 }
@@ -2730,7 +2748,7 @@ impl ReasoningStreamState {
                 let id = reasoning_part_id(item_id, part_index, kind);
                 self.parts
                     .entry(id.clone())
-                    .or_insert_with(|| start_reasoning_part(tx, id, kind));
+                    .or_insert_with(|| start_reasoning_part(tx, id, item_id, kind));
             }
             ReasoningStreamEvent::Delta {
                 item_id,
@@ -2742,7 +2760,7 @@ impl ReasoningStreamState {
                 let part = self
                     .parts
                     .entry(id.clone())
-                    .or_insert_with(|| start_reasoning_part(tx, id.clone(), kind));
+                    .or_insert_with(|| start_reasoning_part(tx, id.clone(), item_id, kind));
                 part.source.push_str(delta);
                 partial_reasoning.lock().unwrap().push_str(delta);
                 let title = (kind == ReasoningKind::Summary)
@@ -2765,7 +2783,7 @@ impl ReasoningStreamState {
                 let mut part = self
                     .parts
                     .remove(&id)
-                    .unwrap_or_else(|| start_reasoning_part(tx, id.clone(), kind));
+                    .unwrap_or_else(|| start_reasoning_part(tx, id.clone(), item_id, kind));
                 if let Some(content) = content {
                     if part.source.is_empty() && !content.is_empty() {
                         partial_reasoning.lock().unwrap().push_str(content);
@@ -2784,6 +2802,23 @@ impl ReasoningStreamState {
                 }
                 send_reasoning_part_finished(tx, id, part);
             }
+            ReasoningStreamEvent::ItemFinished { item_id } => {
+                self.finish_item(item_id, tx);
+            }
+        }
+    }
+
+    fn finish_item(&mut self, item_id: &str, tx: &mpsc::UnboundedSender<EngineEvent>) {
+        let mut ids: Vec<_> = self
+            .parts
+            .iter()
+            .filter_map(|(id, part)| (part.item_id == item_id).then_some(id.clone()))
+            .collect();
+        ids.sort();
+        for id in ids {
+            if let Some(part) = self.parts.remove(&id) {
+                send_reasoning_part_finished(tx, id, part);
+            }
         }
     }
 
@@ -2799,10 +2834,12 @@ impl ReasoningStreamState {
 fn start_reasoning_part(
     tx: &mpsc::UnboundedSender<EngineEvent>,
     id: String,
+    item_id: &str,
     kind: ReasoningKind,
 ) -> ActiveReasoningPart {
     let _ = tx.send(EngineEvent::ReasoningPartStarted { id, kind });
     ActiveReasoningPart {
+        item_id: item_id.to_string(),
         kind,
         source: String::new(),
     }
@@ -2924,6 +2961,151 @@ mod tests {
             Ok(EngineEvent::ReasoningPartFinished { content, .. }) if content == "complete thought"
         ));
         assert_eq!(partial_reasoning.into_inner().unwrap(), "complete thought");
+    }
+
+    #[test]
+    fn codex_reasoning_item_finishes_before_answer_engine_event() {
+        let stream_events = [
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.added",
+                "summary_index": 0,
+            }),
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 0,
+                "delta": "**Checking accounting**",
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": "**Checking accounting**",
+                    }],
+                    "encrypted_content": "enc",
+                },
+            }),
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "Final answer",
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"usage": {}},
+            }),
+        ];
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let provider_stream = ProviderStreamState::default();
+
+        smelt_provider::parse_openai_stream_events(&stream_events, &mut |event| {
+            provider_stream.apply(event, &tx);
+        })
+        .expect("valid Codex response stream");
+        let _ = provider_stream.finish(&tx);
+
+        let mut emitted = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            emitted.push(event);
+        }
+        let finished_index = emitted
+            .iter()
+            .position(|event| matches!(event, EngineEvent::ReasoningPartFinished { .. }))
+            .expect("reasoning completion event");
+        let text_index = emitted
+            .iter()
+            .position(|event| matches!(event, EngineEvent::TextDelta { delta } if delta == "Final answer"))
+            .expect("answer text event");
+        assert!(finished_index < text_index, "events: {emitted:#?}");
+        assert_eq!(
+            emitted
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::ReasoningPartFinished { .. }))
+                .count(),
+            1,
+            "events: {emitted:#?}"
+        );
+    }
+
+    #[test]
+    fn reasoning_item_finished_closes_its_open_parts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let partial_reasoning = std::sync::Mutex::new(String::new());
+        let mut state = ReasoningStreamState::default();
+
+        state.apply(
+            ReasoningStreamEvent::Delta {
+                item_id: "rs_1",
+                part_index: 0,
+                kind: ReasoningKind::Summary,
+                delta: "**Checking accounting**",
+            },
+            &tx,
+            &partial_reasoning,
+        );
+        state.apply(
+            ReasoningStreamEvent::ItemFinished { item_id: "rs_1" },
+            &tx,
+            &partial_reasoning,
+        );
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartStarted { .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartDelta { .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartFinished { content, .. })
+                if content == "**Checking accounting**"
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reasoning_item_finished_does_not_repeat_a_finished_part() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let partial_reasoning = std::sync::Mutex::new(String::new());
+        let mut state = ReasoningStreamState::default();
+
+        state.apply(
+            ReasoningStreamEvent::PartFinished {
+                item_id: "rs_1",
+                part_index: 0,
+                kind: ReasoningKind::Summary,
+                content: Some("complete thought"),
+            },
+            &tx,
+            &partial_reasoning,
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartStarted { .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartDelta { .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ReasoningPartFinished { .. })
+        ));
+
+        state.apply(
+            ReasoningStreamEvent::ItemFinished { item_id: "rs_1" },
+            &tx,
+            &partial_reasoning,
+        );
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

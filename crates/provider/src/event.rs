@@ -26,6 +26,9 @@ pub enum ReasoningStreamEvent<'a> {
         kind: ReasoningKind,
         content: Option<&'a str>,
     },
+    ItemFinished {
+        item_id: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -535,6 +535,16 @@ fn apply_sse_event(
             }
         }
         "response.output_item.done" if ev["item"]["type"].as_str() == Some("reasoning") => {
+            // The output-item boundary is authoritative. Summary-text done
+            // events are optional, so close any parts still open before a
+            // subsequent answer or tool item can be rendered.
+            let item_id = ev["item"]["id"]
+                .as_str()
+                .or(state.active_reasoning_item_id.as_deref())
+                .unwrap_or("reasoning");
+            on_delta(ProviderStreamEvent::Reasoning(
+                ReasoningStreamEvent::ItemFinished { item_id },
+            ));
             // Capture the full reasoning item - `id` + `encrypted_content`
             // + `summary` - so it can be echoed back on the next request.
             state.reasoning_items.push(ev["item"].clone());
@@ -1787,6 +1797,82 @@ mod tests {
                     ReasoningKind::Summary,
                     "**Checking accounting**\n\n<!-- -->".into(),
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_reasoning_item_done_precedes_answer_text() {
+        let mut state = StreamState::default();
+        let mut events = Vec::new();
+
+        for event in [
+            json!({
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.added",
+                "summary_index": 0,
+            }),
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 0,
+                "delta": "**Checking accounting**",
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": "**Checking accounting**",
+                    }],
+                    "encrypted_content": "enc",
+                },
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "Final answer",
+            }),
+        ] {
+            apply_sse_event(
+                &mut state,
+                &event,
+                &mut |event| match event {
+                    ProviderStreamEvent::Reasoning(ReasoningStreamEvent::PartStarted {
+                        ..
+                    }) => events.push("reasoning_started".to_string()),
+                    ProviderStreamEvent::Reasoning(ReasoningStreamEvent::Delta { .. }) => {
+                        events.push("reasoning_delta".to_string())
+                    }
+                    ProviderStreamEvent::Reasoning(ReasoningStreamEvent::PartFinished {
+                        content,
+                        ..
+                    }) => events.push(format!(
+                        "reasoning_finished:{}",
+                        content.unwrap_or_default()
+                    )),
+                    ProviderStreamEvent::Reasoning(ReasoningStreamEvent::ItemFinished {
+                        item_id,
+                    }) => events.push(format!("reasoning_item_finished:{item_id}")),
+                    ProviderStreamEvent::TextDelta(text) => {
+                        events.push(format!("text:{text}"));
+                    }
+                    ProviderStreamEvent::ToolCall(_) => {}
+                },
+                1_000,
+            );
+        }
+
+        assert_eq!(
+            events,
+            [
+                "reasoning_started",
+                "reasoning_delta",
+                "reasoning_item_finished:rs_1",
+                "text:Final answer",
             ]
         );
     }

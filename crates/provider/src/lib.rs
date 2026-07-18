@@ -65,6 +65,8 @@ pub use kind::api_key_auth;
 pub use kind::{
     is_kimi_code_api_base, ApiKeyAuth, AuthKind, ProviderDescriptor, ProviderKind, WireApi,
 };
+#[cfg(feature = "test-support")]
+pub use openai::parse_stream_events as parse_openai_stream_events;
 pub use pricing::{resolve as resolve_pricing, ModelPricing, PricingSource, ResolvedPricing};
 pub(crate) use protocol::ModelConfig;
 #[cfg(not(feature = "test-support"))]
