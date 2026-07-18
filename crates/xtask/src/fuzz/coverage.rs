@@ -1,9 +1,11 @@
 //! `cargo xtask fuzz coverage-snapshot [target...]` - per-target source-code
-//! coverage snapshot. Runs each target against its on-disk corpus and writes
-//! a timestamped summary under `fuzz/coverage-history/`. With no args it
-//! snapshots every target that has a corpus.
+//! coverage snapshot. Runs each target against its shared corpus and writes a
+//! timestamped text and JSON summary under the shared fuzz-data root. With no
+//! args it snapshots every target that has a corpus.
 
-use super::{all_target_names, count_files, die, dir_has_entries, iso_utc, repo_root, stamp};
+use super::{
+    all_target_names, count_files, die, die_with_status, iso_utc, repo_root, stamp, FuzzData,
+};
 use std::fs::File;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -12,37 +14,38 @@ use std::time::{Duration, Instant};
 pub fn run(args: Vec<String>) {
     let root = repo_root();
     let llvm_cov = find_llvm_cov().unwrap_or_else(|| {
-        die("llvm-cov not found in ~/.rustup/toolchains. Run: rustup component add llvm-tools-preview --toolchain nightly")
+        die("nightly llvm-cov not found. Run: rustup component add llvm-tools-preview --toolchain nightly")
     });
+    let host = nightly_host().unwrap_or_else(|| die("could not determine the nightly host triple"));
 
     let (targets, timeout) = parse_args(args);
+    let data = FuzzData::for_repo(&root);
 
-    let hist_dir = root.join("fuzz/coverage-history");
+    let hist_dir = data.coverage_history();
     std::fs::create_dir_all(&hist_dir).unwrap_or_else(|e| die(&format!("mkdir history dir: {e}")));
 
     let ts = stamp();
+    let date = iso_utc();
     let sha = git_short_sha(&root).unwrap_or_else(|| "unknown".to_string());
     let head_full = git_head(&root).unwrap_or_else(|| "unknown".to_string());
     let branch = git_branch(&root).unwrap_or_else(|| "unknown".to_string());
+    let mut records = Vec::new();
+    let mut failed = false;
 
     let summary_path = hist_dir.join(format!("{ts}-{sha}.txt"));
     let mut summary = std::fs::File::create(&summary_path)
         .unwrap_or_else(|e| die(&format!("create summary: {e}")));
     writeln!(summary, "# fuzz coverage snapshot").ok();
-    writeln!(summary, "date: {}", iso_utc()).ok();
+    writeln!(summary, "date: {date}").ok();
     writeln!(summary, "commit: {head_full}").ok();
     writeln!(summary, "branch: {branch}").ok();
     writeln!(summary).ok();
 
     for target in &targets {
-        let corpus = root.join(format!("fuzz/corpus/{target}"));
-        if !dir_has_entries(&corpus) {
-            let line = format!("{target}: no corpus, skipping");
-            println!("{line}");
-            writeln!(summary, "{line}").ok();
-            continue;
-        }
+        data.prepare_target(target);
+        let corpus = data.corpus(target);
         let nfiles = count_files(&corpus);
+        let digest = corpus_digest(&corpus);
         eprintln!(">>> {target}: {nfiles} corpus files");
 
         let log_path = hist_dir.join(format!("{ts}-{sha}-{target}.log"));
@@ -56,6 +59,8 @@ pub fn run(args: Vec<String>) {
                     target,
                     corpus.to_str().expect("corpus path utf-8"),
                 ])
+                .arg("--")
+                .arg(format!("-artifact_prefix={}", data.artifact_prefix(target)))
                 .current_dir(&root),
             timeout,
             &log_path,
@@ -68,7 +73,9 @@ pub fn run(args: Vec<String>) {
             );
             println!("{line}");
             writeln!(summary, "{line}").ok();
-            move_root_crashes(&root, target);
+            records.push(coverage_record(target, nfiles, &digest, "timeout", None));
+            failed = true;
+            move_root_crashes(&root, &data, target);
             continue;
         };
         if !status.success() {
@@ -78,19 +85,27 @@ pub fn run(args: Vec<String>) {
             );
             println!("{line}");
             writeln!(summary, "{line}").ok();
-            move_root_crashes(&root, target);
+            records.push(coverage_record(target, nfiles, &digest, "failed", None));
+            failed = true;
+            move_root_crashes(&root, &data, target);
             continue;
         }
-        move_root_crashes(&root, target);
+        move_root_crashes(&root, &data, target);
 
         let profdata = root.join(format!("fuzz/coverage/{target}/coverage.profdata"));
-        let binary = root.join(format!(
-            "target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/{target}"
-        ));
+        let binary = root.join(format!("target/{host}/coverage/{host}/release/{target}"));
         if !profdata.exists() || !binary.exists() {
             let line = format!("{target}: coverage build missing, skipping");
             println!("{line}");
             writeln!(summary, "{line}").ok();
+            records.push(coverage_record(
+                target,
+                nfiles,
+                &digest,
+                "missing_build",
+                None,
+            ));
+            failed = true;
             continue;
         }
 
@@ -106,6 +121,14 @@ pub fn run(args: Vec<String>) {
                 let line = format!("{target}: llvm-cov report failed, skipping");
                 println!("{line}");
                 writeln!(summary, "{line}").ok();
+                records.push(coverage_record(
+                    target,
+                    nfiles,
+                    &digest,
+                    "llvm_cov_failed",
+                    None,
+                ));
+                failed = true;
                 continue;
             }
         };
@@ -113,10 +136,117 @@ pub fn run(args: Vec<String>) {
         let line = format!("{target} ({nfiles}f): {totals}");
         println!("{line}");
         writeln!(summary, "{line}").ok();
+        match llvm_cov_totals(&llvm_cov, &binary, &profdata) {
+            Some(totals) => {
+                records.push(coverage_record(target, nfiles, &digest, "ok", Some(totals)))
+            }
+            None => {
+                let error = format!("{target}: llvm-cov JSON export failed");
+                println!("{error}");
+                writeln!(summary, "{error}").ok();
+                failed = true;
+                records.push(coverage_record(
+                    target,
+                    nfiles,
+                    &digest,
+                    "llvm_cov_export_failed",
+                    None,
+                ));
+            }
+        }
     }
 
+    let json_path = hist_dir.join(format!("{ts}-{sha}.json"));
+    let document = serde_json::json!({
+        "schema": 1,
+        "date": date,
+        "commit": head_full,
+        "branch": branch,
+        "data_root": data.root,
+        "targets": records,
+    });
+    let body = serde_json::to_vec_pretty(&document)
+        .unwrap_or_else(|e| die(&format!("serialize coverage summary: {e}")));
+    std::fs::write(&json_path, body)
+        .unwrap_or_else(|e| die(&format!("write {}: {e}", json_path.display())));
+
     eprintln!();
-    eprintln!("snapshot saved to {}", summary_path.display());
+    eprintln!("coverage summary: {}", summary_path.display());
+    eprintln!("coverage metadata: {}", json_path.display());
+    if failed {
+        die_with_status("one or more coverage targets failed", Some(1));
+    }
+}
+
+fn coverage_record(
+    target: &str,
+    corpus_files: usize,
+    corpus_digest: &str,
+    status: &str,
+    totals: Option<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target": target,
+        "status": status,
+        "corpus_files": corpus_files,
+        "corpus_digest": corpus_digest,
+        "totals": totals,
+    })
+}
+
+fn llvm_cov_totals(
+    llvm_cov: &std::path::Path,
+    binary: &std::path::Path,
+    profdata: &std::path::Path,
+) -> Option<serde_json::Value> {
+    let output = Command::new(llvm_cov)
+        .args(["export", "--summary-only"])
+        .arg(binary)
+        .arg(format!("-instr-profile={}", profdata.display()))
+        .arg("-ignore-filename-regex=/.cargo/|/rustc/|/.rustup/|fuzz/")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    value
+        .get("data")?
+        .as_array()?
+        .first()?
+        .get("totals")
+        .cloned()
+}
+
+fn corpus_digest(corpus: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(corpus) else {
+        return "empty".to_string();
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for path in files {
+        if let Some(name) = path.file_name() {
+            hash_bytes(&mut hash, name.to_string_lossy().as_bytes());
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => hash_bytes(&mut hash, &bytes),
+            Err(_) => return "unavailable".to_string(),
+        }
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
 }
 
 fn parse_args(args: Vec<String>) -> (Vec<String>, Duration) {
@@ -141,8 +271,18 @@ fn parse_args(args: Vec<String>) -> (Vec<String>, Duration) {
             _ => targets.push(arg),
         }
     }
+    let known = all_target_names();
     if targets.is_empty() {
-        targets = all_target_names();
+        targets = known;
+    } else {
+        for target in &targets {
+            if !known.contains(target) {
+                die(&format!(
+                    "unknown target `{target}`. Known: {}",
+                    known.join(", ")
+                ));
+            }
+        }
     }
     (targets, timeout)
 }
@@ -179,11 +319,11 @@ fn run_with_timeout(
     }
 }
 
-fn move_root_crashes(root: &std::path::Path, target: &str) {
+fn move_root_crashes(root: &std::path::Path, data: &FuzzData, target: &str) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    let dest = root.join(format!("fuzz/artifacts/{target}"));
+    let dest = data.artifacts(target);
     if let Err(e) = std::fs::create_dir_all(&dest) {
         eprintln!(
             ">>> {target}: failed to create artifact dir {}: {e}",
@@ -219,9 +359,28 @@ fn move_root_crashes(root: &std::path::Path, target: &str) {
 }
 
 fn find_llvm_cov() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let root = std::path::PathBuf::from(home).join(".rustup/toolchains");
-    walk_for("llvm-cov", &root)
+    let output = Command::new("rustc")
+        .args(["+nightly", "--print", "sysroot"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sysroot = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    walk_for("llvm-cov", &sysroot)
+}
+
+fn nightly_host() -> Option<String> {
+    let output = Command::new("rustc")
+        .args(["+nightly", "-vV"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
 }
 
 fn walk_for(name: &str, dir: &std::path::Path) -> Option<std::path::PathBuf> {

@@ -26,9 +26,20 @@
 use serde_json::Value;
 use smelt_fuzz::shrink::{ops_count, shrink, string_chars};
 use smelt_fuzz::{run_lua_scenario, run_scenario, LuaScenario, Scenario};
+use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::{env, fs, process};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PanicFingerprint {
+    location: Option<(String, u32, u32)>,
+    message: String,
+}
+
+thread_local! {
+    static LAST_PANIC: RefCell<Option<PanicFingerprint>> = const { RefCell::new(None) };
+}
 
 #[derive(Clone, Copy)]
 enum Target {
@@ -91,15 +102,28 @@ fn main() {
         process::exit(1);
     });
 
-    // Suppress panic output during shrinking - we expect ~hundreds of
-    // panics per run. Restore the original hook before the final
-    // verification so the user still sees the crash they care about.
+    // Capture panic identity without printing hundreds of expected panic trials.
+    // The source location and normalized assertion message keep shrinking on the
+    // original bug instead of accepting an unrelated panic from another path.
     let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(|_| {}));
+    panic::set_hook(Box::new(|info| {
+        let location = info.location().map(|location| {
+            (
+                location.file().to_string(),
+                location.line(),
+                location.column(),
+            )
+        });
+        let message = panic_message(info.payload());
+        LAST_PANIC.with(|slot| {
+            *slot.borrow_mut() = Some(PanicFingerprint {
+                location,
+                message: normalize_message(&message),
+            });
+        });
+    }));
 
-    let crashes = |v: &Value| crashes_for(target, v);
-
-    if !crashes(&value) {
+    let Some(expected) = panic_fingerprint(target, &value) else {
         panic::set_hook(original_hook);
         eprintln!(
             "error: scenario does not panic when replayed; nothing to shrink. \
@@ -107,15 +131,18 @@ fn main() {
             in_path.display()
         );
         process::exit(1);
-    }
+    };
+    let same_crash =
+        |candidate: &Value| panic_fingerprint(target, candidate) == Some(expected.clone());
 
     let before = ops_count(&value);
     let before_chars = string_chars(&value);
-    let shrunk = shrink(value, crashes);
+    let shrunk = shrink(value, same_crash);
     let after = ops_count(&shrunk);
     let after_chars = string_chars(&shrunk);
 
     panic::set_hook(original_hook);
+    eprintln!("panic fingerprint: {expected:?}");
 
     let json = serde_json::to_string_pretty(&shrunk).unwrap_or_else(|e| {
         eprintln!("error: serialize: {e}");
@@ -138,11 +165,12 @@ fn usage_and_exit(code: i32) -> ! {
     process::exit(code);
 }
 
-/// Decode + run. Returns `true` if the run panics. Uses `catch_unwind`
-/// so individual shrink trials don't abort the whole bin.
-fn crashes_for(target: Target, value: &Value) -> bool {
+/// Decode and run one shrink candidate, returning the panic identity when the
+/// candidate reproduces a crash. `catch_unwind` keeps trials in this process.
+fn panic_fingerprint(target: Target, value: &Value) -> Option<PanicFingerprint> {
+    LAST_PANIC.with(|slot| *slot.borrow_mut() = None);
     let value = value.clone();
-    panic::catch_unwind(AssertUnwindSafe(|| match target {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| match target {
         Target::SmeltLoop => {
             let s: Scenario = match serde_json::from_value(value) {
                 Ok(s) => s,
@@ -157,6 +185,44 @@ fn crashes_for(target: Target, value: &Value) -> bool {
             };
             run_lua_scenario(s);
         }
-    }))
-    .is_err()
+    }));
+    if result.is_ok() {
+        return None;
+    }
+    LAST_PANIC
+        .with(|slot| slot.borrow_mut().take())
+        .or_else(|| {
+            let payload = result.expect_err("panic result");
+            Some(PanicFingerprint {
+                location: None,
+                message: normalize_message(&panic_message(payload.as_ref())),
+            })
+        })
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        format!("panic payload type {:?}", payload.type_id())
+    }
+}
+
+fn normalize_message(message: &str) -> String {
+    let mut normalized = String::with_capacity(message.len().min(512));
+    let mut in_digits = false;
+    for ch in message.chars().take(512) {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                normalized.push('#');
+            }
+            in_digits = true;
+        } else {
+            in_digits = false;
+            normalized.push(ch);
+        }
+    }
+    normalized
 }

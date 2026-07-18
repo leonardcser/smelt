@@ -1,43 +1,46 @@
 //! `cargo xtask fuzz status` - compact status for local fuzzing state.
 
-use super::{all_target_names, count_files, repo_root};
+use super::{all_target_names, count_files, die, repo_root, FuzzData};
 use std::path::Path;
 use std::process::Command;
 
-pub fn run(_args: Vec<String>) {
+pub fn run(args: Vec<String>) {
+    if !args.is_empty() {
+        die("usage: cargo xtask fuzz status");
+    }
     let root = repo_root();
+    let data = FuzzData::for_repo(&root);
     println!("fuzz status");
-    println!("root: {}", root.display());
+    println!("repository: {}", root.display());
+    println!("data: {}", data.root.display());
     println!();
 
     print_processes();
     println!();
 
     println!(
-        "{:<28} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "target", "corpus", "size", "tracked", "seeds", "artifacts"
+        "{:<28} {:>8} {:>8} {:>12} {:>10}",
+        "target", "corpus", "size", "regressions", "artifacts"
     );
     for target in all_target_names() {
-        let corpus = root.join(format!("fuzz/corpus/{target}"));
+        let corpus = data.corpus(&target);
         let seeds = root.join(format!("fuzz/seeds/{target}/regression"));
-        let artifacts = root.join(format!("fuzz/artifacts/{target}"));
+        let artifacts = data.artifacts(&target);
         let corpus_files = count_files(&corpus);
         let seed_files = count_recursive_files(&seeds);
         let artifact_files = count_recursive_files(&artifacts);
-        let tracked = tracked_count(&root, &format!("fuzz/corpus/{target}"));
         println!(
-            "{:<28} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "{:<28} {:>8} {:>8} {:>12} {:>10}",
             target,
             corpus_files,
             dir_size(&corpus),
-            tracked,
             seed_files,
             artifact_files
         );
     }
 
     println!();
-    print_latest_coverage(&root);
+    print_latest_coverage(&data);
 }
 
 fn print_processes() {
@@ -99,22 +102,8 @@ fn dir_size(path: &Path) -> String {
     }
 }
 
-fn tracked_count(root: &Path, path: &str) -> usize {
-    let out = Command::new("git")
-        .args(["ls-files", path])
-        .current_dir(root)
-        .output();
-    match out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count(),
-        _ => 0,
-    }
-}
-
-fn print_latest_coverage(root: &Path) {
-    let dir = root.join("fuzz/coverage-history");
+fn print_latest_coverage(data: &FuzzData) {
+    let dir = data.coverage_history();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         println!("coverage: no snapshots");
         return;

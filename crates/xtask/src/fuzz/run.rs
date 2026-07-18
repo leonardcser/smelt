@@ -14,13 +14,14 @@
 //! `-max_total_time=<secs>` after the target (anything trailing the
 //! target name lands in the libFuzzer argv).
 
-use super::{all_target_names, die, repo_root};
+use super::{all_target_names, die, repo_root, FuzzData};
 use std::process::Command;
 
 pub fn run(args: Vec<String>) {
     let mut target: Option<String> = None;
     let mut fork: u32 = 1;
     let mut cmin = false;
+    let mut sanitizer = "address".to_string();
     let mut extra: Vec<String> = Vec::new();
 
     let mut it = args.into_iter();
@@ -33,9 +34,24 @@ pub fn run(args: Vec<String>) {
                     .unwrap_or_else(|_| die(&format!("bad --fork value `{v}`")));
             }
             "--cmin" => cmin = true,
+            "--sanitizer" => {
+                sanitizer = it
+                    .next()
+                    .unwrap_or_else(|| die("--sanitizer needs a value"));
+                if !matches!(
+                    sanitizer.as_str(),
+                    "address" | "leak" | "memory" | "thread" | "none"
+                ) {
+                    die(&format!("bad --sanitizer value `{sanitizer}`"));
+                }
+            }
             "-h" | "--help" => {
                 print_help();
                 return;
+            }
+            "--" => {
+                extra.extend(it);
+                break;
             }
             _ if target.is_none() => target = Some(arg),
             _ => extra.push(arg),
@@ -56,13 +72,27 @@ pub fn run(args: Vec<String>) {
     }
 
     let root = repo_root();
+    let data = FuzzData::for_repo(&root);
+    data.prepare_target(&target);
+    let corpus = data.corpus(&target);
+    let artifact_prefix = data.artifact_prefix(&target);
 
-    preflight_corpus(&root, &target);
+    preflight_corpus(&root, &target, &corpus, &artifact_prefix, &sanitizer);
 
     if cmin {
         println!(">>> cmin {target}");
         let status = Command::new("cargo")
-            .args(["+nightly", "fuzz", "cmin", "--sanitizer=none", &target])
+            .args([
+                "+nightly",
+                "fuzz",
+                "cmin",
+                "--sanitizer",
+                &sanitizer,
+                &target,
+            ])
+            .arg(&corpus)
+            .arg("--")
+            .arg(format!("-artifact_prefix={artifact_prefix}"))
             .current_dir(&root)
             .status()
             .unwrap_or_else(|e| die(&format!("spawn cmin: {e}")));
@@ -72,26 +102,22 @@ pub fn run(args: Vec<String>) {
     }
 
     let fork_flag = format!("-fork={fork}");
-    let mut cargo_args: Vec<String> = vec![
-        "+nightly".into(),
-        "fuzz".into(),
-        "run".into(),
-        "--sanitizer=none".into(),
-        target.clone(),
-        "--".into(),
-        fork_flag,
-        "-ignore_crashes=0".into(),
-        "-ignore_ooms=0".into(),
-        "-ignore_timeouts=0".into(),
-    ];
-    cargo_args.extend(extra);
-
-    println!(">>> fuzz {target} (fork={fork})");
-    // Exec semantics: cargo fuzz prints its own banner and the libFuzzer
-    // process inherits stdio. On crash, cargo-fuzz exits non-zero and
-    // leaves the artifact under `fuzz/artifacts/<target>/`.
+    println!(">>> fuzz {target} (fork={fork}, sanitizer={sanitizer})");
     let status = Command::new("cargo")
-        .args(&cargo_args)
+        .args([
+            "+nightly",
+            "fuzz",
+            "run",
+            "--sanitizer",
+            &sanitizer,
+            &target,
+        ])
+        .arg(&corpus)
+        .arg("--")
+        .arg(&fork_flag)
+        .args(["-ignore_crashes=0", "-ignore_ooms=0", "-ignore_timeouts=0"])
+        .arg(format!("-artifact_prefix={artifact_prefix}"))
+        .args(extra)
         .current_dir(&root)
         .status()
         .unwrap_or_else(|e| die(&format!("spawn cargo fuzz run: {e}")));
@@ -99,48 +125,47 @@ pub fn run(args: Vec<String>) {
     if !status.success() {
         eprintln!();
         eprintln!(
-            ">>> fuzz exited {status} - check fuzz/artifacts/{target}/ for the failure artifact"
+            ">>> fuzz exited {status} - inspect {} for the failure artifact",
+            data.artifacts(&target).display()
         );
-        eprintln!(">>> next: inspect fuzz/artifacts/{target}/ and replay the newest crash/oom/timeout artifact");
         std::process::exit(status.code().unwrap_or(1));
     }
 }
 
-fn preflight_corpus(root: &std::path::Path, target: &str) {
+fn preflight_corpus(
+    root: &std::path::Path,
+    target: &str,
+    corpus: &std::path::Path,
+    artifact_prefix: &str,
+    sanitizer: &str,
+) {
     println!("xtask fuzz: preflight corpus {target}");
     let status = Command::new("cargo")
-        .args([
-            "+nightly",
-            "fuzz",
-            "run",
-            "--sanitizer=none",
-            target,
-            "--",
-            "-runs=0",
-            "-ignore_crashes=0",
-        ])
+        .args(["+nightly", "fuzz", "run", "--sanitizer", sanitizer, target])
+        .arg(corpus)
+        .arg("--")
+        .args(["-runs=0", "-ignore_crashes=0"])
+        .arg(format!("-artifact_prefix={artifact_prefix}"))
         .current_dir(root)
         .status()
         .unwrap_or_else(|e| die(&format!("spawn corpus preflight: {e}")));
     if !status.success() {
         eprintln!();
-        eprintln!(
-            ">>> corpus preflight exited {status} — check fuzz/artifacts/{target}/ for the failure artifact"
-        );
-        eprintln!(">>> next: inspect fuzz/artifacts/{target}/ and replay the newest crash/oom/timeout artifact");
+        eprintln!(">>> corpus preflight exited {status}; inspect {artifact_prefix}");
         std::process::exit(status.code().unwrap_or(1));
     }
 }
 
 fn print_help() {
     let names = all_target_names();
-    eprintln!("usage: cargo xtask fuzz run <target> [--fork N] [--cmin] [-- libfuzzer-flags...]");
+    eprintln!("usage: cargo xtask fuzz run <target> [--fork N] [--cmin] [--sanitizer KIND] [libfuzzer-flags...]");
     eprintln!();
     eprintln!("targets: {}", names.join(", "));
     eprintln!();
     eprintln!("flags:");
-    eprintln!("  --fork N    parallel workers (default 1)");
-    eprintln!("  --cmin      run `cargo fuzz cmin <target>` first");
+    eprintln!("  --fork N              parallel workers (default 1)");
+    eprintln!("  --cmin                minimize the shared corpus before fuzzing");
+    eprintln!("  --sanitizer KIND      address, leak, memory, thread, or none (default address)");
     eprintln!();
     eprintln!("Stops on corpus preflight crash before forking, then on first fork-worker crash, OOM, or timeout. To bound time, append `-max_total_time=<secs>`.");
 }
