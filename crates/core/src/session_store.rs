@@ -174,6 +174,22 @@ pub fn store_error(
                 "transaction cleanup failed during {transaction_operation}: {message}"
             ),
         },
+        smelt_store::StoreError::OperationCleanup {
+            operation: failed_operation,
+            primary,
+            cleanup,
+        } => SessionStoreError::Sqlite {
+            operation,
+            path: path.display().to_string(),
+            message: format!(
+                "{failed_operation} failed: {primary}; cleanup also failed: {}",
+                cleanup
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        },
         smelt_store::StoreError::OwnershipConflict { owner } => {
             SessionStoreError::ReadOnlyOwnerConflict {
                 owner: owner.unwrap_or_else(|| "unknown owner".into()),

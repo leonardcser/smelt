@@ -513,7 +513,7 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
              JOIN request_object_refs response
                ON response.request_attempt_id = body.request_attempt_id
               AND response.object_hash = body.object_hash
-             WHERE body.role = 'body_top' AND response.role = 'response'",
+             WHERE body.role = 'body_json' AND response.role = 'response'",
             [],
             |row| row.get(0),
         )

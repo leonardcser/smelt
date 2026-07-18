@@ -6,6 +6,11 @@ use crate::compression::{accepts_compressed_size, ObjectCompression};
 use crate::error::{Result, StoreError};
 
 pub const MAX_OBJECT_RAW_SIZE: u64 = 64 * 1024 * 1024;
+pub const MAX_REQUEST_MANIFEST_DEPTH: usize = 32;
+pub const MAX_REQUEST_MANIFEST_COUNT: usize = 32;
+pub const MAX_REQUEST_BODY_ITEMS: usize = 100_000;
+pub const MAX_REQUEST_MANIFEST_DECODED_BYTES: u64 = MAX_OBJECT_RAW_SIZE;
+pub const MAX_REQUEST_RECONSTRUCTED_BYTES: u64 = MAX_OBJECT_RAW_SIZE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectCodec {
@@ -35,7 +40,6 @@ impl ObjectCodec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectMeta {
     pub hash: String,
-    pub kind: String,
     pub codec: ObjectCodec,
     pub raw_size: u64,
     pub stored_size: u64,
@@ -50,10 +54,6 @@ pub struct StoredObject {
 impl StoredObject {
     pub fn hash(&self) -> &str {
         &self.meta.hash
-    }
-
-    pub fn kind(&self) -> &str {
-        &self.meta.kind
     }
 
     pub fn codec(&self) -> ObjectCodec {
@@ -71,7 +71,6 @@ impl StoredObject {
 
 pub(crate) fn put_object(
     conn: &Connection,
-    kind: &str,
     bytes: &[u8],
     compression: ObjectCompression,
 ) -> Result<StoredObject> {
@@ -79,6 +78,13 @@ pub(crate) fn put_object(
     enforce_object_size(bytes.len() as u64)?;
     let hash = sha256_hex(bytes);
     if let Some(meta) = object_meta(conn, &hash)? {
+        if meta.raw_size != bytes.len() as u64 {
+            return Err(StoreError::Integrity(format!(
+                "object {hash} raw_size is {}, but incoming payload has {} bytes",
+                meta.raw_size,
+                bytes.len()
+            )));
+        }
         return Ok(StoredObject {
             meta,
             bytes: bytes.to_vec(),
@@ -89,16 +95,9 @@ pub(crate) fn put_object(
     let raw_size = checked_i64(bytes.len() as u64, "raw_size")?;
     let stored_size = checked_i64(stored_bytes.len() as u64, "stored_size")?;
     conn.execute(
-        "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (
-            &hash,
-            kind,
-            codec.as_str(),
-            raw_size,
-            stored_size,
-            &stored_bytes,
-        ),
+        "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (&hash, codec.as_str(), raw_size, stored_size, &stored_bytes),
     )?;
     perf::record_value("store:object:db_rows_inserted", 1);
     perf::record_value("store:object:raw_bytes_stored", bytes.len() as u64);
@@ -129,14 +128,12 @@ pub(crate) fn object_bytes_by_hash(conn: &Connection, hash: &str) -> Result<Opti
 
 fn object_meta_from_parts(
     hash: String,
-    kind: String,
     codec: String,
     raw_size: i64,
     stored_size: i64,
 ) -> Result<ObjectMeta> {
     Ok(ObjectMeta {
         hash,
-        kind,
         codec: ObjectCodec::from_str(&codec)?,
         raw_size: nonnegative_u64(raw_size, "raw_size")?,
         stored_size: nonnegative_u64(stored_size, "stored_size")?,
@@ -145,41 +142,38 @@ fn object_meta_from_parts(
 
 pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<ObjectMeta>> {
     conn.query_row(
-        "SELECT hash, kind, codec, raw_size, stored_size, length(bytes)
+        "SELECT hash, codec, raw_size, stored_size, length(bytes)
          FROM objects
          WHERE hash = ?1",
         [hash],
         |row| {
-            let codec: String = row.get(2)?;
-            let raw_size: i64 = row.get(3)?;
-            let stored_size: i64 = row.get(4)?;
+            let codec: String = row.get(1)?;
+            let raw_size: i64 = row.get(2)?;
+            let stored_size: i64 = row.get(3)?;
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
                 codec,
                 raw_size,
                 stored_size,
-                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(4)?,
             ))
         },
     )
     .optional()?
-    .map(
-        |(hash, kind, codec, raw_size, stored_size, actual_stored_size)| {
-            let meta = object_meta_from_parts(hash, kind, codec, raw_size, stored_size)?;
-            enforce_object_size(meta.raw_size)?;
-            enforce_object_size(meta.stored_size)?;
-            let actual_stored_size = nonnegative_u64(actual_stored_size, "length(bytes)")?;
-            enforce_object_size(actual_stored_size)?;
-            if actual_stored_size != meta.stored_size {
-                return Err(StoreError::Integrity(format!(
-                    "object {} stored_size is {}, but payload length is {actual_stored_size}",
-                    meta.hash, meta.stored_size
-                )));
-            }
-            Ok(meta)
-        },
-    )
+    .map(|(hash, codec, raw_size, stored_size, actual_stored_size)| {
+        let meta = object_meta_from_parts(hash, codec, raw_size, stored_size)?;
+        enforce_object_size(meta.raw_size)?;
+        enforce_object_size(meta.stored_size)?;
+        let actual_stored_size = nonnegative_u64(actual_stored_size, "length(bytes)")?;
+        enforce_object_size(actual_stored_size)?;
+        if actual_stored_size != meta.stored_size {
+            return Err(StoreError::Integrity(format!(
+                "object {} stored_size is {}, but payload length is {actual_stored_size}",
+                meta.hash, meta.stored_size
+            )));
+        }
+        Ok(meta)
+    })
     .transpose()
 }
 
@@ -225,12 +219,6 @@ pub(crate) fn delete_unreachable_objects(conn: &Connection) -> Result<usize> {
          )
            AND NOT EXISTS (
              SELECT 1 FROM request_object_refs WHERE object_hash = objects.hash
-         )
-           AND NOT EXISTS (
-             SELECT 1 FROM request_attempts
-             WHERE body_hash = objects.hash
-                OR response_hash = objects.hash
-                OR error_hash = objects.hash
          )",
         [],
     )?;
@@ -320,8 +308,8 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::schema::migrate(&mut conn, "test").unwrap();
         conn.execute(
-            "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
-             VALUES (?1, 'attachment_image', 'none', ?2, 1, x'00')",
+            "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
+             VALUES (?1, 'none', ?2, 1, x'00')",
             ("a".repeat(64), (MAX_OBJECT_RAW_SIZE + 1) as i64),
         )
         .unwrap();
@@ -339,8 +327,8 @@ mod tests {
         crate::schema::migrate(&mut conn, "test").unwrap();
         let hash = sha256_hex(b"payload");
         conn.execute(
-            "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
-             VALUES (?1, 'test', 'none', 99, 7, ?2)",
+            "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
+             VALUES (?1, 'none', 99, 7, ?2)",
             (&hash, b"payload".as_slice()),
         )
         .unwrap();

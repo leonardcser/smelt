@@ -13,6 +13,31 @@ pub(crate) const METADATA_OBJECT_MIN_BYTES: usize = 4 * 1024;
 pub(crate) const LARGE_REWIND_GC_MIN_ROWS: usize = 128;
 pub(crate) const OBJECT_REF_KEY: &str = "$smelt_object_ref";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HistoryObjectRole {
+    AttachmentImage,
+    Metadata,
+}
+
+impl HistoryObjectRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AttachmentImage => "attachment_image",
+            Self::Metadata => "metadata",
+        }
+    }
+
+    pub(crate) fn from_str(role: &str) -> Result<Self> {
+        match role {
+            "attachment_image" => Ok(Self::AttachmentImage),
+            "metadata" => Ok(Self::Metadata),
+            _ => Err(StoreError::Integrity(format!(
+                "unknown history object role {role:?}"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HistoryRowInfo {
     pub idx: u64,
@@ -649,7 +674,11 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
                 conn.execute(
                     "INSERT OR IGNORE INTO history_object_refs (history_idx, object_hash, role)
                      VALUES (?1, ?2, ?3)",
-                    params![checked_i64(history_idx, "history_idx")?, hash, role],
+                    params![
+                        checked_i64(history_idx, "history_idx")?,
+                        hash,
+                        role.as_str()
+                    ],
                 )?;
             }
         }
@@ -1345,7 +1374,7 @@ struct NormalizedHistoryItem {
     hash: String,
     kind: String,
     search_text: String,
-    refs: Vec<(String, &'static str)>,
+    refs: Vec<(String, HistoryObjectRole)>,
 }
 
 fn normalized_history_value(
@@ -1392,7 +1421,7 @@ fn insert_normalized_history_item(
         conn.execute(
             "INSERT OR IGNORE INTO history_object_refs (history_idx, object_hash, role)
              VALUES (?1, ?2, ?3)",
-            params![idx, hash, role],
+            params![idx, hash, role.as_str()],
         )?;
     }
     insert_transcript_block(
@@ -1410,7 +1439,7 @@ fn normalize_attachments(
     conn: Option<&Connection>,
     value: &mut Value,
     compression: ObjectCompression,
-    refs: &mut Vec<(String, &'static str)>,
+    refs: &mut Vec<(String, HistoryObjectRole)>,
 ) -> Result<()> {
     match value {
         Value::Object(map) => {
@@ -1424,13 +1453,13 @@ fn normalize_attachments(
                     if data_url.starts_with("data:image/") {
                         let bytes = data_url.as_bytes();
                         let hash = if let Some(conn) = conn {
-                            object::put_object(conn, "attachment_image", bytes, compression)?
+                            object::put_object(conn, bytes, compression)?
                                 .hash()
                                 .to_string()
                         } else {
                             sha256_hex(bytes)
                         };
-                        refs.push((hash.clone(), "attachment_image"));
+                        refs.push((hash.clone(), HistoryObjectRole::AttachmentImage));
                         *url = object_ref_json(&hash, bytes.len() as u64);
                         return Ok(());
                     }
@@ -1454,7 +1483,7 @@ fn normalize_metadata(
     conn: Option<&Connection>,
     value: &mut Value,
     compression: ObjectCompression,
-    refs: &mut Vec<(String, &'static str)>,
+    refs: &mut Vec<(String, HistoryObjectRole)>,
 ) -> Result<()> {
     match value {
         Value::Object(map) => {
@@ -1467,13 +1496,13 @@ fn normalize_metadata(
                     let bytes = serde_json::to_vec(child)?;
                     if bytes.len() >= METADATA_OBJECT_MIN_BYTES {
                         let hash = if let Some(conn) = conn {
-                            object::put_object(conn, "tool_metadata", &bytes, compression)?
+                            object::put_object(conn, &bytes, compression)?
                                 .hash()
                                 .to_string()
                         } else {
                             sha256_hex(&bytes)
                         };
-                        refs.push((hash.clone(), "metadata"));
+                        refs.push((hash.clone(), HistoryObjectRole::Metadata));
                         *child = object_ref_json(&hash, bytes.len() as u64);
                         continue;
                     }

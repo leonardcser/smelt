@@ -21,10 +21,10 @@ pub(crate) fn export_history_jsonl(conn: &Connection, mut out: impl Write) -> Re
 
 pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT a.id, body_hash, response_hash, error_hash, request_id, kind, turn_id, ask_id, started_at,
-                completed_at, provider, model, history_len, error_summary, background,
-                api_base, url, http_status, prompt_cache_key, stream, attempt,
-                s.stats_json, s.total_cost_micros, s.tokens_per_sec
+        "SELECT a.id, request_id, kind, turn_id, ask_id, started_at, completed_at, provider,
+                model, history_len, error_summary, background, api_base, url, http_status,
+                prompt_cache_key, stream, attempt, s.stats_json, s.total_cost_micros,
+                s.tokens_per_sec
          FROM request_attempts a
          LEFT JOIN request_stats s ON s.request_attempt_id = a.id
          ORDER BY started_at, a.id",
@@ -36,34 +36,28 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<String>>(7)?,
-            row.get::<_, i64>(8)?,
+            row.get::<_, Option<String>>(8)?,
             row.get::<_, Option<i64>>(9)?,
             row.get::<_, Option<String>>(10)?,
-            row.get::<_, Option<String>>(11)?,
-            row.get::<_, Option<i64>>(12)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, Option<String>>(12)?,
             row.get::<_, Option<String>>(13)?,
-            row.get::<_, i64>(14)?,
+            row.get::<_, Option<i64>>(14)?,
             row.get::<_, Option<String>>(15)?,
-            row.get::<_, Option<String>>(16)?,
-            row.get::<_, Option<i64>>(17)?,
+            row.get::<_, i64>(16)?,
+            row.get::<_, i64>(17)?,
             row.get::<_, Option<String>>(18)?,
-            row.get::<_, i64>(19)?,
-            row.get::<_, i64>(20)?,
-            row.get::<_, Option<String>>(21)?,
-            row.get::<_, Option<i64>>(22)?,
-            row.get::<_, Option<f64>>(23)?,
+            row.get::<_, Option<i64>>(19)?,
+            row.get::<_, Option<f64>>(20)?,
         ))
     })?;
 
     for row in rows {
         let (
-            _id,
-            body_hash,
-            response_hash,
-            error_hash,
+            id,
             request_id,
             kind,
             turn_id,
@@ -113,16 +107,7 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             "attempt": attempt,
             "background": background != 0,
         });
-        let payloads = if body_hash.is_some() || response_hash.is_some() || error_hash.is_some() {
-            Some(request_audit::request_payloads_from_hashes(
-                conn,
-                body_hash.as_deref(),
-                response_hash.as_deref(),
-                error_hash.as_deref(),
-            )?)
-        } else {
-            None
-        };
+        let payloads = request_audit::request_payloads(conn, id)?;
         if let Some(payloads) = payloads {
             if let Some(body) = payloads.body {
                 value["body"] = body;

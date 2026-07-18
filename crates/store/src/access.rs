@@ -1481,7 +1481,7 @@ mod tests {
         ))];
         let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
         writer.commit_session(&command).unwrap();
-        writer.db.put_object("orphan", b"unreachable").unwrap();
+        writer.db.put_object(b"unreachable").unwrap();
         let mut maintenance = SessionMaintenance { writer };
 
         assert_eq!(maintenance.garbage_collect_objects().unwrap(), 1);

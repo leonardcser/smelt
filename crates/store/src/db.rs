@@ -629,23 +629,22 @@ impl SessionDb {
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub fn put_object(&self, kind: &str, bytes: &[u8]) -> Result<StoredObject> {
-        object::put_object(&self.conn, kind, bytes, self.object_compression)
+    pub fn put_object(&self, bytes: &[u8]) -> Result<StoredObject> {
+        object::put_object(&self.conn, bytes, self.object_compression)
     }
 
     #[cfg(any(test, feature = "test-util"))]
-    pub fn put_object_uncompressed(&self, kind: &str, bytes: &[u8]) -> Result<StoredObject> {
-        object::put_object(&self.conn, kind, bytes, ObjectCompression::none())
+    pub fn put_object_uncompressed(&self, bytes: &[u8]) -> Result<StoredObject> {
+        object::put_object(&self.conn, bytes, ObjectCompression::none())
     }
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn put_object_with_compression(
         &self,
-        kind: &str,
         bytes: &[u8],
         compression: ObjectCompression,
     ) -> Result<StoredObject> {
-        object::put_object(&self.conn, kind, bytes, compression)
+        object::put_object(&self.conn, bytes, compression)
     }
 
     pub fn object(&self, hash: &str) -> Result<Option<StoredObject>> {
@@ -1469,6 +1468,21 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
         },
         StoreError::TransactionCleanup { operation, message } => SessionCommitFailure::Sqlite {
             message: format!("transaction cleanup failed during {operation}: {message}"),
+            disposition,
+        },
+        StoreError::OperationCleanup {
+            operation,
+            primary,
+            cleanup,
+        } => SessionCommitFailure::Sqlite {
+            message: format!(
+                "{operation} failed: {primary}; cleanup also failed: {}",
+                cleanup
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
             disposition,
         },
         StoreError::OwnershipConflict { .. } => SessionCommitFailure::OwnershipLost,
@@ -4369,7 +4383,7 @@ mod tests {
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
                  INSERT INTO history_object_refs (history_idx, object_hash, role)
-                 VALUES (0, 'missing-object', 'attachment');
+                 VALUES (0, 'missing-object', 'metadata');
                  PRAGMA foreign_keys = ON;",
             )
             .unwrap();
@@ -5579,13 +5593,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
 
-        let object = db.put_object("request_body", b"hello sqlite").unwrap();
+        let object = db.put_object(b"hello sqlite").unwrap();
         assert_eq!(object.codec(), ObjectCodec::None);
         assert_eq!(object.raw_size(), 12);
         assert_eq!(object.stored_size(), 12);
         assert_eq!(object.bytes, b"hello sqlite");
 
-        let duplicate = db.put_object("request_body", b"hello sqlite").unwrap();
+        let duplicate = db.put_object(b"hello sqlite").unwrap();
         assert_eq!(duplicate.hash(), object.hash());
         assert_eq!(db.object(object.hash()).unwrap().unwrap(), object);
     }
@@ -5596,7 +5610,6 @@ mod tests {
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let object = db
             .put_object_with_compression(
-                "metadata",
                 &representative_metadata_payload(),
                 ObjectCompression::zstd(1, 128, 15),
             )
@@ -5604,26 +5617,24 @@ mod tests {
 
         let meta = db.object_meta(object.hash()).unwrap().unwrap();
         assert_eq!(meta.hash, object.hash());
-        assert_eq!(meta.kind, "metadata");
         assert_eq!(meta.codec, ObjectCodec::Zstd);
         assert_eq!(db.object_bytes(&meta.hash).unwrap().unwrap(), object.bytes);
     }
 
     #[test]
-    fn duplicate_object_write_skips_new_kind_and_keeps_original_row() {
+    fn duplicate_object_write_keeps_intrinsic_storage_and_has_no_semantic_identity() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let bytes = representative_metadata_payload();
 
         let first = db
-            .put_object_with_compression("metadata", &bytes, ObjectCompression::zstd(1, 128, 15))
+            .put_object_with_compression(&bytes, ObjectCompression::zstd(1, 128, 15))
             .unwrap();
         let second = db
-            .put_object_with_compression("other", &bytes, ObjectCompression::none())
+            .put_object_with_compression(&bytes, ObjectCompression::none())
             .unwrap();
 
         assert_eq!(second.hash(), first.hash());
-        assert_eq!(second.kind(), "metadata");
         assert_eq!(second.codec(), ObjectCodec::Zstd);
     }
 
@@ -5633,7 +5644,7 @@ mod tests {
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let bytes = representative_metadata_payload();
 
-        let object = db.put_object_uncompressed("metadata", &bytes).unwrap();
+        let object = db.put_object_uncompressed(&bytes).unwrap();
         assert_eq!(object.codec(), ObjectCodec::None);
         assert_eq!(object.raw_size(), bytes.len() as u64);
         assert_eq!(object.stored_size(), bytes.len() as u64);
@@ -5647,9 +5658,7 @@ mod tests {
         let bytes = representative_metadata_payload();
         let compression = ObjectCompression::zstd(1, 128, 15);
 
-        let object = db
-            .put_object_with_compression("metadata", &bytes, compression)
-            .unwrap();
+        let object = db.put_object_with_compression(&bytes, compression).unwrap();
         assert_eq!(object.codec(), ObjectCodec::Zstd);
         assert_eq!(object.raw_size(), bytes.len() as u64);
         assert!(object.stored_size() < object.raw_size());
@@ -5664,9 +5673,7 @@ mod tests {
         let bytes: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
         let compression = ObjectCompression::zstd(1, 128, 95);
 
-        let object = db
-            .put_object_with_compression("binary", &bytes, compression)
-            .unwrap();
+        let object = db.put_object_with_compression(&bytes, compression).unwrap();
         assert_eq!(object.codec(), ObjectCodec::None);
         assert_eq!(object.raw_size(), bytes.len() as u64);
         assert_eq!(object.stored_size(), bytes.len() as u64);
@@ -6144,7 +6151,7 @@ mod tests {
         let manifest_count: i64 = db
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM objects WHERE kind = 'request_body_manifest'",
+                "SELECT COUNT(*) FROM request_object_refs WHERE role = 'body_manifest'",
                 [],
                 |row| row.get(0),
             )
@@ -6290,7 +6297,7 @@ mod tests {
         let item_count: i64 = db
             .connection()
             .query_row(
-                "SELECT COUNT(*) FROM objects WHERE kind = 'request_body_item'",
+                "SELECT COUNT(DISTINCT object_hash) FROM request_object_refs WHERE role = 'body_item'",
                 [],
                 |row| row.get(0),
             )
@@ -6317,7 +6324,8 @@ mod tests {
         let second_manifest_hash: String = db
             .connection()
             .query_row(
-                "SELECT body_hash FROM request_attempts WHERE id = ?1",
+                "SELECT object_hash FROM request_object_refs
+                 WHERE request_attempt_id = ?1 AND role = 'body_manifest'",
                 [second_id],
                 |row| row.get(0),
             )

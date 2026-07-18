@@ -14,6 +14,11 @@ pub enum StoreError {
         operation: &'static str,
         message: String,
     },
+    OperationCleanup {
+        operation: &'static str,
+        primary: Box<StoreError>,
+        cleanup: Vec<StoreError>,
+    },
     OwnershipConflict {
         owner: Option<String>,
     },
@@ -46,7 +51,10 @@ impl StoreError {
     }
 
     pub fn invalidates_connection(&self) -> bool {
-        matches!(self, Self::Sqlite(_) | Self::TransactionCleanup { .. })
+        matches!(
+            self,
+            Self::Sqlite(_) | Self::TransactionCleanup { .. } | Self::OperationCleanup { .. }
+        )
     }
 
     pub fn session_persistence_disposition(&self) -> crate::SessionPersistenceDisposition {
@@ -57,7 +65,7 @@ impl StoreError {
             Self::Io(err) => io_persistence_disposition(err.kind()),
             Self::Sqlite(err) => sqlite_persistence_disposition(err),
             Self::OwnershipConflict { .. } | Self::OwnershipLost => OwnershipLost,
-            Self::TransactionCleanup { .. } => Reopen,
+            Self::TransactionCleanup { .. } | Self::OperationCleanup { .. } => Reopen,
             Self::Json(_)
             | Self::MissingObject { .. }
             | Self::ObjectTooLarge { .. }
@@ -134,6 +142,17 @@ impl fmt::Display for StoreError {
                     f,
                     "transaction cleanup failed during {operation}: {message}"
                 )
+            }
+            StoreError::OperationCleanup {
+                operation,
+                primary,
+                cleanup,
+            } => {
+                write!(f, "{operation} failed: {primary}")?;
+                for error in cleanup {
+                    write!(f, "; cleanup also failed: {error}")?;
+                }
+                Ok(())
             }
             StoreError::OwnershipConflict { owner } => match owner {
                 Some(owner) => write!(f, "session is owned by another writer: {owner}"),

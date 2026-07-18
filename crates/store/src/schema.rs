@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
@@ -18,9 +18,31 @@ pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
         Ok(())
     })();
     if rebuild {
-        conn.pragma_update(None, "foreign_keys", true)?;
+        return finish_with_cleanup(
+            "schema migration",
+            result,
+            conn.pragma_update(None, "foreign_keys", true)
+                .map_err(Into::into),
+        );
     }
     result
+}
+
+fn finish_with_cleanup(
+    operation: &'static str,
+    primary: Result<()>,
+    cleanup: Result<()>,
+) -> Result<()> {
+    match (primary, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(primary), Err(cleanup)) => Err(StoreError::OperationCleanup {
+            operation,
+            primary: Box::new(primary),
+            cleanup: vec![cleanup],
+        }),
+    }
 }
 
 pub(crate) fn validate_read_only_schema(conn: &Connection) -> Result<()> {
@@ -45,14 +67,20 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
             expected: SCHEMA_VERSION,
         });
     }
+    if current < 0 {
+        return Err(StoreError::UnsupportedSchema {
+            found: current,
+            expected: SCHEMA_VERSION,
+        });
+    }
     let mut current = current;
     if current == 1 {
         migrate_v1_to_v2(conn)?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(LEGACY_SCHEMA_V4)?;
         current = 2;
     }
     if (2..SCHEMA_VERSION).contains(&current) {
-        migrate_to_v4(conn)?;
+        migrate_to_v5(conn, current < 4)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -352,9 +380,17 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_to_v4(conn: &Connection) -> Result<()> {
+fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
     if !column_exists(conn, "session_state", "fast_mode")? {
         conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
+    }
+    {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT role FROM history_object_refs ORDER BY role")?;
+        let roles = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for role in roles {
+            crate::history::HistoryObjectRole::from_str(&role?)?;
+        }
     }
     conn.pragma_update(None, "legacy_alter_table", true)?;
     let result: Result<()> = (|| {
@@ -365,26 +401,26 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
             DROP TRIGGER IF EXISTS transcript_search_au;
             DROP TABLE IF EXISTS transcript_search_fts;
 
-            ALTER TABLE store_meta RENAME TO store_meta_v2;
-            ALTER TABLE session_state RENAME TO session_state_v2;
-            ALTER TABLE history_items RENAME TO history_items_v2;
-            ALTER TABLE transcript_blocks RENAME TO transcript_blocks_v2;
-            ALTER TABLE objects RENAME TO objects_v2;
-            ALTER TABLE history_object_refs RENAME TO history_object_refs_v2;
-            ALTER TABLE request_attempts RENAME TO request_attempts_v2;
-            ALTER TABLE request_object_refs RENAME TO request_object_refs_v2;
-            ALTER TABLE request_stats RENAME TO request_stats_v2;
-            ALTER TABLE turn_metas RENAME TO turn_metas_v2;
-            ALTER TABLE metadata_snapshots RENAME TO metadata_snapshots_v2;
-            ALTER TABLE accounting_snapshots RENAME TO accounting_snapshots_v2;
-            ALTER TABLE transcript_search RENAME TO transcript_search_v2;
+            ALTER TABLE store_meta RENAME TO store_meta_legacy;
+            ALTER TABLE session_state RENAME TO session_state_legacy;
+            ALTER TABLE history_items RENAME TO history_items_legacy;
+            ALTER TABLE transcript_blocks RENAME TO transcript_blocks_legacy;
+            ALTER TABLE objects RENAME TO objects_legacy;
+            ALTER TABLE history_object_refs RENAME TO history_object_refs_legacy;
+            ALTER TABLE request_attempts RENAME TO request_attempts_legacy;
+            ALTER TABLE request_object_refs RENAME TO request_object_refs_legacy;
+            ALTER TABLE request_stats RENAME TO request_stats_legacy;
+            ALTER TABLE turn_metas RENAME TO turn_metas_legacy;
+            ALTER TABLE metadata_snapshots RENAME TO metadata_snapshots_legacy;
+            ALTER TABLE accounting_snapshots RENAME TO accounting_snapshots_legacy;
+            ALTER TABLE transcript_search RENAME TO transcript_search_legacy;
             DROP TABLE IF EXISTS turn_tool_elapsed;
             "#,
         )?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(
             r#"
-            INSERT INTO store_meta SELECT * FROM store_meta_v2;
+            INSERT INTO store_meta SELECT * FROM store_meta_legacy;
             INSERT INTO session_state (
                 singleton, id, title, slug, first_user_message, cwd, mode, reasoning_effort,
                 model, fast_mode, parent_id, accounting_json, checkpoint_json, context_tokens,
@@ -396,9 +432,9 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
                        checkpoint_json, context_tokens, context_tokens_history_len,
                        display_context_tokens, session_cost_usd, revision, history_len,
                        created_at, updated_at
-                FROM session_state_v2;
+                FROM session_state_legacy;
             INSERT INTO history_items (idx, kind, json, hash, search_text, created_at)
-                SELECT idx, kind, json, hash, search_text, created_at FROM history_items_v2;
+                SELECT idx, kind, json, hash, search_text, created_at FROM history_items_legacy;
             INSERT INTO transcript_blocks (
                 block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name,
                 content_hash, estimated_text_bytes, estimated_rows, preview_text,
@@ -407,52 +443,187 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
                 SELECT block_idx, descriptor_idx, history_idx, kind, tool_call_id, tool_name,
                        content_hash, estimated_text_bytes, estimated_rows, preview_text,
                        descriptor_json, origin_json, tool_state_json
-                FROM transcript_blocks_v2;
-            INSERT INTO objects SELECT * FROM objects_v2;
-            INSERT INTO history_object_refs SELECT * FROM history_object_refs_v2;
-            -- COMPAT(request-audit-zero-based-attempts): v2/v3 provider audits
-            -- stored zero-based attempt ordinals.
-            INSERT INTO request_attempts (
-                id, request_id, turn_id, ask_id, started_at, completed_at, provider, model,
-                history_len, body_hash, response_hash, error_hash, error_summary, background,
-                raw_body_size, kind, api_base, url, http_status, prompt_cache_key, stream,
-                attempt, response_summary
-            )
-                SELECT id, request_id, turn_id, ask_id, started_at, completed_at, provider, model,
-                       history_len, body_hash, response_hash, error_hash, error_summary, background,
-                       raw_body_size, kind, api_base, url, http_status, prompt_cache_key, stream,
-                       attempt + 1, response_summary
-                FROM request_attempts_v2;
-            INSERT INTO request_object_refs SELECT * FROM request_object_refs_v2;
-            INSERT INTO request_stats SELECT * FROM request_stats_v2;
-            INSERT INTO turn_metas SELECT * FROM turn_metas_v2;
-            INSERT INTO metadata_snapshots SELECT * FROM metadata_snapshots_v2;
-            INSERT INTO accounting_snapshots SELECT * FROM accounting_snapshots_v2;
-            INSERT INTO transcript_search SELECT * FROM transcript_search_v2;
-
-            DROP TABLE transcript_search_v2;
-            DROP TABLE accounting_snapshots_v2;
-            DROP TABLE metadata_snapshots_v2;
-            DROP TABLE turn_metas_v2;
-            DROP TABLE request_stats_v2;
-            DROP TABLE request_object_refs_v2;
-            DROP TABLE request_attempts_v2;
-            DROP TABLE history_object_refs_v2;
-            DROP TABLE transcript_blocks_v2;
-            DROP TABLE history_items_v2;
-            DROP TABLE objects_v2;
-            DROP TABLE session_state_v2;
-            DROP TABLE store_meta_v2;
+                FROM transcript_blocks_legacy;
+            INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
+                SELECT hash, codec, raw_size, stored_size, bytes FROM objects_legacy;
+            INSERT INTO history_object_refs
+                SELECT * FROM history_object_refs_legacy;
+            INSERT INTO request_stats SELECT * FROM request_stats_legacy;
+            INSERT INTO turn_metas SELECT * FROM turn_metas_legacy;
+            INSERT INTO metadata_snapshots SELECT * FROM metadata_snapshots_legacy;
+            INSERT INTO accounting_snapshots SELECT * FROM accounting_snapshots_legacy;
+            INSERT INTO transcript_search SELECT * FROM transcript_search_legacy;
             "#,
         )?;
-        conn.execute_batch(SCHEMA)?;
+        let attempt_adjustment = if increment_attempt { "+ 1" } else { "" };
+        conn.execute_batch(&format!(
+            r#"
+            INSERT INTO request_attempts (
+                id, request_id, turn_id, ask_id, started_at, completed_at, provider, model,
+                history_len, error_summary, background, raw_body_size, kind, api_base, url,
+                http_status, prompt_cache_key, stream, attempt, response_summary
+            )
+                SELECT id, request_id, turn_id, ask_id, started_at, completed_at, provider, model,
+                       history_len, error_summary, background, raw_body_size, kind, api_base, url,
+                       http_status, prompt_cache_key, stream, attempt {attempt_adjustment},
+                       response_summary
+                FROM request_attempts_legacy;
+            "#
+        ))?;
+        crate::request_audit::migrate_legacy_request_refs(conn)?;
+        conn.execute_batch(
+            r#"
+            DROP TABLE transcript_search_legacy;
+            DROP TABLE accounting_snapshots_legacy;
+            DROP TABLE metadata_snapshots_legacy;
+            DROP TABLE turn_metas_legacy;
+            DROP TABLE request_stats_legacy;
+            DROP TABLE request_object_refs_legacy;
+            DROP TABLE request_attempts_legacy;
+            DROP TABLE history_object_refs_legacy;
+            DROP TABLE transcript_blocks_legacy;
+            DROP TABLE history_items_legacy;
+            DROP TABLE objects_legacy;
+            DROP TABLE session_state_legacy;
+            DROP TABLE store_meta_legacy;
+            "#,
+        )?;
+        validate_migrated_foreign_keys(conn)?;
         Ok(())
     })();
-    let restore = conn.pragma_update(None, "legacy_alter_table", false);
-    result?;
-    restore?;
+    finish_with_cleanup(
+        "schema legacy_alter_table restoration",
+        result,
+        conn.pragma_update(None, "legacy_alter_table", false)
+            .map_err(Into::into),
+    )
+}
+
+fn validate_migrated_foreign_keys(conn: &Connection) -> Result<()> {
+    let violation = conn
+        .query_row(
+            "SELECT * FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((table, rowid, parent, foreign_key)) = violation {
+        return Err(StoreError::Integrity(format!(
+            "migrated foreign key violation in {table} row {rowid:?}: constraint {foreign_key} references {parent}"
+        )));
+    }
     Ok(())
 }
+
+const LEGACY_SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS store_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS session_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    id TEXT NOT NULL UNIQUE,
+    title TEXT,
+    slug TEXT,
+    first_user_message TEXT,
+    cwd TEXT,
+    mode TEXT,
+    reasoning_effort TEXT,
+    model TEXT,
+    fast_mode INTEGER,
+    parent_id TEXT,
+    accounting_json TEXT,
+    checkpoint_json TEXT,
+    context_tokens INTEGER,
+    context_tokens_history_len INTEGER,
+    display_context_tokens INTEGER,
+    session_cost_usd REAL NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0,
+    history_len INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS objects (
+    hash TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    codec TEXT NOT NULL,
+    raw_size INTEGER NOT NULL,
+    stored_size INTEGER NOT NULL,
+    bytes BLOB NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS history_object_refs (
+    history_idx INTEGER NOT NULL REFERENCES history_items(idx) ON DELETE CASCADE,
+    object_hash TEXT NOT NULL REFERENCES objects(hash) ON DELETE RESTRICT,
+    role TEXT NOT NULL,
+    PRIMARY KEY (history_idx, object_hash, role)
+);
+CREATE TABLE IF NOT EXISTS request_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT,
+    turn_id TEXT,
+    ask_id TEXT,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    provider TEXT,
+    model TEXT,
+    history_len INTEGER,
+    body_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
+    response_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
+    error_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
+    error_summary TEXT,
+    background INTEGER NOT NULL DEFAULT 0,
+    raw_body_size INTEGER NOT NULL DEFAULT 0,
+    kind TEXT,
+    api_base TEXT,
+    url TEXT,
+    http_status INTEGER,
+    prompt_cache_key TEXT,
+    stream INTEGER NOT NULL DEFAULT 0,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    response_summary TEXT
+);
+CREATE TABLE IF NOT EXISTS request_object_refs (
+    request_attempt_id INTEGER NOT NULL REFERENCES request_attempts(id) ON DELETE CASCADE,
+    object_hash TEXT NOT NULL REFERENCES objects(hash) ON DELETE RESTRICT,
+    role TEXT NOT NULL,
+    PRIMARY KEY (request_attempt_id, object_hash, role)
+);
+CREATE TABLE IF NOT EXISTS request_stats (
+    request_attempt_id INTEGER PRIMARY KEY REFERENCES request_attempts(id) ON DELETE CASCADE,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cached_input_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    total_cost_micros INTEGER,
+    stats_json TEXT,
+    context_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    tokens_per_sec REAL
+);
+CREATE TABLE IF NOT EXISTS turn_metas (
+    turn_idx INTEGER PRIMARY KEY,
+    meta_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metadata_snapshots (
+    history_idx INTEGER PRIMARY KEY,
+    metadata_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS accounting_snapshots (
+    history_idx INTEGER PRIMARY KEY,
+    accounting_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+"#;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS store_meta (
@@ -525,19 +696,16 @@ CREATE INDEX IF NOT EXISTS transcript_blocks_extent_idx
 
 CREATE TABLE IF NOT EXISTS objects (
     hash TEXT PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
-    kind TEXT NOT NULL,
     codec TEXT NOT NULL CHECK (codec IN ('none', 'zstd')),
     raw_size INTEGER NOT NULL CHECK (raw_size >= 0),
     stored_size INTEGER NOT NULL CHECK (stored_size >= 0 AND stored_size = length(bytes)),
-    bytes BLOB NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (created_at >= 0)
+    bytes BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS objects_kind_idx ON objects(kind, raw_size DESC);
 
 CREATE TABLE IF NOT EXISTS history_object_refs (
     history_idx INTEGER NOT NULL REFERENCES history_items(idx) ON DELETE CASCADE CHECK (history_idx >= 0),
     object_hash TEXT NOT NULL REFERENCES objects(hash) ON DELETE RESTRICT,
-    role TEXT NOT NULL CHECK (role <> ''),
+    role TEXT NOT NULL CHECK (role IN ('attachment_image', 'metadata')),
     PRIMARY KEY (history_idx, object_hash, role)
 );
 
@@ -551,9 +719,6 @@ CREATE TABLE IF NOT EXISTS request_attempts (
     provider TEXT,
     model TEXT,
     history_len INTEGER CHECK (history_len IS NULL OR history_len >= 0),
-    body_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
-    response_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
-    error_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
     error_summary TEXT,
     background INTEGER NOT NULL DEFAULT 0 CHECK (background IN (0, 1)),
     raw_body_size INTEGER NOT NULL DEFAULT 0 CHECK (raw_body_size >= 0),
@@ -578,9 +743,22 @@ CREATE INDEX IF NOT EXISTS request_attempts_url_idx ON request_attempts(url);
 CREATE TABLE IF NOT EXISTS request_object_refs (
     request_attempt_id INTEGER NOT NULL REFERENCES request_attempts(id) ON DELETE CASCADE CHECK (request_attempt_id > 0),
     object_hash TEXT NOT NULL REFERENCES objects(hash) ON DELETE RESTRICT,
-    role TEXT NOT NULL CHECK (role <> ''),
+    role TEXT NOT NULL CHECK (role IN (
+        'body_json', 'body_manifest', 'body_top', 'body_item', 'body_parent', 'response', 'error'
+    )),
     PRIMARY KEY (request_attempt_id, object_hash, role)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS request_object_refs_body_root_idx
+    ON request_object_refs(request_attempt_id)
+    WHERE role IN ('body_json', 'body_manifest');
+CREATE UNIQUE INDEX IF NOT EXISTS request_object_refs_response_idx
+    ON request_object_refs(request_attempt_id)
+    WHERE role = 'response';
+CREATE UNIQUE INDEX IF NOT EXISTS request_object_refs_error_idx
+    ON request_object_refs(request_attempt_id)
+    WHERE role = 'error';
+CREATE INDEX IF NOT EXISTS request_object_refs_object_idx
+    ON request_object_refs(object_hash, request_attempt_id);
 
 CREATE TABLE IF NOT EXISTS request_stats (
     request_attempt_id INTEGER PRIMARY KEY REFERENCES request_attempts(id) ON DELETE CASCADE CHECK (request_attempt_id > 0),
@@ -649,6 +827,32 @@ END;
 mod tests {
     use super::*;
 
+    fn install_legacy_v4_schema(conn: &Connection) {
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute_batch(
+            "DROP TABLE request_stats;
+             DROP TABLE request_object_refs;
+             DROP TABLE request_attempts;
+             DROP TABLE history_object_refs;
+             DROP TABLE objects;",
+        )
+        .unwrap();
+        conn.execute_batch(LEGACY_SCHEMA_V4).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+    }
+
+    fn insert_legacy_object(conn: &Connection, kind: &str, bytes: &[u8]) -> String {
+        let hash = crate::object::sha256_hex(bytes);
+        conn.execute(
+            "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
+             VALUES (?1, ?2, 'none', ?3, ?3, ?4)",
+            rusqlite::params![&hash, kind, bytes.len() as i64, bytes],
+        )
+        .unwrap();
+        hash
+    }
+
     #[test]
     fn bundled_sqlite_supports_fts5_trigram_search() {
         let conn = Connection::open_in_memory().unwrap();
@@ -689,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v4_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v5_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -771,9 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v4_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_to_v5_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate(&mut conn, "test").unwrap();
+        install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "ignore_check_constraints", true)
             .unwrap();
         conn.execute_batch(
@@ -800,28 +1004,28 @@ mod tests {
                 VALUES (0, 0, 'hello');
             INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes, created_at)
                 VALUES (
-                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                    'test', 'none', 1, 1, x'00', 30
+                    '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+                    'request_body', 'none', 2, 2, x'7b7d', 30
                 );
             INSERT INTO history_object_refs (history_idx, object_hash, role)
                 VALUES (
                     0,
-                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                    'test'
+                    '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+                    'metadata'
                 );
             INSERT INTO request_attempts (
                 id, request_id, started_at, body_hash, raw_body_size, attempt
             ) VALUES
                 (
                     1, 'request', 40,
-                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
                     1, 0
                 ),
                 (2, 'request', 41, NULL, 0, 1);
             INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
                 VALUES (
                     1,
-                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
                     'body'
                 );
             INSERT INTO request_stats (request_attempt_id, input_tokens)
@@ -897,9 +1101,9 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v4_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v5_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate(&mut conn, "test").unwrap();
+        install_legacy_v4_schema(&conn);
         conn.execute_batch(
             r#"
             ALTER TABLE session_state RENAME TO session_state_v4;
@@ -930,6 +1134,7 @@ mod tests {
                 singleton, id, model, parent_id, session_cost_usd, revision, history_len,
                 created_at, updated_at, fast_mode
             ) VALUES (1, 'session', 'model', 'parent', 1.5, 4, 7, 10, 20, 1);
+            INSERT INTO request_attempts (id, started_at, attempt) VALUES (1, 30, 0);
             DROP TABLE session_state_v4;
             PRAGMA user_version = 3;
             "#,
@@ -955,7 +1160,179 @@ mod tests {
             .unwrap(),
             ("session".to_string(), true, "parent".to_string(), 20)
         );
+        assert_eq!(
+            conn.query_row("SELECT attempt FROM request_attempts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
         validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v4_to_v5_migration_backfills_typed_refs_and_removes_semantic_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_legacy_v4_schema(&conn);
+        let hash = insert_legacy_object(&conn, "request_body", b"{}");
+        conn.execute(
+            "INSERT INTO request_attempts (id, started_at, body_hash) VALUES (1, 10, ?1)",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
+             VALUES (1, ?1, 'body')",
+            [&hash],
+        )
+        .unwrap();
+        set_user_version(&conn, 4).unwrap();
+
+        migrate(&mut conn, "test-v5").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            table_columns(&conn, "objects").unwrap(),
+            ["hash", "codec", "raw_size", "stored_size", "bytes"]
+        );
+        assert!(!column_exists(&conn, "request_attempts", "body_hash").unwrap());
+        assert!(!column_exists(&conn, "request_attempts", "response_hash").unwrap());
+        assert!(!column_exists(&conn, "request_attempts", "error_hash").unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT object_hash, role FROM request_object_refs WHERE request_attempt_id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            (hash, "body_json".to_string())
+        );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_disagreement_between_payload_hashes_and_legacy_refs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_legacy_v4_schema(&conn);
+        let body_hash = insert_legacy_object(&conn, "request_body", b"{}");
+        let wrong_hash = insert_legacy_object(&conn, "request_body", b"[]");
+        conn.execute(
+            "INSERT INTO request_attempts (id, started_at, body_hash) VALUES (1, 10, ?1)",
+            [&body_hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
+             VALUES (1, ?1, 'body')",
+            [&wrong_hash],
+        )
+        .unwrap();
+        set_user_version(&conn, 4).unwrap();
+
+        let err = migrate(&mut conn, "test-v5").unwrap_err();
+
+        assert!(
+            err.to_string().contains("disagree with payload hashes"),
+            "{err}"
+        );
+        assert_eq!(user_version(&conn).unwrap(), 4);
+        assert!(conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
+            .unwrap());
+    }
+
+    #[test]
+    fn migration_rejects_missing_legacy_request_references() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_legacy_v4_schema(&conn);
+        let body_hash = insert_legacy_object(&conn, "request_body", b"{}");
+        conn.execute(
+            "INSERT INTO request_attempts (id, started_at, body_hash) VALUES (1, 10, ?1)",
+            [&body_hash],
+        )
+        .unwrap();
+        set_user_version(&conn, 4).unwrap();
+
+        let err = migrate(&mut conn, "test-v5").unwrap_err();
+
+        assert!(
+            err.to_string().contains("disagree with payload hashes")
+                && err.to_string().contains("missing Some"),
+            "{err}"
+        );
+        assert_eq!(user_version(&conn).unwrap(), 4);
+    }
+
+    #[test]
+    fn migration_rejects_corrupt_objects_marked_as_manifests() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_legacy_v4_schema(&conn);
+        insert_legacy_object(&conn, "request_body_manifest", b"{}");
+        set_user_version(&conn, 4).unwrap();
+
+        let err = migrate(&mut conn, "test-v5").unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("marked request_body_manifest is invalid"),
+            "{err}"
+        );
+        assert_eq!(user_version(&conn).unwrap(), 4);
+    }
+
+    #[test]
+    fn migration_rejects_unknown_history_object_roles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_legacy_v4_schema(&conn);
+        let hash = insert_legacy_object(&conn, "attachment_image", b"image");
+        conn.execute(
+            "INSERT INTO history_items (idx, kind, json, hash) VALUES (0, 'user', '{}', 'row')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history_object_refs (history_idx, object_hash, role)
+             VALUES (0, ?1, 'unknown')",
+            [&hash],
+        )
+        .unwrap();
+        set_user_version(&conn, 4).unwrap();
+
+        let err = migrate(&mut conn, "test-v5").unwrap_err();
+
+        assert!(
+            err.to_string().contains("unknown history object role"),
+            "{err}"
+        );
+        assert_eq!(user_version(&conn).unwrap(), 4);
+    }
+
+    #[test]
+    fn cleanup_error_preserves_the_primary_migration_error() {
+        let result = finish_with_cleanup(
+            "schema migration",
+            Err(StoreError::Integrity("primary migration failure".into())),
+            Err(StoreError::Integrity("pragma restoration failure".into())),
+        );
+
+        let err = result.unwrap_err();
+        let StoreError::OperationCleanup {
+            operation,
+            primary,
+            cleanup,
+        } = &err
+        else {
+            panic!("unexpected error: {err}");
+        };
+        assert_eq!(*operation, "schema migration");
+        assert!(primary.to_string().contains("primary migration failure"));
+        assert_eq!(cleanup.len(), 1);
+        assert!(cleanup[0]
+            .to_string()
+            .contains("pragma restoration failure"));
+        let message = err.to_string();
+        assert!(message.contains("primary migration failure"));
+        assert!(message.contains("pragma restoration failure"));
     }
 
     #[test]
@@ -971,9 +1348,42 @@ mod tests {
             .is_err());
         assert!(conn
             .execute(
-                "INSERT INTO objects (hash, kind, codec, raw_size, stored_size, bytes)
-                 VALUES (?1, 'test', 'none', 1, 2, x'00')",
+                "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
+                 VALUES (?1, 'none', 1, 2, x'00')",
                 ["a".repeat(64)],
+            )
+            .is_err());
+
+        let first =
+            crate::object::put_object(&conn, b"{}", crate::compression::ObjectCompression::none())
+                .unwrap()
+                .hash()
+                .to_string();
+        let second =
+            crate::object::put_object(&conn, b"[]", crate::compression::ObjectCompression::none())
+                .unwrap()
+                .hash()
+                .to_string();
+        conn.execute("INSERT INTO request_attempts (started_at) VALUES (1)", [])
+            .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
+                 VALUES (1, ?1, 'unknown')",
+                [&first],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
+             VALUES (1, ?1, 'body_json')",
+            [&first],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
+                 VALUES (1, ?1, 'body_manifest')",
+                [&second],
             )
             .is_err());
     }

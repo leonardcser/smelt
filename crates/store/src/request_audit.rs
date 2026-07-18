@@ -2,10 +2,55 @@ use protocol::request_log::RequestLogEntry;
 use protocol::TokenUsage;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde_json::Value;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
-use crate::object::{self, checked_i64};
+use crate::object::{
+    self, checked_i64, MAX_REQUEST_BODY_ITEMS, MAX_REQUEST_MANIFEST_COUNT,
+    MAX_REQUEST_MANIFEST_DECODED_BYTES, MAX_REQUEST_MANIFEST_DEPTH,
+    MAX_REQUEST_RECONSTRUCTED_BYTES,
+};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum RequestObjectRole {
+    BodyJson,
+    BodyManifest,
+    BodyTop,
+    BodyItem,
+    BodyParent,
+    Response,
+    Error,
+}
+
+impl RequestObjectRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::BodyJson => "body_json",
+            Self::BodyManifest => "body_manifest",
+            Self::BodyTop => "body_top",
+            Self::BodyItem => "body_item",
+            Self::BodyParent => "body_parent",
+            Self::Response => "response",
+            Self::Error => "error",
+        }
+    }
+
+    pub(crate) fn from_str(role: &str) -> Result<Self> {
+        match role {
+            "body_json" => Ok(Self::BodyJson),
+            "body_manifest" => Ok(Self::BodyManifest),
+            "body_top" => Ok(Self::BodyTop),
+            "body_item" => Ok(Self::BodyItem),
+            "body_parent" => Ok(Self::BodyParent),
+            "response" => Ok(Self::Response),
+            "error" => Ok(Self::Error),
+            _ => Err(StoreError::Integrity(format!(
+                "unknown request object role {role:?}"
+            ))),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestAuditPayloadMode {
@@ -232,26 +277,19 @@ fn insert_request_record(
             .unwrap_or_default(),
     };
     let raw_body_size = checked_i64(raw_body_size, "raw_body_size")?;
-    let body_hash = match payload_mode {
+    let body = match payload_mode {
         RequestAuditPayloadMode::Summary { .. } => None,
-        RequestAuditPayloadMode::Full => {
-            put_request_body_manifest(conn, record.body.as_ref(), compression)?
-        }
+        RequestAuditPayloadMode::Full => put_request_body(conn, record.body.as_ref(), compression)?,
     };
     let response_hash = match payload_mode {
         RequestAuditPayloadMode::Summary { .. } => None,
-        RequestAuditPayloadMode::Full => put_json_object(
-            conn,
-            record.response.as_ref(),
-            "request_response",
-            compression,
-        )?,
+        RequestAuditPayloadMode::Full => {
+            put_json_object(conn, record.response.as_ref(), compression)?
+        }
     };
     let error_hash = match payload_mode {
         RequestAuditPayloadMode::Summary { .. } => None,
-        RequestAuditPayloadMode::Full => {
-            put_json_object(conn, record.error.as_ref(), "request_error", compression)?
-        }
+        RequestAuditPayloadMode::Full => put_json_object(conn, record.error.as_ref(), compression)?,
     };
     let cost_micros = cost_micros(record.cost_usd)?;
     let stats_json = record
@@ -263,11 +301,10 @@ fn insert_request_record(
     conn.execute(
         "INSERT INTO request_attempts (
             request_id, turn_id, ask_id, started_at, completed_at, provider, model,
-            history_len, body_hash, response_hash, error_hash, kind, error_summary,
-            background, raw_body_size, api_base, url, http_status, prompt_cache_key,
-            stream, attempt, response_summary
+            history_len, kind, error_summary, background, raw_body_size, api_base, url,
+            http_status, prompt_cache_key, stream, attempt, response_summary
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                   ?15, ?16, ?17, ?18, ?19)",
         params![
             record.request_id,
             record.turn_id,
@@ -277,9 +314,6 @@ fn insert_request_record(
             record.provider,
             record.model,
             record.history_len,
-            body_hash.as_deref(),
-            response_hash.as_deref(),
-            error_hash.as_deref(),
             record.kind,
             record.error_summary,
             record.background as i64,
@@ -294,14 +328,27 @@ fn insert_request_record(
         ],
     )?;
     let request_attempt_id = conn.last_insert_rowid();
-    if let Some(hash) = body_hash.as_deref() {
-        insert_request_body_refs(conn, request_attempt_id, hash)?;
+    if let Some(body) = body.as_ref() {
+        match body {
+            StoredRequestBody::Json { hash } => {
+                insert_request_ref(conn, request_attempt_id, hash, RequestObjectRole::BodyJson)?;
+            }
+            StoredRequestBody::Manifest { hash, refs } => {
+                insert_request_ref(
+                    conn,
+                    request_attempt_id,
+                    hash,
+                    RequestObjectRole::BodyManifest,
+                )?;
+                install_manifest_refs(conn, request_attempt_id, refs)?;
+            }
+        }
     }
     if let Some(hash) = response_hash.as_deref() {
-        insert_request_ref(conn, request_attempt_id, hash, "response")?;
+        insert_request_ref(conn, request_attempt_id, hash, RequestObjectRole::Response)?;
     }
     if let Some(hash) = error_hash.as_deref() {
-        insert_request_ref(conn, request_attempt_id, hash, "error")?;
+        insert_request_ref(conn, request_attempt_id, hash, RequestObjectRole::Error)?;
     }
     if record.usage.is_some() || cost_micros.is_some() || record.tokens_per_sec.is_some() {
         let usage = record.usage.as_ref();
@@ -343,11 +390,17 @@ pub(crate) fn request_attempts(
     let mut sql = String::from(
         "SELECT a.id, a.request_id, a.kind, a.turn_id, a.ask_id, a.started_at, a.completed_at,
                 a.provider, a.model, a.api_base, a.url, a.http_status, a.history_len, a.attempt,
-                a.stream, a.prompt_cache_key, a.background, a.raw_body_size, a.body_hash,
-                a.response_hash, a.response_summary, a.error_hash, a.error_summary,
+                a.stream, a.prompt_cache_key, a.background, a.raw_body_size, body.object_hash,
+                response.object_hash, a.response_summary, error.object_hash, a.error_summary,
                 s.stats_json, s.total_cost_micros, s.tokens_per_sec
          FROM request_attempts a
-         LEFT JOIN request_stats s ON s.request_attempt_id = a.id",
+         LEFT JOIN request_stats s ON s.request_attempt_id = a.id
+         LEFT JOIN request_object_refs body
+           ON body.request_attempt_id = a.id AND body.role IN ('body_json', 'body_manifest')
+         LEFT JOIN request_object_refs response
+           ON response.request_attempt_id = a.id AND response.role = 'response'
+         LEFT JOIN request_object_refs error
+           ON error.request_attempt_id = a.id AND error.role = 'error'",
     );
     let mut clauses: Vec<&str> = Vec::new();
     let mut values: Vec<Box<dyn ToSql>> = Vec::new();
@@ -483,7 +536,10 @@ pub(crate) fn request_stats(conn: &Connection) -> Result<RequestAuditStats> {
         "SELECT COUNT(a.id),
                 COALESCE(SUM(CASE WHEN a.error_summary IS NOT NULL THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN a.stream != 0 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN a.response_hash IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM request_object_refs response
+                    WHERE response.request_attempt_id = a.id AND response.role = 'response'
+                ) THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(s.total_cost_micros), 0),
                 COALESCE(SUM(CASE
                     WHEN a.completed_at IS NOT NULL THEN MAX(a.completed_at - a.started_at, 0)
@@ -550,42 +606,103 @@ pub(crate) fn request_payloads(
     conn: &Connection,
     request_attempt_id: i64,
 ) -> Result<Option<RequestAuditPayloads>> {
-    let hashes = conn
+    let exists = conn
         .query_row(
-            "SELECT body_hash, response_hash, error_hash FROM request_attempts WHERE id = ?1",
+            "SELECT 1 FROM request_attempts WHERE id = ?1",
             [request_attempt_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
+            |_| Ok(()),
         )
-        .optional()?;
-    let Some((body_hash, response_hash, error_hash)) = hashes else {
+        .optional()?
+        .is_some();
+    if !exists {
         return Ok(None);
+    }
+    let refs = request_payload_refs(conn, request_attempt_id)?;
+    let body = match refs.body {
+        Some((RequestObjectRole::BodyJson, hash)) => {
+            validate_body_refs(
+                conn,
+                request_attempt_id,
+                &BTreeSet::from([(RequestObjectRole::BodyJson, hash.clone())]),
+            )?;
+            Some(read_json_object_required(conn, &hash)?)
+        }
+        Some((RequestObjectRole::BodyManifest, hash)) => {
+            let manifest = walk_body_manifest(conn, Some(request_attempt_id), &hash)?;
+            Some(rebuild_request_body(&manifest)?)
+        }
+        Some((role, _)) => {
+            return Err(StoreError::Integrity(format!(
+                "request {request_attempt_id} has invalid body root role {:?}",
+                role.as_str()
+            )))
+        }
+        None => {
+            validate_body_refs(conn, request_attempt_id, &BTreeSet::new())?;
+            None
+        }
     };
-    request_payloads_from_hashes(
-        conn,
-        body_hash.as_deref(),
-        response_hash.as_deref(),
-        error_hash.as_deref(),
-    )
-    .map(Some)
+    Ok(Some(RequestAuditPayloads {
+        body,
+        response: refs
+            .response
+            .as_deref()
+            .map(|hash| read_json_object_required(conn, hash))
+            .transpose()?,
+        error: refs
+            .error
+            .as_deref()
+            .map(|hash| read_json_object_required(conn, hash))
+            .transpose()?,
+    }))
 }
 
-pub(crate) fn request_payloads_from_hashes(
-    conn: &Connection,
-    body_hash: Option<&str>,
-    response_hash: Option<&str>,
-    error_hash: Option<&str>,
-) -> Result<RequestAuditPayloads> {
-    Ok(RequestAuditPayloads {
-        body: read_request_body(conn, body_hash)?,
-        response: read_json_object(conn, response_hash)?,
-        error: read_json_object(conn, error_hash)?,
-    })
+struct RequestPayloadRefs {
+    body: Option<(RequestObjectRole, String)>,
+    response: Option<String>,
+    error: Option<String>,
+}
+
+fn request_payload_refs(conn: &Connection, request_attempt_id: i64) -> Result<RequestPayloadRefs> {
+    let mut stmt = conn.prepare(
+        "SELECT object_hash, role
+         FROM request_object_refs
+         WHERE request_attempt_id = ?1
+           AND role IN ('body_json', 'body_manifest', 'response', 'error')
+         ORDER BY role, object_hash",
+    )?;
+    let rows = stmt.query_map([request_attempt_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut refs = RequestPayloadRefs {
+        body: None,
+        response: None,
+        error: None,
+    };
+    for row in rows {
+        let (hash, role) = row?;
+        let role = RequestObjectRole::from_str(&role)?;
+        let target = match role {
+            RequestObjectRole::BodyJson | RequestObjectRole::BodyManifest => {
+                if refs.body.replace((role, hash)).is_some() {
+                    return Err(StoreError::Integrity(format!(
+                        "request {request_attempt_id} has multiple body roots"
+                    )));
+                }
+                continue;
+            }
+            RequestObjectRole::Response => &mut refs.response,
+            RequestObjectRole::Error => &mut refs.error,
+            _ => unreachable!("query selects only payload root roles"),
+        };
+        if target.replace(hash).is_some() {
+            return Err(StoreError::Integrity(format!(
+                "request {request_attempt_id} has multiple {} references",
+                role.as_str()
+            )));
+        }
+    }
+    Ok(refs)
 }
 
 fn json_size<T: serde::Serialize>(value: &T) -> Result<u64> {
@@ -615,7 +732,6 @@ impl std::io::Write for CountingWriter {
 fn put_json_object<T: serde::Serialize>(
     conn: &Connection,
     value: Option<&T>,
-    kind: &str,
     compression: ObjectCompression,
 ) -> Result<Option<String>> {
     let Some(value) = value else {
@@ -623,55 +739,44 @@ fn put_json_object<T: serde::Serialize>(
     };
     let bytes = serde_json::to_vec(value)?;
     Ok(Some(
-        object::put_object(conn, kind, &bytes, compression)?
+        object::put_object(conn, &bytes, compression)?
             .hash()
             .to_string(),
     ))
 }
 
-fn insert_request_ref(conn: &Connection, request_id: i64, hash: &str, role: &str) -> Result<()> {
+fn insert_request_ref(
+    conn: &Connection,
+    request_id: i64,
+    hash: &str,
+    role: RequestObjectRole,
+) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO request_object_refs (request_attempt_id, object_hash, role)
+        "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
          VALUES (?1, ?2, ?3)",
-        params![request_id, hash, role],
+        params![request_id, hash, role.as_str()],
     )?;
     Ok(())
 }
 
-fn insert_request_body_refs(conn: &Connection, request_id: i64, hash: &str) -> Result<()> {
-    insert_request_ref(conn, request_id, hash, "body")?;
-    let mut seen = std::collections::HashSet::new();
-    insert_request_body_manifest_refs(conn, request_id, hash, &mut seen)
-}
-
-fn insert_request_body_manifest_refs(
+fn install_manifest_refs(
     conn: &Connection,
     request_id: i64,
-    hash: &str,
-    seen: &mut std::collections::HashSet<String>,
+    refs: &ManifestReferences,
 ) -> Result<()> {
-    if !seen.insert(hash.to_string()) {
-        return Ok(());
+    for hash in &refs.top_hashes {
+        insert_request_ref(conn, request_id, hash, RequestObjectRole::BodyTop)?;
     }
-    let Some(meta) = object::object_meta(conn, hash)? else {
-        return Ok(());
-    };
-    if meta.kind != "request_body_manifest" {
-        return Ok(());
+    for hash in &refs.item_hashes {
+        insert_request_ref(conn, request_id, hash, RequestObjectRole::BodyItem)?;
     }
-    let manifest = read_request_body_manifest(conn, hash)?;
-    insert_request_ref(conn, request_id, &manifest.top_hash, "body_top")?;
-    for item_hash in &manifest.item_hashes {
-        insert_request_ref(conn, request_id, item_hash, "body_item")?;
-    }
-    if let Some(parent_hash) = manifest.parent_hash.as_deref() {
-        insert_request_ref(conn, request_id, parent_hash, "body_parent")?;
-        insert_request_body_manifest_refs(conn, request_id, parent_hash, seen)?;
+    for hash in &refs.parent_hashes {
+        insert_request_ref(conn, request_id, hash, RequestObjectRole::BodyParent)?;
     }
     Ok(())
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct RequestBodyManifest {
     version: u8,
     input_key: Option<String>,
@@ -681,31 +786,58 @@ struct RequestBodyManifest {
     item_hashes: Vec<String>,
 }
 
-fn put_request_body_manifest(
+enum StoredRequestBody {
+    Json {
+        hash: String,
+    },
+    Manifest {
+        hash: String,
+        refs: ManifestReferences,
+    },
+}
+
+fn put_request_body(
     conn: &Connection,
     body: Option<&Value>,
     compression: ObjectCompression,
-) -> Result<Option<String>> {
+) -> Result<Option<StoredRequestBody>> {
     let Some(body) = body else {
         return Ok(None);
     };
-    let (input_key, top, items) = split_request_body(body);
-    let top_hash = put_json_object(conn, Some(&top), "request_body_top", compression)?
-        .expect("top object is present");
+    let body_size = json_size(body)?;
+    enforce_limit(
+        body_size,
+        MAX_REQUEST_RECONSTRUCTED_BYTES,
+        "request body reconstructed bytes",
+    )?;
+    let Some((input_key, top, items)) = split_request_body(body) else {
+        let hash =
+            put_json_object(conn, Some(body), compression)?.expect("request body is present");
+        return Ok(Some(StoredRequestBody::Json { hash }));
+    };
+    if items.len() > MAX_REQUEST_BODY_ITEMS {
+        return Err(manifest_limit_error(
+            "request body item count",
+            items.len(),
+            MAX_REQUEST_BODY_ITEMS,
+        ));
+    }
+    let top_hash = put_json_object(conn, Some(&top), compression)?.expect("top object is present");
     let item_hashes = items
         .iter()
         .map(|item| {
-            put_json_object(conn, Some(item), "request_body_item", compression)
+            put_json_object(conn, Some(item), compression)
                 .map(|hash| hash.expect("item object is present"))
         })
         .collect::<Result<Vec<_>>>()?;
     let previous = previous_body_manifest(conn)?;
     let (parent_hash, checkpoint, manifest_items) = match previous {
         Some(previous)
-            if previous.input_key == input_key
+            if previous.input_key.as_deref() == Some(input_key.as_str())
                 && previous.top_hash == top_hash
                 && item_hashes.starts_with(&previous.item_hashes)
-                && previous.depth < 32 =>
+                && previous.manifest_count < MAX_REQUEST_MANIFEST_DEPTH
+                && previous.manifest_count < MAX_REQUEST_MANIFEST_COUNT =>
         {
             (
                 Some(previous.hash),
@@ -717,153 +849,543 @@ fn put_request_body_manifest(
     };
     let manifest = RequestBodyManifest {
         version: 1,
-        input_key,
+        input_key: Some(input_key),
         top_hash,
         parent_hash,
         checkpoint,
         item_hashes: manifest_items,
     };
-    put_json_object(conn, Some(&manifest), "request_body_manifest", compression)
+    let hash = put_json_object(conn, Some(&manifest), compression)?
+        .expect("request body manifest is present");
+    let refs = walk_body_manifest(conn, None, &hash)?.refs;
+    Ok(Some(StoredRequestBody::Manifest { hash, refs }))
 }
 
+#[derive(Debug, Default)]
+struct ManifestReferences {
+    top_hashes: BTreeSet<String>,
+    item_hashes: BTreeSet<String>,
+    parent_hashes: BTreeSet<String>,
+}
+
+#[derive(Debug)]
 struct ExpandedManifest {
     hash: String,
     input_key: Option<String>,
     top_hash: String,
     item_hashes: Vec<String>,
-    depth: usize,
+    top: Value,
+    items: Vec<Value>,
+    manifest_count: usize,
+    refs: ManifestReferences,
 }
 
 fn previous_body_manifest(conn: &Connection) -> Result<Option<ExpandedManifest>> {
-    let hash = conn
+    let root = conn
         .query_row(
-            "SELECT a.body_hash FROM request_attempts a
-             JOIN objects o ON o.hash = a.body_hash
-             WHERE a.body_hash IS NOT NULL AND o.kind = 'request_body_manifest'
-             ORDER BY a.id DESC
+            "SELECT request_attempt_id, object_hash
+             FROM request_object_refs
+             WHERE role = 'body_manifest'
+             ORDER BY request_attempt_id DESC
              LIMIT 1",
             [],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
-    hash.map(|hash| expand_body_manifest(conn, &hash))
+    root.map(|(request_id, hash)| walk_body_manifest(conn, Some(request_id), &hash))
         .transpose()
 }
 
-fn split_request_body(body: &Value) -> (Option<String>, Value, Vec<Value>) {
-    let Some(map) = body.as_object() else {
-        return (None, body.clone(), Vec::new());
-    };
+fn split_request_body(body: &Value) -> Option<(String, Value, Vec<Value>)> {
+    let map = body.as_object()?;
     let input_key = if map.get("input").is_some_and(Value::is_array) {
-        Some("input")
+        "input"
     } else if map.get("messages").is_some_and(Value::is_array) {
-        Some("messages")
+        "messages"
     } else {
-        None
-    };
-    let Some(input_key) = input_key else {
-        return (None, body.clone(), Vec::new());
+        return None;
     };
     let mut top = map.clone();
     let items = top
         .remove(input_key)
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
-    (Some(input_key.to_string()), Value::Object(top), items)
+    Some((input_key.to_string(), Value::Object(top), items))
 }
 
-fn read_request_body(conn: &Connection, hash: Option<&str>) -> Result<Option<Value>> {
-    let Some(hash) = hash else {
-        return Ok(None);
-    };
-    let Some(meta) = object::object_meta(conn, hash)? else {
-        return Ok(None);
-    };
-    if meta.kind != "request_body_manifest" {
-        return read_json_object(conn, Some(hash));
+fn walk_body_manifest(
+    conn: &Connection,
+    request_attempt_id: Option<i64>,
+    root_hash: &str,
+) -> Result<ExpandedManifest> {
+    validate_object_hash(root_hash)?;
+
+    let (mut chain, mut decoded_bytes) = collect_manifest_chain(root_hash, |hash| {
+        let bytes = read_object_bytes_required(conn, hash)?;
+        let decoded_size = bytes.len();
+        let manifest = serde_json::from_slice(&bytes).map_err(|err| {
+            StoreError::Integrity(format!(
+                "request body manifest {hash} is invalid JSON: {err}"
+            ))
+        })?;
+        Ok((manifest, decoded_size))
+    })?;
+    let mut refs = ManifestReferences::default();
+    for (_, manifest) in &chain {
+        refs.top_hashes.insert(manifest.top_hash.clone());
+        refs.item_hashes
+            .extend(manifest.item_hashes.iter().cloned());
+        if let Some(parent_hash) = manifest.parent_hash.as_deref() {
+            refs.parent_hashes.insert(parent_hash.to_string());
+        }
     }
-    let manifest = expand_body_manifest(conn, hash)?;
-    rebuild_request_body(conn, &manifest).map(Some)
+    if let Some(request_id) = request_attempt_id {
+        validate_manifest_refs(conn, request_id, root_hash, &refs)?;
+    }
+    chain.reverse();
+    let (_, first) = chain
+        .first()
+        .expect("manifest traversal always contains the root");
+    let input_key = first.input_key.clone();
+    let top_hash = first.top_hash.clone();
+    let mut item_hashes = Vec::new();
+    for (hash, manifest) in &chain {
+        if manifest.input_key != input_key || manifest.top_hash != top_hash {
+            return Err(StoreError::Integrity(format!(
+                "request body manifest {hash} parent shape mismatch"
+            )));
+        }
+        if manifest.checkpoint {
+            item_hashes.clear();
+        }
+        let new_len = item_hashes
+            .len()
+            .checked_add(manifest.item_hashes.len())
+            .ok_or_else(|| StoreError::Integrity("request body item count overflow".into()))?;
+        if new_len > MAX_REQUEST_BODY_ITEMS {
+            return Err(manifest_limit_error(
+                "request body item count",
+                new_len,
+                MAX_REQUEST_BODY_ITEMS,
+            ));
+        }
+        item_hashes.extend(manifest.item_hashes.iter().cloned());
+    }
+
+    let top_bytes = read_object_bytes_required(conn, &top_hash)?;
+    add_decoded_bytes(&mut decoded_bytes, top_bytes.len())?;
+    let top: Value = serde_json::from_slice(&top_bytes).map_err(|err| {
+        StoreError::Integrity(format!(
+            "request body top {top_hash} is invalid JSON: {err}"
+        ))
+    })?;
+    let mut items = Vec::with_capacity(item_hashes.len());
+    for item_hash in &item_hashes {
+        let bytes = read_object_bytes_required(conn, item_hash)?;
+        add_decoded_bytes(&mut decoded_bytes, bytes.len())?;
+        items.push(serde_json::from_slice(&bytes).map_err(|err| {
+            StoreError::Integrity(format!(
+                "request body item {item_hash} is invalid JSON: {err}"
+            ))
+        })?);
+    }
+
+    let expanded = ExpandedManifest {
+        hash: root_hash.to_string(),
+        input_key,
+        top_hash,
+        item_hashes,
+        top,
+        items,
+        manifest_count: chain.len(),
+        refs,
+    };
+    let rebuilt = rebuild_request_body(&expanded)?;
+    enforce_limit(
+        json_size(&rebuilt)?,
+        MAX_REQUEST_RECONSTRUCTED_BYTES,
+        "request body reconstructed bytes",
+    )?;
+    Ok(expanded)
 }
 
-fn read_request_body_manifest(conn: &Connection, hash: &str) -> Result<RequestBodyManifest> {
-    let Some(value) = read_json_object(conn, Some(hash))? else {
-        return Err(StoreError::Integrity(format!(
-            "request body manifest {hash} missing"
-        )));
-    };
-    let manifest: RequestBodyManifest = serde_json::from_value(value)?;
+fn collect_manifest_chain<F>(
+    root_hash: &str,
+    mut load: F,
+) -> Result<(Vec<(String, RequestBodyManifest)>, u64)>
+where
+    F: FnMut(&str) -> Result<(RequestBodyManifest, usize)>,
+{
+    validate_object_hash(root_hash)?;
+    let mut seen = HashSet::new();
+    let mut chain = Vec::new();
+    let mut current_hash = root_hash.to_string();
+    let mut decoded_bytes = 0u64;
+    loop {
+        if chain.len() >= MAX_REQUEST_MANIFEST_DEPTH {
+            return Err(manifest_limit_error(
+                "request body manifest depth",
+                chain.len() + 1,
+                MAX_REQUEST_MANIFEST_DEPTH,
+            ));
+        }
+        if chain.len() >= MAX_REQUEST_MANIFEST_COUNT {
+            return Err(manifest_limit_error(
+                "request body manifest count",
+                chain.len() + 1,
+                MAX_REQUEST_MANIFEST_COUNT,
+            ));
+        }
+        if !seen.insert(current_hash.clone()) {
+            return Err(StoreError::Integrity(format!(
+                "request body manifest cycle at {current_hash}"
+            )));
+        }
+        let (manifest, decoded_size) = load(&current_hash)?;
+        add_decoded_bytes(&mut decoded_bytes, decoded_size)?;
+        validate_manifest(&current_hash, &manifest)?;
+        let parent_hash = manifest.parent_hash.clone();
+        chain.push((current_hash, manifest));
+        let Some(parent_hash) = parent_hash else {
+            break;
+        };
+        current_hash = parent_hash;
+    }
+    Ok((chain, decoded_bytes))
+}
+
+fn validate_manifest(hash: &str, manifest: &RequestBodyManifest) -> Result<()> {
     if manifest.version != 1 {
         return Err(StoreError::Integrity(format!(
-            "unknown request body manifest version {}",
+            "request body manifest {hash} has unknown version {}",
             manifest.version
         )));
     }
-    Ok(manifest)
+    if manifest.parent_hash.is_some() == manifest.checkpoint {
+        return Err(StoreError::Integrity(format!(
+            "request body manifest {hash} has invalid checkpoint/parent state"
+        )));
+    }
+    if manifest.input_key.is_none() && !manifest.item_hashes.is_empty() {
+        return Err(StoreError::Integrity(format!(
+            "request body manifest {hash} has items without an input key"
+        )));
+    }
+    if let Some(input_key) = manifest.input_key.as_deref() {
+        if !matches!(input_key, "input" | "messages") {
+            return Err(StoreError::Integrity(format!(
+                "request body manifest {hash} has unsupported input key {input_key:?}"
+            )));
+        }
+    }
+    validate_object_hash(&manifest.top_hash)?;
+    if let Some(parent_hash) = manifest.parent_hash.as_deref() {
+        validate_object_hash(parent_hash)?;
+    }
+    for item_hash in &manifest.item_hashes {
+        validate_object_hash(item_hash)?;
+    }
+    Ok(())
 }
 
-fn expand_body_manifest(conn: &Connection, hash: &str) -> Result<ExpandedManifest> {
-    let manifest = read_request_body_manifest(conn, hash)?;
-    let (mut item_hashes, depth) = if let Some(parent_hash) = manifest.parent_hash.as_deref() {
-        let parent = expand_body_manifest(conn, parent_hash)?;
-        if parent.input_key != manifest.input_key || parent.top_hash != manifest.top_hash {
+fn rebuild_request_body(manifest: &ExpandedManifest) -> Result<Value> {
+    let mut top = manifest.top.clone();
+    let Some(input_key) = manifest.input_key.as_deref() else {
+        if !manifest.items.is_empty() {
             return Err(StoreError::Integrity(
-                "request body manifest parent shape mismatch".into(),
+                "request body manifest without input key has items".into(),
             ));
         }
-        (parent.item_hashes, parent.depth + 1)
-    } else {
-        (Vec::new(), 0)
-    };
-    if manifest.checkpoint {
-        item_hashes = manifest.item_hashes;
-    } else {
-        item_hashes.extend(manifest.item_hashes);
-    }
-    Ok(ExpandedManifest {
-        hash: hash.to_string(),
-        input_key: manifest.input_key,
-        top_hash: manifest.top_hash,
-        item_hashes,
-        depth,
-    })
-}
-
-fn rebuild_request_body(conn: &Connection, manifest: &ExpandedManifest) -> Result<Value> {
-    let Some(mut top) = read_json_object(conn, Some(&manifest.top_hash))? else {
-        return Err(StoreError::Integrity(format!(
-            "request body top {} missing",
-            manifest.top_hash
-        )));
-    };
-    let Some(input_key) = manifest.input_key.as_deref() else {
         return Ok(top);
     };
-    let items = manifest
-        .item_hashes
-        .iter()
-        .map(|hash| {
-            read_json_object(conn, Some(hash))?
-                .ok_or_else(|| StoreError::Integrity(format!("request body item {hash} missing")))
-        })
-        .collect::<Result<Vec<_>>>()?;
     let Some(map) = top.as_object_mut() else {
         return Err(StoreError::Integrity(
             "request body top is not an object".into(),
         ));
     };
-    map.insert(input_key.to_string(), Value::Array(items));
+    map.insert(input_key.to_string(), Value::Array(manifest.items.clone()));
     Ok(top)
 }
 
-fn read_json_object(conn: &Connection, hash: Option<&str>) -> Result<Option<Value>> {
-    let Some(hash) = hash else {
-        return Ok(None);
+fn validate_manifest_refs(
+    conn: &Connection,
+    request_id: i64,
+    root_hash: &str,
+    refs: &ManifestReferences,
+) -> Result<()> {
+    let mut expected = BTreeSet::from([(RequestObjectRole::BodyManifest, root_hash.to_string())]);
+    expected.extend(
+        refs.top_hashes
+            .iter()
+            .cloned()
+            .map(|hash| (RequestObjectRole::BodyTop, hash)),
+    );
+    expected.extend(
+        refs.item_hashes
+            .iter()
+            .cloned()
+            .map(|hash| (RequestObjectRole::BodyItem, hash)),
+    );
+    expected.extend(
+        refs.parent_hashes
+            .iter()
+            .cloned()
+            .map(|hash| (RequestObjectRole::BodyParent, hash)),
+    );
+    validate_body_refs(conn, request_id, &expected)
+}
+
+fn validate_body_refs(
+    conn: &Connection,
+    request_id: i64,
+    expected: &BTreeSet<(RequestObjectRole, String)>,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT role, object_hash
+         FROM request_object_refs
+         WHERE request_attempt_id = ?1
+           AND role IN ('body_json', 'body_manifest', 'body_top', 'body_item', 'body_parent')
+         ORDER BY role, object_hash",
+    )?;
+    let rows = stmt.query_map([request_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut actual = BTreeSet::new();
+    for row in rows {
+        let (role, hash) = row?;
+        actual.insert((RequestObjectRole::from_str(&role)?, hash));
+    }
+    if &actual == expected {
+        return Ok(());
+    }
+
+    let missing = expected
+        .difference(&actual)
+        .map(|(role, hash)| format!("{}:{hash}", role.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let unexpected = actual
+        .difference(expected)
+        .map(|(role, hash)| format!("{}:{hash}", role.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(StoreError::Integrity(format!(
+        "request {request_id} body references differ from its payload: missing [{missing}]; unexpected [{unexpected}]"
+    )))
+}
+
+fn validate_object_hash(hash: &str) -> Result<()> {
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StoreError::Integrity(format!(
+            "invalid SHA-256 object hash {hash:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn read_object_bytes_required(conn: &Connection, hash: &str) -> Result<Vec<u8>> {
+    validate_object_hash(hash)?;
+    object::object_bytes_by_hash(conn, hash)?.ok_or_else(|| StoreError::MissingObject {
+        reference: hash.to_string(),
+    })
+}
+
+fn read_json_object_required(conn: &Connection, hash: &str) -> Result<Value> {
+    let bytes = read_object_bytes_required(conn, hash)?;
+    serde_json::from_slice(&bytes).map_err(Into::into)
+}
+
+fn add_decoded_bytes(total: &mut u64, added: usize) -> Result<()> {
+    *total = total
+        .checked_add(added as u64)
+        .ok_or_else(|| StoreError::Integrity("request manifest decoded bytes overflow".into()))?;
+    enforce_limit(
+        *total,
+        MAX_REQUEST_MANIFEST_DECODED_BYTES,
+        "request manifest decoded bytes",
+    )
+}
+
+fn enforce_limit(actual: u64, limit: u64, name: &str) -> Result<()> {
+    if actual > limit {
+        return Err(StoreError::Integrity(format!(
+            "{name} {actual} exceeds limit {limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn manifest_limit_error(name: &str, actual: usize, limit: usize) -> StoreError {
+    StoreError::Integrity(format!("{name} {actual} exceeds limit {limit}"))
+}
+
+pub(crate) fn migrate_legacy_request_refs(conn: &Connection) -> Result<()> {
+    let manifest_hashes = {
+        let mut stmt = conn.prepare(
+            "SELECT hash FROM objects_legacy
+             WHERE kind = 'request_body_manifest'
+             ORDER BY hash",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
-    let Some(bytes) = object::object_bytes_by_hash(conn, hash)? else {
-        return Ok(None);
+    for hash in manifest_hashes {
+        walk_body_manifest(conn, None, &hash).map_err(|err| {
+            StoreError::Integrity(format!(
+                "legacy object {hash} marked request_body_manifest is invalid: {err}"
+            ))
+        })?;
+    }
+
+    let attempts = {
+        let mut stmt = conn.prepare(
+            "SELECT id, body_hash, response_hash, error_hash
+             FROM request_attempts_legacy
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
-    Ok(Some(serde_json::from_slice(&bytes)?))
+
+    for (request_id, body_hash, response_hash, error_hash) in attempts {
+        let mut expected_legacy_refs = BTreeSet::new();
+        let body_manifest = if let Some(hash) = body_hash.as_deref() {
+            let kind = legacy_object_kind(conn, hash)?;
+            if kind == "request_body_manifest" {
+                let manifest = walk_body_manifest(conn, None, hash)?;
+                expected_legacy_refs.insert((hash.to_string(), "body"));
+                expected_legacy_refs.extend(
+                    manifest
+                        .refs
+                        .top_hashes
+                        .iter()
+                        .cloned()
+                        .map(|hash| (hash, "body_top")),
+                );
+                expected_legacy_refs.extend(
+                    manifest
+                        .refs
+                        .item_hashes
+                        .iter()
+                        .cloned()
+                        .map(|hash| (hash, "body_item")),
+                );
+                expected_legacy_refs.extend(
+                    manifest
+                        .refs
+                        .parent_hashes
+                        .iter()
+                        .cloned()
+                        .map(|hash| (hash, "body_parent")),
+                );
+                Some(manifest)
+            } else {
+                read_json_object_required(conn, hash).map_err(|err| {
+                    StoreError::Integrity(format!(
+                        "legacy request {request_id} body object {hash} is invalid: {err}"
+                    ))
+                })?;
+                expected_legacy_refs.insert((hash.to_string(), "body"));
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(hash) = response_hash.as_deref() {
+            read_json_object_required(conn, hash)?;
+            expected_legacy_refs.insert((hash.to_string(), "response"));
+        }
+        if let Some(hash) = error_hash.as_deref() {
+            read_json_object_required(conn, hash)?;
+            expected_legacy_refs.insert((hash.to_string(), "error"));
+        }
+        validate_legacy_request_refs(conn, request_id, &expected_legacy_refs)?;
+
+        if let Some(hash) = body_hash.as_deref() {
+            let role = if body_manifest.is_some() {
+                RequestObjectRole::BodyManifest
+            } else {
+                RequestObjectRole::BodyJson
+            };
+            insert_request_ref(conn, request_id, hash, role)?;
+        }
+        if let Some(manifest) = body_manifest.as_ref() {
+            install_manifest_refs(conn, request_id, &manifest.refs)?;
+        }
+        if let Some(hash) = response_hash.as_deref() {
+            insert_request_ref(conn, request_id, hash, RequestObjectRole::Response)?;
+        }
+        if let Some(hash) = error_hash.as_deref() {
+            insert_request_ref(conn, request_id, hash, RequestObjectRole::Error)?;
+        }
+    }
+    Ok(())
+}
+
+fn legacy_object_kind(conn: &Connection, hash: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT kind FROM objects_legacy WHERE hash = ?1",
+        [hash],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| StoreError::MissingObject {
+        reference: hash.to_string(),
+    })
+}
+
+fn validate_legacy_request_refs(
+    conn: &Connection,
+    request_id: i64,
+    expected: &BTreeSet<(String, &'static str)>,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT object_hash, role FROM request_object_refs_legacy
+         WHERE request_attempt_id = ?1
+         ORDER BY object_hash, role",
+    )?;
+    let rows = stmt.query_map([request_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut actual = BTreeSet::new();
+    for row in rows {
+        let (hash, role) = row?;
+        actual.insert((hash, legacy_role_name(&role)?));
+    }
+    if &actual == expected {
+        return Ok(());
+    }
+
+    let missing = expected.difference(&actual).next();
+    let unexpected = actual.difference(expected).next();
+    Err(StoreError::Integrity(format!(
+        "legacy request {request_id} object references disagree with payload hashes: missing {missing:?}; unexpected {unexpected:?}"
+    )))
+}
+
+fn legacy_role_name(role: &str) -> Result<&'static str> {
+    match role {
+        "body" => Ok("body"),
+        "body_top" => Ok("body_top"),
+        "body_item" => Ok("body_item"),
+        "body_parent" => Ok("body_parent"),
+        "response" => Ok("response"),
+        "error" => Ok("error"),
+        _ => Err(StoreError::Integrity(format!(
+            "unknown legacy request object role {role:?}"
+        ))),
+    }
 }
 
 fn request_error_summary(error: &protocol::request_log::RequestError) -> String {
@@ -941,6 +1463,198 @@ fn push_i64(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest(parent_hash: Option<String>, checkpoint: bool) -> RequestBodyManifest {
+        RequestBodyManifest {
+            version: 1,
+            input_key: Some("messages".into()),
+            top_hash: "f".repeat(64),
+            parent_hash,
+            checkpoint,
+            item_hashes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn manifest_chain_accepts_exact_depth_limit_and_rejects_limit_plus_one() {
+        fn chain(
+            count: usize,
+        ) -> (
+            String,
+            std::collections::HashMap<String, RequestBodyManifest>,
+        ) {
+            let mut manifests = std::collections::HashMap::new();
+            let mut parent = None;
+            for index in 0..count {
+                let hash = format!("{index:064x}");
+                manifests.insert(hash.clone(), manifest(parent, index == 0));
+                parent = Some(hash);
+            }
+            (parent.expect("chain is nonempty"), manifests)
+        }
+
+        let (root, manifests) = chain(MAX_REQUEST_MANIFEST_DEPTH);
+        let (walked, _) =
+            collect_manifest_chain(&root, |hash| Ok((manifests.get(hash).unwrap().clone(), 1)))
+                .unwrap();
+        assert_eq!(walked.len(), MAX_REQUEST_MANIFEST_DEPTH);
+
+        let (root, manifests) = chain(MAX_REQUEST_MANIFEST_DEPTH + 1);
+        let err =
+            collect_manifest_chain(&root, |hash| Ok((manifests.get(hash).unwrap().clone(), 1)))
+                .unwrap_err();
+        assert!(err.to_string().contains("manifest depth"), "{err}");
+    }
+
+    #[test]
+    fn manifest_chain_rejects_cycles_before_revisiting_an_object() {
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let manifests = std::collections::HashMap::from([
+            (first.clone(), manifest(Some(second.clone()), false)),
+            (second, manifest(Some(first.clone()), false)),
+        ]);
+
+        let err =
+            collect_manifest_chain(&first, |hash| Ok((manifests.get(hash).unwrap().clone(), 1)))
+                .unwrap_err();
+        assert!(err.to_string().contains("manifest cycle"), "{err}");
+    }
+
+    #[test]
+    fn manifest_byte_limit_accepts_exact_boundary_and_rejects_one_over() {
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let manifests = std::collections::HashMap::from([
+            (root.clone(), manifest(Some(parent.clone()), false)),
+            (parent.clone(), manifest(None, true)),
+        ]);
+        let exact_sizes = std::collections::HashMap::from([
+            (
+                root.clone(),
+                usize::try_from(MAX_REQUEST_MANIFEST_DECODED_BYTES - 1).unwrap(),
+            ),
+            (parent.clone(), 1),
+        ]);
+        let (_, decoded_bytes) = collect_manifest_chain(&root, |hash| {
+            Ok((manifests.get(hash).unwrap().clone(), exact_sizes[hash]))
+        })
+        .unwrap();
+        assert_eq!(decoded_bytes, MAX_REQUEST_MANIFEST_DECODED_BYTES);
+
+        let err = collect_manifest_chain(&root, |hash| {
+            let size = if hash == root {
+                usize::try_from(MAX_REQUEST_MANIFEST_DECODED_BYTES).unwrap()
+            } else {
+                1
+            };
+            Ok((manifests.get(hash).unwrap().clone(), size))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds limit"), "{err}");
+    }
+
+    #[test]
+    fn manifest_walk_rejects_missing_component_objects() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let top_hash = object::put_object(&conn, b"{}", ObjectCompression::none())
+            .unwrap()
+            .hash()
+            .to_string();
+        let missing = "d".repeat(64);
+        let manifest = RequestBodyManifest {
+            version: 1,
+            input_key: Some("messages".into()),
+            top_hash,
+            parent_hash: None,
+            checkpoint: true,
+            item_hashes: vec![missing.clone()],
+        };
+        let root = put_json_object(&conn, Some(&manifest), ObjectCompression::none())
+            .unwrap()
+            .unwrap();
+
+        let err = walk_body_manifest(&conn, None, &root).unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::MissingObject { reference } if reference == missing
+        ));
+    }
+
+    #[test]
+    fn manifest_walk_rejects_reference_role_mismatch() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        let stored = put_request_body(&conn, Some(&body), ObjectCompression::none())
+            .unwrap()
+            .unwrap();
+        let StoredRequestBody::Manifest { hash, refs } = stored else {
+            panic!("array request body was not stored as a manifest");
+        };
+        conn.execute("INSERT INTO request_attempts (started_at) VALUES (1)", [])
+            .unwrap();
+        let request_id = conn.last_insert_rowid();
+        insert_request_ref(&conn, request_id, &hash, RequestObjectRole::BodyManifest).unwrap();
+        for hash in &refs.top_hashes {
+            insert_request_ref(&conn, request_id, hash, RequestObjectRole::BodyTop).unwrap();
+        }
+        for hash in &refs.item_hashes {
+            insert_request_ref(&conn, request_id, hash, RequestObjectRole::BodyTop).unwrap();
+        }
+
+        let err = walk_body_manifest(&conn, Some(request_id), &hash).unwrap_err();
+        assert!(err.to_string().contains("missing [body_item:"), "{err}");
+    }
+
+    #[test]
+    fn request_payloads_rejects_unexpected_body_references() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let body_hash = object::put_object(&conn, b"{}", ObjectCompression::none())
+            .unwrap()
+            .hash()
+            .to_string();
+        let extra_hash = object::put_object(&conn, b"[]", ObjectCompression::none())
+            .unwrap()
+            .hash()
+            .to_string();
+        conn.execute("INSERT INTO request_attempts (started_at) VALUES (1)", [])
+            .unwrap();
+        let request_id = conn.last_insert_rowid();
+        insert_request_ref(&conn, request_id, &body_hash, RequestObjectRole::BodyJson).unwrap();
+        insert_request_ref(&conn, request_id, &extra_hash, RequestObjectRole::BodyItem).unwrap();
+
+        let err = request_payloads(&conn, request_id).unwrap_err();
+        assert!(err.to_string().contains("unexpected [body_item:"), "{err}");
+    }
+
+    #[test]
+    fn identical_bytes_can_serve_different_request_roles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let hash = object::put_object(&conn, b"{}", ObjectCompression::none())
+            .unwrap()
+            .hash()
+            .to_string();
+        conn.execute("INSERT INTO request_attempts (started_at) VALUES (1)", [])
+            .unwrap();
+        let request_id = conn.last_insert_rowid();
+        insert_request_ref(&conn, request_id, &hash, RequestObjectRole::BodyJson).unwrap();
+        insert_request_ref(&conn, request_id, &hash, RequestObjectRole::Response).unwrap();
+
+        let payloads = request_payloads(&conn, request_id).unwrap().unwrap();
+        assert_eq!(payloads.body, Some(serde_json::json!({})));
+        assert_eq!(payloads.response, Some(serde_json::json!({})));
+        let orphan = object::put_object(&conn, b"orphan", ObjectCompression::none())
+            .unwrap()
+            .hash()
+            .to_string();
+        assert_eq!(object::delete_unreachable_objects(&conn).unwrap(), 1);
+        assert!(object::object_meta(&conn, &hash).unwrap().is_some());
+        assert!(object::object_meta(&conn, &orphan).unwrap().is_none());
+    }
 
     #[test]
     fn request_stats_latest_queries_use_started_at_index() {
