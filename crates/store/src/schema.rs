@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
@@ -79,7 +79,7 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
         conn.execute_batch(LEGACY_SCHEMA_V4)?;
         current = 2;
     }
-    if (2..SCHEMA_VERSION).contains(&current) {
+    if (2..=4).contains(&current) {
         migrate_to_v5(conn, current < 4)?;
     }
     ensure_schema_shape(conn)?;
@@ -893,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v5_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v6_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -975,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v5_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_to_v6_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "ignore_check_constraints", true)
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v5_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v6_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v5_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v6_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1206,6 +1206,32 @@ mod tests {
             )
             .unwrap(),
             (hash, "body_json".to_string())
+        );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v5_to_v6_migration_preserves_the_current_schema_without_rebuilding() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO store_meta (key, value) VALUES ('sentinel', 'kept')",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 5).unwrap();
+
+        migrate(&mut conn, "test-v6").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM store_meta WHERE key = 'sentinel'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "kept"
         );
         validate_read_only_schema(&conn).unwrap();
     }

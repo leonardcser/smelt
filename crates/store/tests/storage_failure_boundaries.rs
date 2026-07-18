@@ -9,6 +9,7 @@ const PROBE_READY: &str = "SMELT_STORAGE_PROBE_READY";
 const PROBE_GO: &str = "SMELT_STORAGE_PROBE_GO";
 const PROBE_RESULT: &str = "SMELT_STORAGE_PROBE_RESULT";
 const PROBE_RELEASE: &str = "SMELT_STORAGE_PROBE_RELEASE";
+const SESSION_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
 fn storage_subprocess_probe() {
@@ -24,7 +25,8 @@ fn storage_subprocess_probe() {
             touch(&ready);
             wait_for(&go);
             let session_dir = db_path.parent().expect("database parent");
-            match smelt_store::OwnedSessionWriter::open(session_dir, "probe-session") {
+            let root = session_dir.parent().expect("sessions root");
+            match smelt_store::OwnedSessionWriter::open(root, SESSION_ID) {
                 Ok(_writer) => {
                     std::fs::write(required_path(PROBE_RESULT), "owned")
                         .expect("write claim result");
@@ -42,10 +44,35 @@ fn storage_subprocess_probe() {
         }
         "crash-owner" => {
             let session_dir = db_path.parent().expect("database parent");
-            let _writer = smelt_store::OwnedSessionWriter::open(session_dir, "probe-session")
+            let root = session_dir.parent().expect("sessions root");
+            let _writer = smelt_store::OwnedSessionWriter::open(root, SESSION_ID)
                 .expect("claim session writer");
             touch(&ready);
             std::process::abort();
+        }
+        "closed-owner" => {
+            let session_dir = db_path.parent().expect("database parent");
+            let root = session_dir.parent().expect("sessions root");
+            let mut writer = smelt_store::OwnedSessionWriter::open(root, SESSION_ID)
+                .expect("claim session writer");
+            writer.invalidate_connection();
+            touch(&ready);
+            wait_for(&go);
+            writer.reopen_connection().expect("reopen owned database");
+        }
+        "legacy-lock" => {
+            let session_dir = db_path.parent().expect("database parent");
+            let legacy_path = session_dir.join("session.lock");
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(legacy_path)
+                .expect("open legacy lock");
+            file.try_lock().expect("acquire legacy lock");
+            touch(&ready);
+            wait_for(&go);
         }
         "lock" => {
             let conn = rusqlite::Connection::open(&db_path).expect("open lock database");
@@ -72,14 +99,53 @@ fn storage_subprocess_probe() {
     }
 }
 
+fn create_published_session(root: &Path) -> PathBuf {
+    let mut writer =
+        smelt_store::OwnedSessionWriter::open(root, SESSION_ID).expect("create staged database");
+    let command = smelt_store::SessionCommit {
+        session_id: SESSION_ID.into(),
+        save_id: smelt_store::SaveId::new(1),
+        expected: smelt_store::StoreHead::default(),
+        identity: smelt_store::SessionIdentity {
+            id: SESSION_ID.into(),
+            created_at: 1,
+            parent_id: None,
+        },
+        metadata: smelt_store::SessionMetadata {
+            title: None,
+            slug: None,
+            first_user_message: None,
+            cwd: None,
+            mode: None,
+            reasoning_effort: None,
+            model: None,
+            fast_mode: None,
+            accounting_json: None,
+            checkpoint_json: None,
+            context_tokens: None,
+            context_tokens_history_len: None,
+            display_context_tokens: None,
+            session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
+            updated_at: 1,
+        },
+        history: smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::ZERO,
+            final_len: smelt_store::HistoryLen::ZERO,
+            items: Vec::new(),
+        },
+        side_tables: smelt_store::SideTableSuffixes::default(),
+        descriptors: None,
+    };
+    writer.commit_session(&command).expect("commit session");
+    let session_dir = writer.publish().expect("publish session");
+    writer.release().expect("release database owner");
+    session_dir.join("session.db")
+}
+
 #[test]
 fn simultaneous_process_claims_have_one_lifetime_owner() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = dir.path().join("session.db");
-    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
-        .expect("create database")
-        .release()
-        .expect("release database owner");
+    let db_path = create_published_session(dir.path());
 
     let first_ready = dir.path().join("first.ready");
     let second_ready = dir.path().join("second.ready");
@@ -123,11 +189,7 @@ fn simultaneous_process_claims_have_one_lifetime_owner() {
 #[test]
 fn process_crash_releases_lifetime_ownership() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = dir.path().join("session.db");
-    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
-        .expect("create database")
-        .release()
-        .expect("release database owner");
+    let db_path = create_published_session(dir.path());
 
     let ready = dir.path().join("crash-owner.ready");
     let unused_go = dir.path().join("unused.go");
@@ -136,19 +198,70 @@ fn process_crash_releases_lifetime_ownership() {
     let status = owner.wait().expect("wait for crashing owner");
     assert!(!status.success(), "crash owner unexpectedly exited cleanly");
 
-    let replacement = smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
+    let replacement = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID)
         .expect("operating system releases the crashed process lock");
     assert_eq!(replacement.owner().pid, std::process::id());
 }
 
 #[test]
+fn root_lease_remains_exclusive_while_sqlite_is_closed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = create_published_session(dir.path());
+    let ready = dir.path().join("closed-owner.ready");
+    let release = dir.path().join("closed-owner.release");
+    let mut owner = spawn_probe("closed-owner", &db_path, &ready, &release, None, None);
+    wait_for(&ready);
+
+    assert!(matches!(
+        smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
+    assert!(matches!(
+        smelt_store::SessionMaintenance::delete_session(dir.path(), SESSION_ID),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
+
+    touch(&release);
+    assert_success(owner.wait().expect("wait for closed owner"));
+}
+
+#[test]
+fn legacy_lock_holder_blocks_root_lease_migration() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = create_published_session(dir.path());
+    let connection = rusqlite::Connection::open(&db_path).expect("open database");
+    connection
+        .pragma_update(None, "user_version", 5)
+        .expect("downgrade version marker");
+    drop(connection);
+    let ready = dir.path().join("legacy-lock.ready");
+    let release = dir.path().join("legacy-lock.release");
+    let mut legacy = spawn_probe("legacy-lock", &db_path, &ready, &release, None, None);
+    wait_for(&ready);
+
+    assert!(matches!(
+        smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
+
+    touch(&release);
+    assert_success(legacy.wait().expect("wait for legacy lock"));
+    let replacement = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID)
+        .expect("migrate after legacy owner exits");
+    assert_eq!(
+        smelt_store::SessionReader::open_database(&db_path)
+            .expect("read migrated database")
+            .schema_version()
+            .unwrap(),
+        smelt_store::SCHEMA_VERSION
+    );
+    replacement.release().unwrap();
+}
+
+#[test]
 fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = dir.path().join("session.db");
-    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
-        .expect("create database")
-        .release()
-        .expect("release database owner");
+    let db_path = create_published_session(dir.path());
     let db = rusqlite::Connection::open(&db_path).expect("open database");
     db.busy_timeout(Duration::from_secs(5))
         .expect("set busy timeout");
@@ -215,11 +328,7 @@ fn lock_contention_shorter_and_longer_than_busy_timeout_is_distinct() {
 #[test]
 fn process_crash_rolls_back_an_open_canonical_transaction() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let db_path = dir.path().join("session.db");
-    smelt_store::OwnedSessionWriter::open(dir.path(), "probe-session")
-        .expect("create database")
-        .release()
-        .expect("release database owner");
+    let db_path = create_published_session(dir.path());
 
     let ready = dir.path().join("crash.ready");
     let unused_go = dir.path().join("unused.go");

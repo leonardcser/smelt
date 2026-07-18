@@ -207,6 +207,7 @@ pub(crate) fn item_hash(item: &HistoryItem) -> Result<String> {
     Ok(sha256_hex(json.as_bytes()))
 }
 
+#[cfg(debug_assertions)]
 pub(crate) fn incoming_object_hashes(
     items: &[HistoryItem],
     descriptors: Option<&[TranscriptDescriptorRecord]>,

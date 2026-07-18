@@ -26,7 +26,8 @@ use crate::session_commit::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenMode {
-    ReadWrite,
+    CreateOrMigrate,
+    CurrentWriter,
     ReadOnly,
 }
 
@@ -40,7 +41,7 @@ pub(crate) struct OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         Self {
-            mode: OpenMode::ReadWrite,
+            mode: OpenMode::CreateOrMigrate,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             object_compression: ObjectCompression::default(),
         }
@@ -127,28 +128,46 @@ impl SessionDb {
         )
     }
 
+    pub(crate) fn open_current(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_options(
+            path,
+            OpenOptions {
+                mode: OpenMode::CurrentWriter,
+                ..OpenOptions::default()
+            },
+        )
+    }
+
     pub(crate) fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         let _perf = smelt_perf::perf::begin(match options.mode {
-            OpenMode::ReadWrite => "store:db:open_read_write",
+            OpenMode::CreateOrMigrate | OpenMode::CurrentWriter => "store:db:open_read_write",
             OpenMode::ReadOnly => "store:db:open_read_only",
         });
         let path = path.as_ref().to_path_buf();
-        if matches!(options.mode, OpenMode::ReadWrite) {
+        if matches!(
+            options.mode,
+            OpenMode::CreateOrMigrate | OpenMode::CurrentWriter
+        ) {
             prepare_writable_path(&path)?;
         }
 
         let flags = match options.mode {
-            OpenMode::ReadWrite => {
+            OpenMode::CreateOrMigrate => {
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
             }
+            OpenMode::CurrentWriter => OpenFlags::SQLITE_OPEN_READ_WRITE,
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
         } | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let mut conn = Connection::open_with_flags(&path, flags)?;
         apply_pragmas(&conn, options.mode)?;
 
         match options.mode {
-            OpenMode::ReadWrite => {
+            OpenMode::CreateOrMigrate => {
                 schema::migrate(&mut conn, &options.app_version)?;
+                secure_sqlite_files(&path)?;
+            }
+            OpenMode::CurrentWriter => {
+                schema::validate_read_only_schema(&conn)?;
                 secure_sqlite_files(&path)?;
             }
             OpenMode::ReadOnly => schema::validate_read_only_schema(&conn)?,
@@ -541,6 +560,15 @@ impl SessionDb {
 
     pub(crate) fn last_session_commit_fingerprint(&self) -> Result<Option<String>> {
         persisted_session_commit_fingerprint(&self.conn)
+    }
+
+    pub(crate) fn last_session_commit(&self) -> Result<Option<(String, SaveReceipt)>> {
+        persisted_session_commit(&self.conn)
+            .map(|commit| commit.map(|commit| (commit.fingerprint, commit.receipt)))
+    }
+
+    pub(crate) fn verify_writer_owner(&self, token: &str) -> Result<()> {
+        meta::verify_writer_owner(&self.conn, token)
     }
 
     pub(crate) fn claim_writer_owner(&mut self, token: &str, owner: &WriterOwner) -> Result<()> {
@@ -1495,8 +1523,10 @@ struct PreparedSessionCommit {
     history_start: usize,
     history_final_len: usize,
     history_hashes: Vec<String>,
+    #[cfg(debug_assertions)]
     history_object_hashes: Vec<Vec<String>>,
     descriptor_start: Option<usize>,
+    #[cfg(debug_assertions)]
     descriptor_object_hashes: Vec<String>,
     side_tables: PreparedSideTables,
 }
@@ -1586,6 +1616,7 @@ fn prepare_session_commit(
             }
         }
     }
+    #[cfg(debug_assertions)]
     let history_object_hashes = command
         .history
         .items
@@ -1593,6 +1624,7 @@ fn prepare_session_commit(
         .map(|item| history::incoming_object_hashes(std::slice::from_ref(item), None))
         .collect::<Result<Vec<_>>>()
         .map_err(session_commit_failure_from_store_error)?;
+    #[cfg(debug_assertions)]
     let descriptor_object_hashes = history::incoming_object_hashes(
         &[],
         command
@@ -1608,8 +1640,10 @@ fn prepare_session_commit(
         history_start,
         history_final_len,
         history_hashes,
+        #[cfg(debug_assertions)]
         history_object_hashes,
         descriptor_start,
+        #[cfg(debug_assertions)]
         descriptor_object_hashes,
         side_tables,
     })
@@ -2151,6 +2185,16 @@ fn persisted_session_commit_fingerprint(conn: &Connection) -> Result<Option<Stri
         .transpose()
 }
 
+fn persisted_session_commit(conn: &Connection) -> Result<Option<PersistedSessionCommit>> {
+    persisted_session_commit_value(conn)?
+        .map(|value| {
+            serde_json::from_value(value).map_err(|err| {
+                StoreError::Integrity(format!("invalid persisted session commit: {err}"))
+            })
+        })
+        .transpose()
+}
+
 fn idempotent_session_commit_receipt(
     conn: &Connection,
     fingerprint: &str,
@@ -2624,7 +2668,7 @@ fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
     )?;
     conn.busy_timeout(SESSION_BUSY_TIMEOUT)?;
     match mode {
-        OpenMode::ReadWrite => conn.execute_batch(&format!(
+        OpenMode::CreateOrMigrate | OpenMode::CurrentWriter => conn.execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
              PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT_BYTES};

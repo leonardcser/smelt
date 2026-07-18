@@ -1090,14 +1090,8 @@ impl TuiApp {
                 return;
             }
         };
-        let staged_fork = match session::StagedSessionDir::create(&fork_id) {
-            Ok(staged) => staged,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to stage fork directory: {err}"));
-                return;
-            }
-        };
-        let fork_work_dir = staged_fork.path().to_path_buf();
+        let fork_dir = session::session_dir(&fork_id);
+        let fork_root = fork_dir.parent().expect("fork session root");
         let identity = match session::store_identity_from_session(&forked) {
             Ok(identity) => identity,
             Err(err) => {
@@ -1128,14 +1122,14 @@ impl TuiApp {
                 return;
             }
         };
-        let mut maintenance =
-            match smelt_store::SessionMaintenance::open(&fork_work_dir, &forked.id) {
-                Ok(maintenance) => maintenance,
-                Err(err) => {
-                    self.notify_error_sticky(format!("failed to own fork destination: {err}"));
-                    return;
-                }
-            };
+        let mut maintenance = match smelt_store::SessionMaintenance::open(fork_root, &forked.id) {
+            Ok(maintenance) => maintenance,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to own fork destination: {err}"));
+                return;
+            }
+        };
+        let fork_work_dir = maintenance.session_dir().to_path_buf();
         if let Err(err) = maintenance.import_prefix_from(&source, &identity, &metadata, history_len)
         {
             self.notify_error_sticky(format!("failed to fork session store: {err}"));
@@ -1151,17 +1145,17 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to refresh fork metadata: {err}"));
             return;
         }
-        if let Err(err) = maintenance.release() {
-            self.notify_error_sticky(format!("failed to release fork destination: {err}"));
-            return;
-        }
-        let fork_dir = match staged_fork.publish() {
+        let fork_dir = match maintenance.publish() {
             Ok(path) => path,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to publish fork destination: {err}"));
                 return;
             }
         };
+        if let Err(err) = maintenance.release() {
+            self.notify_error_sticky(format!("failed to release fork destination: {err}"));
+            return;
+        }
         let Some((header, store_ref)) = session::load_store_header_for_dir(fork_dir.clone()) else {
             self.notify_error_sticky("failed to load forked session header".into());
             return;

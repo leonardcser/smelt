@@ -60,6 +60,18 @@ with `COMPAT(<id>)`.
   - `session_state_rejects_checkpoint_first_live_index_past_history`
   - `store_backed_resume_tolerates_bad_checkpoint_without_repairing_database`
 
+## storage-root-lease
+
+- Remove after: schema versions older than v6 are no longer supported for
+  writable open or migration
+- Why: a pre-v6 binary coordinates through `<session>/session.lock`, so migration
+  must acquire the stable root lock first and the legacy lock second, then hold
+  both through schema migration and owner-token claim
+- Code:
+  - `crates/store/src/access.rs`: migration-only `LegacySessionLock`
+- Tests:
+  - `legacy_lock_holder_blocks_root_lease_migration`
+
 ## session-writer-lease-metadata
 
 - Remove after: sessions last written by pre-lock alpha builds no longer need to
@@ -79,7 +91,7 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/store/src/schema.rs`: v2/v3 to v4 request-attempt migration
 - Tests:
-  - `v2_to_v4_migration_preserves_data_and_removes_dead_schema`
+  - `v2_to_v6_migration_preserves_data_and_removes_dead_schema`
 
 ## allowed-session-full-materialization
 

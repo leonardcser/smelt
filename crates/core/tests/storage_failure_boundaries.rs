@@ -19,8 +19,9 @@ fn storage_owner_probe() {
         .file_name()
         .and_then(|name| name.to_str())
         .expect("session id");
-    let _writer = smelt_store::OwnedSessionWriter::open(session_dir, session_id)
-        .expect("claim session writer");
+    let root = session_dir.parent().expect("sessions root");
+    let _writer =
+        smelt_store::OwnedSessionWriter::open(root, session_id).expect("claim session writer");
     touch(&ready);
     wait_for(&release);
 }
@@ -31,9 +32,13 @@ fn delete_refuses_session_owned_by_another_process() {
     std::env::set_var("XDG_STATE_HOME", state.path());
     let id = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let session_dir = smelt_core::session::dir_for_id(id);
-    std::fs::create_dir_all(&session_dir).unwrap();
+    let mut session = smelt_core::session::Session::new(1, PathBuf::from("/tmp"));
+    session.id = id.into();
+    session.history = vec![protocol::HistoryItem::user(protocol::Content::text(
+        "owned",
+    ))];
+    smelt_core::session::save_result(&session).expect("create database");
     let db_path = session_dir.join("session.db");
-    drop(smelt_store::SessionDb::open(&db_path).expect("create database"));
     let ready = state.path().join("delete-owner.ready");
     let release = state.path().join("delete-owner.release");
     let mut owner = spawn_owner(&db_path, &ready, &release);

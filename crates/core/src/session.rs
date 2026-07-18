@@ -1037,148 +1037,13 @@ pub fn session_dir(id: &crate::session_id::SessionId) -> PathBuf {
     sessions_dir().join(id.as_str())
 }
 
-const SESSION_STAGING_DIR: &str = ".staging";
 const DERIVED_CACHE_FORMAT_VERSION: u32 = 1;
-const ABANDONED_SESSION_ARTIFACT_AGE: std::time::Duration = std::time::Duration::from_secs(60);
-
-#[derive(Debug)]
-pub struct StagedSessionDir {
-    path: PathBuf,
-    destination: PathBuf,
-    published: bool,
-}
-
-impl StagedSessionDir {
-    pub fn create(id: &crate::session_id::SessionId) -> std::io::Result<Self> {
-        let root = sessions_dir();
-        create_private_dir_all(&root)?;
-        let staging_root = root.join(SESSION_STAGING_DIR);
-        create_private_dir_all(&staging_root)?;
-        let created_at_ms = now_ms();
-        for _ in 0..16 {
-            let nonce = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = staging_root.join(format!(
-                "{}.{}.{}.{}",
-                id.as_str(),
-                std::process::id(),
-                created_at_ms,
-                nonce
-            ));
-            let mut builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            match builder.create(&path) {
-                Ok(()) => {
-                    return Ok(Self {
-                        path,
-                        destination: session_dir(id),
-                        published: false,
-                    });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(err),
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "could not allocate unique staging directory for session {}",
-                id.as_str()
-            ),
-        ))
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn destination(&self) -> &Path {
-        &self.destination
-    }
-
-    pub fn publish(mut self) -> std::io::Result<PathBuf> {
-        match fs::symlink_metadata(&self.destination) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "session destination already exists: {}",
-                        self.destination.display()
-                    ),
-                ));
-            }
-        }
-        fs::rename(&self.path, &self.destination)?;
-        self.published = true;
-        sync_directory(
-            self.destination
-                .parent()
-                .expect("session destination parent"),
-        )?;
-        Ok(self.destination.clone())
-    }
-}
-
-impl Drop for StagedSessionDir {
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-}
+const ARTIFACT_CLEANUP_BATCH: usize = 64;
 
 pub fn cleanup_abandoned_session_artifacts() {
     let root = sessions_dir();
-    let staging_root = root.join(SESSION_STAGING_DIR);
-    let staging_is_private_dir = fs::symlink_metadata(&staging_root)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
-    if staging_is_private_dir {
-        if let Ok(entries) = fs::read_dir(&staging_root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-                if entry.file_name() == std::ffi::OsStr::new(".trash") && is_dir {
-                    let _ = fs::remove_dir_all(path);
-                    continue;
-                }
-                if is_dir && staging_artifact_is_abandoned(&entry.file_name()) {
-                    let _ = smelt_store::SessionMaintenance::delete_session(path);
-                }
-            }
-        }
-    }
-    let trash_root = root.join(".trash");
-    let trash_is_private_dir = fs::symlink_metadata(&trash_root)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
-    if trash_is_private_dir {
-        if let Ok(entries) = fs::read_dir(&trash_root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    let _ = fs::remove_dir_all(path);
-                } else {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
-    }
+    let _ = smelt_store::cleanup_abandoned_session_artifacts(&root, ARTIFACT_CLEANUP_BATCH);
     cleanup_stale_derived_temps(&root);
-}
-
-fn staging_artifact_is_abandoned(name: &std::ffi::OsStr) -> bool {
-    let Some(created_at_ms) = name
-        .to_str()
-        .and_then(|name| name.rsplit('.').nth(1))
-        .and_then(|value| value.parse::<u64>().ok())
-    else {
-        return false;
-    };
-    now_ms().saturating_sub(created_at_ms) >= ABANDONED_SESSION_ARTIFACT_AGE.as_millis() as u64
 }
 
 fn cleanup_stale_derived_temps(root: &Path) {
@@ -1262,34 +1127,23 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
     let _perf = smelt_perf::perf::begin("session:write");
     let session_id = crate::session_id::SessionId::parse(&session.id)
         .map_err(|err| smelt_store::StoreError::Integrity(err.to_string()))?;
-    let session_dir = session_dir(&session_id);
-    let staged = match fs::symlink_metadata(&session_dir) {
-        Ok(_) => None,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Some(StagedSessionDir::create(&session_id)?)
-        }
-        Err(err) => return Err(err.into()),
-    };
-    let writer_dir = staged
-        .as_ref()
-        .map_or(session_dir.as_path(), |staged| staged.path());
-
-    let mut writer = smelt_store::OwnedSessionWriter::open(writer_dir, &session.id)?;
+    create_private_dir_all(&sessions_dir())?;
+    let mut writer = smelt_store::OwnedSessionWriter::open(sessions_dir(), session_id.as_str())?;
     let expected = writer.store_head()?;
     let command = store_commit_from_session(session, expected, smelt_store::SaveId::ZERO, 0)?;
     let receipt = writer
         .commit_session(&command)
         .map_err(session_commit_failure_to_store_error)?;
-    if let Err(err) = refresh_derived_files(writer_dir) {
+    if let Err(err) = refresh_derived_files(writer.session_dir()) {
         eprintln!(
             "smelt: failed to refresh derived files for session {}: {err}",
             session.id
         );
     }
-    writer.release()?;
-    if let Some(staged) = staged {
-        staged.publish()?;
+    if writer.is_staged() {
+        writer.publish()?;
     }
+    writer.release()?;
     Ok(receipt)
 }
 
@@ -1982,7 +1836,10 @@ pub fn backfill_transcript_descriptor_records_from_history_range(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| smelt_store::StoreError::Integrity("session directory has no id".into()))?;
-    let mut maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
+    let root = session_dir.parent().ok_or_else(|| {
+        smelt_store::StoreError::Integrity("session directory has no parent".into())
+    })?;
+    let mut maintenance = smelt_store::SessionMaintenance::open(root, session_id)?;
     let reader = smelt_store::SessionReader::open_existing(session_dir)?;
     let history = reader.read_history_items_range(history_range.clone())?;
     let records = transcript_descriptor_records_from_history_items(
@@ -2282,7 +2139,7 @@ pub fn delete(id_or_prefix: &str) -> SessionStoreResult<()> {
     }
     crate::session_store::reject_symlink(&session_dir, "delete")?;
     crate::session_store::reject_symlink(&session_dir.join("session.db"), "delete")?;
-    smelt_store::SessionMaintenance::delete_session(&session_dir)
+    smelt_store::SessionMaintenance::delete_session(&root, id.as_str())
         .map_err(|err| crate::session_store::store_error("delete session", &session_dir, err))
 }
 
@@ -2645,9 +2502,10 @@ mod tests {
         let first = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let second = "0123ffff89abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         for id in [first, second] {
-            let dir = sessions_dir().join(id);
-            fs::create_dir_all(&dir).expect("create valid session dir");
-            fs::write(dir.join("session.db"), "fixture").expect("write fixture database");
+            let mut session = fixture_session();
+            session.id = id.into();
+            session.history.push(user_item("deletable"));
+            save_result(&session).expect("create valid session");
         }
 
         assert!(matches!(
@@ -4003,52 +3861,52 @@ mod tests {
     fn staged_session_is_hidden_until_atomic_publication() {
         let state = tempfile::tempdir().unwrap();
         let _guard = crate::test_util::isolate_xdg_state(state.path());
-        let id = crate::session_id::SessionId::parse(TEST_SESSION_ID).unwrap();
-        let staged = StagedSessionDir::create(&id).unwrap();
-        let staged_path = staged.path().to_path_buf();
-        let destination = staged.destination().to_path_buf();
-        fs::write(staged.path().join("marker"), "complete").unwrap();
+        let mut session = fixture_session();
+        session.id = TEST_SESSION_ID.into();
+        let mut writer =
+            smelt_store::OwnedSessionWriter::open(sessions_dir(), TEST_SESSION_ID).unwrap();
+        let staged_path = writer.session_dir().to_path_buf();
+        let destination = dir_for_id(TEST_SESSION_ID);
+        writer
+            .commit_session(&initial_store_commit_from_session(&session).unwrap())
+            .unwrap();
 
         assert!(!destination.exists());
-        let published = staged.publish().unwrap();
+        let published = writer.publish().unwrap();
 
         assert_eq!(published, destination);
         assert!(!staged_path.exists());
-        assert_eq!(
-            fs::read_to_string(destination.join("marker")).unwrap(),
-            "complete"
-        );
+        assert!(destination.join("session.db").is_file());
     }
 
     #[test]
-    fn lifecycle_cleanup_removes_abandoned_but_not_active_staging_and_trash() {
+    fn lifecycle_cleanup_removes_abandoned_but_not_active_staging() {
         let state = tempfile::tempdir().unwrap();
         let _guard = crate::test_util::isolate_xdg_state(state.path());
-        let staging_root = sessions_dir().join(SESSION_STAGING_DIR);
+        let staging_root = sessions_dir().join(".staging");
         create_private_dir_all(&staging_root).unwrap();
-        let abandoned_path = staging_root.join(format!("{TEST_SESSION_ID}.1.0.0"));
+
+        let mut abandoned = fixture_session();
+        abandoned.id = TEST_SESSION_ID.into();
+        let abandoned_path = staging_root.join(format!("{TEST_SESSION_ID}.1.0.orphan"));
         create_private_dir_all(&abandoned_path).unwrap();
+        let mut abandoned_db =
+            smelt_store::SessionDb::open(abandoned_path.join("session.db")).unwrap();
+        abandoned_db
+            .apply_session_commit(&initial_store_commit_from_session(&abandoned).unwrap())
+            .unwrap();
+        drop(abandoned_db);
 
         let active_id = crate::session_id::SessionId::parse(&numbered_session_id(2)).unwrap();
-        let active = StagedSessionDir::create(&active_id).unwrap();
-        let active_path = active.path().to_path_buf();
-        let writer =
-            smelt_store::OwnedSessionWriter::open(&active_path, active_id.as_str()).unwrap();
-        let recent_id = crate::session_id::SessionId::parse(&numbered_session_id(3)).unwrap();
-        let recent = StagedSessionDir::create(&recent_id).unwrap();
-        let recent_path = recent.path().to_path_buf();
-        let trash_path = sessions_dir().join(".trash/crashed-delete");
-        create_private_dir_all(&trash_path).unwrap();
-        fs::write(trash_path.join("session.db"), "tombstone").unwrap();
+        let active =
+            smelt_store::OwnedSessionWriter::open(sessions_dir(), active_id.as_str()).unwrap();
+        let active_path = active.session_dir().to_path_buf();
 
         cleanup_abandoned_session_artifacts();
 
         assert!(!abandoned_path.exists());
         assert!(active_path.exists());
-        assert!(recent_path.exists());
-        assert!(!trash_path.exists());
-        writer.release().unwrap();
-        drop((active, recent));
+        active.release().unwrap();
     }
 
     #[cfg(unix)]
@@ -4062,7 +3920,7 @@ mod tests {
         let external = tempfile::tempdir().unwrap();
         let sentinel = external.path().join("sentinel");
         fs::write(&sentinel, "keep").unwrap();
-        symlink(external.path(), sessions_dir().join(SESSION_STAGING_DIR)).unwrap();
+        symlink(external.path(), sessions_dir().join(".staging")).unwrap();
         symlink(external.path(), sessions_dir().join(".trash")).unwrap();
         symlink(external.path(), sessions_dir().join(TEST_SESSION_ID)).unwrap();
 

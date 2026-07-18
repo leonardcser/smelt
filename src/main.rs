@@ -624,7 +624,10 @@ fn with_session_maintenance<T>(
     action: impl FnOnce(&mut smelt_store::SessionMaintenance, &std::path::Path) -> Result<T, String>,
 ) -> Result<T, String> {
     let (session_id, dir) = resolve_session_target(reference)?;
-    let mut maintenance = smelt_store::SessionMaintenance::open(&dir, session_id)
+    let root = dir
+        .parent()
+        .ok_or_else(|| "session directory has no parent".to_string())?;
+    let mut maintenance = smelt_store::SessionMaintenance::open(root, session_id)
         .map_err(|err| format!("failed to acquire session maintenance ownership: {err}"))?;
     let result = action(&mut maintenance, &dir);
     let release = maintenance

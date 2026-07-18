@@ -466,6 +466,13 @@ fn publish_reopen_failure_preserves_the_committed_session() {
             .summary
             .contains("injected transient session writer open failure")
     }));
+
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let root = session_dir.parent().expect("sessions root");
+    assert!(matches!(
+        smelt_store::OwnedSessionWriter::open(root, &session_id),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
 }
 
 #[test]
@@ -637,7 +644,8 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
     let reader = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
     let stored = reader.stored_session().unwrap().unwrap();
     drop(reader);
-    let mut writer = smelt_store::OwnedSessionWriter::open(&source_dir, &session_id).unwrap();
+    let root = source_dir.parent().expect("sessions root");
+    let mut writer = smelt_store::OwnedSessionWriter::open(root, &session_id).unwrap();
     writer
         .commit_session(&smelt_store::SessionCommit {
             session_id: session_id.clone(),
@@ -1575,7 +1583,8 @@ fn ownership_loss_moves_session_to_read_only_and_releases_lock() {
     assert!(resumed.app.session_is_read_only());
     assert!(resumed.app.next_persistence_retry_delay().is_none());
     let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let replacement = smelt_store::OwnedSessionWriter::open(&session_dir, &session_id)
+    let root = session_dir.parent().expect("sessions root");
+    let replacement = smelt_store::OwnedSessionWriter::open(root, &session_id)
         .expect("ownership loss releases the lifetime lock");
     drop(replacement);
 }

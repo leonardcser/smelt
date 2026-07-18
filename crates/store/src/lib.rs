@@ -11,7 +11,10 @@ mod request_audit;
 mod schema;
 mod session_commit;
 
-pub use access::{LegacyAttachmentBlob, OwnedSessionWriter, SessionMaintenance, SessionReader};
+pub use access::{
+    cleanup_abandoned_session_artifacts, ArtifactCleanupReport, LegacyAttachmentBlob,
+    OwnedSessionWriter, SessionMaintenance, SessionReader,
+};
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
     DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,

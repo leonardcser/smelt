@@ -474,7 +474,6 @@ enum SessionBackendState {
     Owned {
         session_id: smelt_core::session_id::SessionId,
         writer: Box<smelt_store::OwnedSessionWriter>,
-        staged: Option<smelt_core::session::StagedSessionDir>,
     },
 }
 
@@ -537,42 +536,12 @@ impl SessionBackend {
             return Err(self.record_open_failure(session_id, error));
         }
         let session_dir = smelt_core::session::session_dir(&session_id);
-        let staged = match std::fs::symlink_metadata(&session_dir) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => None,
-            Ok(_) => {
-                let message = format!("session path is not a directory: {}", session_dir.display());
-                let error = SessionBackendError::reopenable(message);
-                return Err(self.record_open_failure(session_id, error));
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                match smelt_core::session::StagedSessionDir::create(&session_id) {
-                    Ok(staged) => Some(staged),
-                    Err(err) => {
-                        let error = SessionBackendError::from_store_error(
-                            "stage session directory",
-                            smelt_store::StoreError::Io(err),
-                        );
-                        return Err(self.record_open_failure(session_id, error));
-                    }
-                }
-            }
-            Err(err) => {
-                let error = SessionBackendError::from_store_error(
-                    "inspect session directory",
-                    smelt_store::StoreError::Io(err),
-                );
-                return Err(self.record_open_failure(session_id, error));
-            }
-        };
-        let writer_dir = staged
-            .as_ref()
-            .map_or(session_dir.as_path(), |staged| staged.path());
-        match smelt_store::OwnedSessionWriter::open(writer_dir, session_id.as_str()) {
+        let root = session_dir.parent().expect("session root");
+        match smelt_store::OwnedSessionWriter::open(root, session_id.as_str()) {
             Ok(writer) => {
                 self.state = SessionBackendState::Owned {
                     session_id,
                     writer: Box::new(writer),
-                    staged,
                 };
                 Ok(())
             }
@@ -607,11 +576,10 @@ impl SessionBackend {
         }
         match &mut self.state {
             SessionBackendState::Owned { writer, .. } => {
-                let session_dir = writer
-                    .path()
-                    .parent()
-                    .expect("owned session database parent")
-                    .to_path_buf();
+                writer.reopen_connection().map_err(|err| {
+                    SessionBackendError::from_store_error("reopen session writer", err)
+                })?;
+                let session_dir = writer.session_dir().to_path_buf();
                 Ok((writer, session_dir))
             }
             _ => Err(SessionBackendError::reopenable(
@@ -621,58 +589,21 @@ impl SessionBackend {
     }
 
     fn publish_staged(&mut self) -> Result<Option<String>, String> {
-        let state = std::mem::replace(&mut self.state, SessionBackendState::Closed);
-        let (session_id, writer, staged) = match state {
-            SessionBackendState::Owned {
-                session_id,
-                writer,
-                staged,
-            } => (session_id, writer, staged),
-            state => {
-                self.state = state;
-                return Ok(None);
-            }
-        };
-        let Some(staged) = staged else {
-            self.state = SessionBackendState::Owned {
-                session_id,
-                writer,
-                staged: None,
-            };
+        let SessionBackendState::Owned { writer, .. } = &mut self.state else {
             return Ok(None);
         };
-        (*writer)
-            .release()
-            .map_err(|err| format!("release staged session writer: {err}"))?;
-        let destination = staged
+        if !writer.is_staged() {
+            return Ok(None);
+        }
+        writer
             .publish()
             .map_err(|err| format!("publish staged session: {err}"))?;
         #[cfg(any(test, feature = "harness"))]
         if std::mem::take(&mut self.fail_next_publish_reopen) {
-            let error = SessionBackendError::injected_transient();
-            let warning = error.message.clone();
-            self.record_open_failure(session_id, error);
-            return Ok(Some(warning));
+            writer.invalidate_connection();
+            return Ok(Some(SessionBackendError::injected_transient().message));
         }
-        match smelt_store::OwnedSessionWriter::open(&destination, session_id.as_str()) {
-            Ok(writer) => {
-                self.state = SessionBackendState::Owned {
-                    session_id,
-                    writer: Box::new(writer),
-                    staged: None,
-                };
-                Ok(None)
-            }
-            Err(err) => {
-                let error = SessionBackendError::from_store_error(
-                    "session was saved and published, but write ownership could not be reacquired",
-                    err,
-                );
-                let warning = error.message.clone();
-                self.record_open_failure(session_id, error);
-                Ok(Some(warning))
-            }
-        }
+        Ok(None)
     }
 
     fn release(&mut self) -> Result<(), String> {
@@ -1266,29 +1197,29 @@ mod tests {
     #[test]
     fn failed_commit_does_not_publish_attachment_or_session_state() {
         let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join("session-a");
-        std::fs::create_dir(&session_dir).unwrap();
+        let session_dir = dir.path().join(SESSION_ID);
         let request = PersistRequest {
-            command: commit("session-a", 9),
+            command: commit(SESSION_ID, 9),
         };
-        let mut writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        let mut writer = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID).unwrap();
+        let work_dir = writer.session_dir().to_path_buf();
 
-        let result = write(&request, &mut writer, &session_dir);
+        let result = write(&request, &mut writer, &work_dir);
 
         assert!(result.is_err(), "stale commit should fail");
         assert!(
-            session_dir.join("session.db").is_file(),
-            "database creation publishes the destination before a valid first commit"
+            !session_dir.exists(),
+            "a failed first commit must not publish the session destination"
         );
         assert!(
-            !session_dir.join("blobs/attachment.png").exists(),
+            !work_dir.join("blobs/attachment.png").exists(),
             "failed canonical transaction must not publish its attachment"
         );
-        let staging_root = session_dir.join(".blob-staging");
+        let staging_root = work_dir.join(".blob-staging");
         if staging_root.exists() {
             assert_eq!(std::fs::read_dir(staging_root).unwrap().count(), 0);
         }
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        let db = smelt_store::SessionDb::open_read_only(work_dir.join("session.db")).unwrap();
         assert!(db.stored_session().unwrap().is_none());
         assert_eq!(
             db.connection()
@@ -1302,24 +1233,22 @@ mod tests {
     #[test]
     fn attachment_is_stored_in_the_canonical_transaction() {
         let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join("session-a");
-        std::fs::create_dir(&session_dir).unwrap();
         let data_url = "data:image/png;base64,AAAA";
-        let mut command = commit("session-a", 0);
+        let mut command = commit(SESSION_ID, 0);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "attached".into(),
             vec![("attachment.png".into(), data_url.into())],
         ))];
         let request = PersistRequest { command };
-        let mut writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        let mut writer = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID).unwrap();
+        let work_dir = writer.session_dir().to_path_buf();
 
-        let success =
-            write(&request, &mut writer, &session_dir).expect("canonical commit succeeds");
+        let success = write(&request, &mut writer, &work_dir).expect("canonical commit succeeds");
 
         assert_eq!(success.receipt.current.revision.get(), 1);
         assert!(success.warning.is_none());
-        assert!(!session_dir.join("blobs").exists());
-        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
+        assert!(!work_dir.join("blobs").exists());
+        let db = smelt_store::SessionDb::open_read_only(work_dir.join("session.db")).unwrap();
         assert_eq!(
             db.connection()
                 .query_row("SELECT COUNT(*) FROM objects", [], |row| row
@@ -1327,7 +1256,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        let rows = smelt_store::SessionReader::open_existing(&session_dir)
+        let rows = smelt_store::SessionReader::open_existing(&work_dir)
             .unwrap()
             .read_history_items_range(0..1)
             .unwrap();
@@ -1347,22 +1276,21 @@ mod tests {
     #[test]
     fn derived_refresh_failure_does_not_undo_canonical_commit() {
         let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join("session-a");
-        std::fs::create_dir_all(session_dir.join("meta.json")).unwrap();
         let request = PersistRequest {
-            command: commit("session-a", 0),
+            command: commit(SESSION_ID, 0),
         };
-        let mut writer = smelt_store::OwnedSessionWriter::open(&session_dir, "session-a").unwrap();
+        let mut writer = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID).unwrap();
+        let work_dir = writer.session_dir().to_path_buf();
+        std::fs::create_dir_all(work_dir.join("meta.json")).unwrap();
 
-        let success =
-            write(&request, &mut writer, &session_dir).expect("canonical commit succeeds");
+        let success = write(&request, &mut writer, &work_dir).expect("canonical commit succeeds");
 
         assert_eq!(success.receipt.current.revision.get(), 1);
         assert!(success
             .warning
             .is_some_and(|warning| warning.contains("derived cache refresh failed")));
-        assert!(session_dir.join("meta.json").is_dir());
-        let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
+        assert!(work_dir.join("meta.json").is_dir());
+        let db = smelt_store::SessionReader::open_existing(&work_dir).unwrap();
         assert_eq!(db.store_head().unwrap().history_len.get(), 1);
         assert_eq!(db.read_history_items_range(0..1).unwrap().len(), 1);
     }
@@ -1456,7 +1384,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _state_home = StateHomeGuard::install(dir.path());
         let first_dir = smelt_core::session::dir_for_id(SESSION_ID);
-        let second_dir = smelt_core::session::dir_for_id(SECOND_SESSION_ID);
+        let root = first_dir.parent().expect("sessions root");
         let persister = Persister::spawn();
 
         persister.open_owned(SESSION_ID).unwrap();
@@ -1471,7 +1399,7 @@ mod tests {
             persister.drain_reports().as_slice(),
             [SessionBackendEvent::Saved { .. }]
         ));
-        assert!(smelt_store::OwnedSessionWriter::open(&first_dir, SESSION_ID).is_err());
+        assert!(smelt_store::OwnedSessionWriter::open(root, SESSION_ID).is_err());
 
         persister.open_owned(SECOND_SESSION_ID).unwrap();
         persister
@@ -1484,13 +1412,12 @@ mod tests {
             persister.drain_reports().as_slice(),
             [SessionBackendEvent::Saved { .. }]
         ));
-        let first_replacement =
-            smelt_store::OwnedSessionWriter::open(&first_dir, SESSION_ID).unwrap();
-        assert!(smelt_store::OwnedSessionWriter::open(&second_dir, SECOND_SESSION_ID).is_err());
+        let first_replacement = smelt_store::OwnedSessionWriter::open(root, SESSION_ID).unwrap();
+        assert!(smelt_store::OwnedSessionWriter::open(root, SECOND_SESSION_ID).is_err());
 
         persister.release().unwrap();
         let second_replacement =
-            smelt_store::OwnedSessionWriter::open(&second_dir, SECOND_SESSION_ID).unwrap();
+            smelt_store::OwnedSessionWriter::open(root, SECOND_SESSION_ID).unwrap();
         drop((first_replacement, second_replacement));
     }
 
