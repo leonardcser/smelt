@@ -1985,8 +1985,7 @@ impl TuiApp {
             .signals
             .publish_if_changed("running_procs", running_procs);
 
-        let permission_pending = self.public_attention_reason()
-            == Some(smelt_core::public_status::PublicReason::Permission);
+        let permission_pending = self.pending_dialog;
         self.core
             .signals
             .publish_if_changed("permission_pending", permission_pending);

@@ -21,7 +21,5 @@ dim: 58 22
  17   1   4 attrs=dim
  20  56   1 fg=Black bg=White
  21   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
- 21  10   1 bg=AnsiValue(233)
- 21  11  18 fg=AnsiValue(208) bg=AnsiValue(233) attrs=bold
- 21  29  19 bg=AnsiValue(233)
+ 21  10  38 bg=AnsiValue(233)
  21  48  10 fg=AnsiValue(244) bg=AnsiValue(233)

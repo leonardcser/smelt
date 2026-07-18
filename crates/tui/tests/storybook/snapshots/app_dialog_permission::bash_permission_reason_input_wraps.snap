@@ -23,4 +23,4 @@ expression: frame.text()
 
   Needed to inspect the temporary directory before
   deciding whether the generated fixtures can be reused.
- ○ normal  permission pending                   1:104 100%
+ ○ normal                                       1:104 100%

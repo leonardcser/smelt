@@ -1,0 +1,19 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 633
+expression: frame.text()
+---
+* bash ls -la /tmp/foo
+
+
+
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────
+ Continue drafting this response
+────────────────────────────────────────────────────────────────────────────────
+ ○ normal  permission pending                                           1:1 100%

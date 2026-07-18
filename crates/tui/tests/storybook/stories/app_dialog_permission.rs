@@ -32,6 +32,14 @@ app_story!(bash_permission_dialog, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(permission_request_deferred_while_typing, |ctx| {
+    ctx.set_viewport(80, 14);
+    ctx.start_turn();
+    ctx.type_prompt("Continue drafting this response");
+    open_bash_permission_dialog(ctx);
+    ctx.assert_snapshot();
+});
+
 app_story!(bash_permission_preserves_reasoning_context, |ctx| {
     ctx.set_viewport(80, 22);
     ctx.engine(EngineEvent::Reasoning {

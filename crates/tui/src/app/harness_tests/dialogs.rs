@@ -743,6 +743,50 @@ fn public_status_open_confirm_needs_attention() {
 }
 
 #[test]
+fn open_confirm_dialog_does_not_show_permission_pending_in_statusline() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(130), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+
+    assert_eq!(app.pending_confirm_count(), 1);
+    assert!(app.state().active_modal.is_some());
+    let frame = app.render_to_frame();
+    let text = frame.text();
+    let statusline = text.lines().last().expect("rendered statusline");
+    assert!(!statusline.contains("permission pending"), "{statusline:?}");
+}
+
+#[test]
+fn deferred_confirm_dialog_shows_permission_pending_in_statusline() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+    app.type_text("draft response");
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(131), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert_eq!(app.pending_deferred_dialog_count(), 1);
+    assert!(app.state().active_modal.is_none());
+    let frame = app.render_to_frame();
+    let text = frame.text();
+    let statusline = text.lines().last().expect("rendered statusline");
+    assert!(statusline.contains("permission pending"), "{statusline:?}");
+}
+
+#[test]
 fn confirm_down_moves_selection_without_scrolling_options() {
     let mut app = TestApp::builder().build();
     install_confirm_test_permissions(&mut app);
