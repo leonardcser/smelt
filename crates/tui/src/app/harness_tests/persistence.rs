@@ -14,6 +14,15 @@ fn loaded_session(id: &str) -> smelt_core::session::Session {
     .expect("session saved")
 }
 
+fn session_revision(id: &str) -> u64 {
+    smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(id))
+        .unwrap()
+        .session_state()
+        .unwrap()
+        .expect("session state")
+        .revision
+}
+
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
     app.app.notification.as_ref().is_some_and(|notification| {
         notification.lifetime.is_sticky()
@@ -39,6 +48,36 @@ fn save_receipt(
         revision: smelt_store::Revision::new(revision),
         history_len: smelt_store::HistoryLen::new(history_len as u64),
         descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+    }
+}
+
+fn request_audit_entry(request_id: u64) -> protocol::request_log::RequestLogEntry {
+    protocol::request_log::RequestLogEntry {
+        request_id,
+        kind: "turn".into(),
+        turn_id: Some(request_id),
+        ask_id: None,
+        history_len: Some(1),
+        timestamp_ms: 1,
+        provider_kind: "openai".into(),
+        api_base: "https://api.example.test".into(),
+        model: "model-a".into(),
+        url: "https://api.example.test/v1/chat/completions".into(),
+        http_status: Some(200),
+        body: serde_json::json!({"model": "model-a"}),
+        prompt_cache_key: None,
+        stream: true,
+        system_prompt: None,
+        messages: None,
+        tools: None,
+        response: None,
+        usage: None,
+        cost_usd: None,
+        tokens_per_sec: None,
+        elapsed_ms: Some(10),
+        attempt: 1,
+        error: None,
+        background: false,
     }
 }
 
@@ -159,6 +198,59 @@ fn metadata_only_title_update_persists_after_clean_history_save() {
 }
 
 #[test]
+fn fast_mode_only_save_advances_canonical_revision_once() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.app.save_session_and_flush();
+    let before = session_revision(&session_id);
+
+    app.app.set_fast_mode(true);
+    app.app.save_session_and_flush();
+
+    assert_eq!(session_revision(&session_id), before + 1);
+    assert_eq!(loaded_session(&session_id).fast_mode, Some(true));
+}
+
+#[test]
+fn descriptor_only_save_advances_canonical_revision_once() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.app.save_session_and_flush();
+    let before = session_revision(&session_id);
+
+    app.app.push_block(Block::Thinking {
+        title: None,
+        summary_titles: Vec::new(),
+        kind: protocol::ReasoningKind::Raw,
+        content: "descriptor-only change".into(),
+    });
+    app.app.save_session_and_flush();
+
+    assert_eq!(session_revision(&session_id), before + 1);
+}
+
+#[test]
+fn exact_no_op_save_does_not_advance_canonical_revision() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("persisted history")));
+    app.app.save_session_and_flush();
+    let before = session_revision(&session_id);
+
+    app.app.save_session_and_flush();
+
+    assert_eq!(session_revision(&session_id), before);
+}
+
+#[test]
 fn shutdown_flushes_latest_generation_after_in_flight_save() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -250,6 +342,215 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     assert!(app.app.session_document_has_unflushed_work());
     assert!(app.app.notification.is_some());
     assert!(!session_dir.join("session.db").exists());
+}
+
+#[test]
+fn canonical_enqueue_failure_leaves_document_visibly_unsaved() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app.shutdown_persist().unwrap();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("cannot enqueue")));
+
+    app.app.save_session();
+
+    assert!(app.app.session_document_has_unflushed_work());
+    assert!(!app.app.session_document.has_pending_save());
+    assert!(has_sticky_session_save_failure(&app, &session_id));
+    assert!(!smelt_core::session::dir_for_id(&session_id).exists());
+}
+
+#[test]
+fn storage_failure_causes_have_distinct_visible_outcomes() {
+    let guard = test_home_guard();
+    let schema_dir = tempfile::tempdir().unwrap();
+    let schema_version = smelt_store::SessionDb::open(schema_dir.path().join("session.db"))
+        .unwrap()
+        .schema_version()
+        .unwrap();
+    let unsupported_schema = schema_version.checked_add(1).unwrap();
+    let cases = [
+        (
+            "disk full",
+            smelt_store::SessionCommitFailure::Sqlite {
+                message: "database or disk is full".into(),
+                disposition: smelt_store::SessionPersistenceDisposition::Reopen,
+            },
+            "database or disk is full".to_string(),
+        ),
+        (
+            "unwritable root",
+            smelt_store::SessionCommitFailure::Io {
+                message: "permission denied while creating session root".into(),
+                disposition: smelt_store::SessionPersistenceDisposition::ReadOnly,
+            },
+            "permission denied while creating session root".to_string(),
+        ),
+        (
+            "unsupported schema",
+            smelt_store::SessionCommitFailure::UnsupportedSchema {
+                found: unsupported_schema,
+                expected: schema_version,
+            },
+            format!("unsupported schema version {unsupported_schema}; expected {schema_version}"),
+        ),
+        (
+            "ownership conflict",
+            smelt_store::SessionCommitFailure::OwnershipLost,
+            "session writer ownership was lost".to_string(),
+        ),
+    ];
+    let case_count = cases.len();
+    let mut summaries = Vec::new();
+
+    for (label, failure, expected_message) in cases {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        let session_id = app.app.core.session.id.clone();
+        app.app.persister.inject_commit_failure(failure);
+        app.app
+            .session_append_history(HistoryItem::user(Content::text(label)));
+
+        app.app.save_session_and_flush();
+
+        let notification = app
+            .app
+            .notification
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} must leave a visible persistence notification"));
+        assert!(notification.lifetime.is_sticky(), "{label}");
+        assert!(notification.summary.contains(&expected_message), "{label}");
+        assert!(matches!(
+            notification.owner.as_ref(),
+            Some(crate::app::NotificationOwner::SessionPersistence(owner)) if owner == &session_id
+        ));
+        summaries.push(notification.summary.clone());
+    }
+
+    summaries.sort();
+    summaries.dedup();
+    assert_eq!(summaries.len(), case_count);
+}
+
+#[test]
+fn publish_reopen_failure_preserves_the_committed_session() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app.persister.inject_publish_reopen_failure();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text(
+            "committed before publication reopen",
+        )));
+
+    app.app.save_session_and_flush();
+
+    assert!(!app.app.session_document_has_unflushed_work());
+    let loaded = loaded_session(&session_id);
+    assert_eq!(loaded.history.len(), 1);
+    assert!(matches!(
+        &loaded.history[0],
+        HistoryItem::User { content, .. }
+            if content.text_content() == "committed before publication reopen"
+    ));
+    assert!(app.app.notification.as_ref().is_some_and(|notification| {
+        notification
+            .summary
+            .contains("injected transient session writer open failure")
+    }));
+}
+
+#[test]
+fn new_empty_session_does_not_create_a_directory() {
+    let guard = test_home_guard();
+    let app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_dir = smelt_core::session::dir_for_id(&app.app.core.session.id);
+
+    assert!(!session_dir.exists());
+    drop(app);
+    assert!(!session_dir.exists());
+}
+
+#[test]
+fn identical_object_bytes_can_serve_distinct_request_roles() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("same bytes in two roles")));
+    app.app.save_session_and_flush();
+    let mut audit = request_audit_entry(43);
+    audit.body = serde_json::json!({});
+    audit.response = Some(protocol::request_log::RequestResponse {
+        content: None,
+        reasoning: None,
+        tool_calls: None,
+        raw: None,
+    });
+
+    app.app.dispatch_host_call(engine::HostCall::RequestAudit {
+        session_dir: smelt_core::session::dir_for_id(&session_id),
+        entry: Box::new(audit),
+        payload_mode: smelt_store::RequestAuditPayloadMode::Full,
+    });
+    app.app.flush_persist();
+
+    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
+    let db = smelt_store::SessionDb::open_read_only(db_path).unwrap();
+    let shared_roles: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM request_object_refs body
+             JOIN request_object_refs response
+               ON response.request_attempt_id = body.request_attempt_id
+              AND response.object_hash = body.object_hash
+             WHERE body.role = 'body_top' AND response.role = 'response'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(shared_roles, 1);
+    let attempts = db
+        .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    let payloads = db.request_payloads(attempts[0].id).unwrap().unwrap();
+    assert_eq!(payloads.body, Some(serde_json::json!({})));
+    assert_eq!(payloads.response, Some(serde_json::json!({})));
+}
+
+#[test]
+fn stale_request_audit_after_session_switch_is_rejected() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("old session")));
+    app.app.save_session_and_flush();
+    let old_id = app.app.core.session.id.clone();
+    let old_dir = smelt_core::session::dir_for_id(&old_id);
+
+    app.app.reset_session();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("new session")));
+    app.app.save_session_and_flush();
+    let new_id = app.app.core.session.id.clone();
+
+    app.app.dispatch_host_call(engine::HostCall::RequestAudit {
+        session_dir: old_dir.clone(),
+        entry: Box::new(request_audit_entry(42)),
+        payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
+    });
+    app.app.flush_persist();
+
+    for id in [&old_id, &new_id] {
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(id)).unwrap();
+        assert!(reader
+            .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+            .unwrap()
+            .is_empty());
+    }
 }
 
 #[test]

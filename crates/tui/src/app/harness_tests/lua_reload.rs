@@ -1144,6 +1144,16 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
         protocol::UiCommand::UpdateAgentProjectContext(context)
             if context.cwd.to_string_lossy() == expected
     )));
+
+    let session_id = app.app.core.session.id.clone();
+    app.app.save_session_and_flush();
+    assert_eq!(
+        smelt_core::session::load_full(&session_id)
+            .expect("explicit cwd change persisted")
+            .cwd
+            .as_deref(),
+        Some(expected.as_str())
+    );
 }
 
 #[test]
@@ -1784,13 +1794,18 @@ fn loading_session_restores_persisted_cwd() {
     drop(missing_dir);
     let fallback = app.app.cwd.clone();
     let fallback_path = app.app.core.env.cwd();
+    let missing_cwd = missing_path.to_string_lossy().into_owned();
     let missing_session =
         smelt_core::session::Session::new(app.app.core.env.pid(), missing_path.clone());
 
     app.app.load_session(missing_session);
 
     assert_eq!(app.app.cwd, fallback);
-    assert_eq!(app.app.core.session.cwd.as_deref(), Some(fallback.as_str()));
+    assert_eq!(
+        app.app.core.session.cwd.as_deref(),
+        Some(missing_cwd.as_str()),
+        "runtime fallback must not rewrite canonical session metadata"
+    );
     assert_eq!(app.app.core.env.cwd(), fallback_path);
     assert!(app
         .app

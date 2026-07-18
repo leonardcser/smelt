@@ -690,6 +690,51 @@ pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     Ok(out)
 }
 
+pub(crate) fn transcript_descriptor_suffix_matches(
+    conn: &Connection,
+    start_descriptor_idx: usize,
+    records: &[TranscriptDescriptorRecord],
+    compression: ObjectCompression,
+) -> Result<bool> {
+    let current_count = transcript_descriptor_count(conn)?;
+    let expected_count = start_descriptor_idx
+        .checked_add(records.len())
+        .ok_or_else(|| StoreError::Integrity("descriptor suffix length overflows usize".into()))?;
+    if current_count != expected_count {
+        return Ok(false);
+    }
+    let limit = checked_i64(records.len() as u64, "descriptor_suffix_len")?;
+    let offset = checked_i64(start_descriptor_idx as u64, "descriptor_suffix_start")?;
+    let mut stmt = conn.prepare(
+        "SELECT b.block_idx, b.history_idx, b.kind, b.tool_call_id, b.tool_name, b.content_hash,
+                b.estimated_text_bytes, b.preview_text, COALESCE(s.indexed_text, '') AS indexed_text,
+                b.descriptor_json, b.origin_json, b.tool_state_json
+         FROM transcript_blocks b
+         LEFT JOIN transcript_search s ON s.block_idx = b.block_idx
+         WHERE b.descriptor_json IS NOT NULL
+         ORDER BY b.descriptor_idx
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let current = read_transcript_descriptor_records_from_stmt(
+        conn,
+        &mut stmt,
+        params![limit, offset],
+        TranscriptDescriptorHydration::Hydrated,
+    )?;
+    let mut expected = records.to_vec();
+    for record in &mut expected {
+        let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
+        normalize_metadata(None, &mut descriptor, compression, &mut Vec::new())?;
+        record.descriptor_json = serde_json::to_string(&descriptor)?;
+        if let Some(tool_state_json) = &mut record.tool_state_json {
+            let mut tool_state: Value = serde_json::from_str(tool_state_json)?;
+            normalize_metadata(None, &mut tool_state, compression, &mut Vec::new())?;
+            *tool_state_json = serde_json::to_string(&tool_state)?;
+        }
+    }
+    Ok(current == expected)
+}
+
 pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     conn: &Connection,
     start_descriptor_idx: usize,

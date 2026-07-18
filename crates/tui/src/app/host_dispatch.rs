@@ -134,11 +134,15 @@ impl TuiApp {
                 self.dispatch_recover_from_context_limit(messages, reply);
             }
             HostCall::RequestAudit {
-                session_dir: _,
+                session_dir,
                 entry,
                 payload_mode,
             } => {
-                if !self.ephemeral() && !self.session_access.is_read_only() {
+                let current_session_dir = smelt_core::session::dir_for_id(&self.core.session.id);
+                if session_dir == current_session_dir
+                    && !self.ephemeral()
+                    && !self.session_access.is_read_only()
+                {
                     self.persister
                         .append_request_audit(crate::persist::PersistRequestAudit {
                             session_id: self.core.session.id.clone(),

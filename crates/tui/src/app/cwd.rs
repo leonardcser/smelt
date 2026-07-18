@@ -137,11 +137,10 @@ impl TuiApp {
             let message = if pending.mark_session_dirty {
                 format!("cwd change: {error}")
             } else {
-                let fallback = self.cwd.clone();
-                if !self.session_is_read_only() {
-                    self.apply_session_cwd(fallback.clone(), false);
-                }
-                format!("session cwd unavailable: {requested}: {error}; using {fallback}")
+                format!(
+                    "session cwd unavailable: {requested}: {error}; using {}",
+                    self.cwd
+                )
             };
             self.notify_error_sticky(message.clone());
             return Err(message);
@@ -161,15 +160,9 @@ impl TuiApp {
     /// note or marking the restored session dirty.
     pub(crate) fn restore_session_cwd(&mut self, cwd: Option<&str>) -> SessionCwdRestore {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
-            if !self.session_is_read_only() {
-                self.apply_session_cwd(self.cwd.clone(), false);
-            }
             return SessionCwdRestore::Missing;
         };
         if cwd == self.cwd {
-            if !self.session_is_read_only() {
-                self.apply_session_cwd(self.cwd.clone(), false);
-            }
             return SessionCwdRestore::Current;
         }
 
@@ -184,9 +177,6 @@ impl TuiApp {
             }
             Err(error) => {
                 let fallback = self.cwd.clone();
-                if !self.session_is_read_only() {
-                    self.apply_session_cwd(fallback.clone(), false);
-                }
                 SessionCwdRestore::Fallback {
                     requested: cwd.to_string(),
                     fallback,
@@ -219,8 +209,12 @@ impl TuiApp {
     ) {
         self.cwd = cwd.to_string_lossy().into_owned();
         self.core.env.set_cwd(cwd.clone());
-        if !self.session_is_read_only() {
-            self.apply_session_cwd(self.cwd.clone(), mark_session_dirty);
+        if mark_session_dirty && !self.session_is_read_only() {
+            self.apply_session_document_mutation(
+                crate::app::session_document::SessionMutation::SetCwd {
+                    cwd: self.cwd.clone(),
+                },
+            );
         }
         self.refresh_cwd_status();
         self.core
@@ -243,15 +237,6 @@ impl TuiApp {
             .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
         let branch = engine::paths::git_branch(&cwd).unwrap_or_default();
         self.core.signals.publish_if_changed("branch", branch);
-    }
-
-    fn apply_session_cwd(&mut self, cwd: String, mark_dirty: bool) {
-        let mutation = if mark_dirty {
-            crate::app::session_document::SessionMutation::SetCwd { cwd }
-        } else {
-            crate::app::session_document::SessionMutation::RestoreCwd { cwd }
-        };
-        self.apply_session_document_mutation(mutation);
     }
 
     pub(crate) fn publish_cwd_change(&mut self, user_visible: bool) {

@@ -77,6 +77,12 @@ enum SessionBackendCommand {
     #[cfg(any(test, feature = "harness"))]
     #[allow(dead_code)]
     InjectTransientOpenFailure(Sender<()>),
+    #[cfg(any(test, feature = "harness"))]
+    #[allow(dead_code)]
+    InjectCommitFailure(smelt_store::SessionCommitFailure, Sender<()>),
+    #[cfg(any(test, feature = "harness"))]
+    #[allow(dead_code)]
+    InjectPublishReopenFailure(Sender<()>),
     Flush(Sender<Vec<PersistFailure>>),
     Release(Sender<Result<(), String>>),
     Shutdown(Sender<Result<(), String>>),
@@ -89,7 +95,9 @@ impl SessionBackendCommand {
             Self::AppendRequestAudit(req) => serialized_size(&req.entry),
             Self::OpenOwned(..) | Self::Flush(_) | Self::Release(_) | Self::Shutdown(_) => 0,
             #[cfg(any(test, feature = "harness"))]
-            Self::InjectTransientOpenFailure(_) => 0,
+            Self::InjectTransientOpenFailure(_)
+            | Self::InjectCommitFailure(..)
+            | Self::InjectPublishReopenFailure(_) => 0,
         }
     }
 }
@@ -267,8 +275,8 @@ impl Persister {
             .map_err(|_| "persistence worker stopped during release".to_string())?
     }
 
-    pub(crate) fn save(&self, req: PersistRequest) {
-        let _ = self.enqueue(SessionBackendCommand::CommitSession(Box::new(req)), 0);
+    pub(crate) fn save(&self, req: PersistRequest) -> Result<(), ()> {
+        self.enqueue(SessionBackendCommand::CommitSession(Box::new(req)), 0)
     }
 
     #[cfg(any(test, feature = "harness"))]
@@ -283,6 +291,34 @@ impl Persister {
         done_rx
             .recv()
             .expect("persistence worker acknowledges transient failure injection");
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    #[allow(dead_code)]
+    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::SessionCommitFailure) {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.enqueue(
+            SessionBackendCommand::InjectCommitFailure(failure, done_tx),
+            0,
+        )
+        .expect("persistence worker accepts commit failure injection");
+        done_rx
+            .recv()
+            .expect("persistence worker acknowledges commit failure injection");
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    #[allow(dead_code)]
+    pub(crate) fn inject_publish_reopen_failure(&self) {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.enqueue(
+            SessionBackendCommand::InjectPublishReopenFailure(done_tx),
+            0,
+        )
+        .expect("persistence worker accepts publication failure injection");
+        done_rx
+            .recv()
+            .expect("persistence worker acknowledges publication failure injection");
     }
 
     pub(crate) fn append_request_audit(&self, mut req: PersistRequestAudit) {
@@ -446,6 +482,10 @@ struct SessionBackend {
     state: SessionBackendState,
     #[cfg(any(test, feature = "harness"))]
     fail_next_open: bool,
+    #[cfg(any(test, feature = "harness"))]
+    fail_next_commit: Option<smelt_store::SessionCommitFailure>,
+    #[cfg(any(test, feature = "harness"))]
+    fail_next_publish_reopen: bool,
 }
 
 impl SessionBackend {
@@ -454,6 +494,10 @@ impl SessionBackend {
             state: SessionBackendState::Closed,
             #[cfg(any(test, feature = "harness"))]
             fail_next_open: false,
+            #[cfg(any(test, feature = "harness"))]
+            fail_next_commit: None,
+            #[cfg(any(test, feature = "harness"))]
+            fail_next_publish_reopen: false,
         }
     }
 
@@ -603,6 +647,13 @@ impl SessionBackend {
         let destination = staged
             .publish()
             .map_err(|err| format!("publish staged session: {err}"))?;
+        #[cfg(any(test, feature = "harness"))]
+        if std::mem::take(&mut self.fail_next_publish_reopen) {
+            let error = SessionBackendError::injected_transient();
+            let warning = error.message.clone();
+            self.record_open_failure(session_id, error);
+            return Ok(Some(warning));
+        }
         match smelt_store::OwnedSessionWriter::open(&destination, session_id.as_str()) {
             Ok(writer) => {
                 self.state = SessionBackendState::Owned {
@@ -673,10 +724,17 @@ fn worker_loop(
                 let _ = reply.send(result);
             }
             SessionBackendCommand::CommitSession(req) => {
-                let result = backend
-                    .writer(&req.command.session_id)
-                    .map_err(PersistWriteError::Backend)
-                    .and_then(|(writer, session_dir)| write(&req, writer, &session_dir));
+                #[cfg(any(test, feature = "harness"))]
+                let injected_failure = backend.fail_next_commit.take();
+                #[cfg(not(any(test, feature = "harness")))]
+                let injected_failure = None;
+                let result = match injected_failure {
+                    Some(failure) => Err(PersistWriteError::Commit(failure)),
+                    None => backend
+                        .writer(&req.command.session_id)
+                        .map_err(PersistWriteError::Backend)
+                        .and_then(|(writer, session_dir)| write(&req, writer, &session_dir)),
+                };
                 let result = result.and_then(|mut success| {
                     let publish_warning = backend.publish_staged().map_err(persist_write_error)?;
                     if let Some(publish_warning) = publish_warning {
@@ -714,6 +772,16 @@ fn worker_loop(
             SessionBackendCommand::InjectTransientOpenFailure(done) => {
                 backend.discard_owned_writer();
                 backend.fail_next_open = true;
+                let _ = done.send(());
+            }
+            #[cfg(any(test, feature = "harness"))]
+            SessionBackendCommand::InjectCommitFailure(failure, done) => {
+                backend.fail_next_commit = Some(failure);
+                let _ = done.send(());
+            }
+            #[cfg(any(test, feature = "harness"))]
+            SessionBackendCommand::InjectPublishReopenFailure(done) => {
+                backend.fail_next_publish_reopen = true;
                 let _ = done.send(());
             }
             SessionBackendCommand::Flush(done) => {
@@ -1294,9 +1362,11 @@ mod tests {
         let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
         let persister = Persister::spawn();
 
-        persister.save(PersistRequest {
-            command: commit(SESSION_ID, 9),
-        });
+        persister
+            .save(PersistRequest {
+                command: commit(SESSION_ID, 9),
+            })
+            .unwrap();
         let outcome = persister.flush();
 
         assert!(matches!(
@@ -1378,9 +1448,11 @@ mod tests {
 
         persister.open_owned(SESSION_ID).unwrap();
         assert!(!first_dir.exists(), "uncommitted session must stay hidden");
-        persister.save(PersistRequest {
-            command: commit(SESSION_ID, 0),
-        });
+        persister
+            .save(PersistRequest {
+                command: commit(SESSION_ID, 0),
+            })
+            .unwrap();
         persister.flush();
         assert!(matches!(
             persister.drain_reports().as_slice(),
@@ -1389,9 +1461,11 @@ mod tests {
         assert!(smelt_store::OwnedSessionWriter::open(&first_dir, SESSION_ID).is_err());
 
         persister.open_owned(SECOND_SESSION_ID).unwrap();
-        persister.save(PersistRequest {
-            command: commit(SECOND_SESSION_ID, 0),
-        });
+        persister
+            .save(PersistRequest {
+                command: commit(SECOND_SESSION_ID, 0),
+            })
+            .unwrap();
         persister.flush();
         assert!(matches!(
             persister.drain_reports().as_slice(),
@@ -1413,9 +1487,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _state_home = StateHomeGuard::install(dir.path());
         let persister = Persister::spawn();
-        persister.save(PersistRequest {
-            command: commit(SESSION_ID, 0),
-        });
+        persister
+            .save(PersistRequest {
+                command: commit(SESSION_ID, 0),
+            })
+            .unwrap();
         persister.flush();
         assert!(matches!(
             persister.drain_reports().as_slice(),

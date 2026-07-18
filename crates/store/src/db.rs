@@ -1403,18 +1403,33 @@ fn commit_session_in_transaction(
         validate_descriptor_suffix_history_links(conn, &command.history, descriptors)
             .map_err(session_commit_failure_from_store_error)?;
     }
+    let descriptors_changed = match (&command.descriptors, descriptor_start) {
+        (Some(descriptors), Some(start)) => !history::transcript_descriptor_suffix_matches(
+            conn,
+            start,
+            &descriptors.records,
+            compression,
+        )
+        .map_err(session_commit_failure_from_store_error)?,
+        _ => false,
+    };
     let report = session_snapshot::apply_session_commit_history_in_transaction(
         conn,
         &command.state,
         &command.history,
         &command.side_tables,
+        descriptors_changed,
         Some(current_revision),
-        None,
         compression,
     )
     .map_err(session_commit_failure_from_store_error)?;
 
-    if let (Some(descriptors), Some(start)) = (&command.descriptors, descriptor_start) {
+    if descriptors_changed {
+        let descriptors = command
+            .descriptors
+            .as_ref()
+            .expect("change has descriptors");
+        let start = descriptor_start.expect("change has descriptor start");
         history::replace_transcript_descriptor_suffix_in_transaction(
             conn,
             start,
@@ -2643,6 +2658,60 @@ mod tests {
         assert_eq!(db.history_item_count().unwrap(), 1);
         assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
         assert!(!TRANSACTION_BUSY_DISABLED.get());
+    }
+
+    #[test]
+    fn identical_descriptor_replacement_is_an_exact_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let descriptor = transcript_user_record_with_history(0, 0, "user", "hello");
+        let first = SessionCommit {
+            session_id: "descriptor-no-op".into(),
+            save_id: crate::SaveId::new(1),
+            base_revision: crate::Revision::ZERO,
+            base_history_len: HistoryLen::ZERO,
+            base_descriptor_len: crate::DescriptorLen::ZERO,
+            state: test_session_state("descriptor-no-op", 1),
+            history: crate::HistorySuffix {
+                start: HistoryIndex::ZERO,
+                final_len: HistoryLen::new(1),
+                items: vec![protocol::HistoryItem::user(protocol::Content::text(
+                    "hello",
+                ))],
+            },
+            side_tables: SideTableSuffixes::default(),
+            descriptors: Some(crate::TranscriptDescriptorSuffix {
+                start: DescriptorIndex::ZERO,
+                records: vec![descriptor.clone()],
+            }),
+        };
+        let first_receipt = db.commit_session(&first).unwrap();
+        let no_op = SessionCommit {
+            save_id: crate::SaveId::new(2),
+            base_revision: first_receipt.revision,
+            base_history_len: first_receipt.history_len,
+            base_descriptor_len: first_receipt.descriptor_len,
+            history: crate::HistorySuffix {
+                start: HistoryIndex::new(1),
+                final_len: HistoryLen::new(1),
+                items: Vec::new(),
+            },
+            side_tables: SideTableSuffixes {
+                start: HistoryIndex::new(1),
+                ..SideTableSuffixes::default()
+            },
+            descriptors: Some(crate::TranscriptDescriptorSuffix {
+                start: DescriptorIndex::ZERO,
+                records: vec![descriptor],
+            }),
+            ..first
+        };
+
+        let receipt = db.commit_session(&no_op).unwrap();
+
+        assert_eq!(receipt.previous_revision, crate::Revision::new(1));
+        assert_eq!(receipt.revision, crate::Revision::new(1));
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
     }
 
     #[test]

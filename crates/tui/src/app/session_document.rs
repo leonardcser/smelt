@@ -651,9 +651,6 @@ pub(crate) enum SessionMutation {
     SetCwd {
         cwd: String,
     },
-    RestoreCwd {
-        cwd: String,
-    },
     FinishTurnState {
         history_len: usize,
         meta: TurnMeta,
@@ -1468,10 +1465,6 @@ impl SessionDocument {
                     ..Default::default()
                 }
             }
-            SessionMutation::RestoreCwd { cwd } => {
-                session.cwd = Some(cwd);
-                MutationResult::default()
-            }
             SessionMutation::FinishTurnState {
                 history_len,
                 meta,
@@ -1686,7 +1679,6 @@ impl SessionDocument {
             | SessionMutation::UpdateRuntimeMetadata { .. }
             | SessionMutation::SetFastMode { .. }
             | SessionMutation::SetCwd { .. }
-            | SessionMutation::RestoreCwd { .. }
             | SessionMutation::FinishTurnState { .. }
             | SessionMutation::InstallContextCheckpoint { .. }
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
@@ -1811,7 +1803,6 @@ impl SessionDocument {
             | SessionMutation::UpdateRuntimeMetadata { .. }
             | SessionMutation::SetFastMode { .. }
             | SessionMutation::SetCwd { .. }
-            | SessionMutation::RestoreCwd { .. }
             | SessionMutation::FinishTurnState { .. }
             | SessionMutation::InstallContextCheckpoint { .. }
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
@@ -1914,7 +1905,6 @@ impl SessionDocument {
             | SessionMutation::UpdateRuntimeMetadata { .. }
             | SessionMutation::SetFastMode { .. }
             | SessionMutation::SetCwd { .. }
-            | SessionMutation::RestoreCwd { .. }
             | SessionMutation::FinishTurnState { .. }
             | SessionMutation::InstallContextCheckpoint { .. }
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
@@ -2426,21 +2416,6 @@ mod tests {
         );
 
         assert!(result.session_dirty);
-        assert_eq!(session.cwd.as_deref(), Some("/repo"));
-    }
-
-    #[test]
-    fn restore_cwd_mutation_updates_session_metadata_without_dirtying() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-
-        let result = apply_session(
-            &mut session,
-            SessionMutation::RestoreCwd {
-                cwd: "/repo".into(),
-            },
-        );
-
-        assert!(!result.session_dirty);
         assert_eq!(session.cwd.as_deref(), Some("/repo"));
     }
 

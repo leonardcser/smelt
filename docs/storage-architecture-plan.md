@@ -1389,6 +1389,38 @@ Record large-session resume memory, cumulative intent size, canonical commit
 latency, and current queue memory as a baseline. Existing success, crash,
 restart, fork, delete, migration, and ownership tests must stay green.
 
+#### Phase 0 baseline
+
+Recorded on 2026-07-18 with:
+
+```bash
+cargo xtask bench-transcript-layout --runs 3 \
+  --workloads tiny_blocks_1mib --skip-nav --resume \
+  --resume-bytes 10485760 --save-request \
+  --save-request-history 10000 --no-warmup
+```
+
+The 10,000-row hot path produced these wall-clock means:
+
+| Operation | Mean | Standard deviation |
+| --- | ---: | ---: |
+| No-op save | 0.019 ms | 0.005 ms |
+| Request append | 6.400 ms | 0.419 ms |
+| History append | 3.600 ms | 0.118 ms |
+| Turn complete | 0.142 ms | 0.007 ms |
+| Rewind/delete suffix | 7.307 ms | 0.417 ms |
+| Provider history read | 0.701 ms | 0.024 ms |
+
+Request-append and history-append intents serialized to 1,415 and 1,037 bytes.
+The observed queue depth peaked at 2 and queued serialized payload bytes peaked
+at 1,415. Their SQLite transaction commits took 69-82 us and 78-88 us across
+the three samples.
+
+The descriptor-backed 10 MiB resume fixture contained 2,560 descriptors and
+108,877 estimated rows. Tail load took 7.548 ms, tail render took 2.799 ms, and
+the resume process peaked at 32,760 KiB RSS. The combined layout/hot-path
+process peaked at 97,788 KiB RSS.
+
 ### Phase 1: Install one canonical store model and updater
 
 - Replace `SessionState` input with immutable identity, mutable metadata, and

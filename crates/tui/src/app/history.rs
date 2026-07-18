@@ -1720,6 +1720,25 @@ impl TuiApp {
         }
     }
 
+    fn submit_persist_command(&mut self, command: smelt_store::SessionCommit) -> bool {
+        let failure = crate::persist::PersistFailure {
+            save_id: command.save_id.get(),
+            session_id: command.session_id.clone(),
+            message: "persistence worker is disconnected".into(),
+            commit_failure: None,
+            disposition: smelt_store::SessionPersistenceDisposition::Reopen,
+        };
+        if self
+            .persister
+            .save(crate::persist::PersistRequest { command })
+            .is_ok()
+        {
+            return true;
+        }
+        self.fail_persist_save(failure);
+        false
+    }
+
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
         if self.ephemeral() {
@@ -1786,9 +1805,7 @@ impl TuiApp {
                 ) else {
                     return;
                 };
-                self.persister.save(crate::persist::PersistRequest {
-                    command: submitted.command,
-                });
+                self.submit_persist_command(submitted.command);
             }
             crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
                 let submitted = match self
@@ -1804,9 +1821,7 @@ impl TuiApp {
                         return;
                     }
                 };
-                self.persister.save(crate::persist::PersistRequest {
-                    command: submitted.command,
-                });
+                self.submit_persist_command(submitted.command);
             }
             crate::app::session_document::PreparedSessionSave::RequestHistoryAppend { .. } => {
                 unreachable!("full session save preparation must not build request append save")
@@ -1865,9 +1880,7 @@ impl TuiApp {
                 return;
             }
         };
-        self.persister.save(crate::persist::PersistRequest {
-            command: submitted.command,
-        });
+        self.submit_persist_command(submitted.command);
     }
 
     fn runtime_session_metadata(&self) -> crate::app::session_document::RuntimeSessionMetadata {
@@ -2328,10 +2341,7 @@ impl TuiApp {
                 return false;
             }
         };
-        self.persister.save(crate::persist::PersistRequest {
-            command: submitted.command,
-        });
-        true
+        self.submit_persist_command(submitted.command)
     }
 
     fn commit_live_session_request_history_item(

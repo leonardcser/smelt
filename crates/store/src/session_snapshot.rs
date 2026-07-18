@@ -136,8 +136,8 @@ pub(crate) fn apply_session_commit_history_in_transaction(
     state: &SessionState,
     history: &HistorySuffix,
     side_tables: &SideTableSuffixes,
+    descriptors_changed: bool,
     expected_revision: Option<u64>,
-    owner_token: Option<&str>,
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
     let _perf = perf::begin("store:session:save_history_suffix_transaction");
@@ -146,9 +146,6 @@ pub(crate) fn apply_session_commit_history_in_transaction(
         history.items.len() as u64,
     );
     perf::record_value("store:session:total_history_rows", history.final_len.get());
-    if let Some(token) = owner_token {
-        meta::verify_writer_owner(conn, token)?;
-    }
     let current_state = meta::session_state(conn)?;
     if let Some(expected_revision) = expected_revision {
         let current_revision = current_state.as_ref().map_or(0, |state| state.revision);
@@ -194,8 +191,11 @@ pub(crate) fn apply_session_commit_history_in_transaction(
 
     let state_changed = session_state_changed(current_state.as_ref(), state);
     let side_tables_changed = replace_typed_side_table_suffixes_if_changed(conn, side_tables)?;
-    let changed =
-        history_deleted > 0 || history_inserted > 0 || state_changed || side_tables_changed;
+    let changed = history_deleted > 0
+        || history_inserted > 0
+        || state_changed
+        || side_tables_changed
+        || descriptors_changed;
     let mut state = state.clone();
     state.history_len = history.final_len.get();
     state.revision = if changed {
@@ -246,6 +246,7 @@ fn session_state_changed(current: Option<&SessionState>, next: &SessionState) ->
         || current.mode != next.mode
         || current.reasoning_effort != next.reasoning_effort
         || current.model != next.model
+        || current.fast_mode != next.fast_mode
         || current.parent_id != next.parent_id
         || current.accounting_json != next.accounting_json
         || current.checkpoint_json != next.checkpoint_json

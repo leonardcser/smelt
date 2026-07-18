@@ -6813,11 +6813,11 @@ mod tests {
         smelt_perf::perf::set_enabled(true);
         let lua = crate::lua::LuaRuntime::new();
         let theme = Theme::default();
-        let session_id = format!(
-            "transcript-resume-bench-{}-{}",
-            smelt_core::session::now_ms(),
-            std::process::id()
-        );
+        let session_id = smelt_core::session::Session::new(
+            std::process::id(),
+            std::env::current_dir().unwrap_or_default(),
+        )
+        .id;
         let (descriptor_count, generated_bytes, setup_ms) =
             write_descriptor_backed_resume_fixture(&session_id, target_bytes);
 
