@@ -25,9 +25,9 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use protocol::{mode_change_note, Content, Message, ModelConfig, ReasoningEffort};
-use smelt_provider::{fuzz_build_anthropic_body, CacheConfig, ToolDefinition};
 use serde_json::Value;
 use smelt_fuzz::cache_common::{mode_at, ArbTool, StableAction};
+use smelt_provider::{fuzz_build_anthropic_body, CacheConfig, ToolDefinition};
 
 #[derive(Debug, Arbitrary)]
 struct Input {

@@ -11,9 +11,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use smelt_fuzz::{runtime::with_current_thread_runtime, TestApp};
-use tui::app::test_harness::{
-    TranscriptScrollProbeCommand, TranscriptScrollProbeEdge,
-};
+use tui::app::test_harness::{TranscriptScrollProbeCommand, TranscriptScrollProbeEdge};
 
 #[derive(Arbitrary, Debug)]
 struct Input {
@@ -72,7 +70,11 @@ fn run_with_app(input: Input) {
             Op::Click { row, col } => {
                 app.transcript_scroll_probe_content_click(u16::from(row), u16::from(col));
             }
-            Op::DragSelect { from_row, to_row, col } => {
+            Op::DragSelect {
+                from_row,
+                to_row,
+                col,
+            } => {
                 app.transcript_scroll_probe_drag_select(
                     u16::from(from_row),
                     u16::from(to_row),

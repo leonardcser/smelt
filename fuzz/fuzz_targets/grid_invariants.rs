@@ -63,12 +63,38 @@ fn pick_style(u: &mut Unstructured<'_>) -> Style {
 
 #[derive(Debug)]
 enum Op {
-    Set { x: u16, y: u16, ch: char, style: Style },
-    PutStr { x: u16, y: u16, chars: Vec<u8>, style: Style },
-    PutChar { x: u16, y: u16, ch: char, fg: Color },
-    PutStrFg { x: u16, y: u16, chars: Vec<u8>, fg: Color },
-    Fill { rect: Rect, ch: char, style: Style },
-    Clear { rect: Rect },
+    Set {
+        x: u16,
+        y: u16,
+        ch: char,
+        style: Style,
+    },
+    PutStr {
+        x: u16,
+        y: u16,
+        chars: Vec<u8>,
+        style: Style,
+    },
+    PutChar {
+        x: u16,
+        y: u16,
+        ch: char,
+        fg: Color,
+    },
+    PutStrFg {
+        x: u16,
+        y: u16,
+        chars: Vec<u8>,
+        fg: Color,
+    },
+    Fill {
+        rect: Rect,
+        ch: char,
+        style: Style,
+    },
+    Clear {
+        rect: Rect,
+    },
     ClearAll,
     /// Force a frame boundary: swap `curr` into `prev` and run the diff-replay
     /// check. Implemented in the harness, not as a Grid mutation.

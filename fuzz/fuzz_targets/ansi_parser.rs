@@ -1,7 +1,8 @@
 #![no_main]
 
-//! ANSI parser/projection fuzz target. Exercises the SGR parser plus the
-//! `wrap_ansi` → `emit_ansi_row` handoff, where wrap byte ranges must remain
+//! ANSI parser/projection fuzz target. Exercises direct valid UTF-8 input and
+//! raw process bytes after the product's lossy UTF-8 ingress conversion, plus
+//! the `wrap_ansi` -> `emit_ansi_row` handoff where wrap byte ranges must remain
 //! valid UTF-8 boundaries inside each style span.
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -14,6 +15,7 @@ use smelt_core::theme::Theme;
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     bytes: Vec<u8>,
+    text: String,
     width: u8,
 }
 
@@ -22,16 +24,21 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let text = String::from_utf8_lossy(&input.bytes);
-    let render_width = u16::from(input.width % 80);
+    let raw_text = String::from_utf8_lossy(&input.bytes);
+    exercise(&raw_text, input.width);
+    exercise(&input.text, input.width);
+});
+
+fn exercise(text: &str, width: u8) {
+    let render_width = u16::from(width % 80);
     let wrap_width = usize::from(render_width);
 
-    let spans = smelt_ansi::parse_ansi(&text);
+    let spans = smelt_ansi::parse_ansi(text);
     for span in &spans {
         assert!(!span.text.chars().any(|ch| ch.is_control() && ch != '\t'));
     }
 
-    let (spans, ranges, boundaries) = wrap_ansi(&text, wrap_width);
+    let (spans, ranges, boundaries) = wrap_ansi(text, wrap_width);
     let plain: String = spans.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(boundaries.first().copied(), Some(0));
     assert_eq!(boundaries.last().copied(), Some(plain.len()));
@@ -49,4 +56,4 @@ fuzz_target!(|data: &[u8]| {
             out.newline();
         }
     });
-});
+}

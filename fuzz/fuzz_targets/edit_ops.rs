@@ -5,7 +5,10 @@
 //! handling, mouse dispatch, resize, and rendering without the full TUI app.
 
 use arbitrary::Arbitrary;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use libfuzzer_sys::fuzz_target;
 use smelt_edit::{BufCreateOpts, Constraint, Event, Gutters, LayoutTree, SplitConfig, Ui};
 
@@ -18,14 +21,39 @@ struct Input {
 
 #[derive(Arbitrary, Debug)]
 enum Op {
-    Insert { pos: u32, text: String },
-    Replace { start: u32, end: u32, text: String },
-    SetCursor { pos: u32 },
-    KeyChar { ch: u32, ctrl: bool, shift: bool, alt: bool },
-    Special { idx: u8, shift: bool },
+    Insert {
+        pos: u32,
+        text: String,
+    },
+    Replace {
+        start: u32,
+        end: u32,
+        text: String,
+    },
+    SetCursor {
+        pos: u32,
+    },
+    KeyChar {
+        ch: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    },
+    Special {
+        idx: u8,
+        shift: bool,
+    },
     Paste(String),
-    Mouse { kind: u8, button: u8, row: u8, col: u8 },
-    Resize { w: u8, h: u8 },
+    Mouse {
+        kind: u8,
+        button: u8,
+        row: u8,
+        col: u8,
+    },
+    Resize {
+        w: u8,
+        h: u8,
+    },
     ToggleWrap,
     Render,
 }
@@ -50,7 +78,9 @@ fn run(input: Input) {
     let mut ui = Ui::new();
     ui.set_terminal_size(40, 10);
     let buf = ui.buf_create(BufCreateOpts::default());
-    ui.buf_mut(buf).unwrap().set_source(plain_text(&input.initial));
+    ui.buf_mut(buf)
+        .unwrap()
+        .set_source(plain_text(&input.initial));
     ui.buf_mut(buf).unwrap().sync_after_edit(40);
     let win = ui
         .win_open_split(
@@ -61,7 +91,10 @@ fn run(input: Input) {
             },
         )
         .expect("open fuzz window");
-    ui.set_layout(LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]));
+    ui.set_layout(LayoutTree::vbox(vec![(
+        Constraint::Fill,
+        LayoutTree::leaf(win),
+    )]));
     ui.set_focus(win);
     if input.vim {
         if let Some(w) = ui.win_mut(win) {
@@ -72,23 +105,47 @@ fn run(input: Input) {
     let take = input.ops.len().min(96);
     for op in input.ops.into_iter().take(take) {
         match op {
-            Op::Insert { pos, text } => insert_direct(&mut ui, buf, win, pos as usize, &plain_text(&text)),
-            Op::Replace { start, end, text } => replace_direct(&mut ui, buf, win, start as usize, end as usize, &plain_text(&text)),
+            Op::Insert { pos, text } => {
+                insert_via_dispatch(&mut ui, buf, win, pos as usize, &plain_text(&text))
+            }
+            Op::Replace { start, end, text } => replace_via_dispatch(
+                &mut ui,
+                buf,
+                win,
+                start as usize,
+                end as usize,
+                &plain_text(&text),
+            ),
             Op::SetCursor { pos } => {
                 let source = ui.buf_mut(buf).unwrap().source().to_string();
                 let p = smelt_buffer::text::snap(&source, (pos as usize).min(source.len()));
                 ui.win_mut(win).unwrap().set_cpos(p);
             }
-            Op::KeyChar { ch, ctrl, shift, alt } => {
-                let c = char::from_u32(ch).filter(|c| *c != smelt_buffer::ATTACHMENT_MARKER).unwrap_or('?');
-                dispatch(&mut ui, Event::Key(key(KeyCode::Char(c), mods(ctrl, shift, alt))));
+            Op::KeyChar {
+                ch,
+                ctrl,
+                shift,
+                alt,
+            } => {
+                let c = char::from_u32(ch)
+                    .filter(|c| *c != smelt_buffer::ATTACHMENT_MARKER)
+                    .unwrap_or('?');
+                dispatch(
+                    &mut ui,
+                    Event::Key(key(KeyCode::Char(c), mods(ctrl, shift, alt))),
+                );
             }
             Op::Special { idx, shift } => {
                 let code = SPECIALS[(idx as usize) % SPECIALS.len()];
                 dispatch(&mut ui, Event::Key(key(code, mods(false, shift, false))));
             }
             Op::Paste(s) => dispatch(&mut ui, Event::Paste(plain_text(&s))),
-            Op::Mouse { kind, button, row, col } => {
+            Op::Mouse {
+                kind,
+                button,
+                row,
+                col,
+            } => {
                 dispatch(
                     &mut ui,
                     Event::Mouse(MouseEvent {
@@ -122,19 +179,22 @@ fn plain_text(s: &str) -> String {
     s.replace(smelt_buffer::ATTACHMENT_MARKER, "")
 }
 
-fn insert_direct(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit::WinId, pos: usize, text: &str) {
-    let old_source = ui.buf(buf).unwrap().source().to_string();
-    let start = smelt_buffer::text::snap(&old_source, pos);
-    let offsets = window_offsets(ui, win);
-    {
-        let b = ui.buf_mut(buf).unwrap();
-        b.text_mut().insert_str(start, text);
-        b.sync_after_edit(80);
-    }
-    repair_window_offsets(ui, buf, win, start, start, text.len(), offsets);
+fn insert_via_dispatch(
+    ui: &mut Ui,
+    buf: smelt_edit::BufId,
+    win: smelt_edit::WinId,
+    pos: usize,
+    text: &str,
+) {
+    let source = ui.buf(buf).unwrap().source();
+    let pos = smelt_buffer::text::snap(source, pos);
+    let window = ui.win_mut(win).unwrap();
+    window.set_cpos(pos);
+    window.clear_selection_anchor();
+    dispatch(ui, Event::Paste(text.to_string()));
 }
 
-fn replace_direct(
+fn replace_via_dispatch(
     ui: &mut Ui,
     buf: smelt_edit::BufId,
     win: smelt_edit::WinId,
@@ -142,54 +202,13 @@ fn replace_direct(
     end: usize,
     text: &str,
 ) {
-    let old_source = ui.buf(buf).unwrap().source().to_string();
-    let start = smelt_buffer::text::snap(&old_source, start);
-    let end = smelt_buffer::text::snap(&old_source, end).max(start);
-    let offsets = window_offsets(ui, win);
-    {
-        let b = ui.buf_mut(buf).unwrap();
-        b.text_mut().replace_range(start..end, text);
-        b.sync_after_edit(80);
-    }
-    repair_window_offsets(ui, buf, win, start, end, text.len(), offsets);
-}
-
-fn window_offsets(ui: &Ui, win: smelt_edit::WinId) -> (usize, Option<usize>) {
-    let w = ui.win(win).unwrap();
-    (w.cpos(), w.selection_anchor())
-}
-
-fn repair_window_offsets(
-    ui: &mut Ui,
-    buf: smelt_edit::BufId,
-    win: smelt_edit::WinId,
-    start: usize,
-    end: usize,
-    inserted_len: usize,
-    offsets: (usize, Option<usize>),
-) {
-    let (cpos, anchor) = offsets;
-    let source = ui.buf(buf).unwrap().source().to_string();
-    let w = ui.win_mut(win).unwrap();
-    w.set_cpos(transform_offset(&source, start, end, inserted_len, cpos));
-    w.set_selection_anchor(anchor.map(|offset| transform_offset(&source, start, end, inserted_len, offset)));
-    w.set_curswant(None);
-}
-
-fn transform_offset(source: &str, start: usize, end: usize, inserted_len: usize, offset: usize) -> usize {
-    let removed_len = end.saturating_sub(start);
-    let shifted = if offset <= start {
-        offset
-    } else if offset >= end {
-        if inserted_len >= removed_len {
-            offset.saturating_add(inserted_len - removed_len)
-        } else {
-            offset.saturating_sub(removed_len - inserted_len)
-        }
-    } else {
-        start.saturating_add(inserted_len)
-    };
-    smelt_buffer::text::snap(source, shifted.min(source.len()))
+    let source = ui.buf(buf).unwrap().source();
+    let start = smelt_buffer::text::snap(source, start);
+    let end = smelt_buffer::text::snap(source, end).max(start);
+    let window = ui.win_mut(win).unwrap();
+    window.set_selection_anchor(Some(start));
+    window.set_cpos(end);
+    dispatch(ui, Event::Paste(text.to_string()));
 }
 
 fn dispatch(ui: &mut Ui, ev: Event) {
@@ -205,14 +224,25 @@ fn lua_noop(
 }
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-    KeyEvent { code, modifiers, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
 }
 
 fn mods(ctrl: bool, shift: bool, alt: bool) -> KeyModifiers {
     let mut m = KeyModifiers::NONE;
-    if ctrl { m |= KeyModifiers::CONTROL; }
-    if shift { m |= KeyModifiers::SHIFT; }
-    if alt { m |= KeyModifiers::ALT; }
+    if ctrl {
+        m |= KeyModifiers::CONTROL;
+    }
+    if shift {
+        m |= KeyModifiers::SHIFT;
+    }
+    if alt {
+        m |= KeyModifiers::ALT;
+    }
     m
 }
 
@@ -238,11 +268,26 @@ fn assert_window_invariants(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit
     let source = ui.buf_mut(buf).unwrap().source().to_string();
     let len = source.len();
     let w = ui.win_mut(win).unwrap();
-    assert!(w.cpos() <= len, "cursor beyond source: {} > {len}", w.cpos());
-    assert_eq!(smelt_buffer::text::snap(&source, w.cpos()), w.cpos(), "cursor mid-char");
+    assert!(
+        w.cpos() <= len,
+        "cursor beyond source: {} > {len}",
+        w.cpos()
+    );
+    assert_eq!(
+        smelt_buffer::text::snap(&source, w.cpos()),
+        w.cpos(),
+        "cursor mid-char"
+    );
     if let Some(anchor) = w.selection_anchor() {
-        assert!(anchor <= len, "selection anchor beyond source: {anchor} > {len}");
-        assert_eq!(smelt_buffer::text::snap(&source, anchor), anchor, "selection anchor mid-char");
+        assert!(
+            anchor <= len,
+            "selection anchor beyond source: {anchor} > {len}"
+        );
+        assert_eq!(
+            smelt_buffer::text::snap(&source, anchor),
+            anchor,
+            "selection anchor mid-char"
+        );
     }
 }
 

@@ -3,7 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use smelt_core::permissions::rules::{
-    ModeBehavior, RawModePerms, RawPerms, RawRuleSet, ToolDefaults, ToolEffectKind, ToolPermDefaults,
+    ModeBehavior, RawModePerms, RawPerms, RawRuleSet, ToolDefaults, ToolEffectKind,
+    ToolPermDefaults,
 };
 use smelt_core::permissions::{
     builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Decision,
@@ -76,8 +77,8 @@ impl<'a> Arbitrary<'a> for Input {
             plan_mode: u.arbitrary()?,
             allow_subcommands_by_default: u.arbitrary()?,
             ask_on_output_redirection: u.arbitrary()?,
-            tool: choose_or_string(u, &["bash", "web_fetch", "edit", "read", "danger"] )?,
-            bucket: choose_or_string(u, &["bash", "web_fetch", "mcp", "edit"] )?,
+            tool: choose_or_string(u, &["bash", "web_fetch", "edit", "read", "danger"])?,
+            bucket: choose_or_string(u, &["bash", "web_fetch", "mcp", "edit"])?,
             value: short_string(u, 160)?,
             command: short_string(u, 256)?,
             url: short_string(u, 160)?,
@@ -93,7 +94,16 @@ fn patterns(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<String>> {
     for _ in 0..n {
         out.push(choose_or_string(
             u,
-            &["*", "bash", "web_fetch", "git status*", "ls*", "rm*", "https://*", "*.rs"],
+            &[
+                "*",
+                "bash",
+                "web_fetch",
+                "git status*",
+                "ls*",
+                "rm*",
+                "https://*",
+                "*.rs",
+            ],
         )?);
     }
     Ok(out)
@@ -195,11 +205,21 @@ fuzz_target!(|input: Input| {
     };
 
     let mut defaults = ToolDefaults::default();
-    defaults.subcommand_allow.insert("bash".into(), vec!["git status*".into(), "ls*".into()]);
-    defaults.subcommand_allow.insert("web_fetch".into(), vec!["https://*".into()]);
-    defaults.subpattern_parsers.insert("bash".into(), builtin_subpattern_parser("shell").unwrap());
-    defaults.tool_effects.insert("read".into(), ToolEffectKind::Read);
-    defaults.tool_effects.insert("edit".into(), ToolEffectKind::Write);
+    defaults
+        .subcommand_allow
+        .insert("bash".into(), vec!["git status*".into(), "ls*".into()]);
+    defaults
+        .subcommand_allow
+        .insert("web_fetch".into(), vec!["https://*".into()]);
+    defaults
+        .subpattern_parsers
+        .insert("bash".into(), builtin_subpattern_parser("shell").unwrap());
+    defaults
+        .tool_effects
+        .insert("read".into(), ToolEffectKind::Read);
+    defaults
+        .tool_effects
+        .insert("edit".into(), ToolEffectKind::Write);
     defaults.tool_decisions.insert(
         "read".into(),
         ToolPermDefaults {
@@ -216,10 +236,7 @@ fuzz_target!(|input: Input| {
                 ..ModeBehavior::default()
             },
         ),
-        (
-            "plan".to_string(),
-            ModeBehavior::default(),
-        ),
+        ("plan".to_string(), ModeBehavior::default()),
     ]);
 
     let mut perms = Permissions::from_raw_with_mode_behaviors(&raw, &defaults, behaviors);
@@ -239,7 +256,10 @@ fuzz_target!(|input: Input| {
             "command".to_string(),
             serde_json::Value::String(input.command.clone()),
         ),
-        ("url".to_string(), serde_json::Value::String(input.url.clone())),
+        (
+            "url".to_string(),
+            serde_json::Value::String(input.url.clone()),
+        ),
         (
             "path".to_string(),
             serde_json::Value::String(input.path.clone()),

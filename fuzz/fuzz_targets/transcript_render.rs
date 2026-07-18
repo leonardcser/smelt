@@ -22,17 +22,43 @@ enum Op {
     TextDelta(String),
     Thinking(String),
     ThinkingDelta(String),
-    ToolStart { id: u8, name: String },
-    ToolOutput { id: u8, text: String },
-    ToolFinish { id: u8, is_error: bool, text: String },
-    KnownToolRoundTrip { id: u8, kind: u8, is_error: bool },
-    ProcessCompleted { id: String, code: Option<i32> },
-    Complete { count: u8 },
+    ToolStart {
+        id: u8,
+        name: String,
+    },
+    ToolOutput {
+        id: u8,
+        text: String,
+    },
+    ToolFinish {
+        id: u8,
+        is_error: bool,
+        text: String,
+    },
+    KnownToolRoundTrip {
+        id: u8,
+        kind: u8,
+        is_error: bool,
+    },
+    ProcessCompleted {
+        id: String,
+        code: Option<i32>,
+    },
+    Complete {
+        count: u8,
+    },
     Error(String),
-    Resize { w: u8, h: u8 },
+    Resize {
+        w: u8,
+        h: u8,
+    },
     Tick(u16),
     TranscriptGroups(u8),
-    TranscriptProbe { kind: u8, row: u16, count: u8 },
+    TranscriptProbe {
+        kind: u8,
+        row: u16,
+        count: u8,
+    },
     Render,
 }
 
@@ -47,34 +73,55 @@ fn run_with_app(input: Input) {
         match op {
             Op::StartTurn(id) => app.start_turn(u64::from(id)),
             Op::Text(content) => app.feed_one(SourceEvent::engine(EngineEvent::Text { content })),
-            Op::TextDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::TextDelta { delta })),
+            Op::TextDelta(delta) => {
+                app.feed_one(SourceEvent::engine(EngineEvent::TextDelta { delta }))
+            }
             Op::Thinking(content) => app.feed_one(SourceEvent::engine(EngineEvent::Reasoning {
                 kind: ReasoningKind::Raw,
                 title: None,
                 content,
             })),
-            Op::ThinkingDelta(delta) => app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartDelta {
-                id: "fuzz:raw:0".into(),
-                kind: ReasoningKind::Raw,
-                delta,
-                title: None,
-            })),
-            Op::ToolStart { id, name } => app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
-                call_id: call_id(id),
-                tool_name: name,
-                args: std::collections::HashMap::new(),
-            })),
-            Op::ToolOutput { id, text } => app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
-                call_id: call_id(id),
-                chunk: text,
-            })),
-            Op::ToolFinish { id, is_error, text } => app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
-                call_id: call_id(id),
-                result: protocol::ToolOutcome { content: text, is_error, metadata: None },
-                elapsed_ms: None,
-            })),
-            Op::KnownToolRoundTrip { id, kind, is_error } => known_tool_round_trip(&mut app, id, kind, is_error),
-            Op::ProcessCompleted { id, code } => app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted { id, exit_code: code })),
+            Op::ThinkingDelta(delta) => {
+                app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartDelta {
+                    id: "fuzz:raw:0".into(),
+                    kind: ReasoningKind::Raw,
+                    delta,
+                    title: None,
+                }))
+            }
+            Op::ToolStart { id, name } => {
+                app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+                    call_id: call_id(id),
+                    tool_name: name,
+                    args: std::collections::HashMap::new(),
+                }))
+            }
+            Op::ToolOutput { id, text } => {
+                app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+                    call_id: call_id(id),
+                    chunk: text,
+                }))
+            }
+            Op::ToolFinish { id, is_error, text } => {
+                app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+                    call_id: call_id(id),
+                    result: protocol::ToolOutcome {
+                        content: text,
+                        is_error,
+                        metadata: None,
+                    },
+                    elapsed_ms: None,
+                }))
+            }
+            Op::KnownToolRoundTrip { id, kind, is_error } => {
+                known_tool_round_trip(&mut app, id, kind, is_error)
+            }
+            Op::ProcessCompleted { id, code } => {
+                app.feed_one(SourceEvent::engine(EngineEvent::ProcessCompleted {
+                    id,
+                    exit_code: code,
+                }))
+            }
             Op::Complete { count } => {
                 let turn_id = app.current_turn_id().unwrap_or(0);
                 app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
@@ -96,7 +143,9 @@ fn run_with_app(input: Input) {
             }),
             Op::Tick(ms) => app.feed_one(SourceEvent::Tick(u64::from(ms))),
             Op::TranscriptGroups(kind) => register_transcript_group(&mut app, kind),
-            Op::TranscriptProbe { kind, row, count } => transcript_probe(&mut app, kind, row, count),
+            Op::TranscriptProbe { kind, row, count } => {
+                transcript_probe(&mut app, kind, row, count)
+            }
             Op::Render => {}
         }
         app.render_silent();
@@ -141,7 +190,10 @@ fn known_tool_payload(
     let mut args = std::collections::HashMap::new();
     match kind % 6 {
         0 => {
-            args.insert("command".into(), serde_json::json!("printf 'one\\ntwo' && echo done"));
+            args.insert(
+                "command".into(),
+                serde_json::json!("printf 'one\\ntwo' && echo done"),
+            );
             ("bash", args, "one\ntwo\ndone\n".into(), None)
         }
         1 => {
@@ -177,8 +229,14 @@ fn known_tool_payload(
         }
         4 => {
             args.insert("file_path".into(), serde_json::json!("/tmp/fuzz.rs"));
-            args.insert("old_string".into(), serde_json::json!("fn old() {\n    1\n}\n"));
-            args.insert("new_string".into(), serde_json::json!("fn new() {\n    2\n}\n"));
+            args.insert(
+                "old_string".into(),
+                serde_json::json!("fn old() {\n    1\n}\n"),
+            );
+            args.insert(
+                "new_string".into(),
+                serde_json::json!("fn new() {\n    2\n}\n"),
+            );
             args.insert("replace_all".into(), serde_json::json!(false));
             (
                 "edit_file",
@@ -202,7 +260,6 @@ fn known_tool_payload(
 fn register_transcript_group(app: &mut TestApp, kind: u8) {
     const SNIPPETS: &[&str] = &[
         r#"
-        pcall(function()
           smelt.transcript.groups.register({
             name = "fuzz_tool_batch",
             cache_key = "v1",
@@ -217,10 +274,8 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
               return smelt.layout.text("fuzz tools " .. tostring(group.count))
             end,
           })
-        end)
         "#,
         r#"
-        pcall(function()
           smelt.transcript.groups.register({
             name = "fuzz_process_batch",
             cache_key = "v1",
@@ -232,10 +287,8 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
               return smelt.layout.text("fuzz process " .. tostring(group.bucket) .. " x" .. tostring(group.count))
             end,
           })
-        end)
         "#,
         r#"
-        pcall(function()
           smelt.transcript.extend_renderer("fuzz_wrapper", function(next, block, ctx)
             local layout = next(block, ctx)
             if block.kind == "thinking" and ctx.view_state == "collapsed" then
@@ -243,10 +296,8 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
             end
             return layout
           end, { cache_key = "v1" })
-        end)
         "#,
         r#"
-        pcall(function()
           smelt.settings.transcript = {
             view = {
               blocks = { thinking = "collapsed" },
@@ -256,10 +307,11 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
             limits = { tool_rows = 12, collapsed_error_rows = 3 },
           }
           smelt.transcript.invalidate_renderer()
-        end)
         "#,
     ];
-    let _ = app.run_lua(SNIPPETS[(kind as usize) % SNIPPETS.len()]);
+    let snippet = SNIPPETS[(kind as usize) % SNIPPETS.len()];
+    app.run_lua_result(snippet)
+        .unwrap_or_else(|error| panic!("transcript registration failed: {error}"));
 }
 
 fn transcript_probe(app: &mut TestApp, kind: u8, row: u16, count: u8) {
@@ -303,14 +355,14 @@ fn transcript_probe(app: &mut TestApp, kind: u8, row: u16, count: u8) {
         3 => block_snapshot_probe("loaded_blocks_expensive"),
         4 => block_snapshot_probe("visible_blocks"),
         5 => "assert(type(smelt.transcript.loaded_text_expensive()) == \"string\")".to_string(),
-        6 => format!(
-            "assert(type(smelt.transcript.fold_at_row({row}, 'toggle')) == \"boolean\")"
-        ),
-        7 => "assert(type(smelt.transcript.fold_kind('thinking', 'toggle')) == \"boolean\")".to_string(),
+        6 => format!("assert(type(smelt.transcript.fold_at_row({row}, 'toggle')) == \"boolean\")"),
+        7 => "assert(type(smelt.transcript.fold_kind('thinking', 'toggle')) == \"boolean\")"
+            .to_string(),
         8 => "smelt.transcript.fold_all('open')".to_string(),
         _ => format!("smelt.win.transcript():reveal({row}, {{ top_padding = 1 }})"),
     };
-    assert!(app.run_lua(&snippet), "transcript probe failed: {snippet}");
+    app.run_lua_result(&snippet)
+        .unwrap_or_else(|error| panic!("transcript probe failed: {error}\n{snippet}"));
 }
 
 fn block_snapshot_probe(name: &str) -> String {

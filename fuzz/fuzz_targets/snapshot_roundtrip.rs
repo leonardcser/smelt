@@ -11,15 +11,14 @@
 //!
 //! This target hammers the round-trip with random grids:
 //!  - random `(width, height)` within small bounds
-//!  - each cell gets a char from a small alphabet (single-width unicode
-//!    + ASCII) and a `Style` from a curated palette covering every
-//!    fg/bg/attr combination the parser exercises
+//!  - each cell gets a char from a small alphabet (ASCII, single-width
+//!    Unicode, CJK, and emoji) and a `Style` from a curated palette covering
+//!    every fg/bg/attr combination the parser exercises
 //!  - construct a `Grid`, run `from_grid` → `text + styles_text` →
 //!    `parse`, assert the parsed `SnapshotFrame` matches the original
 //!
-//! Wide-char placement is left to the existing snapshot unit tests -
-//! the focus here is the `parse_spans` + `parse_row` path with random
-//! styled runs that the unit tests cover only on a handful of cases.
+//! Random writes intentionally overlap wide glyphs and continuation cells.
+//! `Grid::set` repairs those transitions before the snapshot round-trip.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -39,14 +38,13 @@ struct Cell {
     style_idx: u8,
 }
 
-/// Single-width chars only - the round-trip story for wide chars is
-/// covered by `snapshot::tests` in `crates/term`. Including ASCII
-/// printable + a few common single-width unicode keeps the parser
-/// branches exercised without spilling into wide-char territory.
+/// Printable ASCII, single-width Unicode, and representative wide glyphs.
+/// Wide entries exercise continuation reconstruction at arbitrary columns,
+/// including the right edge and overlaps with earlier writes.
 const CHARS: &[char] = &[
-    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', '0', '1',
-    '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@', 'A', 'B', 'a', 'b',
-    '~', 'á', 'é', 'ñ', '€', '¶',
+    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2',
+    '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@', 'A', 'B', 'a', 'b', '~',
+    'á', 'é', 'ñ', '€', '¶', '漢', '界', '🙂', '🚀',
 ];
 
 /// Palette covers: default; bare fg/bg; basic named colors; ANSI; RGB;
@@ -59,7 +57,11 @@ fn style(idx: u8) -> Style {
         1 => Style::new().fg(Color::Red),
         2 => Style::new().bg(Color::Blue),
         3 => Style::new().fg(Color::AnsiValue(42)),
-        4 => Style::new().fg(Color::Rgb { r: 12, g: 34, b: 56 }),
+        4 => Style::new().fg(Color::Rgb {
+            r: 12,
+            g: 34,
+            b: 56,
+        }),
         5 => Style::new().fg(Color::Reset),
         6 => Style {
             bold: true,
@@ -88,7 +90,11 @@ fn style(idx: u8) -> Style {
             ..Style::default()
         },
         12 => Style {
-            fg: Some(Color::Rgb { r: 200, g: 0, b: 200 }),
+            fg: Some(Color::Rgb {
+                r: 200,
+                g: 0,
+                b: 200,
+            }),
             italic: true,
             underline: true,
             ..Style::default()
@@ -147,12 +153,7 @@ fn run(input: Input) {
     }
     if original.rows != parsed.rows {
         let mut diff = String::new();
-        for (i, (a, b)) in original
-            .rows
-            .iter()
-            .zip(parsed.rows.iter())
-            .enumerate()
-        {
+        for (i, (a, b)) in original.rows.iter().zip(parsed.rows.iter()).enumerate() {
             if a != b {
                 diff.push_str(&format!(
                     "  row[{i}]: original={a:?}\n           parsed  ={b:?}\n"
@@ -167,12 +168,7 @@ fn run(input: Input) {
     }
     if original.styles != parsed.styles {
         // Find the first cell that differs and report it.
-        for (y, (a_row, b_row)) in original
-            .styles
-            .iter()
-            .zip(parsed.styles.iter())
-            .enumerate()
-        {
+        for (y, (a_row, b_row)) in original.styles.iter().zip(parsed.styles.iter()).enumerate() {
             for (x, (a, b)) in a_row.iter().zip(b_row.iter()).enumerate() {
                 if a != b {
                     panic!(
