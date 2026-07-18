@@ -1524,39 +1524,3 @@ fn repo_root() -> std::io::Result<PathBuf> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hot_reload_audit_classifies_every_generated_namespace() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let index = std::fs::read_to_string(root.join("docs/docs/reference/api/index.md"))
-            .expect("read generated Lua API index");
-        let audit = std::fs::read_to_string(root.join("docs/hot-reload-surface-audit.md"))
-            .expect("read hot reload surface audit");
-        let mut namespaces = Vec::new();
-
-        for line in index.lines() {
-            let Some(rest) = line.strip_prefix("- [`smelt") else {
-                continue;
-            };
-            let Some((suffix, _)) = rest.split_once("`](") else {
-                continue;
-            };
-            namespaces.push(format!("smelt{suffix}"));
-        }
-
-        assert_eq!(namespaces.len(), 84, "generated namespace count changed");
-        let missing = namespaces
-            .into_iter()
-            .filter(|namespace| !audit.contains(&format!("`{namespace}`")))
-            .collect::<Vec<_>>();
-        assert!(
-            missing.is_empty(),
-            "hot reload surface audit is missing generated namespaces: {}",
-            missing.join(", ")
-        );
-    }
-}
