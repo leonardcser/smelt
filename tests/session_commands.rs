@@ -66,7 +66,7 @@ fn session_storage_commands_doctor_backup_rebuild_gc_and_vacuum() {
     assert!(manifest.is_file());
     let backup_reader = smelt_store::SessionReader::open_database(&backup).unwrap();
     assert_eq!(
-        backup_reader.session_state().unwrap().unwrap().id,
+        backup_reader.stored_session().unwrap().unwrap().identity.id,
         session.id
     );
 

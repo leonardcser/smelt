@@ -11,12 +11,13 @@ use crate::blob_staging::recover_blob_staging;
 use crate::blob_staging::{stage_session_blobs, SessionBlob, BLOB_STAGING_DIR};
 use crate::db::SessionDb;
 use crate::{
-    ObjectMeta, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
-    RequestAuditStats, RequestAuditSummary, Result, SaveReceipt, SessionCommit,
-    SessionCommitFailure, SessionMeta, SessionSaveReport, SessionSnapshot, SessionState,
-    StoreError, StoredObject, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
+    DescriptorIndex, FullSession, HistoryIndex, HistoryLen, HistorySuffix, ObjectMeta,
+    RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery, RequestAuditStats,
+    RequestAuditSummary, Result, SaveId, SaveReceipt, SessionCommit, SessionCommitFailure,
+    SessionIdentity, SessionMeta, SessionMetadata, SideTableSuffixes, StoreError, StoreHead,
+    StoredObject, StoredSession, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
     TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
-    TranscriptSearchCandidate, TranscriptSearchDirection, WriterOwner,
+    TranscriptDescriptorSuffix, TranscriptSearchCandidate, TranscriptSearchDirection, WriterOwner,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,8 +83,12 @@ impl SessionReader {
             .collect())
     }
 
-    pub fn session_state(&self) -> Result<Option<SessionState>> {
-        self.db.session_state()
+    pub fn stored_session(&self) -> Result<Option<StoredSession>> {
+        self.db.stored_session()
+    }
+
+    pub fn store_head(&self) -> Result<StoreHead> {
+        self.db.store_head()
     }
 
     pub fn load_session_resume_snapshot(
@@ -137,12 +142,12 @@ impl SessionReader {
         self.db.request_payloads(request_attempt_id)
     }
 
-    pub fn load_full_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
-        let mut snapshot = self.db.load_full_session_snapshot()?;
-        if let Some(snapshot) = &mut snapshot {
-            self.hydrate_legacy_attachments(&mut snapshot.history)?;
+    pub fn load_full_session(&self) -> Result<Option<FullSession>> {
+        let mut session = self.db.load_full_session()?;
+        if let Some(session) = &mut session {
+            self.hydrate_legacy_attachments(&mut session.history)?;
         }
-        Ok(snapshot)
+        Ok(session)
     }
 
     pub fn transcript_descriptor_count(&self) -> Result<usize> {
@@ -492,11 +497,11 @@ impl OwnedSessionWriter {
         let session_id = session_id.into();
         let lock = SessionLock::acquire(&session_dir)?;
         let mut db = SessionDb::open(session_dir.join("session.db"))?;
-        if let Some(state) = db.session_state()? {
-            if state.id != session_id {
+        if let Some(session) = db.stored_session()? {
+            if session.identity.id != session_id {
                 return Err(StoreError::Integrity(format!(
                     "session id mismatch: requested {session_id}, stored {}",
-                    state.id
+                    session.identity.id
                 )));
             }
         }
@@ -532,8 +537,12 @@ impl OwnedSessionWriter {
         self.db.path()
     }
 
-    pub fn session_state(&self) -> Result<Option<SessionState>> {
-        self.db.session_state()
+    pub fn stored_session(&self) -> Result<Option<StoredSession>> {
+        self.db.stored_session()
+    }
+
+    pub fn store_head(&self) -> Result<StoreHead> {
+        self.db.store_head()
     }
 
     pub fn transcript_descriptor_count(&self) -> Result<usize> {
@@ -582,14 +591,14 @@ impl OwnedSessionWriter {
         &mut self,
         command: &SessionCommit,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-        if command.session_id != self.session_id || command.state.id != self.session_id {
+        if command.session_id != self.session_id || command.identity.id != self.session_id {
             return Err(SessionCommitFailure::SessionMismatch {
                 expected: self.session_id.clone(),
-                actual: Some(command.state.id.clone()),
+                actual: Some(command.identity.id.clone()),
             });
         }
         let token = self.token.as_deref().expect("owned writer token");
-        self.db.commit_session_owned(token, command)
+        self.db.apply_session_commit_owned(token, command)
     }
 
     // COMPAT(legacy-attachment-blobs): finish or discard external attachment
@@ -683,41 +692,76 @@ impl SessionMaintenance {
         self.writer.session_id()
     }
 
-    pub fn import_snapshot(&mut self, snapshot: &SessionSnapshot) -> Result<SessionSaveReport> {
-        if snapshot.state.id != self.writer.session_id {
+    pub fn import_session(&mut self, session: &FullSession) -> Result<SaveReceipt> {
+        if session.session.identity.id != self.writer.session_id {
             return Err(StoreError::Integrity(format!(
                 "import session id mismatch: expected {}, got {}",
-                self.writer.session_id, snapshot.state.id
+                self.writer.session_id, session.session.identity.id
             )));
         }
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer
-            .db
-            .save_session_snapshot_for_import_owned(token, snapshot)
+        let expected = self.writer.db.store_head()?;
+        let command = full_session_commit(
+            expected,
+            &session.session.identity,
+            &session.session.metadata,
+            session,
+        )?;
+        apply_maintenance_commit(&mut self.writer, &command)
     }
 
     pub fn repair_transcript_history_links(&mut self) -> Result<usize> {
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer
+        let mut session = self
+            .writer
             .db
-            .repair_mismatched_transcript_descriptor_history_links_owned(token)
+            .load_full_session()?
+            .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
+        let mut repaired = 0;
+        for record in &mut session.descriptors {
+            let matches_history = record
+                .history_idx
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| session.history.get(index))
+                .is_some_and(|item| descriptor_kind_matches_history_item(&record.kind, item));
+            if record.history_idx.is_some() && !matches_history {
+                record.history_idx = None;
+                record.origin_json = None;
+                repaired += 1;
+            }
+        }
+        if repaired == 0 {
+            return Ok(0);
+        }
+        let command = metadata_and_descriptor_commit(
+            &session,
+            session.session.metadata.clone(),
+            Some(TranscriptDescriptorSuffix {
+                start: DescriptorIndex::ZERO,
+                records: session.descriptors.clone(),
+            }),
+        )?;
+        apply_maintenance_commit(&mut self.writer, &command)?;
+        Ok(repaired)
     }
 
     pub fn repair_checkpoint(&mut self) -> Result<usize> {
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer
+        let Some((stored, metadata)) = self.writer.db.repaired_checkpoint_metadata()? else {
+            return Ok(0);
+        };
+        let session = self
+            .writer
             .db
-            .repair_checkpoint_first_live_index_past_history_owned(token)
+            .load_full_session()?
+            .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
+        let command = full_session_commit(stored.head, &stored.identity, &metadata, &session)?;
+        apply_maintenance_commit(&mut self.writer, &command)?;
+        Ok(1)
     }
 
     pub fn replace_transcript_descriptors(
         &mut self,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer
-            .db
-            .replace_transcript_descriptor_records_owned(token, records)
+        self.replace_transcript_descriptor_suffix(0, records)
     }
 
     pub fn replace_transcript_descriptor_suffix(
@@ -725,46 +769,74 @@ impl SessionMaintenance {
         start_descriptor_idx: usize,
         records: &[TranscriptDescriptorRecord],
     ) -> Result<()> {
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer.db.replace_transcript_descriptor_suffix_owned(
-            token,
-            start_descriptor_idx,
-            records,
-        )
+        let session = self
+            .writer
+            .db
+            .load_full_session()?
+            .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
+        let start = DescriptorIndex::try_from(start_descriptor_idx)
+            .map_err(|_| StoreError::Integrity("descriptor start exceeds u64".into()))?;
+        let command = metadata_and_descriptor_commit(
+            &session,
+            session.session.metadata.clone(),
+            Some(TranscriptDescriptorSuffix {
+                start,
+                records: records.to_vec(),
+            }),
+        )?;
+        apply_maintenance_commit(&mut self.writer, &command)?;
+        Ok(())
     }
 
-    pub fn copy_prefix_from(
+    pub fn import_prefix_from(
         &mut self,
         source: &SessionReader,
-        state: &SessionState,
+        identity: &SessionIdentity,
+        metadata: &SessionMetadata,
         history_len: usize,
-    ) -> Result<()> {
-        if state.id != self.writer.session_id {
+    ) -> Result<SaveReceipt> {
+        if identity.id != self.writer.session_id {
             return Err(StoreError::Integrity(format!(
                 "fork session id mismatch: expected {}, got {}",
-                self.writer.session_id, state.id
+                self.writer.session_id, identity.id
             )));
         }
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer
+        let session = source
             .db
-            .copy_prefix_from(&source.db, state, history_len, Some(token))
+            .load_full_session_prefix(history_len)?
+            .ok_or_else(|| StoreError::Integrity("source session metadata is missing".into()))?;
+        let expected = self.writer.db.store_head()?;
+        let command = full_session_commit(expected, identity, metadata, &session)?;
+        apply_maintenance_commit(&mut self.writer, &command)
     }
 
     pub fn import_legacy_attachments(&mut self) -> Result<usize> {
-        let history_len = self.writer.db.history_item_count()?;
-        let references = self.writer.db.legacy_attachment_references(history_len)?;
-        let mut attachments = std::collections::BTreeMap::new();
-        for reference in references {
-            attachments.insert(
-                reference.clone(),
-                read_legacy_attachment(&self.writer.session_dir, &reference)?.data_url,
-            );
-        }
-        let token = self.writer.token.as_deref().expect("owned writer token");
-        self.writer
+        let mut session = self
+            .writer
             .db
-            .import_legacy_attachments_owned(token, &attachments)
+            .load_full_session()?
+            .ok_or_else(|| StoreError::Integrity("session metadata is missing".into()))?;
+        let mut changed = 0;
+        for item in &mut session.history {
+            let mut value = serde_json::to_value(&*item)?;
+            let before = value.clone();
+            hydrate_legacy_attachment_value(&self.writer.session_dir, &mut value)?;
+            if value != before {
+                *item = serde_json::from_value(value)?;
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            return Ok(0);
+        }
+        let command = full_session_commit(
+            session.session.head,
+            &session.session.identity,
+            &session.session.metadata,
+            &session,
+        )?;
+        apply_maintenance_commit(&mut self.writer, &command)?;
+        Ok(changed)
     }
 
     pub fn garbage_collect_objects(&mut self) -> Result<usize> {
@@ -785,6 +857,108 @@ impl SessionMaintenance {
     pub fn release(self) -> Result<()> {
         self.writer.release()
     }
+}
+
+fn full_session_commit(
+    expected: StoreHead,
+    identity: &SessionIdentity,
+    metadata: &SessionMetadata,
+    session: &FullSession,
+) -> Result<SessionCommit> {
+    let history_len = u64::try_from(session.history.len())
+        .map_err(|_| StoreError::Integrity("history length exceeds u64".into()))?;
+    Ok(SessionCommit {
+        session_id: identity.id.clone(),
+        save_id: maintenance_save_id(expected)?,
+        expected,
+        identity: identity.clone(),
+        metadata: metadata.clone(),
+        history: HistorySuffix {
+            start: HistoryIndex::ZERO,
+            final_len: HistoryLen::new(history_len),
+            items: session.history.clone(),
+        },
+        side_tables: SideTableSuffixes {
+            start: HistoryIndex::ZERO,
+            turn_metas: side_table_rows(&session.turn_metas),
+            metadata_snapshots: side_table_rows(&session.metadata_snapshots),
+            context_snapshots: side_table_rows(&session.context_snapshots),
+        },
+        descriptors: Some(TranscriptDescriptorSuffix {
+            start: DescriptorIndex::ZERO,
+            records: session.descriptors.clone(),
+        }),
+    })
+}
+
+fn metadata_and_descriptor_commit(
+    session: &FullSession,
+    metadata: SessionMetadata,
+    descriptors: Option<TranscriptDescriptorSuffix>,
+) -> Result<SessionCommit> {
+    let history_len = session.session.head.history_len;
+    let boundary = history_len.get();
+    Ok(SessionCommit {
+        session_id: session.session.identity.id.clone(),
+        save_id: maintenance_save_id(session.session.head)?,
+        expected: session.session.head,
+        identity: session.session.identity.clone(),
+        metadata,
+        history: HistorySuffix {
+            start: HistoryIndex::new(boundary),
+            final_len: history_len,
+            items: Vec::new(),
+        },
+        side_tables: SideTableSuffixes {
+            start: HistoryIndex::new(boundary),
+            turn_metas: side_table_rows_from(&session.turn_metas, boundary),
+            metadata_snapshots: side_table_rows_from(&session.metadata_snapshots, boundary),
+            context_snapshots: side_table_rows_from(&session.context_snapshots, boundary),
+        },
+        descriptors,
+    })
+}
+
+fn side_table_rows(rows: &[(u64, serde_json::Value)]) -> Vec<(HistoryIndex, serde_json::Value)> {
+    side_table_rows_from(rows, 0)
+}
+
+fn side_table_rows_from(
+    rows: &[(u64, serde_json::Value)],
+    start: u64,
+) -> Vec<(HistoryIndex, serde_json::Value)> {
+    rows.iter()
+        .filter(|(index, _)| *index >= start)
+        .map(|(index, value)| (HistoryIndex::new(*index), value.clone()))
+        .collect()
+}
+
+fn maintenance_save_id(head: StoreHead) -> Result<SaveId> {
+    head.revision
+        .get()
+        .checked_add(1)
+        .map(SaveId::new)
+        .ok_or_else(|| StoreError::Integrity("maintenance save id overflow".into()))
+}
+
+fn apply_maintenance_commit(
+    writer: &mut OwnedSessionWriter,
+    command: &SessionCommit,
+) -> Result<SaveReceipt> {
+    writer
+        .commit_session(command)
+        .map_err(|failure| StoreError::Integrity(format!("session commit failed: {failure:?}")))
+}
+
+fn descriptor_kind_matches_history_item(kind: &str, item: &protocol::HistoryItem) -> bool {
+    matches!(
+        (kind, item),
+        ("user", protocol::HistoryItem::User { .. })
+            | (
+                "assistant" | "thinking" | "tool" | "exec" | "code",
+                protocol::HistoryItem::Assistant(_),
+            )
+    )
 }
 
 fn session_commit_failure_from_blob_error(err: StoreError) -> SessionCommitFailure {
@@ -944,11 +1118,17 @@ mod tests {
         SessionCommit {
             session_id: session_id.into(),
             save_id: crate::SaveId::new(save_id),
-            base_revision: crate::Revision::new(base_revision),
-            base_history_len: crate::HistoryLen::ZERO,
-            base_descriptor_len: crate::DescriptorLen::ZERO,
-            state: SessionState {
+            expected: StoreHead {
+                revision: crate::Revision::new(base_revision),
+                history_len: crate::HistoryLen::ZERO,
+                descriptor_len: crate::DescriptorLen::ZERO,
+            },
+            identity: SessionIdentity {
                 id: session_id.into(),
+                created_at: 1,
+                parent_id: None,
+            },
+            metadata: SessionMetadata {
                 title: None,
                 slug: None,
                 first_user_message: None,
@@ -957,16 +1137,12 @@ mod tests {
                 reasoning_effort: None,
                 model: None,
                 fast_mode: None,
-                parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: base_revision,
-                history_len: 0,
-                created_at: 1,
+                session_cost_usd: crate::SessionCostUsd::new(0.0).unwrap(),
                 updated_at: 1,
             },
             history: crate::HistorySuffix {
@@ -1132,7 +1308,7 @@ mod tests {
 
         let outcome = writer.commit_session_with_blobs(&command, &blobs).unwrap();
         assert!(outcome.deferred_blob_error.is_some());
-        assert_eq!(outcome.receipt.revision, crate::Revision::new(1));
+        assert_eq!(outcome.receipt.current.revision, crate::Revision::new(1));
         assert_eq!(
             fs::read_dir(session_dir.join(BLOB_STAGING_DIR))
                 .unwrap()
@@ -1200,7 +1376,7 @@ mod tests {
             Err(SessionWriteFailure::Stage(StoreError::Integrity(_)))
         ));
         assert!(!root.path().join("escape").exists());
-        assert!(writer.session_state().unwrap().is_none());
+        assert!(writer.stored_session().unwrap().is_none());
     }
 
     #[test]
@@ -1215,7 +1391,6 @@ mod tests {
         let filename = format!("{}.png", crate::object::hex_lower(&hasher.finalize()));
         let reference = format!("blob:{filename}");
         let mut command = empty_commit("session", 1, 0);
-        command.state.history_len = 1;
         command.history.final_len = crate::HistoryLen::new(1);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "legacy".into(),
@@ -1266,7 +1441,6 @@ mod tests {
         fs::create_dir(&session_dir).unwrap();
         let data_url = "data:image/png;base64,AAAA";
         let mut command = empty_commit("session", 1, 0);
-        command.state.history_len = 1;
         command.history.final_len = crate::HistoryLen::new(1);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "attached".into(),
@@ -1300,7 +1474,6 @@ mod tests {
         fs::create_dir(&session_dir).unwrap();
         let data_url = "data:image/png;base64,AAAA";
         let mut command = empty_commit("session", 1, 0);
-        command.state.history_len = 1;
         command.history.final_len = crate::HistoryLen::new(1);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "attached".into(),
@@ -1337,7 +1510,6 @@ mod tests {
             vec![("attachment.png".into(), data_url.into())],
         ));
         let mut initial = empty_commit("session", 1, 0);
-        initial.state.history_len = 129;
         initial.history.final_len = crate::HistoryLen::new(129);
         initial.history.items = vec![item; 129];
         let mut writer = OwnedSessionWriter::open(&session_dir, "session").unwrap();
@@ -1346,7 +1518,7 @@ mod tests {
         assert!(writer.db.object(&object_hash).unwrap().is_some());
 
         let mut rewind = empty_commit("session", 2, 1);
-        rewind.base_history_len = crate::HistoryLen::new(129);
+        rewind.expected.history_len = crate::HistoryLen::new(129);
         writer.commit_session(&rewind).unwrap();
 
         assert!(writer.db.object(&object_hash).unwrap().is_none());

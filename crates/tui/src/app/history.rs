@@ -590,8 +590,7 @@ mod tests {
         let records = (0..200)
             .map(|idx| test_descriptor_record(idx, &format!("block {idx}")))
             .collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records_for_repair(&records)
-            .unwrap();
+        db.apply_transcript_descriptor_fixture(&records).unwrap();
         drop(db);
 
         let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 10, 1)
@@ -626,8 +625,7 @@ mod tests {
             test_descriptor_record(70, "visible old tail"),
             test_descriptor_record(235, "visible newest tail"),
         ];
-        db.replace_transcript_descriptor_records_for_repair(&records)
-            .unwrap();
+        db.apply_transcript_descriptor_fixture(&records).unwrap();
         drop(db);
 
         let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 80, 12)
@@ -1100,8 +1098,15 @@ impl TuiApp {
             }
         };
         let fork_work_dir = staged_fork.path().to_path_buf();
-        let state = match session::store_state_from_session(&forked, history_len) {
-            Ok(state) => state,
+        let identity = match session::store_identity_from_session(&forked) {
+            Ok(identity) => identity,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare fork: {err}"));
+                return;
+            }
+        };
+        let metadata = match session::store_metadata_from_session(&forked, history_len) {
+            Ok(metadata) => metadata,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to prepare fork: {err}"));
                 return;
@@ -1131,7 +1136,8 @@ impl TuiApp {
                     return;
                 }
             };
-        if let Err(err) = maintenance.copy_prefix_from(&source, &state, history_len) {
+        if let Err(err) = maintenance.import_prefix_from(&source, &identity, &metadata, history_len)
+        {
             self.notify_error_sticky(format!("failed to fork session store: {err}"));
             return;
         }
@@ -1793,14 +1799,16 @@ impl TuiApp {
             }
             crate::app::session_document::PreparedSessionSave::MetadataOnly {
                 generation,
-                state,
+                identity,
+                metadata,
                 side_tables,
             } => {
                 smelt_perf::perf::record_value("session:save:metadata_only", 1);
                 let Some(submitted) = self.session_document.submit_metadata_save(
                     session_id,
                     generation,
-                    *state,
+                    *identity,
+                    *metadata,
                     *side_tables,
                 ) else {
                     return;
@@ -2775,18 +2783,18 @@ mod checkpoint_tests {
         let id = app.app.core.session.id.clone();
         let loaded_transcript = load_transcript_tail_from_sqlite_id(&id, 80, 24)
             .expect("display-only transcript tail should load");
-        let mut display_session =
-            session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        display_session.id = id.clone();
-        display_session.first_user_message = Some("old user".into());
-
-        app.app.load_store_backed_session(
-            crate::app::session_document::StoreBackedSessionDocument::new(
-                display_session,
-                loaded_transcript,
-                crate::app::history::live_session_for_test(id.clone(), 2, None),
-            ),
+        let (header, store_ref) =
+            session::load_store_header(&id).expect("stored session header should load");
+        let document = crate::app::session_document::SessionDocument::from_store(
+            header,
+            store_ref,
+            loaded_transcript,
+            app.app.core.env.pid(),
+            app.app.core.env.cwd(),
         );
+
+        app.app
+            .load_store_backed_session(document.into_store_backed());
 
         let source = app.app.commit_request_history_item(
             user("new user"),
@@ -2811,6 +2819,11 @@ mod checkpoint_tests {
                 .as_ref()
                 .map(|live| live.history_len()),
             Some(3)
+        );
+        assert!(
+            app.app.notification.is_none(),
+            "display-only append should persist without error: {:?}",
+            app.app.notification
         );
 
         let db =
@@ -3173,9 +3186,9 @@ mod checkpoint_tests {
             smelt_store::SessionReader::open_database(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         let snapshot = db
-            .load_full_session_snapshot()
-            .expect("load snapshot")
-            .expect("snapshot");
+            .load_full_session()
+            .expect("load full session")
+            .expect("stored session");
         assert_eq!(snapshot.history, vec![user("new user")]);
         assert_eq!(snapshot.metadata_snapshots.len(), 1);
         assert_eq!(snapshot.metadata_snapshots[0].0, 1);
@@ -3216,7 +3229,7 @@ mod checkpoint_tests {
             .expect("read descriptors")
             .is_empty());
         assert_eq!(
-            db.session_state().expect("read state").unwrap().history_len,
+            db.store_head().expect("read store head").history_len.get(),
             0
         );
     }

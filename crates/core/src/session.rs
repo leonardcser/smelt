@@ -1275,31 +1275,8 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
         .map_or(session_dir.as_path(), |staged| staged.path());
 
     let mut writer = smelt_store::OwnedSessionWriter::open(writer_dir, &session.id)?;
-    let current_state = writer.session_state()?;
-    let base_revision = current_state.as_ref().map_or(0, |state| state.revision);
-    let base_history_len = current_state.as_ref().map_or(0, |state| state.history_len);
-    let base_descriptor_len = writer.transcript_descriptor_count()? as u64;
-    let history_len = session.history.len();
-    let history_start_idx = 0;
-    let command = smelt_store::SessionCommit {
-        session_id: session.id.clone(),
-        save_id: smelt_store::SaveId::ZERO,
-        base_revision: smelt_store::Revision::new(base_revision),
-        base_history_len: smelt_store::HistoryLen::new(base_history_len),
-        base_descriptor_len: smelt_store::DescriptorLen::new(base_descriptor_len),
-        state: store_state_from_session(session, history_len)?,
-        history: smelt_store::HistorySuffix {
-            start: smelt_store::HistoryIndex::new(history_start_idx as u64),
-            final_len: smelt_store::HistoryLen::new(history_len as u64),
-            items: session.history[history_start_idx..].to_vec(),
-        },
-        side_tables: store_side_table_suffixes_from_session_at(
-            session,
-            history_start_idx,
-            history_len,
-        )?,
-        descriptors: None,
-    };
+    let expected = writer.store_head()?;
+    let command = store_commit_from_session(session, expected, smelt_store::SaveId::ZERO, 0)?;
     let receipt = writer
         .commit_session(&command)
         .map_err(session_commit_failure_to_store_error)?;
@@ -1316,31 +1293,46 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
     Ok(receipt)
 }
 
-pub fn store_snapshot_from_session(
+pub fn initial_store_commit_from_session(
     session: &Session,
+) -> Result<smelt_store::SessionCommit, smelt_store::StoreError> {
+    store_commit_from_session(
+        session,
+        smelt_store::StoreHead::default(),
+        smelt_store::SaveId::ZERO,
+        0,
+    )
+}
+
+pub fn store_commit_from_session(
+    session: &Session,
+    expected: smelt_store::StoreHead,
+    save_id: smelt_store::SaveId,
     history_start_idx: usize,
-) -> Result<smelt_store::SessionSnapshot, smelt_store::StoreError> {
-    let history_start_idx = history_start_idx.min(session.history.len());
-    Ok(smelt_store::SessionSnapshot {
-        state: store_state_from_session(session, session.history.len())?,
-        history_start_idx,
-        history_len: session.history.len(),
-        history: session.history[history_start_idx..].to_vec(),
-        turn_metas: turn_meta_values_from(
-            &session.turn_metas,
+) -> Result<smelt_store::SessionCommit, smelt_store::StoreError> {
+    let history_len = session.history.len();
+    let history_start_idx = history_start_idx.min(history_len);
+    let history_start = u64::try_from(history_start_idx)
+        .map_err(|_| smelt_store::StoreError::Integrity("history start exceeds u64".into()))?;
+    let history_len_u64 = u64::try_from(history_len)
+        .map_err(|_| smelt_store::StoreError::Integrity("history length exceeds u64".into()))?;
+    Ok(smelt_store::SessionCommit {
+        session_id: session.id.clone(),
+        save_id,
+        expected,
+        identity: store_identity_from_session(session)?,
+        metadata: store_metadata_from_session(session, history_len)?,
+        history: smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::new(history_start),
+            final_len: smelt_store::HistoryLen::new(history_len_u64),
+            items: session.history[history_start_idx..].to_vec(),
+        },
+        side_tables: store_side_table_suffixes_from_session_at(
+            session,
             history_start_idx,
-            session.history.len(),
+            history_len,
         )?,
-        metadata_snapshots: snapshot_values_from(
-            &session.metadata_snapshots,
-            history_start_idx,
-            session.history.len(),
-        )?,
-        context_snapshots: snapshot_values_from(
-            &session.context_snapshots,
-            history_start_idx,
-            session.history.len(),
-        )?,
+        descriptors: None,
     })
 }
 
@@ -1443,12 +1435,23 @@ fn checkpoint_json_for_history_len(
     Ok(Some(serde_json::to_value(checkpoint)?))
 }
 
-pub fn store_state_from_session(
+pub fn store_identity_from_session(
+    session: &Session,
+) -> Result<smelt_store::SessionIdentity, smelt_store::StoreError> {
+    Ok(smelt_store::SessionIdentity {
+        id: session.id.clone(),
+        created_at: i64::try_from(session.created_at_ms).map_err(|_| {
+            smelt_store::StoreError::Integrity("session creation time exceeds SQLite range".into())
+        })?,
+        parent_id: session.parent_id.clone(),
+    })
+}
+
+pub fn store_metadata_from_session(
     session: &Session,
     history_len: usize,
-) -> Result<smelt_store::SessionState, smelt_store::StoreError> {
-    Ok(smelt_store::SessionState {
-        id: session.id.clone(),
+) -> Result<smelt_store::SessionMetadata, smelt_store::StoreError> {
+    Ok(smelt_store::SessionMetadata {
         title: session.title.clone(),
         slug: session.slug.clone(),
         first_user_message: session.first_user_message.clone(),
@@ -1459,19 +1462,25 @@ pub fn store_state_from_session(
             .map(|effort| effort.label().to_string()),
         model: session.model.clone(),
         fast_mode: session.fast_mode,
-        parent_id: session.parent_id.clone(),
         accounting_json: Some(serde_json::to_value(context_snapshot_state_from_session(
             session,
         ))?),
         checkpoint_json: checkpoint_json_for_history_len(session.checkpoint.as_ref(), history_len)?,
         context_tokens: session.context_tokens.map(u64::from),
-        context_tokens_history_len: session.context_tokens_history_len.map(|len| len as u64),
+        context_tokens_history_len: session
+            .context_tokens_history_len
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| {
+                smelt_store::StoreError::Integrity(
+                    "context token history length exceeds u64".into(),
+                )
+            })?,
         display_context_tokens: session.display_context_tokens.map(u64::from),
-        session_cost_usd: session.session_cost_usd,
-        revision: 0,
-        history_len: history_len as u64,
-        created_at: session.created_at_ms as i64,
-        updated_at: session.updated_at_ms as i64,
+        session_cost_usd: smelt_store::SessionCostUsd::new(session.session_cost_usd)?,
+        updated_at: i64::try_from(session.updated_at_ms).map_err(|_| {
+            smelt_store::StoreError::Integrity("session update time exceeds SQLite range".into())
+        })?,
     })
 }
 
@@ -1738,24 +1747,24 @@ pub fn load_store_resume_result(
     else {
         return Ok(None);
     };
-    let history_len =
-        snapshot
-            .head
-            .history_len
-            .as_usize()
-            .ok_or_else(|| SessionStoreError::Corrupt {
-                context: "session history length exceeds platform limits".into(),
-            })?;
-    let meta = session_meta_from_store_state(
+    let history_len = snapshot
+        .session
+        .head
+        .history_len
+        .as_usize()
+        .ok_or_else(|| SessionStoreError::Corrupt {
+            context: "session history length exceeds platform limits".into(),
+        })?;
+    let meta = session_meta_from_stored_session(
         &session_dir,
-        snapshot.state,
+        snapshot.session.clone(),
         snapshot.history_text_bytes,
         snapshot.retained_history_len.min(history_len),
     )?;
     let header = SessionHeader {
         meta,
         history_len,
-        revision: snapshot.head.revision.get(),
+        revision: snapshot.session.head.revision.get(),
         degraded_warnings: snapshot
             .missing_object_references
             .iter()
@@ -1768,7 +1777,7 @@ pub fn load_store_resume_result(
             session_dir,
             db_path,
         },
-        head: snapshot.head,
+        head: snapshot.session.head,
         descriptor_tail: snapshot.descriptor_tail,
     }))
 }
@@ -1796,23 +1805,30 @@ pub fn load_store_header_for_dir_result(
     crate::session_store::reject_symlink(&db_path, "read")?;
     let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
-    let Some(state) = db
-        .session_state()
-        .map_err(|err| crate::session_store::store_error("read session state", &db_path, err))?
+    let Some(stored) = db
+        .stored_session()
+        .map_err(|err| crate::session_store::store_error("read session metadata", &db_path, err))?
     else {
         return Ok(None);
     };
     let Some(meta) = load_meta_from_db_result(&session_dir)? else {
         return Ok(None);
     };
-    let history_len = state.history_len as usize;
+    let history_len =
+        stored
+            .head
+            .history_len
+            .as_usize()
+            .ok_or_else(|| SessionStoreError::Corrupt {
+                context: "session history length exceeds platform limits".into(),
+            })?;
     let degraded_warnings = db.degraded_warnings().map_err(|err| {
         crate::session_store::store_error("inspect session objects", &db_path, err)
     })?;
     let header = SessionHeader {
         meta,
         history_len,
-        revision: state.revision,
+        revision: stored.head.revision.get(),
         degraded_warnings,
     };
     Ok(Some((
@@ -1853,32 +1869,31 @@ fn load_db_session_result(dir_path: &std::path::Path) -> SessionStoreResult<Opti
     }
     let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
-    let Some(mut snapshot) = db
-        .load_full_session_snapshot()
+    let Some(session) = db
+        .load_full_session()
         .map_err(|err| crate::session_store::store_error("load session", &db_path, err))?
     else {
         return Ok(None);
     };
     let expected_id = dir_path.file_name().and_then(|name| name.to_str());
-    if expected_id != Some(snapshot.state.id.as_str()) {
+    if expected_id != Some(session.session.identity.id.as_str()) {
         return Err(SessionStoreError::Corrupt {
             context: format!(
                 "session id {:?} does not match directory {:?}",
-                snapshot.state.id, expected_id
+                session.session.identity.id, expected_id
             ),
         });
     }
-    let history = std::mem::take(&mut snapshot.history);
-    session_from_store_snapshot(snapshot, history).map(Some)
+    session_from_full_store(session).map(Some)
 }
 
-fn session_from_store_snapshot(
-    snapshot: smelt_store::SessionSnapshot,
-    history: Vec<HistoryItem>,
-) -> SessionStoreResult<Session> {
-    let state = snapshot.state;
-    crate::session_id::SessionId::parse(&state.id).map_err(|err| SessionStoreError::Corrupt {
-        context: format!("invalid persisted session id: {err}"),
+fn session_from_full_store(snapshot: smelt_store::FullSession) -> SessionStoreResult<Session> {
+    let identity = snapshot.session.identity;
+    let metadata = snapshot.session.metadata;
+    crate::session_id::SessionId::parse(&identity.id).map_err(|err| {
+        SessionStoreError::Corrupt {
+            context: format!("invalid persisted session id: {err}"),
+        }
     })?;
     let turn_metas =
         snapshots_from_values(snapshot.turn_metas).map_err(|err| SessionStoreError::Corrupt {
@@ -1894,48 +1909,56 @@ fn session_from_store_snapshot(
             context: format!("invalid accounting snapshot: {err}"),
         }
     })?;
-    let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
+    let context_state = context_snapshot_state_from_json(metadata.accounting_json.clone());
     let session_usage = context_state.session_usage.clone();
     let context_token_identity = context_state.context_token_identity;
     let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
-    let checkpoint = checkpoint_from_json(state.checkpoint_json.clone(), history.len());
-    let context_tokens = state
+    let checkpoint = checkpoint_from_json(metadata.checkpoint_json.clone(), snapshot.history.len());
+    let context_tokens = metadata
         .context_tokens
         .and_then(|tokens| u32::try_from(tokens).ok());
+    let created_at_ms =
+        u64::try_from(identity.created_at).map_err(|_| SessionStoreError::Corrupt {
+            context: "negative session creation time".into(),
+        })?;
+    let updated_at_ms =
+        u64::try_from(metadata.updated_at).map_err(|_| SessionStoreError::Corrupt {
+            context: "negative session update time".into(),
+        })?;
     Ok(Session {
-        id: state.id,
-        title: state.title,
-        slug: state.slug,
-        first_user_message: state.first_user_message,
+        id: identity.id,
+        title: metadata.title,
+        slug: metadata.slug,
+        first_user_message: metadata.first_user_message,
         metadata_snapshots,
-        created_at_ms: state.created_at as u64,
-        updated_at_ms: state.updated_at as u64,
-        mode: state.mode,
-        reasoning_effort: state
+        created_at_ms,
+        updated_at_ms,
+        mode: metadata.mode,
+        reasoning_effort: metadata
             .reasoning_effort
             .as_deref()
             .and_then(ReasoningEffort::parse),
-        model: state.model,
-        fast_mode: state.fast_mode,
-        cwd: state.cwd,
-        parent_id: state.parent_id,
-        history,
+        model: metadata.model,
+        fast_mode: metadata.fast_mode,
+        cwd: metadata.cwd,
+        parent_id: identity.parent_id,
+        history: snapshot.history,
         checkpoint,
         context_tokens,
-        context_tokens_history_len: state
+        context_tokens_history_len: metadata
             .context_tokens_history_len
             .and_then(|len| usize::try_from(len).ok()),
         context_token_identity,
-        display_context_tokens: state
+        display_context_tokens: metadata
             .display_context_tokens
             .and_then(|tokens| u32::try_from(tokens).ok())
             .or(context_tokens),
         display_context_token_identity,
         turn_metas,
         context_snapshots,
-        session_cost_usd: state.session_cost_usd,
+        session_cost_usd: metadata.session_cost_usd.get(),
         session_usage,
     })
 }
@@ -2409,8 +2432,8 @@ fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMet
     }
     let db = smelt_store::SessionReader::open_database(&db_path)
         .map_err(|err| crate::session_store::store_error("open", &db_path, err))?;
-    let Some(state) = db
-        .session_state()
+    let Some(session) = db
+        .stored_session()
         .map_err(|err| crate::session_store::store_error("read session metadata", &db_path, err))?
     else {
         return Ok(None);
@@ -2421,59 +2444,75 @@ fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMet
     let retained_history_len = db
         .history_item_count()
         .map_err(|err| crate::session_store::store_error("read history length", &db_path, err))?;
-    session_meta_from_store_state(path, state, text_bytes, retained_history_len).map(Some)
+    session_meta_from_stored_session(path, session, text_bytes, retained_history_len).map(Some)
 }
 
-fn session_meta_from_store_state(
+fn session_meta_from_stored_session(
     path: &Path,
-    state: smelt_store::SessionState,
+    session: smelt_store::StoredSession,
     text_bytes: u64,
     retained_history_len: usize,
 ) -> SessionStoreResult<SessionMeta> {
-    crate::session_id::SessionId::parse(&state.id).map_err(|err| SessionStoreError::Corrupt {
-        context: format!("invalid persisted session id: {err}"),
+    let identity = session.identity;
+    let metadata = session.metadata;
+    crate::session_id::SessionId::parse(&identity.id).map_err(|err| {
+        SessionStoreError::Corrupt {
+            context: format!("invalid persisted session id: {err}"),
+        }
     })?;
     let expected_id = path.file_name().and_then(|name| name.to_str());
-    if expected_id != Some(state.id.as_str()) {
+    if expected_id != Some(identity.id.as_str()) {
         return Err(SessionStoreError::Corrupt {
             context: format!(
                 "session id {:?} does not match directory {:?}",
-                state.id, expected_id
+                identity.id, expected_id
             ),
         });
     }
     let history_len =
-        usize::try_from(state.history_len).map_err(|_| SessionStoreError::Corrupt {
-            context: "session history length exceeds platform limits".into(),
-        })?;
+        session
+            .head
+            .history_len
+            .as_usize()
+            .ok_or_else(|| SessionStoreError::Corrupt {
+                context: "session history length exceeds platform limits".into(),
+            })?;
     let checkpoint = checkpoint_from_json(
-        state.checkpoint_json.clone(),
+        metadata.checkpoint_json.clone(),
         retained_history_len.min(history_len),
     );
-    let context_state = context_snapshot_state_from_json(state.accounting_json.clone());
+    let context_state = context_snapshot_state_from_json(metadata.accounting_json.clone());
     let context_token_identity = context_state.context_token_identity;
     let display_context_token_identity = context_state
         .display_context_token_identity
         .or_else(|| context_token_identity.clone());
+    let created_at_ms =
+        u64::try_from(identity.created_at).map_err(|_| SessionStoreError::Corrupt {
+            context: "negative session creation time".into(),
+        })?;
+    let updated_at_ms =
+        u64::try_from(metadata.updated_at).map_err(|_| SessionStoreError::Corrupt {
+            context: "negative session update time".into(),
+        })?;
     Ok(SessionMeta {
-        id: state.id,
-        title: state.title,
-        slug: state.slug,
-        first_user_message: state.first_user_message,
-        created_at_ms: state.created_at as u64,
-        updated_at_ms: state.updated_at as u64,
-        mode: state.mode,
-        reasoning_effort: state
+        id: identity.id,
+        title: metadata.title,
+        slug: metadata.slug,
+        first_user_message: metadata.first_user_message,
+        created_at_ms,
+        updated_at_ms,
+        mode: metadata.mode,
+        reasoning_effort: metadata
             .reasoning_effort
             .as_deref()
             .and_then(ReasoningEffort::parse),
-        model: state.model,
-        fast_mode: state.fast_mode,
-        cwd: state.cwd,
-        parent_id: state.parent_id,
-        context_tokens: state
+        model: metadata.model,
+        fast_mode: metadata.fast_mode,
+        cwd: metadata.cwd,
+        parent_id: identity.parent_id,
+        context_tokens: metadata
             .display_context_tokens
-            .or(state.context_tokens)
+            .or(metadata.context_tokens)
             .and_then(|tokens| u32::try_from(tokens).ok()),
         context_token_identity,
         display_context_token_identity,
@@ -2772,30 +2811,25 @@ mod tests {
                 "cwd changed",
             )));
         let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
-        db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
+        db.apply_session_commit(&initial_store_commit_from_session(&s).unwrap())
             .unwrap();
-        db.replace_transcript_descriptor_records_for_repair(&[
-            smelt_store::TranscriptDescriptorRecord {
-                block_idx: 0,
-                history_idx: Some(0),
-                kind: "user".to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                content_hash: "bad-user-link".to_string(),
-                estimated_text_bytes: "continue".len() as u64,
-                preview_text: "continue".to_string(),
-                indexed_text: "continue".to_string(),
-                descriptor_json: serde_json::json!({
-                    "kind": "user",
-                    "text": "continue",
-                    "image_labels": [],
-                })
-                .to_string(),
-                origin_json: Some(serde_json::json!({ "History": 0 }).to_string()),
-                tool_state_json: None,
-            },
-        ])
-        .unwrap();
+        let descriptor_json = serde_json::json!({
+            "kind": "user",
+            "text": "continue",
+            "image_labels": [],
+        })
+        .to_string();
+        let origin_json = serde_json::json!({ "History": 0 }).to_string();
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks
+                 SET descriptor_idx = 0, kind = 'user', content_hash = 'bad-user-link',
+                     estimated_text_bytes = ?1, preview_text = 'continue',
+                     descriptor_json = ?2, origin_json = ?3
+                 WHERE block_idx = 0",
+                ("continue".len() as i64, descriptor_json, origin_json),
+            )
+            .unwrap();
         drop(db);
 
         let (_header, _store_ref) =
@@ -2809,15 +2843,14 @@ mod tests {
     }
 
     #[test]
-    fn store_state_drops_checkpoint_past_target_history_len() {
+    fn store_metadata_drops_checkpoint_past_target_history_len() {
         let mut s = fixture_session();
         s.history = vec![user_item("kept")];
         s.checkpoint = Some(checkpoint("stale summary", 3));
 
-        let state = store_state_from_session(&s, 1).unwrap();
+        let metadata = store_metadata_from_session(&s, 1).unwrap();
 
-        assert_eq!(state.history_len, 1);
-        assert!(state.checkpoint_json.is_none());
+        assert!(metadata.checkpoint_json.is_none());
     }
 
     #[test]
@@ -2829,7 +2862,7 @@ mod tests {
         s.id = TEST_SESSION_ID.into();
         s.history = vec![user_item("old prompt"), assistant_text_item("recent reply")];
         let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
-        db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
+        db.apply_session_commit(&initial_store_commit_from_session(&s).unwrap())
             .unwrap();
         let checkpoint = serde_json::json!({
             "kind": "compaction",
@@ -2879,9 +2912,10 @@ mod tests {
 
         let db = smelt_store::SessionDb::open_read_only(dir.join("session.db")).unwrap();
         let persisted = db
-            .session_state()
+            .stored_session()
             .unwrap()
             .unwrap()
+            .metadata
             .checkpoint_json
             .unwrap();
         assert_eq!(persisted["first_live_index"].as_u64(), Some(177));
@@ -3025,16 +3059,22 @@ mod tests {
             serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
         let content = fs::read_to_string(dir.join("content.txt")).unwrap();
 
-        assert_eq!(meta["revision"].as_u64(), Some(receipt.revision.get()));
+        assert_eq!(
+            meta["revision"].as_u64(),
+            Some(receipt.current.revision.get())
+        );
         assert_eq!(
             meta["source_revision"].as_u64(),
-            Some(receipt.revision.get())
+            Some(receipt.current.revision.get())
         );
         assert_eq!(
             meta["cache_format_version"].as_u64(),
             Some(DERIVED_CACHE_FORMAT_VERSION.into())
         );
-        assert!(content.starts_with(&format!("# smelt-revision:{}\n", receipt.revision.get())));
+        assert!(content.starts_with(&format!(
+            "# smelt-revision:{}\n",
+            receipt.current.revision.get()
+        )));
     }
 
     #[cfg(unix)]
@@ -3156,7 +3196,7 @@ mod tests {
         session.id = persisted_id;
         session.history.push(user_item("mismatched id"));
         let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
-        db.save_session_snapshot_for_import(&store_snapshot_from_session(&session, 0).unwrap())
+        db.apply_session_commit(&initial_store_commit_from_session(&session).unwrap())
             .unwrap();
         drop(db);
 
@@ -3296,7 +3336,7 @@ mod tests {
         s.history.push(user_item("hello sqlite"));
         s.record_context_tokens(42, test_context_identity());
         let mut db = smelt_store::SessionDb::open(dir.join("session.db")).unwrap();
-        db.save_session_snapshot_for_import(&store_snapshot_from_session(&s, 0).unwrap())
+        db.apply_session_commit(&initial_store_commit_from_session(&s).unwrap())
             .unwrap();
 
         let loaded = load_session_files(&dir).expect("load db session");

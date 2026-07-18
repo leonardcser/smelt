@@ -301,11 +301,12 @@ impl TuiSessionDocument {
         &mut self,
         session_id: String,
         generation: DocumentGeneration,
-        state: smelt_store::SessionState,
+        identity: smelt_store::SessionIdentity,
+        metadata: smelt_store::SessionMetadata,
         side_tables: smelt_store::SideTableSuffixes,
     ) -> Option<smelt_core::session_save::SubmittedSessionCommit> {
         self.persist
-            .begin_metadata_commit(session_id, generation, state, side_tables)
+            .begin_metadata_commit(session_id, generation, identity, metadata, side_tables)
     }
 
     pub(crate) fn submit_history_save(
@@ -400,7 +401,8 @@ pub(crate) enum PreparedSessionSave {
     Skip(SessionSaveSkipReason),
     MetadataOnly {
         generation: DocumentGeneration,
-        state: Box<smelt_store::SessionState>,
+        identity: Box<smelt_store::SessionIdentity>,
+        metadata: Box<smelt_store::SessionMetadata>,
         side_tables: Box<smelt_store::SideTableSuffixes>,
     },
     History {
@@ -986,6 +988,7 @@ impl SessionDocument {
         receipt: &smelt_store::SaveReceipt,
     ) -> bool {
         let history_len = receipt
+            .current
             .history_len
             .as_usize()
             .expect("saved history length originated as usize");
@@ -1002,7 +1005,7 @@ impl SessionDocument {
                     if matches!(outcome.kind, crate::persist::PersistSaveKind::History) {
                         live_session.compact_saved_prefix(
                             history_len,
-                            receipt.revision.get(),
+                            receipt.current.revision.get(),
                             checkpoint,
                         );
                     }
@@ -1074,7 +1077,8 @@ impl SessionDocument {
             .descriptor_records_with_ids_from(descriptor_order_start);
         let descriptor_count = descriptor_records.len();
         let history_len = history_index.saturating_add(1);
-        let state = smelt_core::session::store_state_from_session(session, history_len)?;
+        let identity = smelt_core::session::store_identity_from_session(session)?;
+        let metadata = smelt_core::session::store_metadata_from_session(session, history_len)?;
         let side_tables = if include_side_tables {
             smelt_core::session::store_side_table_suffixes_from_session(session, history_index)?
         } else {
@@ -1088,7 +1092,8 @@ impl SessionDocument {
         Ok(RequestHistoryAppendSavePlan {
             generation,
             delta: Box::new(PersistDelta {
-                state,
+                identity,
+                metadata,
                 history: smelt_store::HistorySuffix {
                     start: smelt_store::HistoryIndex::new(history_index as u64),
                     final_len: smelt_store::HistoryLen::new(history_len as u64),
@@ -1119,7 +1124,9 @@ impl SessionDocument {
         match plan {
             SessionSavePlan::Skip(reason) => Ok(PreparedSessionSave::Skip(reason)),
             SessionSavePlan::MetadataOnly { generation } => {
-                let state = smelt_core::session::store_state_from_session(
+                let identity = smelt_core::session::store_identity_from_session(input.session)
+                    .map_err(|err| err.to_string())?;
+                let metadata = smelt_core::session::store_metadata_from_session(
                     input.session,
                     input.state.history_len,
                 )
@@ -1132,7 +1139,8 @@ impl SessionDocument {
                 .map_err(|err| err.to_string())?;
                 Ok(PreparedSessionSave::MetadataOnly {
                     generation,
-                    state: Box::new(state),
+                    identity: Box::new(identity),
+                    metadata: Box::new(metadata),
                     side_tables: Box::new(side_tables),
                 })
             }
@@ -1151,8 +1159,10 @@ impl SessionDocument {
                 debug_assert!(history_start_idx <= input.state.durable_history_len);
                 let history = input.history.range(history_start_idx..history_len)?;
                 debug_assert_eq!(history_len, history_start_idx.saturating_add(history.len()));
-                let state =
-                    smelt_core::session::store_state_from_session(input.session, history_len)
+                let identity = smelt_core::session::store_identity_from_session(input.session)
+                    .map_err(|err| err.to_string())?;
+                let metadata =
+                    smelt_core::session::store_metadata_from_session(input.session, history_len)
                         .map_err(|err| err.to_string())?;
                 let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
                     input.session,
@@ -1163,7 +1173,8 @@ impl SessionDocument {
                 Ok(PreparedSessionSave::History {
                     generation,
                     delta: Box::new(PersistDelta {
-                        state,
+                        identity,
+                        metadata,
                         history: smelt_store::HistorySuffix {
                             start: smelt_store::HistoryIndex::new(history_start_idx as u64),
                             final_len: smelt_store::HistoryLen::new(history_len as u64),
@@ -2011,10 +2022,16 @@ mod tests {
         smelt_store::SaveReceipt {
             session_id: "session-a".into(),
             save_id: smelt_store::SaveId::new(save_id),
-            previous_revision: smelt_store::Revision::new(revision.saturating_sub(1)),
-            revision: smelt_store::Revision::new(revision),
-            history_len: smelt_store::HistoryLen::new(history_len as u64),
-            descriptor_len: smelt_store::DescriptorLen::ZERO,
+            previous: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(revision.saturating_sub(1)),
+                history_len: smelt_store::HistoryLen::new(history_len as u64),
+                descriptor_len: smelt_store::DescriptorLen::ZERO,
+            },
+            current: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(revision),
+                history_len: smelt_store::HistoryLen::new(history_len as u64),
+                descriptor_len: smelt_store::DescriptorLen::ZERO,
+            },
         }
     }
 

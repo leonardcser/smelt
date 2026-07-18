@@ -17,10 +17,10 @@ fn loaded_session(id: &str) -> smelt_core::session::Session {
 fn session_revision(id: &str) -> u64 {
     smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(id))
         .unwrap()
-        .session_state()
+        .store_head()
         .unwrap()
-        .expect("session state")
         .revision
+        .get()
 }
 
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
@@ -41,13 +41,21 @@ fn save_receipt(
     descriptor_len: usize,
     revision: u64,
 ) -> smelt_store::SaveReceipt {
+    let history_len = smelt_store::HistoryLen::new(history_len as u64);
+    let descriptor_len = smelt_store::DescriptorLen::new(descriptor_len as u64);
     smelt_store::SaveReceipt {
         session_id: session_id.to_string(),
         save_id: smelt_store::SaveId::new(save_id),
-        previous_revision: smelt_store::Revision::new(revision.saturating_sub(1)),
-        revision: smelt_store::Revision::new(revision),
-        history_len: smelt_store::HistoryLen::new(history_len as u64),
-        descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+        previous: smelt_store::StoreHead {
+            revision: smelt_store::Revision::new(revision.saturating_sub(1)),
+            history_len,
+            descriptor_len,
+        },
+        current: smelt_store::StoreHead {
+            revision: smelt_store::Revision::new(revision),
+            history_len,
+            descriptor_len,
+        },
     }
 }
 
@@ -572,9 +580,12 @@ fn sparse_fork_publishes_a_complete_destination() {
     assert_ne!(fork_id, session_id);
     let fork_dir = smelt_core::session::dir_for_id(&fork_id);
     let reader = smelt_store::SessionReader::open_existing(&fork_dir).unwrap();
-    let state = reader.session_state().unwrap().unwrap();
-    assert_eq!(state.id, fork_id);
-    assert_eq!(state.parent_id.as_deref(), Some(session_id.as_str()));
+    let stored = reader.stored_session().unwrap().unwrap();
+    assert_eq!(stored.identity.id, fork_id);
+    assert_eq!(
+        stored.identity.parent_id.as_deref(),
+        Some(session_id.as_str())
+    );
     assert_eq!(reader.read_history_items_range(0..1).unwrap().len(), 1);
     assert!(fork_dir.join("meta.json").is_file());
     assert!(fork_dir.join("content.txt").is_file());
@@ -624,18 +635,16 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
     };
     let source_dir = smelt_core::session::dir_for_id(&session_id);
     let reader = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
-    let state = reader.session_state().unwrap().unwrap();
-    let descriptor_len = reader.transcript_descriptor_count().unwrap();
+    let stored = reader.stored_session().unwrap().unwrap();
     drop(reader);
     let mut writer = smelt_store::OwnedSessionWriter::open(&source_dir, &session_id).unwrap();
     writer
         .commit_session(&smelt_store::SessionCommit {
             session_id: session_id.clone(),
             save_id: smelt_store::SaveId::new(99),
-            base_revision: smelt_store::Revision::new(state.revision),
-            base_history_len: smelt_store::HistoryLen::new(state.history_len),
-            base_descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
-            state,
+            expected: stored.head,
+            identity: stored.identity,
+            metadata: stored.metadata,
             history: smelt_store::HistorySuffix {
                 start: smelt_store::HistoryIndex::ZERO,
                 final_len: smelt_store::HistoryLen::new(1),
@@ -1105,9 +1114,10 @@ fn store_backed_resume_tolerates_bad_checkpoint_without_repairing_database() {
 
     let persisted = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
-        .session_state()
+        .stored_session()
         .unwrap()
         .unwrap()
+        .metadata
         .checkpoint_json
         .unwrap();
     assert_eq!(persisted["first_live_index"].as_u64(), Some(177));
@@ -1189,7 +1199,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     let db_path = session_dir.join("session.db");
     let before = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
-        .session_state()
+        .stored_session()
         .unwrap()
         .expect("session state before read-only resume");
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
@@ -1209,11 +1219,11 @@ fn resuming_session_with_active_writer_is_read_only() {
 
     let after = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
-        .session_state()
+        .stored_session()
         .unwrap()
         .expect("session state after read-only resume");
-    assert_eq!(after.revision, before.revision);
-    assert_eq!(after.history_len, before.history_len);
+    assert_eq!(after.head.revision, before.head.revision);
+    assert_eq!(after.head.history_len, before.head.history_len);
     assert_eq!(
         smelt_store::SessionReader::open_database(&db_path)
             .unwrap()
@@ -1499,7 +1509,7 @@ fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
     let reader =
         smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
             .unwrap();
-    let persisted_state = reader.session_state().unwrap().unwrap();
+    let persisted_head = reader.store_head().unwrap();
     let persisted_descriptor_len = reader.transcript_descriptor_count().unwrap();
     drop(reader);
 
@@ -1519,13 +1529,13 @@ fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
         message: "save session database: stale descriptor base: base 303, current 1".into(),
         commit_failure: Some(smelt_store::SessionCommitFailure::StaleBase {
             expected: smelt_store::StoreHead {
-                revision: smelt_store::Revision::new(persisted_state.revision),
+                revision: persisted_head.revision,
                 history_len: smelt_store::HistoryLen::new(before_len as u64),
                 descriptor_len: smelt_store::DescriptorLen::new(303),
             },
             current: smelt_store::StoreHead {
-                revision: smelt_store::Revision::new(persisted_state.revision),
-                history_len: smelt_store::HistoryLen::new(persisted_state.history_len),
+                revision: persisted_head.revision,
+                history_len: persisted_head.history_len,
                 descriptor_len: smelt_store::DescriptorLen::new(persisted_descriptor_len as u64),
             },
         }),
@@ -1865,7 +1875,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
     let before = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
-        .session_state()
+        .stored_session()
         .unwrap()
         .expect("session state before readonly loops");
     for idx in 0..5 {
@@ -1887,11 +1897,11 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
 
     let after = smelt_store::SessionReader::open_database(&db_path)
         .unwrap()
-        .session_state()
+        .stored_session()
         .unwrap()
         .expect("session state after readonly loops");
-    assert_eq!(after.revision, before.revision);
-    assert_eq!(after.history_len, before.history_len);
+    assert_eq!(after.head.revision, before.head.revision);
+    assert_eq!(after.head.history_len, before.head.history_len);
     assert_eq!(
         smelt_store::SessionReader::open_database(&db_path)
             .unwrap()

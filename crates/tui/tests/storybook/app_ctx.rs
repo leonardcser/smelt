@@ -413,9 +413,16 @@ impl AppStoryCtx {
                 )))
             })
             .collect::<Vec<_>>();
-        db.save_session_snapshot_for_import(&smelt_store::SessionSnapshot {
-            state: smelt_store::SessionState {
+        db.apply_session_commit(&smelt_store::SessionCommit {
+            session_id: meta.id.clone(),
+            save_id: smelt_store::SaveId::new(1),
+            expected: smelt_store::StoreHead::default(),
+            identity: smelt_store::SessionIdentity {
                 id: meta.id.clone(),
+                created_at: i64::try_from(meta.created_at_ms).expect("fixture created_at fits i64"),
+                parent_id: meta.parent_id.clone(),
+            },
+            metadata: smelt_store::SessionMetadata {
                 title: meta.title.clone(),
                 slug: meta.slug.clone(),
                 first_user_message: meta.first_user_message.clone(),
@@ -426,24 +433,24 @@ impl AppStoryCtx {
                     .map(|effort| effort.label().to_string()),
                 model: meta.model.clone(),
                 fast_mode: meta.fast_mode,
-                parent_id: meta.parent_id.clone(),
                 accounting_json: None,
                 checkpoint_json: None,
                 context_tokens: meta.context_tokens.map(u64::from),
                 context_tokens_history_len: None,
                 display_context_tokens: meta.context_tokens.map(u64::from),
-                session_cost_usd: 0.0,
-                revision: 0,
-                history_len: history_len as u64,
-                created_at: meta.created_at_ms as i64,
-                updated_at: meta.updated_at_ms as i64,
+                session_cost_usd: smelt_store::SessionCostUsd::new(0.0)
+                    .expect("valid fixture cost"),
+                updated_at: i64::try_from(meta.updated_at_ms).expect("fixture updated_at fits i64"),
             },
-            history_start_idx: 0,
-            history_len,
-            history,
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            context_snapshots: Vec::new(),
+            history: smelt_store::HistorySuffix {
+                start: smelt_store::HistoryIndex::ZERO,
+                final_len: smelt_store::HistoryLen::new(
+                    u64::try_from(history_len).expect("fixture history length fits u64"),
+                ),
+                items: history,
+            },
+            side_tables: smelt_store::SideTableSuffixes::default(),
+            descriptors: None,
         })
         .expect("write canonical session fixture");
         let meta_json = serde_json::to_string(meta).expect("serialize session fixture metadata");

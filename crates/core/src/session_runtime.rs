@@ -326,7 +326,50 @@ fn history_json_bytes(items: &[HistoryItem]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_store::{SessionSnapshot, SessionState};
+
+    fn seed_store(
+        db: &mut smelt_store::SessionDb,
+        id: &str,
+        mode: Option<&str>,
+        history: Vec<HistoryItem>,
+    ) {
+        let command = smelt_store::SessionCommit {
+            session_id: id.into(),
+            save_id: smelt_store::SaveId::new(1),
+            expected: smelt_store::StoreHead::default(),
+            identity: smelt_store::SessionIdentity {
+                id: id.into(),
+                created_at: 1,
+                parent_id: None,
+            },
+            metadata: smelt_store::SessionMetadata {
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: mode.map(str::to_owned),
+                reasoning_effort: None,
+                model: None,
+                fast_mode: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
+                updated_at: 2,
+            },
+            history: smelt_store::HistorySuffix {
+                start: smelt_store::HistoryIndex::ZERO,
+                final_len: smelt_store::HistoryLen::new(history.len() as u64),
+                items: history,
+            },
+            side_tables: smelt_store::SideTableSuffixes::default(),
+            descriptors: None,
+        };
+        db.apply_session_commit(&command)
+            .expect("seed session store");
+    }
 
     #[test]
     fn store_backed_live_session_reads_persisted_range_and_live_suffix() {
@@ -337,37 +380,7 @@ mod tests {
             HistoryItem::user(protocol::Content::text("one")),
             HistoryItem::user(protocol::Content::text("two")),
         ];
-        db.save_session_snapshot_for_import(&SessionSnapshot {
-            state: SessionState {
-                id: "live".into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                parent_id: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 1,
-                history_len: persisted.len() as u64,
-                created_at: 1,
-                updated_at: 2,
-            },
-            history_start_idx: 0,
-            history_len: persisted.len(),
-            history: persisted,
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            context_snapshots: Vec::new(),
-        })
-        .expect("save snapshot");
+        seed_store(&mut db, "live", None, persisted);
 
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
@@ -453,37 +466,7 @@ mod tests {
             )),
             HistoryItem::user(protocol::Content::text("after mode")),
         ];
-        db.save_session_snapshot_for_import(&SessionSnapshot {
-            state: SessionState {
-                id: "live-scan".into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: Some("normal".into()),
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                parent_id: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 1,
-                history_len: history.len() as u64,
-                created_at: 1,
-                updated_at: 2,
-            },
-            history_start_idx: 0,
-            history_len: history.len(),
-            history,
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            context_snapshots: Vec::new(),
-        })
-        .expect("save snapshot");
+        seed_store(&mut db, "live-scan", Some("normal"), history);
         let header = SessionHeader {
             meta: crate::session::SessionMeta {
                 id: "live-scan".into(),

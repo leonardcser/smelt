@@ -148,7 +148,8 @@ pub struct PersistBase {
 
 #[derive(Clone)]
 pub struct PersistDelta {
-    pub state: smelt_store::SessionState,
+    pub identity: smelt_store::SessionIdentity,
+    pub metadata: smelt_store::SessionMetadata,
     pub history: smelt_store::HistorySuffix,
     pub side_tables: smelt_store::SideTableSuffixes,
     pub descriptors: Option<PersistDescriptorDelta>,
@@ -197,10 +198,9 @@ fn history_commit_from_delta(
     Ok(smelt_store::SessionCommit {
         session_id,
         save_id: smelt_store::SaveId::new(save_id),
-        base_revision: smelt_store::Revision::new(base.revision),
-        base_history_len: smelt_store::HistoryLen::new(base.history_len as u64),
-        base_descriptor_len: smelt_store::DescriptorLen::new(base.descriptor_len as u64),
-        state: delta.state,
+        expected: store_head_from_base(base),
+        identity: delta.identity,
+        metadata: delta.metadata,
         history: delta.history,
         side_tables: delta.side_tables,
         descriptors,
@@ -211,16 +211,16 @@ fn metadata_commit(
     save_id: u64,
     session_id: String,
     base: PersistBase,
-    state: smelt_store::SessionState,
+    identity: smelt_store::SessionIdentity,
+    metadata: smelt_store::SessionMetadata,
     side_tables: smelt_store::SideTableSuffixes,
 ) -> smelt_store::SessionCommit {
     smelt_store::SessionCommit {
         session_id,
         save_id: smelt_store::SaveId::new(save_id),
-        base_revision: smelt_store::Revision::new(base.revision),
-        base_history_len: smelt_store::HistoryLen::new(base.history_len as u64),
-        base_descriptor_len: smelt_store::DescriptorLen::new(base.descriptor_len as u64),
-        state,
+        expected: store_head_from_base(base),
+        identity,
+        metadata,
         history: smelt_store::HistorySuffix {
             start: smelt_store::HistoryIndex::new(base.history_len as u64),
             final_len: smelt_store::HistoryLen::new(base.history_len as u64),
@@ -228,6 +228,14 @@ fn metadata_commit(
         },
         side_tables,
         descriptors: None,
+    }
+}
+
+fn store_head_from_base(base: PersistBase) -> smelt_store::StoreHead {
+    smelt_store::StoreHead {
+        revision: smelt_store::Revision::new(base.revision),
+        history_len: smelt_store::HistoryLen::new(base.history_len as u64),
+        descriptor_len: smelt_store::DescriptorLen::new(base.descriptor_len as u64),
     }
 }
 
@@ -396,11 +404,12 @@ impl SessionPersistState {
         &mut self,
         session_id: String,
         generation: DocumentGeneration,
-        state: smelt_store::SessionState,
+        identity: smelt_store::SessionIdentity,
+        metadata: smelt_store::SessionMetadata,
         side_tables: smelt_store::SideTableSuffixes,
     ) -> Option<SubmittedSessionCommit> {
-        let history = SubmittedHistoryRange::metadata_only(state.history_len);
         let base = self.base();
+        let history = SubmittedHistoryRange::metadata_only(base.history_len as u64);
         let save_id = self.begin_save(
             session_id.clone(),
             SessionSaveKind::Metadata,
@@ -409,7 +418,7 @@ impl SessionPersistState {
             None,
         )?;
         Some(SubmittedSessionCommit {
-            command: metadata_commit(save_id, session_id, base, state, side_tables),
+            command: metadata_commit(save_id, session_id, base, identity, metadata, side_tables),
         })
     }
 
@@ -448,6 +457,7 @@ impl SessionPersistState {
             return None;
         }
         let history_len = receipt
+            .current
             .history_len
             .as_usize()
             .expect("saved history length originated as usize");
@@ -464,10 +474,11 @@ impl SessionPersistState {
         self.store_ready = true;
         self.durable.store_history_len = history_len;
         self.durable.descriptor_len = receipt
+            .current
             .descriptor_len
             .as_usize()
             .expect("saved descriptor length originated as usize");
-        self.durable.revision = receipt.revision.get();
+        self.durable.revision = receipt.current.revision.get();
         if matches!(pending.kind, SessionSaveKind::History) {
             self.descriptors_persisted = true;
         }
@@ -906,10 +917,16 @@ mod tests {
         smelt_store::SaveReceipt {
             session_id: "session-a".into(),
             save_id: smelt_store::SaveId::new(save_id),
-            previous_revision: smelt_store::Revision::new(revision.saturating_sub(1)),
-            revision: smelt_store::Revision::new(revision),
-            history_len: smelt_store::HistoryLen::new(history_len as u64),
-            descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+            previous: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(revision.saturating_sub(1)),
+                history_len: smelt_store::HistoryLen::new(history_len as u64),
+                descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+            },
+            current: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(revision),
+                history_len: smelt_store::HistoryLen::new(history_len as u64),
+                descriptor_len: smelt_store::DescriptorLen::new(descriptor_len as u64),
+            },
         }
     }
 

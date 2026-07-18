@@ -6801,7 +6801,7 @@ mod tests {
                 descriptor_count += 1;
             }
             let start_descriptor_idx = descriptor_count.saturating_sub(records.len());
-            db.replace_transcript_descriptor_suffix_for_repair(start_descriptor_idx, &records)
+            db.apply_transcript_descriptor_suffix_fixture(start_descriptor_idx, &records)
                 .expect("write descriptor resume fixture chunk");
         }
         let setup_ms = elapsed_ms(setup_start.elapsed());

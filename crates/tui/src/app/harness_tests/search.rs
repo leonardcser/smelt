@@ -30,8 +30,7 @@ fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) ->
             test_descriptor_record(idx, &content)
         })
         .collect::<Vec<_>>();
-    db.replace_transcript_descriptor_records_for_repair(&records)
-        .unwrap();
+    db.apply_transcript_descriptor_fixture(&records).unwrap();
     drop(db);
 
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)

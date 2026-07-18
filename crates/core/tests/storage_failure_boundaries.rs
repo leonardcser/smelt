@@ -68,8 +68,9 @@ fn repair_needed_read_does_not_mutate_while_another_process_owns_session() {
         )),
     ];
     let mut db = smelt_store::SessionDb::open(&db_path).expect("create database");
-    db.save_session_snapshot_for_import(
-        &smelt_core::session::store_snapshot_from_session(&session, 0).expect("build snapshot"),
+    db.apply_session_commit(
+        &smelt_core::session::initial_store_commit_from_session(&session)
+            .expect("build session commit"),
     )
     .expect("save fixture");
     drop(db);
@@ -105,9 +106,10 @@ fn repair_needed_read_does_not_mutate_while_another_process_owns_session() {
     );
     let persisted = smelt_store::SessionDb::open_read_only(&db_path)
         .expect("open database after read")
-        .session_state()
-        .expect("read persisted state")
-        .expect("session state")
+        .stored_session()
+        .expect("read persisted session")
+        .expect("stored session")
+        .metadata
         .checkpoint_json
         .expect("checkpoint");
     assert_eq!(persisted["first_live_index"].as_u64(), Some(177));

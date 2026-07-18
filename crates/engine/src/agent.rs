@@ -2931,6 +2931,43 @@ fn send_usage(
 mod tests {
     use super::*;
 
+    fn test_store_commit(id: &str, history: Vec<HistoryItem>) -> smelt_store::SessionCommit {
+        smelt_store::SessionCommit {
+            session_id: id.into(),
+            save_id: smelt_store::SaveId::new(1),
+            expected: smelt_store::StoreHead::default(),
+            identity: smelt_store::SessionIdentity {
+                id: id.into(),
+                created_at: 10,
+                parent_id: None,
+            },
+            metadata: smelt_store::SessionMetadata {
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: None,
+                reasoning_effort: None,
+                model: None,
+                fast_mode: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
+                updated_at: 20,
+            },
+            history: smelt_store::HistorySuffix {
+                start: smelt_store::HistoryIndex::ZERO,
+                final_len: smelt_store::HistoryLen::new(history.len() as u64),
+                items: history,
+            },
+            side_tables: smelt_store::SideTableSuffixes::default(),
+            descriptors: None,
+        }
+    }
+
     #[test]
     fn completed_only_reasoning_part_emits_its_content_as_a_delta() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3149,37 +3186,8 @@ mod tests {
             None,
             Vec::new(),
         ));
-        let snapshot = smelt_store::SessionSnapshot {
-            state: smelt_store::SessionState {
-                id: "s1".into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                parent_id: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 0,
-                history_len: 3,
-                created_at: 10,
-                updated_at: 20,
-            },
-            history_start_idx: 0,
-            history_len: 3,
-            history: vec![old, recent.clone(), reply.clone()],
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            context_snapshots: Vec::new(),
-        };
-        db.save_session_snapshot_for_import(&snapshot).unwrap();
+        let command = test_store_commit("s1", vec![old, recent.clone(), reply.clone()]);
+        db.apply_session_commit(&command).unwrap();
 
         let history = load_model_history(
             protocol::ModelHistorySource::store(
@@ -3210,37 +3218,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let item = HistoryItem::user(protocol::Content::text("persisted"));
-        let snapshot = smelt_store::SessionSnapshot {
-            state: smelt_store::SessionState {
-                id: "blocked-history".into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                parent_id: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 0,
-                history_len: 1,
-                created_at: 10,
-                updated_at: 20,
-            },
-            history_start_idx: 0,
-            history_len: 1,
-            history: vec![item.clone()],
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            context_snapshots: Vec::new(),
-        };
-        db.save_session_snapshot_for_import(&snapshot).unwrap();
+        let command = test_store_commit("blocked-history", vec![item.clone()]);
+        db.apply_session_commit(&command).unwrap();
         db.connection()
             .execute_batch(
                 "BEGIN IMMEDIATE;

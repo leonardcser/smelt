@@ -1148,10 +1148,13 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     let session_id = app.app.core.session.id.clone();
     app.app.save_session_and_flush();
     assert_eq!(
-        smelt_core::session::load_full(&session_id)
-            .expect("explicit cwd change persisted")
-            .cwd
-            .as_deref(),
+        crate::app::history::materialize_full_session(
+            &session_id,
+            crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
+        )
+        .expect("explicit cwd change persisted")
+        .cwd
+        .as_deref(),
         Some(expected.as_str())
     );
 }

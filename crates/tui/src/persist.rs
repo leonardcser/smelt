@@ -945,6 +945,9 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
                 actual
             )
         }
+        smelt_store::SessionCommitFailure::IdentityMismatch { stored, attempted } => format!(
+            "immutable session identity mismatch: stored {stored:?}, attempted {attempted:?}"
+        ),
         smelt_store::SessionCommitFailure::StaleBase { expected, current } => format!(
             "stale store head: expected revision/history/descriptors {}/{}/{}, current {}/{}/{}",
             expected.revision.get(),
@@ -1017,11 +1020,17 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
 fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
     smelt_perf::perf::record_value(
         "persist:write:previous_revision",
-        receipt.previous_revision.get(),
+        receipt.previous.revision.get(),
     );
-    smelt_perf::perf::record_value("persist:write:revision", receipt.revision.get());
-    smelt_perf::perf::record_value("persist:write:history_len", receipt.history_len.get());
-    smelt_perf::perf::record_value("persist:write:descriptor_len", receipt.descriptor_len.get());
+    smelt_perf::perf::record_value("persist:write:revision", receipt.current.revision.get());
+    smelt_perf::perf::record_value(
+        "persist:write:history_len",
+        receipt.current.history_len.get(),
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:descriptor_len",
+        receipt.current.descriptor_len.get(),
+    );
 }
 
 fn write(
@@ -1081,11 +1090,7 @@ pub(crate) fn write_transcript_descriptor_suffix(
     start_descriptor_idx: usize,
     records: &[smelt_core::TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
-    let session_id = session_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| smelt_store::StoreError::Integrity("session directory has no id".into()))?;
-    let mut maintenance = smelt_store::SessionMaintenance::open(session_dir, session_id)?;
+    let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
     let rows = records
         .iter()
         .enumerate()
@@ -1102,7 +1107,13 @@ pub(crate) fn write_transcript_descriptor_suffix(
             )
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
-    maintenance.replace_transcript_descriptor_suffix(start_descriptor_idx, &rows)
+    db.apply_transcript_descriptor_suffix_fixture(start_descriptor_idx, &rows)
+        .map(|_| ())
+        .map_err(|failure| {
+            smelt_store::StoreError::Integrity(format!(
+                "transcript descriptor fixture commit failed: {failure:?}"
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -1136,11 +1147,17 @@ mod tests {
         smelt_store::SessionCommit {
             session_id: session_id.into(),
             save_id: smelt_store::SaveId::new(1),
-            base_revision: smelt_store::Revision::new(base_revision),
-            base_history_len: smelt_store::HistoryLen::ZERO,
-            base_descriptor_len: smelt_store::DescriptorLen::ZERO,
-            state: smelt_store::SessionState {
+            expected: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(base_revision),
+                history_len: smelt_store::HistoryLen::ZERO,
+                descriptor_len: smelt_store::DescriptorLen::ZERO,
+            },
+            identity: smelt_store::SessionIdentity {
                 id: session_id.into(),
+                created_at: 1,
+                parent_id: None,
+            },
+            metadata: smelt_store::SessionMetadata {
                 title: None,
                 slug: None,
                 first_user_message: None,
@@ -1149,16 +1166,12 @@ mod tests {
                 reasoning_effort: None,
                 model: None,
                 fast_mode: None,
-                parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
                 context_tokens: None,
                 context_tokens_history_len: None,
                 display_context_tokens: None,
-                session_cost_usd: 0.0,
-                revision: 0,
-                history_len: 1,
-                created_at: 1,
+                session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
                 updated_at: 1,
             },
             history: smelt_store::HistorySuffix {
@@ -1276,7 +1289,7 @@ mod tests {
             assert_eq!(std::fs::read_dir(staging_root).unwrap().count(), 0);
         }
         let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
-        assert!(db.session_state().unwrap().is_none());
+        assert!(db.stored_session().unwrap().is_none());
         assert_eq!(
             db.connection()
                 .query_row("SELECT COUNT(*) FROM objects", [], |row| row
@@ -1303,7 +1316,7 @@ mod tests {
         let success =
             write(&request, &mut writer, &session_dir).expect("canonical commit succeeds");
 
-        assert_eq!(success.receipt.revision.get(), 1);
+        assert_eq!(success.receipt.current.revision.get(), 1);
         assert!(success.warning.is_none());
         assert!(!session_dir.join("blobs").exists());
         let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).unwrap();
@@ -1344,13 +1357,13 @@ mod tests {
         let success =
             write(&request, &mut writer, &session_dir).expect("canonical commit succeeds");
 
-        assert_eq!(success.receipt.revision.get(), 1);
+        assert_eq!(success.receipt.current.revision.get(), 1);
         assert!(success
             .warning
             .is_some_and(|warning| warning.contains("derived cache refresh failed")));
         assert!(session_dir.join("meta.json").is_dir());
         let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
-        assert_eq!(db.session_state().unwrap().unwrap().history_len, 1);
+        assert_eq!(db.store_head().unwrap().history_len.get(), 1);
         assert_eq!(db.read_history_items_range(0..1).unwrap().len(), 1);
     }
 

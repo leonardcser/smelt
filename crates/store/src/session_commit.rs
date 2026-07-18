@@ -2,7 +2,7 @@ use protocol::HistoryItem;
 use serde_json::Value;
 
 use crate::history::TranscriptDescriptorRecord;
-use crate::meta::SessionState;
+use crate::meta::{SessionIdentity, SessionMetadata};
 
 macro_rules! typed_u64 {
     ($name:ident) => {
@@ -29,6 +29,13 @@ macro_rules! typed_u64 {
 
             pub const fn get(self) -> u64 {
                 self.0
+            }
+
+            pub const fn checked_add(self, amount: u64) -> Option<Self> {
+                match self.0.checked_add(amount) {
+                    Some(value) => Some(Self(value)),
+                    None => None,
+                }
             }
 
             pub fn as_usize(self) -> Option<usize> {
@@ -63,10 +70,9 @@ typed_u64!(SaveId);
 pub struct SessionCommit {
     pub session_id: String,
     pub save_id: SaveId,
-    pub base_revision: Revision,
-    pub base_history_len: HistoryLen,
-    pub base_descriptor_len: DescriptorLen,
-    pub state: SessionState,
+    pub expected: StoreHead,
+    pub identity: SessionIdentity,
+    pub metadata: SessionMetadata,
     pub history: HistorySuffix,
     pub side_tables: SideTableSuffixes,
     pub descriptors: Option<TranscriptDescriptorSuffix>,
@@ -104,19 +110,13 @@ pub struct StoreHead {
 pub struct SaveReceipt {
     pub session_id: String,
     pub save_id: SaveId,
-    pub previous_revision: Revision,
-    pub revision: Revision,
-    pub history_len: HistoryLen,
-    pub descriptor_len: DescriptorLen,
+    pub previous: StoreHead,
+    pub current: StoreHead,
 }
 
 impl SaveReceipt {
     pub const fn head(&self) -> StoreHead {
-        StoreHead {
-            revision: self.revision,
-            history_len: self.history_len,
-            descriptor_len: self.descriptor_len,
-        }
+        self.current
     }
 }
 
@@ -146,6 +146,10 @@ pub enum SessionCommitFailure {
     SessionMismatch {
         expected: String,
         actual: Option<String>,
+    },
+    IdentityMismatch {
+        stored: SessionIdentity,
+        attempted: SessionIdentity,
     },
     StaleBase {
         expected: StoreHead,
@@ -209,6 +213,7 @@ impl SessionCommitFailure {
             Self::OwnershipLost => SessionPersistenceDisposition::OwnershipLost,
             Self::Io { disposition, .. } | Self::Sqlite { disposition, .. } => *disposition,
             Self::SessionMismatch { .. }
+            | Self::IdentityMismatch { .. }
             | Self::InvalidHistorySuffix { .. }
             | Self::InvalidDescriptorSuffix { .. }
             | Self::InvalidSideTableSuffix { .. }

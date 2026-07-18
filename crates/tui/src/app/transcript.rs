@@ -7881,8 +7881,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..4).map(test_descriptor_record).collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records_for_repair(&records)
-            .unwrap();
+        db.apply_transcript_descriptor_fixture(&records).unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(1).unwrap();
         drop(db);
 
@@ -7904,8 +7903,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..6).map(test_descriptor_record).collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records_for_repair(&records)
-            .unwrap();
+        db.apply_transcript_descriptor_fixture(&records).unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
         drop(db);
 
@@ -8019,8 +8017,7 @@ mod tests {
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let mut records = (0..300).map(test_descriptor_record).collect::<Vec<_>>();
         records[0].estimated_text_bytes = 1_000;
-        db.replace_transcript_descriptor_records_for_repair(&records)
-            .unwrap();
+        db.apply_transcript_descriptor_fixture(&records).unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
         drop(db);
 
@@ -8047,8 +8044,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
         let records = (0..16).map(test_descriptor_record).collect::<Vec<_>>();
-        db.replace_transcript_descriptor_records_for_repair(&records)
-            .unwrap();
+        db.apply_transcript_descriptor_fixture(&records).unwrap();
         let tail = db.read_transcript_descriptor_tail_slice(4).unwrap();
         drop(db);
 
