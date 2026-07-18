@@ -15,7 +15,7 @@ use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaTyp
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
 use smelt_core::lua::LuaHandle;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Window-event names accepted by `win:on(event, fn)`. Maps onto the
 /// internal `WinEvent` enum.
@@ -850,10 +850,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // Doc text is built at registration time so per-opt defaults stay in
     // lockstep with the Rust source (`Gutters::default()`) - no hand-kept
     // duplication that could drift on a default change.
-    let new_doc: &'static str = Box::leak(format!(
-        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
-        crate::smelt_edit::layout::Gutters::default().scrollbar
-    ).into_boxed_str());
+    static NEW_DOC: OnceLock<String> = OnceLock::new();
+    let new_doc = NEW_DOC.get_or_init(|| {
+        format!(
+            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
+            crate::smelt_edit::layout::Gutters::default().scrollbar
+        )
+    });
     m.fn_(
         "new",
         new_doc,

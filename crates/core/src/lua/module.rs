@@ -10,6 +10,7 @@
 //! compile error.
 
 use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MaybeSend};
+use std::sync::{Mutex, OnceLock};
 
 use super::doc::{record_internal_module, record_module, register_fn_inner, Tier, Visibility};
 use super::lua_type::{LuaType, LuaTypeTuple};
@@ -34,7 +35,7 @@ impl<'a> LuaMod<'a> {
         doc: &'static str,
         tier: Tier,
     ) -> mlua::Result<Self> {
-        let path: &'static str = leak(format!("smelt.{name}"));
+        let path: &'static str = intern_path(format!("smelt.{name}"));
         let tbl = lua.create_table()?;
         record_module(path, doc, Some(tier));
         smelt.set(name, tbl.clone())?;
@@ -53,7 +54,7 @@ impl<'a> LuaMod<'a> {
         doc: &'static str,
         tier: Tier,
     ) -> mlua::Result<Self> {
-        let path: &'static str = leak(format!("smelt.{name}"));
+        let path: &'static str = intern_path(format!("smelt.{name}"));
         let tbl = lua.create_table()?;
         record_internal_module(path, doc, Some(tier));
         smelt.set(name, tbl.clone())?;
@@ -101,7 +102,7 @@ impl<'a> LuaMod<'a> {
     /// Add a sub-module under this one. Path becomes `self.path.name`.
     /// Inherits the parent's tier.
     pub fn sub(&self, name: &'static str, doc: &'static str) -> mlua::Result<LuaMod<'a>> {
-        let path: &'static str = leak(format!("{}.{name}", self.path));
+        let path: &'static str = intern_path(format!("{}.{name}", self.path));
         let tbl = self.lua.create_table()?;
         record_module(path, doc, Some(self.tier));
         self.tbl.set(name, tbl.clone())?;
@@ -114,7 +115,7 @@ impl<'a> LuaMod<'a> {
     }
 
     pub fn sub_internal(&self, name: &'static str, doc: &'static str) -> mlua::Result<LuaMod<'a>> {
-        let path: &'static str = leak(format!("{}.{name}", self.path));
+        let path: &'static str = intern_path(format!("{}.{name}", self.path));
         let tbl = self.lua.create_table()?;
         record_internal_module(path, doc, Some(self.tier));
         self.tbl.set(name, tbl.clone())?;
@@ -219,9 +220,19 @@ impl<'a> LuaMod<'a> {
     }
 }
 
-/// Leak a `String` into a `&'static str`. Used at registration time only
-/// (~50 calls across the whole binary), so the leaked memory is constant
-/// and bounded.
-fn leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
+/// Intern a generated module path for the process lifetime. Lua runtimes are
+/// recreated during reloads and tests, so retaining one copy per distinct path
+/// keeps the documentation registry's static references bounded.
+fn intern_path(s: String) -> &'static str {
+    static PATHS: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
+    let mut paths = PATHS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("Lua module path interner poisoned");
+    if let Some(path) = paths.iter().copied().find(|path| *path == s) {
+        return path;
+    }
+    let path = Box::leak(s.into_boxed_str());
+    paths.push(path);
+    path
 }
