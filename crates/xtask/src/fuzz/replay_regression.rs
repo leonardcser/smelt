@@ -23,6 +23,8 @@ pub fn run(args: Vec<String>) {
         Command::new("cargo")
             .args([
                 "build",
+                "--features",
+                "scenario-tools",
                 "--bin",
                 "replay_scenario",
                 "--manifest-path",

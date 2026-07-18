@@ -12,6 +12,9 @@ cargo-fuzz = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+scenario-tools = []
+
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
@@ -154,6 +157,7 @@ bench = false
 [[bin]]
 name = "crash_to_scenario"
 path = "src/bin/crash_to_scenario.rs"
+required-features = ["scenario-tools"]
 test = false
 doc = false
 bench = false
@@ -161,6 +165,7 @@ bench = false
 [[bin]]
 name = "replay_scenario"
 path = "src/bin/replay_scenario.rs"
+required-features = ["scenario-tools"]
 test = false
 doc = false
 bench = false
@@ -168,6 +173,7 @@ bench = false
 [[bin]]
 name = "play_scenario"
 path = "src/bin/play_scenario.rs"
+required-features = ["scenario-tools"]
 test = false
 doc = false
 bench = false
@@ -175,6 +181,7 @@ bench = false
 [[bin]]
 name = "shrink_scenario"
 path = "src/bin/shrink_scenario.rs"
+required-features = ["scenario-tools"]
 test = false
 doc = false
 bench = false

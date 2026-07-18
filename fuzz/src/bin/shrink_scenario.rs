@@ -15,7 +15,7 @@
 //! Usage:
 //!
 //! ```text
-//! cargo run --release --bin shrink_scenario -- \
+//! cargo run --release --features scenario-tools --bin shrink_scenario -- \
 //!     [--target smelt_loop|lua_loop] <scenario.json> [out.json]
 //! ```
 //!

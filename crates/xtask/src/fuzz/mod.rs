@@ -45,7 +45,7 @@ pub fn print_usage() {
     eprintln!(
         "  status                              summarize corpora, seeds, artifacts, coverage"
     );
-    eprintln!("  build [target...]                    build real fuzz targets one-by-one");
+    eprintln!("  build [target...]                    build every target or selected targets");
     eprintln!("  prepare                              initialize shared data for every target");
     eprintln!("  verify                               prepare, build, and replay every target");
     eprintln!("  import-data [fuzz-dir]               merge legacy corpus and artifacts into shared storage");
@@ -82,22 +82,27 @@ fn verify(args: Vec<String>) {
 
 fn build(args: Vec<String>) {
     let known = all_target_names();
-    let targets: Vec<String> = if args.is_empty() {
-        known.clone()
-    } else {
-        for target in &args {
-            if !known.contains(target) {
-                die(&format!(
-                    "unknown target `{target}`. Known: {}",
-                    known.join(", ")
-                ));
-            }
+    for target in &args {
+        if !known.contains(target) {
+            die(&format!(
+                "unknown target `{target}`. Known: {}",
+                known.join(", ")
+            ));
         }
-        args
-    };
+    }
 
     let root = repo_root();
-    for target in targets {
+    if args.is_empty() {
+        step(
+            &format!("build all {} targets", known.len()),
+            Command::new("cargo")
+                .args(["+nightly", "fuzz", "build", "--sanitizer=none"])
+                .current_dir(&root),
+        );
+        return;
+    }
+
+    for target in args {
         step(
             &format!("build {target}"),
             Command::new("cargo")

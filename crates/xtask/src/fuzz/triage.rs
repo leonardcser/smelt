@@ -51,6 +51,8 @@ fn triage_json(root: &Path, target: &str, artifact: &Path) -> PathBuf {
                 "build",
                 "--manifest-path",
                 fuzz_cargo.to_str().expect("fuzz manifest path utf-8"),
+                "--features",
+                "scenario-tools",
                 "--bin",
                 "crash_to_scenario",
                 "--bin",

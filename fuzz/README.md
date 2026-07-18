@@ -111,9 +111,10 @@ to the original. Then either fix the bug and commit a regression seed, or replay
 the minimized scenario directly:
 
 ```sh
-cargo run --bin replay_scenario -- --target lua_loop /path/to/shrunk.json
+cargo run --features scenario-tools --bin replay_scenario -- \
+  --target lua_loop /path/to/shrunk.json
 # Or step through it visually (smelt_loop only):
-cargo run --bin play_scenario -- /path/to/shrunk.json
+cargo run --features scenario-tools --bin play_scenario -- /path/to/shrunk.json
 ```
 
 ## Regression seeds
@@ -150,15 +151,16 @@ cargo xtask fuzz coverage-snapshot --timeout 120 smelt_loop      # one target on
 ## Lower-level
 
 ```sh
-# Build real fuzz targets one-by-one (preferred over bare `cargo fuzz build`,
-# which also tries to instrument helper binaries in this crate).
+# Build every registered fuzz target in one cargo-fuzz invocation.
 cargo xtask fuzz build
 
 # Raw structured shrinker; the predicate preserves normalized panic identity.
-cargo run --release --bin shrink_scenario -- --target lua_loop in.json out.min.json
+cargo run --release --features scenario-tools --bin shrink_scenario -- \
+  --target lua_loop in.json out.min.json
 
 # Headless replay (exits non-zero on panic; what triage and CI use):
-cargo run --bin replay_scenario -- --target lua_loop in.json
+cargo run --features scenario-tools --bin replay_scenario -- \
+  --target lua_loop in.json
 
 # Prefer the wrappers so custom corpus and artifact paths are always supplied:
 cargo xtask fuzz run smelt_loop --cmin --sanitizer none -max_total_time=3600

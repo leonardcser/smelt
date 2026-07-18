@@ -3,7 +3,7 @@
 //! Usage:
 //!
 //! ```text
-//! cargo run --bin crash_to_scenario -- \
+//! cargo run --features scenario-tools --bin crash_to_scenario -- \
 //!     [--target smelt_loop|lua_loop] <artifact-path> [out.json]
 //! ```
 //!
