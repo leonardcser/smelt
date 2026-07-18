@@ -24,6 +24,41 @@ fn manual_lua_reload_success_notifies() {
 }
 
 #[test]
+fn candidate_layout_registration_does_not_invoke_committed_composer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(&init, "").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let committed_generation = app.app.lua.id;
+    let marker = "committed composer invoked during candidate load";
+
+    assert!(app.run_lua(&format!(
+        r#"
+        smelt.ui.layout.set(function()
+          error({marker:?})
+        end)
+        "#
+    )));
+    app.app.lua.core_shared().messages.lock().unwrap().clear();
+
+    app.reload_lua();
+
+    assert_eq!(app.app.lua.id, committed_generation.wrapping_add(1));
+    assert!(
+        app.app
+            .lua
+            .core_shared()
+            .messages
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .all(|entry| !entry.full.contains(marker)),
+        "a staged layout declaration must not refresh the committed composer"
+    );
+}
+
+#[test]
 fn failed_lua_reload_preserves_the_committed_command_generation() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");

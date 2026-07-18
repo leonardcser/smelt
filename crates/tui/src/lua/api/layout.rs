@@ -110,9 +110,11 @@ replace earlier ones.",
                 if let Ok(mut slot) = s.main_layout_composer.lock() {
                     *slot = handle;
                 }
-                let _ = crate::lua::try_with_app(|app| {
-                    app.refresh_main_layout();
-                });
+                if s.core.external_effects_active() {
+                    let _ = crate::lua::try_with_app(|app| {
+                        app.refresh_main_layout();
+                    });
+                }
                 Ok(())
             },
         )?;
