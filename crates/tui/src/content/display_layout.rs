@@ -471,16 +471,6 @@ fn group_snapshot_json(
     })
 }
 
-fn insert_process_status_event_json_fields(
-    value: &mut serde_json::Map<String, serde_json::Value>,
-    event: Option<&protocol::ProcessStatusEvent>,
-) {
-    let Some(event) = event else {
-        return;
-    };
-    value.extend(event.snapshot_json_fields());
-}
-
 fn block_snapshot_json(
     history: &BlockHistory,
     block_index: usize,
@@ -488,109 +478,21 @@ fn block_snapshot_json(
 ) -> Option<serde_json::Value> {
     let id = *history.order.get(block_index)?;
     let block = history.block(id)?;
-    let mut value = serde_json::Map::new();
-    value.insert("id".into(), serde_json::to_value(id).ok()?);
-    value.insert("index".into(), serde_json::json!(block_index));
-    value.insert("kind".into(), serde_json::json!(block_kind(block)));
+    let state = match block {
+        Block::ToolCall { call_id, .. } => history.tool_state(call_id),
+        _ => None,
+    };
+    let serde_json::Value::Object(mut value) =
+        smelt_core::lua::runtime::transcript_block_snapshot_json(id, block_index, block, state)
+            .ok()?
+    else {
+        return None;
+    };
     if let Some(view_state) = view_state {
         value.insert(
             "view_state".into(),
             serde_json::json!(view_state_label(view_state)),
         );
-    }
-    match block {
-        Block::User { text, image_labels } => {
-            value.insert("text".into(), serde_json::json!(text));
-            value.insert("image_labels".into(), serde_json::json!(image_labels));
-        }
-        Block::Mode {
-            text,
-            icon,
-            hl_group,
-        } => {
-            value.insert("text".into(), serde_json::json!(text));
-            value.insert("icon".into(), serde_json::json!(icon));
-            value.insert("hl_group".into(), serde_json::json!(hl_group));
-        }
-        Block::ProcessStatus { text, event } => {
-            value.insert("text".into(), serde_json::json!(text));
-            insert_process_status_event_json_fields(&mut value, event.as_ref());
-        }
-        Block::Thinking {
-            title,
-            summary_titles,
-            content,
-            kind,
-        } => {
-            value.insert("title".into(), serde_json::json!(title));
-            value.insert("summary_titles".into(), serde_json::json!(summary_titles));
-            value.insert("content".into(), serde_json::json!(content));
-            value.insert("reasoning_kind".into(), serde_json::json!(kind));
-        }
-        Block::Text { content } => {
-            value.insert("content".into(), serde_json::json!(content));
-        }
-        Block::CodeLine { content, lang } => {
-            value.insert("content".into(), serde_json::json!(content));
-            value.insert("lang".into(), serde_json::json!(lang));
-        }
-        Block::ToolDraft {
-            stream_id,
-            call_id,
-            name,
-            summary,
-            args,
-            raw_arguments,
-            finished,
-        } => {
-            value.insert("stream_id".into(), serde_json::json!(stream_id));
-            value.insert("call_id".into(), serde_json::json!(call_id));
-            value.insert("name".into(), serde_json::json!(name));
-            value.insert("args".into(), serde_json::json!(args));
-            value.insert("raw_arguments".into(), serde_json::json!(raw_arguments));
-            value.insert("summary".into(), serde_json::to_value(summary).ok()?);
-            value.insert(
-                "summary_text".into(),
-                serde_json::json!(summary.as_plain_text()),
-            );
-            value.insert("status".into(), serde_json::json!("drafting"));
-            value.insert("status_hl".into(), serde_json::json!("SmeltToolPending"));
-            value.insert("draft".into(), serde_json::json!(true));
-            value.insert("draft_finished".into(), serde_json::json!(finished));
-        }
-        Block::ToolCall {
-            call_id,
-            name,
-            summary,
-            args,
-        } => {
-            value.insert("call_id".into(), serde_json::json!(call_id));
-            value.insert("name".into(), serde_json::json!(name));
-            value.insert("args".into(), serde_json::json!(args));
-            value.insert("summary".into(), serde_json::to_value(summary).ok()?);
-            value.insert(
-                "summary_text".into(),
-                serde_json::json!(summary.as_plain_text()),
-            );
-            let status = state_status(history, call_id);
-            value.insert("status".into(), serde_json::json!(status.label()));
-            value.insert("status_hl".into(), serde_json::json!(status.hl_group()));
-            if let Some(state) = history.tool_state(call_id) {
-                value.insert("output".into(), serde_json::to_value(&state.output).ok()?);
-                value.insert(
-                    "preview_output".into(),
-                    serde_json::to_value(&state.preview_output).ok()?,
-                );
-                value.insert("user_message".into(), serde_json::json!(state.user_message));
-            }
-        }
-        Block::Exec { command, output } => {
-            value.insert("command".into(), serde_json::json!(command));
-            value.insert("output".into(), serde_json::json!(output));
-        }
-        Block::Compacted { summary } | Block::CompactionPreview { summary } => {
-            value.insert("summary".into(), serde_json::json!(summary));
-        }
     }
     Some(serde_json::Value::Object(value))
 }
@@ -603,13 +505,6 @@ fn view_state_label(view_state: ViewState) -> &'static str {
         ViewState::TrimmedHead { .. } => "trimmed_head",
         ViewState::TrimmedTail { .. } => "trimmed_tail",
     }
-}
-
-fn state_status(history: &BlockHistory, call_id: &str) -> smelt_core::ToolStatus {
-    history
-        .tool_state(call_id)
-        .map(|state| state.status)
-        .unwrap_or(smelt_core::ToolStatus::Pending)
 }
 
 fn compile_block_with_lua(

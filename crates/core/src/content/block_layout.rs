@@ -88,6 +88,19 @@ pub struct ElapsedSpec {
     pub selectable: bool,
 }
 
+/// Format a visible tool elapsed value, omitting sub-second and confirmation states.
+pub fn tool_elapsed_text(status: ToolStatus, secs: u64) -> Option<String> {
+    (!matches!(status, ToolStatus::Confirm) && secs >= 1).then(|| {
+        if secs < 60 {
+            format!("{secs}s")
+        } else if secs < 3600 {
+            format!("{}m{}s", secs / 60, secs % 60)
+        } else {
+            format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+        }
+    })
+}
+
 /// Width-dependent horizontal separator leaf.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeparatorSpec {

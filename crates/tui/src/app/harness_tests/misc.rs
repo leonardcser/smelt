@@ -307,6 +307,37 @@ fn assert_edit_file_diff_visible(frame: &str, stage: &str) {
 }
 
 #[test]
+fn parallel_pending_tool_timers_refresh_live() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 20);
+    app.start_turn(7);
+    for (call_id, path) in [("read-a", "a.rs"), ("read-b", "b.rs")] {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+            call_id: call_id.into(),
+            tool_name: "read_file".into(),
+            args: std::collections::HashMap::from([("file_path".into(), serde_json::json!(path))]),
+        }));
+    }
+
+    app.render_silent();
+    assert!(app.run_lua("smelt.transcript.fold_all('open')"));
+    let initial = app.render_to_frame().text();
+    assert_eq!(initial.matches("2s").count(), 0);
+
+    app.feed_one(SourceEvent::Tick(2_000));
+    let live = app.render_to_frame().text();
+
+    let live_tool_timers = live
+        .lines()
+        .filter(|line| line.contains("read_file") && line.ends_with("2s"))
+        .count();
+    assert_eq!(
+        live_tool_timers, 2,
+        "both pending tool timers should repaint before either call finishes:\n{live}"
+    );
+}
+
+#[test]
 fn stale_title_response_after_reset_is_ignored() {
     let mut app = TestApp::builder().build();
     let original_session_id = app.app.core.session.id.clone();

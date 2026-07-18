@@ -9,8 +9,9 @@ use crate::content::source_view::{render_source_view, SourceView, SourceViewTarg
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
-    solve_hbox_widths_with_fit, BlockLayout, CodeSpec, ElapsedSpec, GutterSpec, IrLeaf, LayoutIr,
-    LineSpec, MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
+    solve_hbox_widths_with_fit, tool_elapsed_text, BlockLayout, CodeSpec, ElapsedSpec, GutterSpec,
+    IrLeaf, LayoutIr, LineSpec, MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec,
+    StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
@@ -20,7 +21,7 @@ use smelt_core::content::highlight::{
 };
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
 use smelt_core::theme::{intern, Theme};
-use smelt_core::transcript_model::{BlockHistory, ToolStatus};
+use smelt_core::transcript_model::BlockHistory;
 
 pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
     render_layout_ir_range(
@@ -872,20 +873,6 @@ fn elapsed_text_for_spec(spec: &ElapsedSpec, history: Option<&BlockHistory>) -> 
         .unwrap_or((spec.status, spec.fallback_secs));
     secs.and_then(|secs| tool_elapsed_text(status, secs))
         .unwrap_or_default()
-}
-
-fn tool_elapsed_text(status: ToolStatus, secs: u64) -> Option<String> {
-    (!matches!(status, ToolStatus::Confirm) && secs >= 1).then(|| format_elapsed_secs(secs))
-}
-
-fn format_elapsed_secs(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
 }
 
 fn render_separator_spec(
