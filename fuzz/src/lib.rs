@@ -501,10 +501,8 @@ pub enum FuzzOp {
 }
 
 impl FuzzOp {
-    /// Short human label used by `play_scenario` for its status line.
-    /// Lives next to the enum so adding a variant is one edit, not two -
-    /// the per-variant match previously lived in `play_scenario.rs` and
-    /// drifted every time a new op landed.
+    /// Short human label used by `play_scenario` for its status line. Keeping
+    /// labels next to the operation enum makes new variants a single edit.
     pub fn label(&self) -> String {
         use FuzzOp::*;
         match self {
@@ -612,11 +610,10 @@ impl From<FuzzMode> for AgentMode {
 /// A full reproducible scenario: initial app config plus the event stream.
 /// `FuzzInput` is also what `arbitrary` decodes from libFuzzer bytes, so a
 /// crash artifact converts to a `Scenario` JSON via a single
-/// `serde_json::to_string_pretty`. `Arbitrary` is **hand-written** to draw
-/// per-scenario [`SwarmWeights`] up front, then sample ops from that
-/// distribution (see [`build_fuzz_op`]). JSON serialisation still
-/// round-trips losslessly via serde derive - the swarm table itself is
-/// generator state and is not persisted.
+/// `serde_json::to_string_pretty`. `Arbitrary` selects one named workload
+/// profile up front, then samples operations from that profile. JSON
+/// serialization round-trips the resulting operations; generator profile
+/// state does not need to be persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzInput {
     pub vim: bool,
@@ -628,12 +625,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let vim = u.arbitrary()?;
         let mode = u.arbitrary()?;
-        // Swarm testing: each scenario commits to a corner of the op
-        // space. Some variants are disabled outright; the rest get
-        // wildly skewed weights. Drawing the table here (not per-op)
-        // means a single seed goes deep into its chosen corner rather
-        // than uniformly bouncing across dozens of variants.
-        let swarm = SwarmWeights::arbitrary(u, N_FUZZOP_VARIANTS)?;
+        // One profile byte selects a coherent workload without consuming one
+        // byte for every operation variant before any operation can decode.
+        let swarm = app_swarm(u)?;
         let mut ops = Vec::new();
         while !u.is_empty() && ops.len() < MAX_OPS {
             let idx = swarm.pick(u)?;
@@ -643,63 +637,84 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-/// Per-scenario swarm weights. Each entry is either `0` (variant
-/// disabled for this seed) or a weight in `1..=100` (relative selection
-/// weight). At least one entry is guaranteed non-zero. Inspired by
-/// TigerBeetle's `random_enum_weights`: per seed, *zero out* most
-/// variants and skew the rest wildly so each scenario commits to one
-/// shape of workload rather than uniformly spreading thin.
-///
-/// Weights aren't persisted in the on-disk `Scenario` JSON - they're a
-/// per-Arbitrary-draw artifact. Crashed scenarios round-trip through
-/// the `ops` vector alone, which is what actually replays.
+/// Fixed per-scenario operation weights. A target selects one named workload
+/// profile with a single byte, then uses this table for the whole scenario.
+/// Profiles make prerequisites common, isolate coherent subsystems, and leave
+/// almost all input entropy for operations and payloads.
 pub struct SwarmWeights {
     weights: Vec<u32>,
     total: u32,
 }
 
 impl SwarmWeights {
-    /// Draw a fresh swarm table over `n` variants. One byte per slot:
-    /// `byte < 64` disables the variant (25% disable rate); otherwise
-    /// the weight is `byte - 63` (range `1..=192`). Single-byte cost
-    /// matters - measured coverage A/B showed the prior 2-byte/variant
-    /// encoding ate the entire entropy budget of the median 47-byte
-    /// libFuzzer seed, leaving nothing for op bytes.
-    pub fn arbitrary(u: &mut Unstructured<'_>, n: usize) -> arbitrary::Result<Self> {
+    pub fn profile(n: usize, enabled: &[usize], boosted: &[usize]) -> Self {
+        assert!(n > 0, "swarm profiles need at least one variant");
         let mut weights = vec![0u32; n];
-        let mut total = 0u32;
-        for slot in &mut weights {
-            let b = u.arbitrary::<u8>().unwrap_or(0);
-            if b >= 64 {
-                let w = (b - 63) as u32;
-                *slot = w;
-                total += w;
-            }
+        for &index in enabled {
+            *weights
+                .get_mut(index)
+                .unwrap_or_else(|| panic!("enabled swarm index {index} exceeds {n} variants")) = 4;
         }
-        if total == 0 {
-            // Empty random draw (or exhausted input): fall back to a
-            // uniform distribution rather than collapsing to a single
-            // variant. Short seeds - common in libFuzzer's early corpus
-            // growth - would otherwise only ever fire variant 0.
+        for &index in boosted {
+            *weights
+                .get_mut(index)
+                .unwrap_or_else(|| panic!("boosted swarm index {index} exceeds {n} variants")) = 16;
+        }
+        if weights.iter().all(|weight| *weight == 0) {
             weights.fill(1);
-            total = n as u32;
         }
-        Ok(Self { weights, total })
+        let total = weights.iter().copied().sum();
+        Self { weights, total }
     }
 
-    /// Sample a variant index, weighted by the table. Consumes a few
-    /// bytes per call.
+    pub fn uniform(n: usize) -> Self {
+        assert!(n > 0, "uniform swarms need at least one variant");
+        Self {
+            weights: vec![1; n],
+            total: n as u32,
+        }
+    }
+
+    /// Sample a variant index, weighted by the selected profile.
     pub fn pick(&self, u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
         let pick = u.int_in_range(0u32..=self.total.saturating_sub(1))?;
         let mut acc = 0u32;
-        for (i, &w) in self.weights.iter().enumerate() {
-            acc = acc.saturating_add(w);
+        for (i, &weight) in self.weights.iter().enumerate() {
+            acc = acc.saturating_add(weight);
             if pick < acc {
                 return Ok(i);
             }
         }
         Ok(self.weights.len() - 1)
     }
+}
+
+fn app_swarm(u: &mut Unstructured<'_>) -> arbitrary::Result<SwarmWeights> {
+    const EDITING: &[usize] = &[
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 25, 32, 33, 42, 43, 44, 48, 53, 54, 55, 58, 60,
+    ];
+    const ENGINE: &[usize] = &[
+        7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 34, 35, 36,
+        37, 38, 39, 40, 45, 46, 47, 48, 49, 50, 51, 56, 62,
+    ];
+    const TOOLS: &[usize] = &[10, 16, 17, 18, 28, 29, 30, 31, 34, 38, 39, 49, 52, 61];
+    const RELOAD: &[usize] = &[
+        0, 3, 7, 8, 9, 10, 25, 37, 40, 41, 42, 43, 44, 45, 46, 47, 48, 53, 54, 55, 56, 57, 58, 59,
+        62,
+    ];
+    const TRANSCRIPT: &[usize] = &[
+        6, 7, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 26, 27, 34, 37, 40, 42, 61, 62,
+    ];
+
+    let profile = u.arbitrary::<u8>()? % 6;
+    Ok(match profile {
+        0 => SwarmWeights::uniform(N_FUZZOP_VARIANTS),
+        1 => SwarmWeights::profile(N_FUZZOP_VARIANTS, EDITING, &[0, 3, 5, 9, 60]),
+        2 => SwarmWeights::profile(N_FUZZOP_VARIANTS, ENGINE, &[10, 12, 13, 37, 56, 62]),
+        3 => SwarmWeights::profile(N_FUZZOP_VARIANTS, TOOLS, &[10, 16, 18, 28, 29, 39, 61]),
+        4 => SwarmWeights::profile(N_FUZZOP_VARIANTS, RELOAD, &[10, 37, 41, 48, 57, 62]),
+        _ => SwarmWeights::profile(N_FUZZOP_VARIANTS, TRANSCRIPT, &[9, 10, 13, 18, 37, 62]),
+    })
 }
 
 /// Per-variant builder. The Arbitrary impl picks an index into
@@ -899,8 +914,16 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
             command: u.arbitrary()?,
         })
     },
-    |u| Ok(FuzzOp::Steer { text: u.arbitrary()? }),
-    |u| Ok(FuzzOp::Unsteer { count: u.arbitrary()? }),
+    |u| {
+        Ok(FuzzOp::Steer {
+            text: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::Unsteer {
+            count: u.arbitrary()?,
+        })
+    },
     |u| {
         Ok(FuzzOp::CallCoreTool {
             tool_name: u.arbitrary()?,
@@ -1043,10 +1066,7 @@ fn clamp_dim(d: u16) -> u16 {
 /// case where the placeholder is purely cosmetic.
 fn placeholder_chord_pair(
     variant: u8,
-) -> (
-    Vec<tui::smelt_edit::KeyBind>,
-    Vec<tui::smelt_edit::KeyBind>,
-) {
+) -> (Vec<tui::smelt_edit::KeyBind>, Vec<tui::smelt_edit::KeyBind>) {
     use tui::smelt_edit::KeyBind;
     let kb = |code, mods| KeyBind { code, mods };
     let tab = kb(KeyCode::Tab, KeyModifiers::NONE);
@@ -1078,11 +1098,8 @@ fn call_id_string(id: u8) -> String {
 }
 
 /// Synthesize a deterministic, lightweight history vector for compaction
-/// payloads. Rotates through user, terminal assistant, and tool-call
-/// assistant turns so `EngineMessages` / `EngineTurnComplete` exercise
-/// every `HistoryItem` discriminant - the sum-typed history (commit
-/// `b0c54474`) added a third arm and the rebuild-screen path through
-/// `restore_screen` must survive each variant.
+/// payloads. Rotates through user, terminal assistant, and tool-call assistant
+/// turns so history updates and screen restoration exercise every variant.
 fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
     (0..count)
         .map(|i| {
@@ -1186,10 +1203,8 @@ struct Snapshot {
     prompt_selection_range: Option<(usize, usize)>,
     prompt_text_input_ready: bool,
     prompt_paste_target_ready: bool,
-    /// Length of the harness's action log at capture time. Use
-    /// `app.actions_since(snapshot.action_count)` to inspect actions
-    /// produced after the snapshot, replacing the previous per-UiCommand
-    /// counter fields.
+    /// Length of the harness action log at capture time. Post-checks inspect
+    /// actions produced after this snapshot.
     action_count: usize,
 }
 
@@ -1757,13 +1772,9 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 pre.prompt_cpos, pre.prompt_selection_range, text, inserted, pre.prompt_source, post.prompt_source,
             );
             assert_eq!(
-                post.prompt_cpos,
-                expected_cpos,
+                post.prompt_cpos, expected_cpos,
                 "prompt paste left cursor at {}, expected {} after inserting {:?} from paste {:?}",
-                post.prompt_cpos,
-                expected_cpos,
-                inserted,
-                text,
+                post.prompt_cpos, expected_cpos, inserted, text,
             );
             if matches!(pre.prompt_vim_mode, VimMode::Visual | VimMode::VisualLine)
                 && pre.prompt_selection_range.is_some()
@@ -2304,8 +2315,8 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         }
         FuzzOp::EngineAskErrorPending { kind_idx, message } => {
             if let Some(id) = app.pending_ask_id() {
-                let kind = ENGINE_ASK_ERROR_KINDS
-                    [(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
+                let kind =
+                    ENGINE_ASK_ERROR_KINDS[(kind_idx as usize) % ENGINE_ASK_ERROR_KINDS.len()];
                 let ev = SourceEvent::engine(EngineEvent::EngineAskResponse {
                     id,
                     message: None,

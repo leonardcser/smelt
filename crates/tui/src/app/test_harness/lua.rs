@@ -25,20 +25,28 @@ impl TestApp {
         self.app.pending_lua_reload
     }
 
-    /// Run an arbitrary Lua snippet against the embedded runtime with
-    /// the host pointer installed. Returns whether execution succeeded
-    /// (a Lua-level error is *not* a fuzz failure - many generated
-    /// snippets intentionally hit type errors that the bindings layer
-    /// raises as mlua errors). Used by `lua_loop` to feed batched ops
-    /// that reference each other via shared locals.
+    /// Run an arbitrary Lua snippet against the embedded runtime with the host
+    /// pointer installed. Callers that intentionally probe invalid arguments can
+    /// use this boolean form after wrapping those calls in Lua `pcall`.
     pub fn run_lua(&mut self, snippet: &str) -> bool {
-        let succeeded = {
+        self.run_lua_result(snippet).is_ok()
+    }
+
+    /// Run a Lua snippet and preserve the Lua error for focused harnesses that
+    /// require a valid call path to succeed.
+    pub fn run_lua_result(&mut self, snippet: &str) -> Result<(), String> {
+        let result = {
             let _guard = crate::lua::install_app_ptr(&mut self.app);
-            self.app.lua.lua.load(snippet).exec().is_ok()
+            self.app
+                .lua
+                .lua
+                .load(snippet)
+                .exec()
+                .map_err(|error| error.to_string())
         };
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.try_perform_scheduled_runtime_reconcile();
-        succeeded
+        result
     }
 
     pub fn lua_int_global(&self, name: &str) -> Option<i64> {

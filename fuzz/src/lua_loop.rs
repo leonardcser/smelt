@@ -163,9 +163,9 @@ pub enum LuaOp {
     /// `CmdRegister`; bogus names exercise the not-found path.
     CmdInvoke { name_slot: u8 },
 
-    /// `smelt.keymap.set(scope, chord, fn)`. `scope_kind % 3` picks
-    /// ""/"prompt"/"content". Chord drawn from a small chord pool so
-    /// collisions are likely.
+    /// `smelt.keymap.set(mode, chord, fn)`. `scope_kind % 4` picks a
+    /// global, insert, normal, or visual binding. Chords come from a small
+    /// pool so collisions are likely.
     KeymapSet {
         scope_kind: u8,
         chord_slot: u8,
@@ -434,20 +434,31 @@ pub struct LuaScenario {
     pub ops: Vec<LuaOp>,
 }
 
+fn lua_swarm(u: &mut Unstructured<'_>) -> arbitrary::Result<SwarmWeights> {
+    const RESOURCES: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 11, 12];
+    const STATE_AND_COMMANDS: &[usize] = &[4, 5, 7, 8, 9, 10, 11, 12];
+    const RELOAD: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 9, 11, 14, 15, 16];
+    const VALID_RECIPES: &[usize] = &[4, 5, 12, 14, 15, 16, 17];
+    const CONVERSION_PROBES: &[usize] = &[4, 5, 12, 13, 16];
+
+    let profile = u.arbitrary::<u8>()? % 6;
+    Ok(match profile {
+        0 => SwarmWeights::uniform(N_LUAOP_VARIANTS),
+        1 => SwarmWeights::profile(N_LUAOP_VARIANTS, RESOURCES, &[0, 1, 2, 3, 6]),
+        2 => SwarmWeights::profile(N_LUAOP_VARIANTS, STATE_AND_COMMANDS, &[7, 8, 9, 10, 11]),
+        3 => SwarmWeights::profile(N_LUAOP_VARIANTS, RELOAD, &[4, 5, 14, 15, 16]),
+        4 => SwarmWeights::profile(N_LUAOP_VARIANTS, VALID_RECIPES, &[17]),
+        _ => SwarmWeights::profile(N_LUAOP_VARIANTS, CONVERSION_PROBES, &[13]),
+    })
+}
+
 impl<'a> Arbitrary<'a> for LuaScenario {
-    /// Per-scenario swarm-weighted op stream. Each seed disables most
-    /// `LuaOp` variants and skews the rest wildly so scenarios commit
-    /// to one shape of workload (buf-heavy, hook-heavy, paint-heavy…)
-    /// rather than uniformly bouncing across all variants. No state
-    /// model - the emitted Lua has defensive `#pool == 0` guards so
-    /// "act on an empty pool" ops cleanly no-op at runtime; the
-    /// generator doesn't need to know what's live. (A prior state-aware
-    /// generator added a retry loop and terminated scenarios early on
-    /// state-starvation, costing more ops than it saved.) The swarm
-    /// table itself isn't persisted in the JSON scenario - `ops` is
-    /// what replays.
+    /// Select one coherent workload profile using a single byte, leaving the
+    /// remaining entropy for operations and payloads. Generated Lua guards
+    /// operations that need a live handle, so profiles can stay stateless
+    /// without terminating early when a resource pool is empty.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let swarm = SwarmWeights::arbitrary(u, N_LUAOP_VARIANTS)?;
+        let swarm = lua_swarm(u)?;
         let mut ops = Vec::new();
         while !u.is_empty() && ops.len() < LUA_MAX_OPS {
             let idx = swarm.pick(u)?;
@@ -542,15 +553,15 @@ fn emit_layout(out: &mut String, layout: &ArbLayout) {
                 win_idx
             ));
             if *with_measure {
-                out.push_str(", { measure = { w = 18, h = 4 } }");
+                out.push_str(", { measure = { 18, 4 } }");
             }
             out.push(')');
         }
         ArbLayout::Vbox { a, b } => {
             out.push_str(&format!(
                 "smelt.ui.layout.vbox({{ \
-                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }}, \
-                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }} \
+                    {{ smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }}, \
+                    {{ smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), height = 3 }} \
                 }})",
                 a, b
             ));
@@ -558,8 +569,8 @@ fn emit_layout(out: &mut String, layout: &ArbLayout) {
         ArbLayout::Hbox { a, b } => {
             out.push_str(&format!(
                 "smelt.ui.layout.hbox({{ \
-                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }}, \
-                    {{ node = smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }} \
+                    {{ smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }}, \
+                    {{ smelt.ui.layout.leaf(__fuzz.wins[({} % math.max(1, #__fuzz.wins)) + 1]), width = 8 }} \
                 }})",
                 a, b
             ));
@@ -682,8 +693,13 @@ fn emit_cmd_register(out: &mut String, name_slot: u8, handler_kind: u8) {
         // Re-entrant: read+write state, then invoke another command.
         _ => "function() local s = smelt.state.get(\"fuzz.cmd_reentry\"); s.depth = (s.depth or 0) + 1; if (s.depth or 0) < 4 then pcall(smelt.cmd.run, \"fuzz.cmd.\" .. ((s.depth or 0) % 6)) end; s.depth = (s.depth or 1) - 1 end",
     };
+    let opts = if (handler_kind / 6) % 2 == 0 {
+        "nil"
+    } else {
+        "{ override = true }"
+    };
     out.push_str(&format!(
-        "pcall(smelt.cmd.register, \"fuzz.cmd.{n}\", {body})\n"
+        "pcall(smelt.cmd.register, \"fuzz.cmd.{n}\", {body}, {opts})\n"
     ));
 }
 
@@ -693,10 +709,11 @@ fn emit_cmd_invoke(out: &mut String, name_slot: u8) {
 }
 
 fn emit_keymap_set(out: &mut String, scope_kind: u8, chord_slot: u8, handler_kind: u8) {
-    let scope = match scope_kind % 3 {
+    let scope = match scope_kind % 4 {
         0 => "",
-        1 => "prompt",
-        _ => "content",
+        1 => "i",
+        2 => "n",
+        _ => "v",
     };
     let chord = CHORDS[(chord_slot as usize) % CHORD_POOL];
     let body = match handler_kind % 3 {
@@ -783,6 +800,11 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
             }
             LuaOp::ApiRecipe { kind } => emit_api_recipe(&mut out, *kind),
         }
+        // Lua treats a call followed by a parenthesized expression on the next
+        // line as another call on the first result. Keep independently emitted
+        // operations unambiguously separated, especially `pcall(...)` followed
+        // by an immediately-invoked function expression.
+        out.push_str(";\n");
     }
     out
 }
@@ -794,7 +816,7 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
 fn emit_api_recipe(out: &mut String, kind: u8) {
     match kind % 5 {
         0 => out.push_str(
-            r#"pcall(function()
+            r#"assert(pcall(function()
   local b = smelt.buf.new({ name = "fuzz.recipe.buf" })
   local w = smelt.win.new(b, { name = "fuzz.recipe.win" })
   local p = smelt.paint.register(function(slice, _ctx)
@@ -809,11 +831,11 @@ fn emit_api_recipe(out: &mut String, kind: u8) {
   if p and p.rect then p:rect() end
   if w and w.content_width then w:content_width() end
   if ov and ov.remove then ov:remove() end
-end)
+end))
 "#,
         ),
         1 => out.push_str(
-            r#"pcall(function()
+            r#"assert(pcall(function()
   smelt.permissions.extend({
     default = {
       tools = { allow = { "bash", "web_fetch" }, ask = { "edit" }, deny = { "danger" } },
@@ -828,31 +850,31 @@ end)
   smelt.permissions.check("normal", "bash", "git status --short")
   smelt.permissions.check("normal", "bash", "rm -rf target")
   smelt.permissions.list()
-end)
+end))
 "#,
         ),
         2 => out.push_str(
-            r#"pcall(function()
+            r#"assert(pcall(function()
   smelt.cmd.register("fuzz.recipe.cmd", function()
     local s = smelt.state.get("fuzz.recipe.cmd")
     s.count = (s.count or 0) + 1
     smelt.text.fit("recipe", 4)
-  end)
+  end, { override = true })
   smelt.cmd.run("fuzz.recipe.cmd")
-  smelt.keymap.set("prompt", "<C-r>", function() smelt.cmd.run("fuzz.recipe.cmd") end)
-end)
+  smelt.keymap.set("i", "<C-r>", function() smelt.cmd.run("fuzz.recipe.cmd") end)
+end))
 "#,
         ),
         3 => out.push_str(
-            r#"pcall(function()
+            r#"assert(pcall(function()
   local reg = smelt.work.busy("fuzz.recipe.busy")
   smelt.engine.reload_when_idle()
   if reg then reg:remove() end
-end)
+end))
 "#,
         ),
         _ => out.push_str(
-            r#"pcall(function()
+            r#"assert(pcall(function()
   smelt.permissions.extend({
     default = {
       tools = { allow = { "bash" }, ask = { "web_fetch" }, deny = { "danger" } },
@@ -864,7 +886,7 @@ end)
   smelt.permissions.list()
   smelt.permissions.check_tool("normal", "bash")
   smelt.permissions.check("normal", "bash", "echo hello")
-end)
+end))
 "#,
         ),
     }
@@ -1017,12 +1039,13 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
 
         for (segment, action) in split_reload_segments(&snippet) {
             if !segment.trim().is_empty() {
-                // Lua-level errors aren't fuzz failures - the snippet
-                // intentionally tolerates type errors via `pcall`. Real
-                // bugs surface through `assert_invariants`, Rust panics
-                // inside binding code, or the FFI ledger detecting a
-                // dangling `RegistryKey`.
-                let _ = app.run_lua(&segment);
+                // Invalid conversion probes are isolated by `pcall`; the outer
+                // chunk must remain valid. This makes curated recipes prove they
+                // reach successful binding paths instead of silently stopping at
+                // their first Lua error.
+                if let Err(error) = app.run_lua_result(&segment) {
+                    panic!("generated Lua segment failed: {error}\n{segment}");
+                }
                 app.assert_invariants();
                 // FFI ledger: force a full Lua GC and verify every Rust-
                 // side `LuaHandle` still resolves in the mlua registry.
@@ -1055,10 +1078,23 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // TestApp reloads process-wide Lua settings, so concurrent scenarios can
+    // perturb each other's handle ledgers even though fuzz executions are
+    // single-threaded. Serialize these end-to-end tests around that global seam.
+    static LUA_SCENARIO_TEST: Mutex<()> = Mutex::new(());
+
+    fn run_test_scenario(scenario: LuaScenario) {
+        let _guard = LUA_SCENARIO_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        run_lua_scenario(scenario);
+    }
 
     #[test]
     fn failed_reload_scenario_discards_candidate_resources() {
-        run_lua_scenario(LuaScenario {
+        run_test_scenario(LuaScenario {
             ops: vec![
                 LuaOp::CmdRegister {
                     name_slot: 0,
@@ -1066,6 +1102,61 @@ mod tests {
                 },
                 LuaOp::FailedReload,
                 LuaOp::Reload,
+            ],
+        });
+    }
+
+    #[test]
+    fn valid_api_recipes_reach_success_paths() {
+        run_test_scenario(LuaScenario {
+            ops: (0..5)
+                .chain(0..5)
+                .map(|kind| LuaOp::ApiRecipe { kind })
+                .collect(),
+        });
+    }
+
+    #[test]
+    fn generated_layout_shapes_reach_valid_api_paths() {
+        run_test_scenario(LuaScenario {
+            ops: vec![
+                LuaOp::BufNew { name_slot: None },
+                LuaOp::WinNew {
+                    buf_idx: 0,
+                    name_slot: None,
+                },
+                LuaOp::OverlayNew {
+                    layout: ArbLayout::Leaf {
+                        win_idx: 0,
+                        with_measure: true,
+                    },
+                    name_slot: None,
+                    keymap_count: 1,
+                },
+                LuaOp::OverlayNew {
+                    layout: ArbLayout::Vbox { a: 0, b: 0 },
+                    name_slot: None,
+                    keymap_count: 0,
+                },
+                LuaOp::OverlayNew {
+                    layout: ArbLayout::Hbox { a: 0, b: 0 },
+                    name_slot: None,
+                    keymap_count: 0,
+                },
+            ],
+        });
+    }
+
+    #[test]
+    fn emitted_calls_are_separated_from_function_expressions() {
+        run_test_scenario(LuaScenario {
+            ops: vec![
+                LuaOp::ProbeRead {
+                    kind: 2,
+                    target_idx: 0,
+                },
+                LuaOp::Remove { kind: 1, idx: 93 },
+                LuaOp::Remove { kind: 1, idx: 0 },
             ],
         });
     }
