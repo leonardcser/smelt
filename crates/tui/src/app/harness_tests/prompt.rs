@@ -152,6 +152,7 @@ fn fast_mode_is_restored_per_loaded_session() {
                 smelt_core::content::transcript::Transcript::new(),
             ),
             crate::app::history::live_session_for_test("fast-enabled".into(), 0, None),
+            smelt_store::StoreHead::default(),
         ),
     );
     assert!(app.app.fast_mode());
@@ -167,6 +168,7 @@ fn fast_mode_is_restored_per_loaded_session() {
                 smelt_core::content::transcript::Transcript::new(),
             ),
             crate::app::history::live_session_for_test("fast-disabled".into(), 0, None),
+            smelt_store::StoreHead::default(),
         ),
     );
     assert!(!app.app.fast_mode());

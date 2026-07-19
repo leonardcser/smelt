@@ -68,7 +68,7 @@ impl ContextTokenReading {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     pub context_tokens: Option<u32>,
     pub context_tokens_history_len: Option<usize>,
@@ -96,7 +96,7 @@ impl ContextSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetadataSnapshot {
     #[serde(default)]
     pub title: Option<String>,
@@ -140,7 +140,7 @@ impl Default for ContextCheckpoint {
 ///
 /// Storage shape is `Vec<HistoryItem>` (the sum-type history that makes
 /// orphan tool_calls impossible).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub id: String,
     pub title: Option<String>,
@@ -1130,7 +1130,7 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
     create_private_dir_all(&sessions_dir())?;
     let mut writer = smelt_store::OwnedSessionWriter::open(sessions_dir(), session_id.as_str())?;
     let expected = writer.store_head()?;
-    let command = store_commit_from_session(session, expected, smelt_store::SaveId::ZERO, 0)?;
+    let command = store_commit_from_session(session, expected, 0)?;
     let receipt = writer
         .commit_session(&command)
         .map_err(session_commit_failure_to_store_error)?;
@@ -1150,18 +1150,12 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
 pub fn initial_store_commit_from_session(
     session: &Session,
 ) -> Result<smelt_store::SessionCommit, smelt_store::StoreError> {
-    store_commit_from_session(
-        session,
-        smelt_store::StoreHead::default(),
-        smelt_store::SaveId::ZERO,
-        0,
-    )
+    store_commit_from_session(session, smelt_store::StoreHead::default(), 0)
 }
 
 pub fn store_commit_from_session(
     session: &Session,
     expected: smelt_store::StoreHead,
-    save_id: smelt_store::SaveId,
     history_start_idx: usize,
 ) -> Result<smelt_store::SessionCommit, smelt_store::StoreError> {
     let history_len = session.history.len();
@@ -1172,7 +1166,6 @@ pub fn store_commit_from_session(
         .map_err(|_| smelt_store::StoreError::Integrity("history length exceeds u64".into()))?;
     Ok(smelt_store::SessionCommit {
         session_id: session.id.clone(),
-        save_id,
         expected,
         identity: store_identity_from_session(session)?,
         metadata: store_metadata_from_session(session, history_len)?,

@@ -856,6 +856,14 @@ pub(super) fn register(
         },
     )?;
     m.fn_(
+        "retry_persistence",
+        "Explicitly retry the latest unsaved generation after session persistence becomes blocked. Returns true when the retry request is accepted. No automatic retry timer is used.",
+        &[],
+        |_, ()| -> LuaResult<bool> {
+            Ok(crate::lua::try_with_app(|app| app.retry_blocked_persistence()).unwrap_or(false))
+        },
+    )?;
+    m.fn_(
         "load",
         "Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.",
         &["id"],
@@ -929,7 +937,6 @@ pub(super) fn register(
                                 crate::app::history::materialize_full_transcript_read_only(
                                     &app.lua, &id,
                                 )
-                                .map(|(transcript, _)| transcript)
                             });
                     if let Some(transcript) = transcript {
                         let mut view = crate::app::transcript::TranscriptDocument::from_loaded_transcript(transcript);

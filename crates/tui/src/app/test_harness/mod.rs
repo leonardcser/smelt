@@ -444,6 +444,12 @@ pub(crate) fn test_home_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+pub(crate) fn initialized_test_home_guard() -> MutexGuard<'static, ()> {
+    let guard = test_home_guard();
+    reset_test_home();
+    guard
+}
+
 pub(super) fn managed_harness_dir(kind: &str) -> PathBuf {
     let dir = harness_root(kind).join(process_dir_name());
     cleanup_stale_harness_dirs(kind, &dir);

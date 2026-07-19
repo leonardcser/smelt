@@ -178,6 +178,14 @@ fun(): nil
 
 Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.
 
+## `smelt.session.retry_persistence`
+
+```lua
+fun(): boolean
+```
+
+Explicitly retry the latest unsaved generation after session persistence becomes blocked. Returns true when the retry request is accepted. No automatic retry timer is used.
+
 ## `smelt.session.rewind_to`
 
 ```lua

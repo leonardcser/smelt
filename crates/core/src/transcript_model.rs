@@ -1493,12 +1493,19 @@ impl BlockHistory {
         self.descriptor_dirty_from = None;
     }
 
-    fn mark_descriptor_dirty_from(&mut self, idx: usize) {
-        self.descriptor_dirty_generation = self.descriptor_dirty_generation.wrapping_add(1);
+    pub fn require_descriptor_resave_from(&mut self, idx: usize) {
+        self.descriptor_dirty_generation = self
+            .descriptor_dirty_generation
+            .checked_add(1)
+            .expect("transcript descriptor generation overflow");
         self.descriptor_dirty_from = Some(
             self.descriptor_dirty_from
                 .map_or(idx, |current| current.min(idx)),
         );
+    }
+
+    fn mark_descriptor_dirty_from(&mut self, idx: usize) {
+        self.require_descriptor_resave_from(idx);
     }
 
     fn mark_descriptor_dirty_for_id(&mut self, id: BlockId) {
@@ -2038,6 +2045,16 @@ impl BlockHistory {
     }
 
     pub fn clear(&mut self) {
+        if self.order.is_empty() {
+            self.entries.clear();
+            self.content_hashes.clear();
+            self.next_id = 0;
+            self.tool_states.clear();
+            self.tool_display_hashes.clear();
+            self.statuses.clear();
+            self.origins.clear();
+            return;
+        }
         let navigation_changed = self
             .order
             .iter()

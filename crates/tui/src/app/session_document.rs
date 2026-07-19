@@ -10,31 +10,120 @@ use smelt_core::session::{
     ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionMeta, SessionStoreRef,
 };
 use smelt_core::session_runtime::LiveSession;
-#[cfg(test)]
-use smelt_core::session_save::DurableCursor;
-#[cfg(test)]
-use smelt_core::session_save::SubmittedHistoryRange;
-pub(crate) use smelt_core::session_save::{
-    DescriptorAppendSubmission, DocumentGeneration, SessionSaveSkipReason,
-};
-use smelt_core::session_save::{
-    DocumentDirtyState, PersistDelta, PersistDescriptorDelta, SaveAckPlan, SessionPersistState,
-    SessionSavePlan, SessionSaveState,
-};
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
 use crate::app::transcript::TranscriptDocument;
+use crate::persist::SessionEpoch;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct PersistenceGeneration(u64);
+
+impl Default for PersistenceGeneration {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+impl PersistenceGeneration {
+    pub(crate) const ZERO: Self = Self(0);
+
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DocumentChanges {
+    current: PersistenceGeneration,
+    durable: PersistenceGeneration,
+    acknowledged_head: smelt_store::StoreHead,
+    history_dirty_from: Option<usize>,
+}
+
+impl DocumentChanges {
+    fn reserve_generation(&self) -> PersistenceGeneration {
+        self.current
+            .checked_next()
+            .expect("session persistence generation overflow")
+    }
+
+    fn record(&mut self, generation: PersistenceGeneration, result: &MutationResult) {
+        if !result.canonical_changed() {
+            return;
+        }
+        debug_assert_eq!(generation, self.reserve_generation());
+        self.current = generation;
+        if let Some(index) = result.history_dirty_from {
+            self.history_dirty_from = Some(
+                self.history_dirty_from
+                    .map_or(index, |current| current.min(index)),
+            );
+        }
+    }
+
+    fn force_dirty(&mut self) {
+        self.current = self.reserve_generation();
+    }
+
+    fn force_dirty_from(&mut self, history_index: usize) {
+        self.force_dirty();
+        self.history_dirty_from = Some(
+            self.history_dirty_from
+                .map_or(history_index, |current| current.min(history_index)),
+        );
+    }
+
+    fn install_head(&mut self, head: smelt_store::StoreHead) {
+        *self = Self {
+            acknowledged_head: head,
+            ..Self::default()
+        };
+    }
+
+    fn mark_clean(&mut self, head: smelt_store::StoreHead) {
+        self.durable = self.current;
+        self.acknowledged_head = head;
+        self.history_dirty_from = None;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SessionSaveIntent {
+    pub(crate) generation: PersistenceGeneration,
+    pub(crate) identity: smelt_store::SessionIdentity,
+    pub(crate) metadata: smelt_store::SessionMetadata,
+    pub(crate) history: smelt_store::HistorySuffix,
+    pub(crate) side_tables: smelt_store::SideTableSuffixes,
+    pub(crate) descriptors: Option<smelt_store::TranscriptDescriptorSuffix>,
+}
+
+struct AcknowledgementView<'a> {
+    generation: PersistenceGeneration,
+    previous: smelt_store::StoreHead,
+    receipt: &'a smelt_store::SaveReceipt,
+    coalesced: bool,
+}
 
 pub(crate) struct SessionDocument {
     session: Session,
     transcript: crate::app::transcript::LoadedTranscript,
     live_session: Option<smelt_core::session_runtime::LiveSession>,
+    store_head: Option<smelt_store::StoreHead>,
 }
 
 pub(crate) struct TuiSessionDocument {
     pub(crate) transcript: TranscriptDocument,
     pub(crate) live_session: Option<LiveSession>,
-    persist: SessionPersistState,
+    changes: DocumentChanges,
+    persistence_epoch: Option<SessionEpoch>,
 }
 
 impl TuiSessionDocument {
@@ -42,7 +131,8 @@ impl TuiSessionDocument {
         Self {
             transcript,
             live_session: None,
-            persist: SessionPersistState::new(),
+            changes: DocumentChanges::default(),
+            persistence_epoch: None,
         }
     }
 
@@ -53,318 +143,349 @@ impl TuiSessionDocument {
         persist_mutation: bool,
         mutation: SessionMutation,
     ) -> MutationResult {
-        let persistence = if !persist_mutation {
-            SessionMutationPersistence::ReadOnly
-        } else if self.live_session.is_some() {
-            SessionMutationPersistence::Live(&mut self.persist)
-        } else {
-            SessionMutationPersistence::Full(&mut self.persist)
-        };
-        SessionDocument::apply_runtime(
+        let reserved = persist_mutation.then(|| self.changes.reserve_generation());
+        let result = SessionDocument::apply_runtime(
             session,
             self.live_session.as_mut(),
             &mut self.transcript,
             parser,
-            persistence,
             mutation,
-        )
+        );
+        if let Some(generation) = reserved {
+            self.changes.record(generation, &result);
+        }
+        result
     }
 
     pub(crate) fn has_session_work(&self) -> bool {
-        self.persist.has_session_work()
+        self.changes.current > self.changes.durable
+    }
+
+    pub(crate) fn generation(&self) -> PersistenceGeneration {
+        self.changes.current
+    }
+
+    pub(crate) fn durable_generation(&self) -> PersistenceGeneration {
+        self.changes.durable
     }
 
     pub(crate) fn descriptors_persisted(&self) -> bool {
-        self.persist.descriptors_persisted()
+        self.transcript.history().descriptor_dirty_from().is_none()
+            && self.changes.current == self.changes.durable
     }
 
-    pub(crate) fn mark_history_resave_required(&mut self, history_index: usize) {
-        self.persist.require_history_resave_from(history_index);
+    pub(crate) fn acknowledged_head(&self) -> smelt_store::StoreHead {
+        self.changes.acknowledged_head
+    }
+
+    pub(crate) fn bind_persistence(&mut self, epoch: SessionEpoch) {
+        self.persistence_epoch = Some(epoch);
+    }
+
+    pub(crate) fn unbind_persistence(&mut self, epoch: SessionEpoch) {
+        if self.persistence_epoch == Some(epoch) {
+            self.persistence_epoch = None;
+        }
     }
 
     pub(crate) fn mark_session_unpersisted(&mut self) {
-        self.persist.reset_unpersisted();
+        self.persistence_epoch = None;
+        self.changes.install_head(smelt_store::StoreHead::default());
+        self.changes.force_dirty_from(0);
+        self.transcript
+            .history_mut()
+            .require_descriptor_resave_from(0);
     }
 
     pub(crate) fn install_materialized_session(&mut self, descriptors_persisted: bool) {
-        let descriptor_len = durable_descriptor_len_for_transcript(&self.transcript);
-        self.persist
-            .install_materialized_session(descriptors_persisted, descriptor_len);
+        if descriptors_persisted {
+            self.transcript.history_mut().clear_descriptor_dirty();
+        } else {
+            if self.transcript.history().descriptor_dirty_from().is_none() {
+                self.changes.force_dirty();
+            }
+            self.transcript
+                .history_mut()
+                .require_descriptor_resave_from(0);
+        }
     }
 
     pub(crate) fn install_loaded_full_session(
         &mut self,
         transcript: crate::app::transcript::LoadedTranscript,
-        writable: bool,
-        history_len: usize,
-        revision: u64,
+        store_head: Option<smelt_store::StoreHead>,
     ) {
         self.live_session = None;
         self.transcript.replace_loaded_transcript(transcript);
-        let descriptor_len = durable_descriptor_len_for_transcript(&self.transcript);
-        self.persist
-            .install_loaded_full_session(writable, history_len, descriptor_len, revision);
+        self.changes.install_head(store_head.unwrap_or_default());
+        self.persistence_epoch = None;
+        self.changes.force_dirty_from(0);
+        self.transcript
+            .history_mut()
+            .require_descriptor_resave_from(0);
     }
 
     pub(crate) fn install_loaded_store_session(
         &mut self,
         transcript: crate::app::transcript::LoadedTranscript,
         live_session: LiveSession,
-        writable: bool,
-        history_len: usize,
-        persisted_descriptor_len: Option<usize>,
+        store_head: smelt_store::StoreHead,
+        repair_descriptors: bool,
     ) {
-        let revision = live_session.header.revision;
+        debug_assert_eq!(
+            store_head.history_len.as_usize(),
+            Some(live_session.history_len())
+        );
         self.live_session = Some(live_session);
         self.transcript.replace_loaded_transcript(transcript);
-        let descriptor_len = persisted_descriptor_len
-            .unwrap_or_else(|| durable_descriptor_len_for_transcript(&self.transcript));
-        self.persist
-            .install_loaded_store_session(writable, history_len, descriptor_len, revision);
-        if persisted_descriptor_len.is_some() {
-            // The read-only compatibility fallback built a complete in-memory
-            // transcript. Defer descriptor repair until the next owned save.
-            self.persist.descriptors_persisted = false;
+        self.changes.install_head(store_head);
+        self.persistence_epoch = None;
+        if repair_descriptors {
+            // The descriptor fallback materializes a complete transcript.
+            // Repair only its descriptor projection, preserving store-backed
+            // history and side-table rows outside the transcript.
+            self.changes.force_dirty();
+            self.transcript
+                .history_mut()
+                .require_descriptor_resave_from(0);
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn current_generation_for_test(&self) -> DocumentGeneration {
-        self.persist.current_generation(&self.transcript)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_pending_save_for_test(
-        &mut self,
-        save_id: u64,
-        session_id: String,
-        kind: crate::persist::PersistSaveKind,
-        generation: DocumentGeneration,
-        history_len: usize,
-    ) {
-        self.persist
-            .set_pending_save_for_test(save_id, session_id, kind, generation, history_len);
-    }
-
-    #[cfg(test)]
     pub(crate) fn set_history_resave_from_for_test(&mut self, history_index: usize) {
-        self.persist.dirty_history_from = Some(history_index);
-        self.persist.session_dirty = true;
-        self.persist.bump_dirty_generation();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn durable_history_len_for_test(&self) -> usize {
-        self.persist.durable.store_history_len
+        self.changes.force_dirty_from(history_index);
     }
 
     #[cfg(test)]
     pub(crate) fn dirty_history_from_for_test(&self) -> Option<usize> {
-        self.persist.dirty_history_from
+        self.changes.history_dirty_from
     }
 
     pub(crate) fn prepare_save(
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-    ) -> Result<PreparedSessionSave, String> {
-        if self.live_session.is_some() {
-            return self.prepare_live_save(session, metadata);
+    ) -> Result<Option<SessionSaveIntent>, String> {
+        let history = self.live_session.as_ref().map_or(
+            SessionHistoryRef::Materialized(&session.history),
+            SessionHistoryRef::StoreBacked,
+        );
+        let history_len = history.len();
+        let descriptor_dirty = self.transcript.history().descriptor_dirty_from().is_some();
+        if self.changes.current == self.changes.durable && !descriptor_dirty {
+            return Ok(None);
         }
-        self.prepare_full_save(session, metadata)
-    }
+        if self.changes.acknowledged_head == smelt_store::StoreHead::default()
+            && history_len == 0
+            && self.transcript.is_empty()
+        {
+            return Ok(None);
+        }
 
-    pub(crate) fn prepare_request_history_append_save(
-        &mut self,
-        session: &mut Session,
-        metadata: RuntimeSessionMetadata,
-        request: RuntimeRequestHistoryAppendSave<'_>,
-    ) -> Result<PreparedSessionSave, String> {
         self.apply_runtime_metadata(session, metadata);
-        let can_persist_suffix = self
-            .persist
-            .can_persist_request_append_at(request.history_index);
-        let generation = self.persist.current_generation(&self.transcript);
-        if can_persist_suffix {
-            let plan = SessionDocument::build_request_history_append_save(
-                session,
-                &self.transcript,
-                generation,
-                request.history_index,
-                request.descriptor_order_start,
-                request.item,
-                request.include_side_tables,
-            )
-            .map_err(|err| err.to_string())?;
-            return Ok(PreparedSessionSave::RequestHistoryAppend {
-                generation: plan.generation,
-                delta: plan.delta,
-                descriptor_append: plan.descriptor_append,
-            });
-        }
-        if let Some(live_session) = self.live_session.as_ref() {
-            let input = SessionSaveInput {
-                session,
-                history: SessionHistoryRef::StoreBacked(live_session),
-                transcript: &self.transcript,
-                state: self.persist.live_save_state(&self.transcript, live_session),
-            };
-            return SessionDocument::prepare_save_from_input(input);
-        }
-        let input = SessionSaveInput {
+        let history = self.live_session.as_ref().map_or(
+            SessionHistoryRef::Materialized(&session.history),
+            SessionHistoryRef::StoreBacked,
+        );
+        let history_len = history.len();
+        let acknowledged_history_len = self
+            .changes
+            .acknowledged_head
+            .history_len
+            .as_usize()
+            .ok_or_else(|| "acknowledged history length exceeds platform limits".to_string())?;
+        let history_start = self
+            .changes
+            .history_dirty_from
+            .map_or(acknowledged_history_len, |dirty| {
+                dirty.min(acknowledged_history_len)
+            })
+            .min(history_len);
+        let history_items = history.range(history_start..history_len)?;
+        let history = smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::new(history_start as u64),
+            final_len: smelt_store::HistoryLen::new(history_len as u64),
+            items: history_items,
+        };
+        let identity = smelt_core::session::store_identity_from_session(session)
+            .map_err(|error| error.to_string())?;
+        let metadata = smelt_core::session::store_metadata_from_session(session, history_len)
+            .map_err(|error| error.to_string())?;
+        let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
             session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &self.transcript,
-            state: self
-                .persist
-                .full_save_state(&self.transcript, session.history.len()),
-        };
-        SessionDocument::prepare_save_from_input(input)
+            history_start,
+            history_len,
+        )
+        .map_err(|error| error.to_string())?;
+        let descriptors =
+            descriptor_save_plan(&self.transcript, true, self.changes.history_dirty_from)
+                .map(|plan| {
+                    let records = plan
+                        .records
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, record)| {
+                            transcript_descriptor_row(
+                                plan.start_descriptor_idx + offset,
+                                record,
+                                &history,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
+                    Ok::<_, smelt_store::StoreError>(smelt_store::TranscriptDescriptorSuffix {
+                        start: smelt_store::DescriptorIndex::new(plan.start_descriptor_idx as u64),
+                        records,
+                    })
+                })
+                .transpose()
+                .map_err(|error| format!("prepare transcript descriptors: {error}"))?;
+        Ok(Some(SessionSaveIntent {
+            generation: self.changes.current,
+            identity,
+            metadata,
+            history,
+            side_tables,
+            descriptors,
+        }))
     }
 
-    fn prepare_full_save(
+    pub(crate) fn acknowledge(
         &mut self,
-        session: &mut Session,
-        metadata: RuntimeSessionMetadata,
-    ) -> Result<PreparedSessionSave, String> {
-        let preflight = SessionSaveInput {
-            session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &self.transcript,
-            state: self
-                .persist
-                .full_save_state(&self.transcript, session.history.len()),
-        };
-        if let SessionSavePlan::Skip(reason) = SessionDocument::select_save_plan(preflight) {
-            return Ok(PreparedSessionSave::Skip(reason));
-        }
-        self.apply_runtime_metadata(session, metadata);
-        let input = SessionSaveInput {
-            session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &self.transcript,
-            state: self
-                .persist
-                .full_save_state(&self.transcript, session.history.len()),
-        };
-        SessionDocument::prepare_save_from_input(input)
-    }
-
-    fn prepare_live_save(
-        &mut self,
-        session: &mut Session,
-        metadata: RuntimeSessionMetadata,
-    ) -> Result<PreparedSessionSave, String> {
-        let Some(live_session) = self.live_session.as_ref() else {
-            return self.prepare_full_save(session, metadata);
-        };
-        let preflight = SessionSaveInput {
-            session,
-            history: SessionHistoryRef::StoreBacked(live_session),
-            transcript: &self.transcript,
-            state: self.persist.live_save_state(&self.transcript, live_session),
-        };
-        if let SessionSavePlan::Skip(reason) = SessionDocument::select_save_plan(preflight) {
-            return Ok(PreparedSessionSave::Skip(reason));
-        }
-        self.apply_runtime_metadata(session, metadata);
-        let live_session = self
-            .live_session
-            .as_ref()
-            .expect("live session present after metadata update");
-        let input = SessionSaveInput {
-            session,
-            history: SessionHistoryRef::StoreBacked(live_session),
-            transcript: &self.transcript,
-            state: self.persist.live_save_state(&self.transcript, live_session),
-        };
-        SessionDocument::prepare_save_from_input(input)
-    }
-
-    pub(crate) fn is_save_queued(&self) -> bool {
-        self.persist.is_save_queued()
-    }
-
-    pub(crate) fn clear_queued_save(&mut self) {
-        self.persist.clear_queued_save();
-    }
-
-    pub(crate) fn queue_save(&mut self) {
-        self.persist.queue_save();
-    }
-
-    pub(crate) fn has_pending_save(&self) -> bool {
-        self.persist.has_pending_save()
-    }
-
-    pub(crate) fn submit_metadata_save(
-        &mut self,
-        session_id: String,
-        generation: DocumentGeneration,
-        identity: smelt_store::SessionIdentity,
-        metadata: smelt_store::SessionMetadata,
-        side_tables: smelt_store::SideTableSuffixes,
-    ) -> Option<smelt_core::session_save::SubmittedSessionCommit> {
-        self.persist
-            .begin_metadata_commit(session_id, generation, identity, metadata, side_tables)
-    }
-
-    pub(crate) fn submit_history_save(
-        &mut self,
-        session_id: String,
-        generation: DocumentGeneration,
-        delta: PersistDelta,
-        descriptor_append: Option<DescriptorAppendSubmission>,
-    ) -> Result<Option<smelt_core::session_save::SubmittedSessionCommit>, String> {
-        self.persist
-            .begin_history_commit(session_id, generation, delta, descriptor_append)
-    }
-
-    pub(crate) fn mark_persisted(
-        &mut self,
+        epoch: SessionEpoch,
+        generation: PersistenceGeneration,
         receipt: &smelt_store::SaveReceipt,
+        session_id: &str,
+        history_len: usize,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> bool {
-        SessionDocument::mark_persisted(
-            &mut self.persist,
-            &mut self.transcript,
-            self.live_session.as_mut(),
+        self.acknowledge_from(
+            epoch,
+            AcknowledgementView {
+                generation,
+                previous: receipt.previous,
+                receipt,
+                coalesced: false,
+            },
+            session_id,
+            history_len,
             checkpoint,
-            receipt,
         )
     }
 
-    pub(crate) fn mark_persist_failed(&mut self, err: &crate::persist::PersistFailure) {
-        SessionDocument::mark_persist_failed(
-            &mut self.persist,
-            &mut self.transcript,
-            self.live_session.as_mut(),
-            err,
-        );
-    }
-
-    pub(crate) fn mark_ephemeral_persisted(
+    pub(crate) fn acknowledge_convergence(
         &mut self,
-        descriptor_append: Option<DescriptorAppendSubmission>,
-    ) {
-        SessionDocument::mark_ephemeral_persisted(
-            &mut self.persist,
-            &mut self.transcript,
-            self.live_session.as_mut(),
-            descriptor_append,
-        );
+        epoch: SessionEpoch,
+        acknowledgement: &crate::persist::PersistenceAcknowledgement,
+        session_id: &str,
+        history_len: usize,
+        checkpoint: Option<&ContextCheckpoint>,
+    ) -> bool {
+        self.acknowledge_from(
+            epoch,
+            AcknowledgementView {
+                generation: acknowledgement.generation,
+                previous: acknowledgement.previous,
+                receipt: &acknowledgement.receipt,
+                coalesced: true,
+            },
+            session_id,
+            history_len,
+            checkpoint,
+        )
     }
 
-    pub(crate) fn has_unflushed_work(&self, session: &Session) -> bool {
-        SessionDocument::has_unflushed_work_for(
-            &self.persist,
-            session,
-            self.live_session.as_ref(),
-            &self.transcript,
-        )
+    fn acknowledge_from(
+        &mut self,
+        epoch: SessionEpoch,
+        acknowledgement: AcknowledgementView<'_>,
+        session_id: &str,
+        history_len: usize,
+        checkpoint: Option<&ContextCheckpoint>,
+    ) -> bool {
+        let AcknowledgementView {
+            generation,
+            previous,
+            receipt,
+            coalesced,
+        } = acknowledgement;
+        if self.persistence_epoch != Some(epoch) || generation != self.changes.current {
+            return false;
+        }
+        let expected_descriptor_len =
+            descriptor_save_plan(&self.transcript, true, self.changes.history_dirty_from)
+                .and_then(|plan| plan.start_descriptor_idx.checked_add(plan.records.len()))
+                .unwrap_or_else(|| {
+                    self.changes
+                        .acknowledged_head
+                        .descriptor_len
+                        .as_usize()
+                        .expect("document descriptor length originated as usize")
+                });
+        let revision_advanced_once = receipt
+            .previous
+            .revision
+            .checked_add(1)
+            .is_some_and(|revision| revision == receipt.current.revision);
+        let revision_valid = if coalesced {
+            receipt.previous.revision.get() >= previous.revision.get()
+                && receipt.current.revision.get() >= receipt.previous.revision.get()
+        } else {
+            receipt.previous == previous
+                && (receipt.current.revision == receipt.previous.revision || revision_advanced_once)
+        };
+        let descriptor_projection_valid =
+            self.transcript
+                .descriptor_total_count()
+                .is_none_or(|total| {
+                    expected_descriptor_len >= total
+                        || self
+                            .transcript
+                            .can_reconcile_dense_descriptor_count(expected_descriptor_len)
+                });
+        if receipt.session_id != session_id
+            || receipt.current.history_len.as_usize() != Some(history_len)
+            || receipt.current.descriptor_len.as_usize() != Some(expected_descriptor_len)
+            || previous != self.changes.acknowledged_head
+            || !revision_valid
+            || !descriptor_projection_valid
+        {
+            return false;
+        }
+        if let Some(live_session) = self.live_session.as_mut() {
+            live_session.compact_saved_prefix(
+                history_len,
+                receipt.current.revision.get(),
+                checkpoint,
+            );
+        }
+        if let Some(total) = self.transcript.descriptor_total_count() {
+            if expected_descriptor_len >= total {
+                self.transcript
+                    .note_persisted_descriptor_append(expected_descriptor_len - total);
+            } else if !self
+                .transcript
+                .reconcile_dense_descriptor_count(expected_descriptor_len)
+            {
+                return false;
+            }
+        }
+        self.transcript.history_mut().clear_descriptor_dirty();
+        self.changes.mark_clean(receipt.current);
+        true
+    }
+
+    pub(crate) fn mark_ephemeral_persisted(&mut self) {
+        self.changes.durable = self.changes.current;
+        self.changes.history_dirty_from = None;
+        self.transcript.history_mut().clear_descriptor_dirty();
+    }
+
+    pub(crate) fn has_unflushed_work(&self, _session: &Session) -> bool {
+        self.changes.current > self.changes.durable
     }
 
     fn apply_runtime_metadata(&mut self, session: &mut Session, metadata: RuntimeSessionMetadata) {
+        let generation = self.changes.reserve_generation();
         let result = SessionDocument::apply_to_session(
             session,
             SessionMutation::UpdateRuntimeMetadata {
@@ -375,8 +496,7 @@ impl TuiSessionDocument {
                 fast_mode: metadata.fast_mode,
             },
         );
-        self.persist
-            .record_mutation(result.session_dirty, result.history_dirty_from);
+        self.changes.record(generation, &result);
     }
 }
 
@@ -389,7 +509,8 @@ pub(crate) struct StoreBackedSessionDocument {
     pub(crate) session: Session,
     pub(crate) transcript: crate::app::transcript::LoadedTranscript,
     pub(crate) live_session: smelt_core::session_runtime::LiveSession,
-    pub(crate) persisted_descriptor_len: Option<usize>,
+    pub(crate) store_head: smelt_store::StoreHead,
+    pub(crate) repair_descriptors: bool,
 }
 
 struct SessionDescriptorSavePlan {
@@ -397,43 +518,10 @@ struct SessionDescriptorSavePlan {
     records: Vec<smelt_core::TranscriptBlockRecordWithId>,
 }
 
-pub(crate) enum PreparedSessionSave {
-    Skip(SessionSaveSkipReason),
-    MetadataOnly {
-        generation: DocumentGeneration,
-        identity: Box<smelt_store::SessionIdentity>,
-        metadata: Box<smelt_store::SessionMetadata>,
-        side_tables: Box<smelt_store::SideTableSuffixes>,
-    },
-    History {
-        generation: DocumentGeneration,
-        delta: Box<PersistDelta>,
-    },
-    RequestHistoryAppend {
-        generation: DocumentGeneration,
-        delta: Box<PersistDelta>,
-        descriptor_append: DescriptorAppendSubmission,
-    },
-}
-
-struct RequestHistoryAppendSavePlan {
-    generation: DocumentGeneration,
-    delta: Box<PersistDelta>,
-    descriptor_append: DescriptorAppendSubmission,
-}
-
 #[derive(Clone, Copy)]
 enum SessionHistoryRef<'a> {
     Materialized(&'a [HistoryItem]),
     StoreBacked(&'a LiveSession),
-}
-
-#[derive(Clone, Copy)]
-struct SessionSaveInput<'a> {
-    session: &'a Session,
-    history: SessionHistoryRef<'a>,
-    transcript: &'a TranscriptDocument,
-    state: SessionSaveState,
 }
 
 impl<'a> SessionHistoryRef<'a> {
@@ -463,60 +551,6 @@ pub(crate) struct RuntimeSessionMetadata {
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) model: Option<String>,
     pub(crate) fast_mode: bool,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RuntimeRequestHistoryAppendSave<'a> {
-    pub(crate) history_index: usize,
-    pub(crate) descriptor_order_start: usize,
-    pub(crate) item: &'a HistoryItem,
-    pub(crate) include_side_tables: bool,
-}
-
-trait SessionPersistStateTuiExt {
-    fn current_generation(&self, transcript: &TranscriptDocument) -> DocumentGeneration;
-    fn full_save_state(
-        &self,
-        transcript: &TranscriptDocument,
-        history_len: usize,
-    ) -> SessionSaveState;
-    fn live_save_state(
-        &self,
-        transcript: &TranscriptDocument,
-        live_session: &LiveSession,
-    ) -> SessionSaveState;
-}
-
-impl SessionPersistStateTuiExt for SessionPersistState {
-    fn current_generation(&self, transcript: &TranscriptDocument) -> DocumentGeneration {
-        self.generation_for_descriptor(transcript.history().descriptor_dirty_generation())
-    }
-
-    fn full_save_state(
-        &self,
-        transcript: &TranscriptDocument,
-        history_len: usize,
-    ) -> SessionSaveState {
-        self.save_state(
-            self.current_generation(transcript),
-            transcript.history().descriptor_dirty_from(),
-            history_len,
-            true,
-        )
-    }
-
-    fn live_save_state(
-        &self,
-        transcript: &TranscriptDocument,
-        live_session: &LiveSession,
-    ) -> SessionSaveState {
-        self.save_state(
-            self.current_generation(transcript),
-            transcript.history().descriptor_dirty_from(),
-            live_session.history_len(),
-            false,
-        )
-    }
 }
 
 pub(crate) enum SessionMutation {
@@ -697,10 +731,6 @@ pub(crate) enum SessionMutationTarget<'a> {
         session: &'a mut Session,
         transcript: &'a mut TranscriptDocument,
     },
-    LiveSession {
-        session: &'a mut Session,
-        live_session: &'a mut LiveSession,
-    },
     LiveSessionAndTranscript {
         session: &'a mut Session,
         live_session: &'a mut LiveSession,
@@ -713,48 +743,6 @@ pub(crate) enum SessionMutationTarget<'a> {
         parser: &'a mut StreamParser,
         transcript: &'a mut TranscriptDocument,
     },
-}
-
-enum SessionMutationPersistence<'a> {
-    ReadOnly,
-    Full(&'a mut SessionPersistState),
-    Live(&'a mut SessionPersistState),
-}
-
-#[derive(Clone, Copy)]
-enum MutationRecordTarget {
-    Session,
-    LiveSession,
-    Transcript,
-    StreamParserTranscript,
-    SessionAndTranscript,
-    LiveSessionAndTranscript,
-}
-
-impl MutationRecordTarget {
-    fn touches_session(self) -> bool {
-        matches!(
-            self,
-            Self::Session
-                | Self::SessionAndTranscript
-                | Self::LiveSession
-                | Self::LiveSessionAndTranscript
-        )
-    }
-
-    fn touches_live_session(self) -> bool {
-        matches!(self, Self::LiveSession | Self::LiveSessionAndTranscript)
-    }
-
-    fn touches_transcript(self) -> bool {
-        matches!(
-            self,
-            Self::Transcript
-                | Self::StreamParserTranscript
-                | Self::SessionAndTranscript
-                | Self::LiveSessionAndTranscript
-        )
-    }
 }
 
 #[derive(Default)]
@@ -770,6 +758,15 @@ pub(crate) struct MutationResult {
     pub(crate) block_id: Option<BlockId>,
     pub(crate) history_append_result: Option<HistoryAppendResult>,
     pub(crate) turn_meta: Option<TurnMeta>,
+}
+
+impl MutationResult {
+    fn canonical_changed(&self) -> bool {
+        self.session_dirty
+            || self.history_dirty_from.is_some()
+            || self.transcript_dirty
+            || self.descriptors_unpersisted
+    }
 }
 
 impl FullSessionDocument {
@@ -789,17 +786,19 @@ impl StoreBackedSessionDocument {
         session: Session,
         transcript: crate::app::transcript::LoadedTranscript,
         live_session: smelt_core::session_runtime::LiveSession,
+        store_head: smelt_store::StoreHead,
     ) -> Self {
         Self {
             session,
             transcript,
             live_session,
-            persisted_descriptor_len: None,
+            store_head,
+            repair_descriptors: false,
         }
     }
 
-    pub(crate) fn with_persisted_descriptor_len(mut self, descriptor_len: usize) -> Self {
-        self.persisted_descriptor_len = Some(descriptor_len);
+    pub(crate) fn requiring_descriptor_repair(mut self) -> Self {
+        self.repair_descriptors = true;
         self
     }
 }
@@ -816,10 +815,6 @@ impl SessionDocument {
                 session,
                 transcript,
             } => Self::apply_to_session_and_transcript(session, transcript, mutation),
-            SessionMutationTarget::LiveSession {
-                session,
-                live_session,
-            } => Self::apply_to_live_session(session, live_session, mutation),
             SessionMutationTarget::LiveSessionAndTranscript {
                 session,
                 live_session,
@@ -844,26 +839,19 @@ impl SessionDocument {
         live_session: Option<&mut LiveSession>,
         transcript: &mut TranscriptDocument,
         parser: &mut StreamParser,
-        persistence: SessionMutationPersistence<'_>,
         mutation: SessionMutation,
     ) -> MutationResult {
-        let (result, target) = match mutation {
+        match mutation {
             SessionMutation::CommitRequestHistoryItem { .. } => {
                 if let Some(live_session) = live_session {
-                    (
-                        Self::apply_to_live_session_and_transcript(
-                            session,
-                            live_session,
-                            transcript,
-                            mutation,
-                        ),
-                        MutationRecordTarget::LiveSessionAndTranscript,
+                    Self::apply_to_live_session_and_transcript(
+                        session,
+                        live_session,
+                        transcript,
+                        mutation,
                     )
                 } else {
-                    (
-                        Self::apply_to_session_and_transcript(session, transcript, mutation),
-                        MutationRecordTarget::SessionAndTranscript,
-                    )
+                    Self::apply_to_session_and_transcript(session, transcript, mutation)
                 }
             }
             SessionMutation::AppendHistoryItem { .. }
@@ -872,15 +860,9 @@ impl SessionDocument {
             | SessionMutation::SetCheckpoint { .. }
             | SessionMutation::SetCheckpointTokensAfterEstimate { .. } => {
                 if let Some(live_session) = live_session {
-                    (
-                        Self::apply_to_live_session(session, live_session, mutation),
-                        MutationRecordTarget::LiveSession,
-                    )
+                    Self::apply_to_live_session(session, live_session, mutation)
                 } else {
-                    (
-                        Self::apply_to_session(session, mutation),
-                        MutationRecordTarget::Session,
-                    )
+                    Self::apply_to_session(session, mutation)
                 }
             }
             SessionMutation::AppendTranscriptBlock { .. }
@@ -891,10 +873,9 @@ impl SessionDocument {
             | SessionMutation::ClearTranscript
             | SessionMutation::UpdateCompactionPreview { .. }
             | SessionMutation::ClearCompactionPreview
-            | SessionMutation::RewriteTranscriptBlock { .. } => (
-                Self::apply_to_transcript(transcript, mutation),
-                MutationRecordTarget::Transcript,
-            ),
+            | SessionMutation::RewriteTranscriptBlock { .. } => {
+                Self::apply_to_transcript(transcript, mutation)
+            }
             SessionMutation::AppendStreamingThinking { .. }
             | SessionMutation::FlushStreamingThinking
             | SessionMutation::AppendStreamingText { .. }
@@ -912,282 +893,10 @@ impl SessionDocument {
             | SessionMutation::StartExec { .. }
             | SessionMutation::AppendExecOutput { .. }
             | SessionMutation::FinishExec { .. }
-            | SessionMutation::FinalizeExec => (
-                Self::apply_to_stream_parser_transcript(parser, transcript, mutation),
-                MutationRecordTarget::StreamParserTranscript,
-            ),
-            mutation => (
-                Self::apply_to_session(session, mutation),
-                MutationRecordTarget::Session,
-            ),
-        };
-        Self::record_runtime_mutation(persistence, target, &result);
-        result
-    }
-
-    fn record_runtime_mutation(
-        persistence: SessionMutationPersistence<'_>,
-        target: MutationRecordTarget,
-        result: &MutationResult,
-    ) {
-        match persistence {
-            SessionMutationPersistence::ReadOnly => {}
-            SessionMutationPersistence::Full(persist) => {
-                if target.touches_session() {
-                    persist.record_mutation(result.session_dirty, result.history_dirty_from);
-                }
-                if target.touches_transcript() {
-                    persist
-                        .record_transcript_descriptors_unpersisted(result.descriptors_unpersisted);
-                }
+            | SessionMutation::FinalizeExec => {
+                Self::apply_to_stream_parser_transcript(parser, transcript, mutation)
             }
-            SessionMutationPersistence::Live(persist) => {
-                if target.touches_live_session() || target.touches_session() {
-                    persist.record_mutation(result.session_dirty, result.history_dirty_from);
-                }
-                if target.touches_transcript() {
-                    persist
-                        .record_transcript_descriptors_unpersisted(result.descriptors_unpersisted);
-                }
-            }
-        }
-    }
-
-    fn has_unflushed_work(state: DocumentDirtyState) -> bool {
-        smelt_core::session_save::has_unflushed_work(state)
-    }
-
-    pub(crate) fn has_unflushed_work_for(
-        persist: &SessionPersistState,
-        session: &Session,
-        live_session: Option<&LiveSession>,
-        transcript: &TranscriptDocument,
-    ) -> bool {
-        let history_len = live_session.map_or(session.history.len(), LiveSession::history_len);
-        Self::has_unflushed_work(persist.dirty_state(
-            transcript.history().descriptor_dirty_from(),
-            history_len,
-            transcript.history().is_empty(),
-        ))
-    }
-
-    #[cfg(test)]
-    fn plan_save_ack(
-        submitted: DocumentGeneration,
-        current: DocumentGeneration,
-        kind: crate::persist::PersistSaveKind,
-    ) -> SaveAckPlan {
-        smelt_core::session_save::plan_save_ack_for_kind(submitted, current, kind)
-    }
-
-    pub(crate) fn mark_persisted(
-        persist: &mut SessionPersistState,
-        transcript: &mut TranscriptDocument,
-        live_session: Option<&mut LiveSession>,
-        checkpoint: Option<&ContextCheckpoint>,
-        receipt: &smelt_store::SaveReceipt,
-    ) -> bool {
-        let history_len = receipt
-            .current
-            .history_len
-            .as_usize()
-            .expect("saved history length originated as usize");
-        let current_generation = persist.current_generation(transcript);
-        let Some(outcome) = persist.ack_save(receipt, current_generation) else {
-            return false;
-        };
-        if let Some(descriptor_append) = outcome.descriptor_append {
-            Self::mark_request_history_append_persisted(transcript, descriptor_append);
-        }
-        match outcome.plan {
-            SaveAckPlan::MarkClean { clear_descriptors } => {
-                if let Some(live_session) = live_session {
-                    if matches!(outcome.kind, crate::persist::PersistSaveKind::History) {
-                        live_session.compact_saved_prefix(
-                            history_len,
-                            receipt.current.revision.get(),
-                            checkpoint,
-                        );
-                    }
-                }
-                if clear_descriptors {
-                    transcript.history_mut().clear_descriptor_dirty();
-                }
-            }
-            SaveAckPlan::SaveAgain => {}
-        }
-        persist.is_save_queued()
-    }
-
-    pub(crate) fn mark_persist_failed(
-        persist: &mut SessionPersistState,
-        transcript: &mut TranscriptDocument,
-        live_session: Option<&mut LiveSession>,
-        failure: &crate::persist::PersistFailure,
-    ) {
-        let plan = persist.record_save_failure(
-            failure.save_id,
-            &failure.session_id,
-            failure.commit_failure.as_ref(),
-        );
-        if live_session.is_some()
-            && failure.commit_failure.is_none()
-            && !failure.disposition.should_retry_automatically()
-        {
-            persist.mark_history_dirty_from(0);
-        }
-        if let Some(current) = plan.reconcile_descriptor_len {
-            transcript.reconcile_dense_descriptor_count(current);
-        }
-    }
-
-    pub(crate) fn mark_ephemeral_persisted(
-        persist: &mut SessionPersistState,
-        transcript: &mut TranscriptDocument,
-        live_session: Option<&mut LiveSession>,
-        descriptor_append: Option<DescriptorAppendSubmission>,
-    ) {
-        persist.mark_clean();
-        if let Some(descriptor_append) = descriptor_append {
-            Self::mark_request_history_append_persisted(transcript, descriptor_append);
-        }
-        Self::clear_persisted_descriptor_work(transcript, live_session);
-    }
-
-    fn select_save_plan(input: SessionSaveInput<'_>) -> SessionSavePlan {
-        smelt_core::session_save::plan_session_save(input.state)
-    }
-
-    fn build_request_history_append_save(
-        session: &Session,
-        transcript: &TranscriptDocument,
-        generation: DocumentGeneration,
-        history_index: usize,
-        descriptor_order_start: usize,
-        item: &HistoryItem,
-        include_side_tables: bool,
-    ) -> Result<RequestHistoryAppendSavePlan, smelt_store::StoreError> {
-        let descriptor_start_idx = transcript.descriptor_total_count().unwrap_or_else(|| {
-            transcript
-                .history()
-                .descriptor_record_index_for_order_index(descriptor_order_start)
-        });
-        let descriptor_records = transcript
-            .history()
-            .descriptor_records_with_ids_from(descriptor_order_start);
-        let descriptor_count = descriptor_records.len();
-        let history_len = history_index.saturating_add(1);
-        let identity = smelt_core::session::store_identity_from_session(session)?;
-        let metadata = smelt_core::session::store_metadata_from_session(session, history_len)?;
-        let side_tables = if include_side_tables {
-            smelt_core::session::store_side_table_suffixes_from_session(session, history_index)?
-        } else {
-            smelt_store::SideTableSuffixes {
-                start: smelt_store::HistoryIndex::new(history_index as u64),
-                turn_metas: Vec::new(),
-                metadata_snapshots: Vec::new(),
-                context_snapshots: Vec::new(),
-            }
-        };
-        Ok(RequestHistoryAppendSavePlan {
-            generation,
-            delta: Box::new(PersistDelta {
-                identity,
-                metadata,
-                history: smelt_store::HistorySuffix {
-                    start: smelt_store::HistoryIndex::new(history_index as u64),
-                    final_len: smelt_store::HistoryLen::new(history_len as u64),
-                    items: vec![item.clone()],
-                },
-                side_tables,
-                descriptors: Some(PersistDescriptorDelta {
-                    start_descriptor_idx: descriptor_start_idx,
-                    records: descriptor_records,
-                }),
-            }),
-            descriptor_append: DescriptorAppendSubmission {
-                count: descriptor_count,
-                had_descriptor_total: transcript.descriptor_total_count().is_some(),
-            },
-        })
-    }
-
-    fn prepare_save_from_input(input: SessionSaveInput<'_>) -> Result<PreparedSessionSave, String> {
-        let plan = Self::select_save_plan(input);
-        Self::prepare_session_save_from_plan(input, plan)
-    }
-
-    fn prepare_session_save_from_plan(
-        input: SessionSaveInput<'_>,
-        plan: SessionSavePlan,
-    ) -> Result<PreparedSessionSave, String> {
-        match plan {
-            SessionSavePlan::Skip(reason) => Ok(PreparedSessionSave::Skip(reason)),
-            SessionSavePlan::MetadataOnly { generation } => {
-                let identity = smelt_core::session::store_identity_from_session(input.session)
-                    .map_err(|err| err.to_string())?;
-                let metadata = smelt_core::session::store_metadata_from_session(
-                    input.session,
-                    input.state.history_len,
-                )
-                .map_err(|err| err.to_string())?;
-                let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
-                    input.session,
-                    input.state.history_len,
-                    input.state.history_len,
-                )
-                .map_err(|err| err.to_string())?;
-                Ok(PreparedSessionSave::MetadataOnly {
-                    generation,
-                    identity: Box::new(identity),
-                    metadata: Box::new(metadata),
-                    side_tables: Box::new(side_tables),
-                })
-            }
-            SessionSavePlan::History {
-                generation,
-                history_start_idx,
-                dirty_history_from,
-            } => {
-                let descriptor_delta = descriptor_save_plan(
-                    input.transcript,
-                    input.state.descriptors_persisted,
-                    dirty_history_from,
-                );
-                let history_len = input.state.history_len;
-                debug_assert_eq!(history_len, input.history.len());
-                debug_assert!(history_start_idx <= input.state.durable_history_len);
-                let history = input.history.range(history_start_idx..history_len)?;
-                debug_assert_eq!(history_len, history_start_idx.saturating_add(history.len()));
-                let identity = smelt_core::session::store_identity_from_session(input.session)
-                    .map_err(|err| err.to_string())?;
-                let metadata =
-                    smelt_core::session::store_metadata_from_session(input.session, history_len)
-                        .map_err(|err| err.to_string())?;
-                let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
-                    input.session,
-                    history_start_idx,
-                    history_len,
-                )
-                .map_err(|err| err.to_string())?;
-                Ok(PreparedSessionSave::History {
-                    generation,
-                    delta: Box::new(PersistDelta {
-                        identity,
-                        metadata,
-                        history: smelt_store::HistorySuffix {
-                            start: smelt_store::HistoryIndex::new(history_start_idx as u64),
-                            final_len: smelt_store::HistoryLen::new(history_len as u64),
-                            items: history,
-                        },
-                        side_tables,
-                        descriptors: descriptor_delta.map(|delta| PersistDescriptorDelta {
-                            start_descriptor_idx: delta.start_descriptor_idx,
-                            records: delta.records,
-                        }),
-                    }),
-                })
-            }
+            mutation => Self::apply_to_session(session, mutation),
         }
     }
 
@@ -1199,12 +908,14 @@ impl SessionDocument {
             session,
             transcript,
             live_session: None,
+            store_head: None,
         }
     }
 
     pub(crate) fn from_store(
         header: SessionHeader,
         store_ref: SessionStoreRef,
+        store_head: smelt_store::StoreHead,
         transcript: crate::app::transcript::LoadedTranscript,
         pid: u32,
         cwd: std::path::PathBuf,
@@ -1215,6 +926,7 @@ impl SessionDocument {
             session,
             transcript,
             live_session: Some(live_session),
+            store_head: Some(store_head),
         }
     }
 
@@ -1304,7 +1016,12 @@ impl SessionDocument {
     }
 
     fn apply_to_session(session: &mut Session, mutation: SessionMutation) -> MutationResult {
-        match mutation {
+        let before_rewrite = matches!(
+            &mutation,
+            SessionMutation::TruncateHistoryFrom { .. } | SessionMutation::RewindHistoryTo { .. }
+        )
+        .then(|| session.clone());
+        let mut result = match mutation {
             SessionMutation::AppendHistoryItem { item } => {
                 let idx = session.history.len();
                 session.history.push(item);
@@ -1406,10 +1123,16 @@ impl SessionDocument {
                 if tokens == 0 {
                     return MutationResult::default();
                 }
+                let history_len = session.history.len();
+                let changed = session.context_tokens != Some(tokens)
+                    || session.context_tokens_history_len != Some(history_len)
+                    || session.context_token_identity.as_ref() != Some(&identity)
+                    || session.display_context_tokens != Some(tokens)
+                    || session.display_context_token_identity.as_ref() != Some(&identity);
                 session.record_context_tokens(tokens, identity);
                 MutationResult {
-                    session_dirty: true,
-                    context_tokens_updated: true,
+                    session_dirty: changed,
+                    context_tokens_updated: changed,
                     ..Default::default()
                 }
             }
@@ -1425,10 +1148,13 @@ impl SessionDocument {
                 }
             }
             SessionMutation::AccumulateUsage { usage, cost_usd } => {
+                let before_cost = session.session_cost_usd;
+                let before_usage = session.session_usage.clone();
                 session.session_cost_usd += cost_usd;
                 session.session_usage.accumulate(&usage);
                 MutationResult {
-                    session_dirty: true,
+                    session_dirty: session.session_cost_usd != before_cost
+                        || session.session_usage != before_usage,
                     ..Default::default()
                 }
             }
@@ -1437,11 +1163,16 @@ impl SessionDocument {
                 slug,
                 snapshot_history_len,
             } => {
+                let before_title = session.title.clone();
+                let before_slug = session.slug.clone();
+                let before_snapshots = session.metadata_snapshots.clone();
                 session.title = Some(title);
                 session.slug = Some(slug);
                 session.snapshot_metadata_at(snapshot_history_len);
                 MutationResult {
-                    session_dirty: true,
+                    session_dirty: session.title != before_title
+                        || session.slug != before_slug
+                        || session.metadata_snapshots != before_snapshots,
                     ..Default::default()
                 }
             }
@@ -1452,27 +1183,34 @@ impl SessionDocument {
                 model,
                 fast_mode,
             } => {
+                let changed = session.updated_at_ms != updated_at_ms
+                    || session.mode.as_deref() != Some(mode.as_str())
+                    || session.reasoning_effort.as_ref() != Some(&reasoning_effort)
+                    || session.model != model
+                    || session.fast_mode != Some(fast_mode);
                 session.updated_at_ms = updated_at_ms;
                 session.mode = Some(mode);
                 session.reasoning_effort = Some(reasoning_effort);
                 session.model = model;
                 session.fast_mode = Some(fast_mode);
                 MutationResult {
-                    session_dirty: true,
+                    session_dirty: changed,
                     ..Default::default()
                 }
             }
             SessionMutation::SetFastMode { enabled } => {
+                let changed = session.fast_mode != Some(enabled);
                 session.fast_mode = Some(enabled);
                 MutationResult {
-                    session_dirty: true,
+                    session_dirty: changed,
                     ..Default::default()
                 }
             }
             SessionMutation::SetCwd { cwd } => {
+                let changed = session.cwd.as_deref() != Some(cwd.as_str());
                 session.cwd = Some(cwd);
                 MutationResult {
-                    session_dirty: true,
+                    session_dirty: changed,
                     ..Default::default()
                 }
             }
@@ -1482,15 +1220,21 @@ impl SessionDocument {
                 snapshot_context,
                 update_context_token_history_len,
             } => {
+                let before_turn_metas = session.turn_metas.clone();
+                let before_context_snapshots = session.context_snapshots.clone();
+                let before_context_tokens_history_len = session.context_tokens_history_len;
                 session.finish_turn_state(
                     history_len,
                     meta,
                     snapshot_context,
                     update_context_token_history_len,
                 );
+                let changed = session.turn_metas != before_turn_metas
+                    || session.context_snapshots != before_context_snapshots
+                    || session.context_tokens_history_len != before_context_tokens_history_len;
                 MutationResult {
-                    session_dirty: true,
-                    applied: true,
+                    session_dirty: changed,
+                    applied: changed,
                     ..Default::default()
                 }
             }
@@ -1554,9 +1298,16 @@ impl SessionDocument {
                 }
             }
             SessionMutation::RestoreMetadataAfterRewind { history_len } => {
+                let before_title = session.title.clone();
+                let before_slug = session.slug.clone();
+                let before_first_user_message = session.first_user_message.clone();
+                let before_snapshots = session.metadata_snapshots.clone();
                 session.restore_metadata_after_rewind(history_len);
                 MutationResult {
-                    session_dirty: true,
+                    session_dirty: session.title != before_title
+                        || session.slug != before_slug
+                        || session.first_user_message != before_first_user_message
+                        || session.metadata_snapshots != before_snapshots,
                     ..Default::default()
                 }
             }
@@ -1582,7 +1333,15 @@ impl SessionDocument {
                     ..Default::default()
                 }
             }
+        };
+        if before_rewrite
+            .as_ref()
+            .is_some_and(|before| before == session)
+        {
+            result.session_dirty = false;
+            result.history_dirty_from = None;
         }
+        result
     }
 
     fn apply_to_live_session(
@@ -1590,7 +1349,18 @@ impl SessionDocument {
         live_session: &mut LiveSession,
         mutation: SessionMutation,
     ) -> MutationResult {
-        match mutation {
+        let before_rewrite = matches!(
+            &mutation,
+            SessionMutation::TruncateHistoryFrom { .. } | SessionMutation::RewindHistoryTo { .. }
+        )
+        .then(|| {
+            (
+                session.clone(),
+                live_session.live_start,
+                live_session.live_history.len(),
+            )
+        });
+        let mut result = match mutation {
             SessionMutation::AppendHistoryItem { item } => {
                 let idx = live_session.append_history(item);
                 MutationResult {
@@ -1695,7 +1465,18 @@ impl SessionDocument {
             | SessionMutation::InstallContextCheckpointAtHistoryIndex { .. }
             | SessionMutation::RestoreMetadataAfterRewind { .. }
             | SessionMutation::PruneRewindableState { .. } => MutationResult::default(),
+        };
+        if before_rewrite.as_ref().is_some_and(
+            |(before_session, before_live_start, before_live_len)| {
+                before_session == session
+                    && *before_live_start == live_session.live_start
+                    && *before_live_len == live_session.live_history.len()
+            },
+        ) {
+            result.session_dirty = false;
+            result.history_dirty_from = None;
         }
+        result
     }
 
     fn apply_to_stream_parser_transcript(
@@ -1935,22 +1716,6 @@ impl SessionDocument {
         }
     }
 
-    pub(crate) fn clear_persisted_descriptor_work(
-        transcript: &mut TranscriptDocument,
-        _live_session: Option<&mut LiveSession>,
-    ) {
-        transcript.history_mut().clear_descriptor_dirty();
-    }
-
-    pub(crate) fn mark_request_history_append_persisted(
-        transcript: &mut TranscriptDocument,
-        descriptor_append: DescriptorAppendSubmission,
-    ) {
-        if descriptor_append.had_descriptor_total {
-            transcript.note_persisted_descriptor_append(descriptor_append.count);
-        }
-    }
-
     pub(crate) fn into_full(self) -> FullSessionDocument {
         FullSessionDocument::new(self.session, self.transcript)
     }
@@ -1961,14 +1726,10 @@ impl SessionDocument {
             self.transcript,
             self.live_session
                 .expect("store-backed session document includes live session state"),
+            self.store_head
+                .expect("store-backed session document includes a store head"),
         )
     }
-}
-
-fn durable_descriptor_len_for_transcript(transcript: &TranscriptDocument) -> usize {
-    transcript
-        .descriptor_total_count()
-        .unwrap_or_else(|| transcript.history().descriptor_records().len())
 }
 
 fn descriptor_save_plan(
@@ -1986,6 +1747,70 @@ fn descriptor_save_plan(
             records: descriptor_records,
         }),
     }
+}
+
+fn transcript_descriptor_row(
+    descriptor_idx: usize,
+    record: &smelt_core::TranscriptBlockRecordWithId,
+    history: &smelt_store::HistorySuffix,
+) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
+    let owned_record;
+    let record_ref = match record.record.origin {
+        Some(BlockOrigin::History(index))
+            if !history_suffix_contains_matching_descriptor_origin(history, index, record) =>
+        {
+            owned_record = smelt_core::TranscriptBlockRecord {
+                origin: None,
+                ..record.record.clone()
+            };
+            &owned_record
+        }
+        _ => &record.record,
+    };
+    smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
+        descriptor_idx,
+        record.block_id.get(),
+        record_ref,
+    )
+}
+
+fn history_suffix_contains_matching_descriptor_origin(
+    history: &smelt_store::HistorySuffix,
+    history_idx: usize,
+    record: &smelt_core::TranscriptBlockRecordWithId,
+) -> bool {
+    let history_start = history
+        .start
+        .as_usize()
+        .expect("prepared history start originated as usize");
+    let history_len = history
+        .final_len
+        .as_usize()
+        .expect("prepared history length originated as usize");
+    if history_idx >= history_len {
+        return false;
+    }
+    if history_idx < history_start {
+        return true;
+    }
+    history
+        .items
+        .get(history_idx - history_start)
+        .is_some_and(|item| descriptor_origin_matches_history_item(&record.record.descriptor, item))
+}
+
+fn descriptor_origin_matches_history_item(
+    descriptor: &smelt_core::TranscriptBlockDescriptor,
+    item: &HistoryItem,
+) -> bool {
+    matches!(
+        (descriptor.kind(), item),
+        ("user", HistoryItem::User { .. })
+            | (
+                "assistant" | "thinking" | "tool" | "exec" | "code",
+                HistoryItem::Assistant { .. }
+            )
+    )
 }
 
 fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Session {
@@ -2017,55 +1842,6 @@ mod tests {
     use super::*;
     use protocol::{Content, ReasoningEffort};
     use smelt_core::session::ContextTokenIdentity;
-
-    fn save_receipt(save_id: u64, history_len: usize, revision: u64) -> smelt_store::SaveReceipt {
-        smelt_store::SaveReceipt {
-            session_id: "session-a".into(),
-            save_id: smelt_store::SaveId::new(save_id),
-            previous: smelt_store::StoreHead {
-                revision: smelt_store::Revision::new(revision.saturating_sub(1)),
-                history_len: smelt_store::HistoryLen::new(history_len as u64),
-                descriptor_len: smelt_store::DescriptorLen::ZERO,
-            },
-            current: smelt_store::StoreHead {
-                revision: smelt_store::Revision::new(revision),
-                history_len: smelt_store::HistoryLen::new(history_len as u64),
-                descriptor_len: smelt_store::DescriptorLen::ZERO,
-            },
-        }
-    }
-
-    fn prepare_request_append(
-        persist: SessionPersistState,
-        session: &mut Session,
-        transcript: TranscriptDocument,
-        live_session: Option<LiveSession>,
-        history_index: usize,
-        descriptor_order_start: usize,
-        item: HistoryItem,
-    ) -> Result<PreparedSessionSave, String> {
-        let mut document = TuiSessionDocument {
-            transcript,
-            live_session,
-            persist,
-        };
-        document.prepare_request_history_append_save(
-            session,
-            RuntimeSessionMetadata {
-                updated_at_ms: 20,
-                mode: "agent".into(),
-                reasoning_effort: ReasoningEffort::Low,
-                model: Some("model-a".into()),
-                fast_mode: false,
-            },
-            RuntimeRequestHistoryAppendSave {
-                history_index,
-                descriptor_order_start,
-                item: &item,
-                include_side_tables: true,
-            },
-        )
-    }
 
     fn token_identity() -> ContextTokenIdentity {
         ContextTokenIdentity {
@@ -2641,17 +2417,14 @@ mod tests {
     #[test]
     fn runtime_apply_routes_history_append_to_live_session() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut live_session = empty_live_session_for(&session, 0);
-        let mut transcript = TranscriptDocument::new();
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        document.live_session = Some(empty_live_session_for(&session, 0));
         let mut parser = StreamParser::new();
-        let mut persist = SessionPersistState::new();
 
-        let result = SessionDocument::apply_runtime(
+        let result = document.apply(
             &mut session,
-            Some(&mut live_session),
-            &mut transcript,
             &mut parser,
-            SessionMutationPersistence::Live(&mut persist),
+            true,
             SessionMutation::AppendHistoryItem {
                 item: HistoryItem::user(Content::text("live")),
             },
@@ -2659,32 +2432,39 @@ mod tests {
 
         assert_eq!(result.history_idx, Some(0));
         assert!(session.history.is_empty());
-        assert_eq!(live_session.history_len(), 1);
-        assert!(persist.session_dirty);
-        assert_eq!(persist.dirty_history_from, Some(0));
+        assert_eq!(
+            document
+                .live_session
+                .as_ref()
+                .expect("live session")
+                .history_len(),
+            1
+        );
+        assert_eq!(document.generation(), PersistenceGeneration::new(1));
+        assert_eq!(document.dirty_history_from_for_test(), Some(0));
     }
 
     #[test]
     fn runtime_apply_routes_streaming_mutation_to_parser_and_transcript() {
         let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut transcript = TranscriptDocument::new();
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
         let mut parser = StreamParser::new();
-        let mut persist = SessionPersistState::new();
 
-        let result = SessionDocument::apply_runtime(
+        let result = document.apply(
             &mut session,
-            None,
-            &mut transcript,
             &mut parser,
-            SessionMutationPersistence::Full(&mut persist),
+            true,
             SessionMutation::AppendStreamingText {
                 delta: "hello".into(),
             },
         );
 
         assert!(result.transcript_dirty);
-        assert_eq!(transcript.history().descriptor_dirty_from(), Some(0));
-        assert!(!persist.session_dirty);
+        assert_eq!(
+            document.transcript.history().descriptor_dirty_from(),
+            Some(0)
+        );
+        assert_eq!(document.generation(), PersistenceGeneration::new(1));
     }
 
     #[test]
@@ -3185,895 +2965,431 @@ mod tests {
         assert_eq!(transcript.history().len(), 1);
     }
 
-    #[test]
-    fn full_save_plan_uses_metadata_only_for_clean_persisted_history() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![HistoryItem::user(Content::text("persisted"))];
-        let transcript = TranscriptDocument::new();
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: true,
-                dirty_history_from: None,
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: session.history.len(),
-                durable_history_len: session.history.len(),
-                supports_metadata_only: true,
-            },
-        });
-
-        assert!(matches!(plan, SessionSavePlan::MetadataOnly { .. }));
+    fn runtime_metadata() -> RuntimeSessionMetadata {
+        RuntimeSessionMetadata {
+            updated_at_ms: 20,
+            mode: "agent".into(),
+            reasoning_effort: ReasoningEffort::Low,
+            model: Some("model-a".into()),
+            fast_mode: false,
+        }
     }
 
-    #[test]
-    fn full_save_plan_rewrites_history_when_metadata_len_is_stale() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![HistoryItem::user(Content::text("persisted"))];
-        let transcript = TranscriptDocument::new();
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: true,
-                dirty_history_from: None,
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: session.history.len(),
-                durable_history_len: 0,
-                supports_metadata_only: true,
+    fn receipt_for(
+        intent: &SessionSaveIntent,
+        previous: smelt_store::StoreHead,
+    ) -> smelt_store::SaveReceipt {
+        let descriptor_len =
+            intent
+                .descriptors
+                .as_ref()
+                .map_or(previous.descriptor_len, |suffix| {
+                    smelt_store::DescriptorLen::new(
+                        suffix.start.get()
+                            + u64::try_from(suffix.records.len()).expect("descriptor count"),
+                    )
+                });
+        smelt_store::SaveReceipt {
+            session_id: intent.identity.id.clone(),
+            previous,
+            current: smelt_store::StoreHead {
+                revision: previous.revision.checked_add(1).expect("revision"),
+                history_len: intent.history.final_len,
+                descriptor_len,
             },
-        });
-
-        assert!(matches!(
-            plan,
-            SessionSavePlan::History {
-                generation: _,
-                history_start_idx: 0,
-                dirty_history_from: Some(0),
-            }
-        ));
-    }
-
-    #[test]
-    fn save_plan_clamps_dirty_marker_to_durable_history_len() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            HistoryItem::user(Content::text("stored 0")),
-            HistoryItem::user(Content::text("stored 1")),
-            HistoryItem::user(Content::text("live 2")),
-        ];
-        let transcript = TranscriptDocument::new();
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: true,
-                dirty_history_from: Some(5),
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: session.history.len(),
-                durable_history_len: 2,
-                supports_metadata_only: true,
-            },
-        });
-
-        assert!(matches!(
-            plan,
-            SessionSavePlan::History {
-                history_start_idx: 2,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn save_plan_clamps_dirty_marker_to_current_history_len() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            HistoryItem::user(Content::text("stored 0")),
-            HistoryItem::user(Content::text("stored 1")),
-        ];
-        let transcript = TranscriptDocument::new();
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: true,
-                dirty_history_from: Some(5),
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: session.history.len(),
-                durable_history_len: 5,
-                supports_metadata_only: true,
-            },
-        });
-
-        assert!(matches!(
-            plan,
-            SessionSavePlan::History {
-                history_start_idx: 2,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn request_history_append_falls_back_when_append_index_is_not_durable_len() {
-        let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 1, 0, 0);
-        persist.mark_history_dirty_from(2);
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            HistoryItem::user(Content::text("stored")),
-            HistoryItem::user(Content::text("unsaved")),
-            HistoryItem::user(Content::text("request")),
-        ];
-        let transcript = TranscriptDocument::new();
-        let item = session.history[2].clone();
-
-        let prepared = prepare_request_append(persist, &mut session, transcript, None, 2, 0, item)
-            .expect("prepare request append fallback");
-
-        assert!(matches!(
-            prepared,
-            PreparedSessionSave::History { ref delta, .. }
-                if delta.history.start.get() == 1 && delta.history.final_len.get() == 3
-        ));
-    }
-
-    #[test]
-    fn full_save_plan_includes_descriptor_suffix() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![HistoryItem::user(Content::text("persisted"))];
-        let mut transcript = TranscriptDocument::new();
-        transcript.push(Block::Text {
-            content: "descriptor-only text".into(),
-        });
-
-        let prepared = SessionDocument::prepare_save_from_input(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: false,
-                dirty_history_from: None,
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: session.history.len(),
-                durable_history_len: session.history.len(),
-                supports_metadata_only: true,
-            },
-        })
-        .expect("prepare save");
-
-        match prepared {
-            PreparedSessionSave::History { delta, .. } => {
-                assert_eq!(delta.history.start.get(), session.history.len() as u64);
-                let descriptors = delta.descriptors.expect("descriptor delta");
-                assert_eq!(descriptors.start_descriptor_idx, 0);
-                assert_eq!(descriptors.records.len(), 1);
-            }
-            _ => panic!("expected descriptor history save"),
         }
     }
 
     #[test]
-    fn request_history_append_save_plan_builds_descriptor_and_side_table_suffix() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            HistoryItem::user(Content::text("persisted")),
-            HistoryItem::user(Content::text("new")),
-        ];
-        let mut transcript = TranscriptDocument::new();
-        transcript.push(Block::Text {
-            content: "persisted".into(),
-        });
-        transcript.history_mut().clear_descriptor_dirty();
-        let descriptor_order_start = transcript.history().len();
-        transcript.push(Block::User {
-            text: "new".into(),
-            image_labels: Vec::new(),
-        });
+    fn persistence_generation_is_checked() {
+        assert_eq!(
+            PersistenceGeneration::new(41).checked_next(),
+            Some(PersistenceGeneration::new(42))
+        );
+        assert_eq!(PersistenceGeneration::new(u64::MAX).checked_next(), None);
+    }
 
-        let generation = DocumentGeneration::new(3, 4);
-        let plan = SessionDocument::build_request_history_append_save(
-            &session,
-            &transcript,
-            generation,
-            1,
-            descriptor_order_start,
-            &HistoryItem::user(Content::text("new")),
+    #[test]
+    fn no_op_canonical_mutation_does_not_advance_generation() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.updated_at_ms = 20;
+        session.mode = Some("agent".into());
+        session.reasoning_effort = Some(ReasoningEffort::Low);
+        session.model = Some("model-a".into());
+        session.fast_mode = Some(false);
+        session.cwd = Some("/tmp".into());
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let mut parser = StreamParser::new();
+
+        for mutation in [
+            SessionMutation::SetFastMode { enabled: false },
+            SessionMutation::SetCwd { cwd: "/tmp".into() },
+            SessionMutation::UpdateRuntimeMetadata {
+                updated_at_ms: 20,
+                mode: "agent".into(),
+                reasoning_effort: ReasoningEffort::Low,
+                model: Some("model-a".into()),
+                fast_mode: false,
+            },
+            SessionMutation::TruncateHistoryFrom {
+                index: 0,
+                identity: token_identity(),
+            },
+            SessionMutation::ClearTranscript,
+        ] {
+            let result = document.apply(&mut session, &mut parser, true, mutation);
+            assert!(!result.canonical_changed());
+        }
+        assert_eq!(document.generation(), PersistenceGeneration::ZERO);
+    }
+
+    #[test]
+    fn materialized_intent_is_cumulative_and_matching_acknowledgement_cleans() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let mut parser = StreamParser::new();
+        document.apply(
+            &mut session,
+            &mut parser,
             true,
-        )
-        .expect("prepare request append save");
-
-        let (plan_generation, delta, descriptor_append) =
-            (plan.generation, plan.delta, plan.descriptor_append);
-
-        assert_eq!(plan_generation, generation);
-        assert_eq!(delta.history.start.get(), 1);
-        assert_eq!(delta.history.final_len.get(), 2);
-        assert_eq!(delta.history.items.len(), 1);
-        assert_eq!(delta.side_tables.start.get(), 1);
-        let descriptors = delta.descriptors.as_ref().expect("descriptor delta");
-        assert_eq!(descriptors.start_descriptor_idx, 1);
-        assert_eq!(descriptor_append.count, 1);
-        assert_eq!(descriptors.records.len(), 1);
-        assert!(!descriptor_append.had_descriptor_total);
-    }
-
-    #[test]
-    fn request_history_append_planner_falls_back_to_full_save_when_dirty_range_exists() {
-        let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 1, 0, 0);
-        persist.mark_history_dirty_from(0);
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            HistoryItem::user(Content::text("old")),
-            HistoryItem::user(Content::text("new")),
-        ];
-        let transcript = TranscriptDocument::new();
-        let item = session.history[1].clone();
-
-        let prepared = prepare_request_append(persist, &mut session, transcript, None, 1, 0, item)
-            .expect("prepare request append fallback");
-
-        assert!(matches!(
-            prepared,
-            PreparedSessionSave::History { ref delta, .. }
-                if delta.history.start.get() == 0 && delta.history.final_len.get() == 2
-        ));
-    }
-
-    #[test]
-    fn request_history_append_planner_falls_back_when_live_dirty_range_exists() {
-        let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 0, 0, 0);
-        persist.mark_history_dirty_from(0);
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut live_session = empty_live_session_for(&session, 0);
-        live_session.append_history(HistoryItem::user(Content::text("dirty")));
-        live_session.append_history(HistoryItem::user(Content::text("new")));
-        let transcript = TranscriptDocument::new();
-        let item = HistoryItem::user(Content::text("new"));
-
-        let prepared = prepare_request_append(
-            persist,
-            &mut session,
-            transcript,
-            Some(live_session),
-            1,
-            0,
-            item,
-        )
-        .expect("prepare request append fallback");
-
-        assert!(matches!(
-            prepared,
-            PreparedSessionSave::History { ref delta, .. }
-                if delta.history.start.get() == 0 && delta.history.final_len.get() == 2
-        ));
-    }
-
-    #[test]
-    fn request_history_append_planner_builds_current_live_append() {
-        let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 1, 0, 0);
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut live_session = empty_live_session_for(&session, 1);
-        let item = HistoryItem::user(Content::text("new"));
-        live_session.append_history(item.clone());
-        let transcript = TranscriptDocument::new();
-
-        let prepared = prepare_request_append(
-            persist,
-            &mut session,
-            transcript,
-            Some(live_session),
-            1,
-            0,
-            item,
-        )
-        .expect("prepare request append");
-
-        assert!(matches!(
-            prepared,
-            PreparedSessionSave::RequestHistoryAppend { .. }
-        ));
-    }
-
-    #[test]
-    fn prepared_full_save_builds_history_and_descriptor_delta() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            HistoryItem::user(Content::text("persisted")),
-            HistoryItem::user(Content::text("dirty")),
-        ];
-        let mut transcript = TranscriptDocument::new();
-        transcript.push(Block::Text {
-            content: "descriptor-only text".into(),
-        });
-
-        let prepared = SessionDocument::prepare_save_from_input(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::Materialized(&session.history),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: true,
-                dirty_history_from: Some(1),
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: session.history.len(),
-                durable_history_len: 1,
-                supports_metadata_only: true,
-            },
-        })
-        .expect("prepare save");
-
-        match prepared {
-            PreparedSessionSave::History {
-                generation: _,
-                delta,
-            } => {
-                assert_eq!(delta.history.start.get(), 1);
-                assert_eq!(delta.history.final_len.get(), 2);
-                assert_eq!(delta.history.items.len(), 1);
-                assert_eq!(delta.side_tables.start.get(), 1);
-                let descriptors = delta.descriptors.expect("descriptor delta");
-                assert_eq!(descriptors.start_descriptor_idx, 0);
-                assert_eq!(descriptors.records.len(), 1);
-            }
-            _ => panic!("expected prepared history save"),
-        }
-    }
-
-    #[test]
-    fn live_save_plan_skips_unchanged_store_backed_session() {
-        let transcript = TranscriptDocument::new();
-        let session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let live_session = empty_live_session_for(&session, 2);
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::StoreBacked(&live_session),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: false,
-                dirty_history_from: None,
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: 2,
-                durable_history_len: 2,
-                supports_metadata_only: false,
-            },
-        });
-
-        assert!(matches!(
-            plan,
-            SessionSavePlan::Skip(SessionSaveSkipReason::Unchanged)
-        ));
-    }
-
-    #[test]
-    fn live_session_metadata_mutation_forces_metadata_save() {
-        let transcript = TranscriptDocument::new();
-        let mut persist = SessionPersistState::new();
-        persist.install_loaded_store_session(true, 2, 0, 0);
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut live_session = empty_live_session_for(&session, 2);
-        let checkpoint = ContextCheckpoint {
-            kind: "compaction".into(),
-            summary: "summary".into(),
-            first_live_index: 2,
-            created_at_ms: 10,
-            tokens_before: Some(100),
-            tokens_after_estimate: None,
-            tokens_after_estimate_history_len: None,
-            pre_checkpoint_context_tokens: None,
-            pre_checkpoint_context_history_len: None,
-        };
-
-        let result = SessionDocument::apply(
-            SessionMutationTarget::LiveSession {
-                session: &mut session,
-                live_session: &mut live_session,
-            },
-            SessionMutation::SetCheckpoint {
-                checkpoint: Some(checkpoint),
+            SessionMutation::AppendHistoryItem {
+                item: HistoryItem::user(Content::text("first")),
             },
         );
-        persist.record_mutation(result.session_dirty, result.history_dirty_from);
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::StoreBacked(&live_session),
-            transcript: &transcript,
-            state: persist.live_save_state(&transcript, &live_session),
-        });
-
-        assert!(matches!(
-            plan,
-            SessionSavePlan::History {
-                generation: _,
-                history_start_idx: 2,
-                dirty_history_from: None,
-            }
-        ));
-    }
-
-    #[test]
-    fn live_save_plan_uses_dirty_history_start() {
-        let transcript = TranscriptDocument::new();
-        let session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let live_session = empty_live_session_for(&session, 3);
-
-        let plan = SessionDocument::select_save_plan(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::StoreBacked(&live_session),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: false,
-                dirty_history_from: Some(1),
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: 3,
-                durable_history_len: 3,
-                supports_metadata_only: false,
+        document.apply(
+            &mut session,
+            &mut parser,
+            true,
+            SessionMutation::AppendHistoryItem {
+                item: HistoryItem::user(Content::text("second")),
             },
-        });
+        );
 
-        assert!(matches!(
-            plan,
-            SessionSavePlan::History {
-                generation: _,
-                history_start_idx: 1,
-                dirty_history_from: Some(1),
-            }
-        ));
+        let previous = document.acknowledged_head();
+        let intent = document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare intent")
+            .expect("dirty intent");
+        assert_eq!(intent.history.start, smelt_store::HistoryIndex::ZERO);
+        assert_eq!(intent.history.final_len, smelt_store::HistoryLen::new(2));
+        assert_eq!(intent.history.items.len(), 2);
+
+        let epoch = SessionEpoch::new(7);
+        let receipt = receipt_for(&intent, previous);
+        document.bind_persistence(epoch);
+        assert!(document.acknowledge(epoch, intent.generation, &receipt, &session.id, 2, None));
+        assert_eq!(document.durable_generation(), intent.generation);
+        assert_eq!(document.dirty_history_from_for_test(), None);
+        assert!(!document.has_session_work());
     }
 
     #[test]
-    fn prepared_live_save_builds_history_delta_from_live_session() {
+    fn acknowledgement_rejects_wrong_scope_and_head() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let mut parser = StreamParser::new();
+        document.apply(
+            &mut session,
+            &mut parser,
+            true,
+            SessionMutation::AppendHistoryItem {
+                item: HistoryItem::user(Content::text("dirty")),
+            },
+        );
+        let previous = document.acknowledged_head();
+        let intent = document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare intent")
+            .expect("dirty intent");
+        let epoch = SessionEpoch::new(3);
+        let receipt = receipt_for(&intent, previous);
+        document.bind_persistence(epoch);
+
+        assert!(!document.acknowledge(
+            SessionEpoch::new(4),
+            intent.generation,
+            &receipt,
+            &session.id,
+            1,
+            None,
+        ));
+        assert!(!document.acknowledge(
+            epoch,
+            PersistenceGeneration::new(intent.generation.get() - 1),
+            &receipt,
+            &session.id,
+            1,
+            None,
+        ));
+        assert!(!document.acknowledge(
+            epoch,
+            PersistenceGeneration::new(intent.generation.get() + 1),
+            &receipt,
+            &session.id,
+            1,
+            None,
+        ));
+        assert!(!document.acknowledge(epoch, intent.generation, &receipt, &session.id, 2, None));
+        let mut wrong_session = receipt.clone();
+        wrong_session.session_id = "different-session".into();
+        assert!(!document.acknowledge(
+            epoch,
+            intent.generation,
+            &wrong_session,
+            &session.id,
+            1,
+            None,
+        ));
+        let mut wrong_descriptor_len = receipt.clone();
+        wrong_descriptor_len.current.descriptor_len = smelt_store::DescriptorLen::new(1);
+        assert!(!document.acknowledge(
+            epoch,
+            intent.generation,
+            &wrong_descriptor_len,
+            &session.id,
+            1,
+            None,
+        ));
+        let mut wrong_head = receipt.clone();
+        wrong_head.previous.revision = smelt_store::Revision::new(9);
+        assert!(!document.acknowledge(epoch, intent.generation, &wrong_head, &session.id, 1, None,));
+        let mut skipped_revision = receipt.clone();
+        skipped_revision.current.revision = skipped_revision
+            .previous
+            .revision
+            .checked_add(2)
+            .expect("revision");
+        assert!(!document.acknowledge(
+            epoch,
+            intent.generation,
+            &skipped_revision,
+            &session.id,
+            1,
+            None,
+        ));
+        assert!(document.has_session_work());
+    }
+
+    #[test]
+    fn empty_unpublished_draft_does_not_build_intent() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let mut parser = StreamParser::new();
+        document.apply(
+            &mut session,
+            &mut parser,
+            true,
+            SessionMutation::SetFastMode { enabled: true },
+        );
+
+        assert!(document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare draft")
+            .is_none());
+        assert!(document.has_session_work());
+    }
+
+    #[test]
+    fn generated_mutation_sequences_build_complete_cumulative_intents() {
+        for seed in 0..64_u64 {
+            let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+            let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+            let mut parser = StreamParser::new();
+            let mut state = seed.wrapping_add(1);
+            for step in 0..24 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let mutation = match state % 5 {
+                    0 => SessionMutation::AppendHistoryItem {
+                        item: HistoryItem::user(Content::text(format!("{seed}:{step}"))),
+                    },
+                    1 => SessionMutation::TruncateHistoryFrom {
+                        index: (state as usize) % (session.history.len() + 1),
+                        identity: token_identity(),
+                    },
+                    2 => SessionMutation::SetFastMode {
+                        enabled: state & 1 == 0,
+                    },
+                    3 => SessionMutation::SetCwd {
+                        cwd: format!("/tmp/{seed}/{step}"),
+                    },
+                    _ => SessionMutation::SetTitle {
+                        title: format!("title-{seed}-{step}"),
+                        slug: format!("title-{seed}-{step}"),
+                        snapshot_history_len: session.history.len(),
+                    },
+                };
+                document.apply(&mut session, &mut parser, true, mutation);
+            }
+            document.apply(
+                &mut session,
+                &mut parser,
+                true,
+                SessionMutation::AppendHistoryItem {
+                    item: HistoryItem::user(Content::text(format!("final-{seed}"))),
+                },
+            );
+
+            let intent = document
+                .prepare_save(&mut session, runtime_metadata())
+                .expect("prepare generated intent")
+                .expect("generated session has content");
+            let history_len = session.history.len();
+            assert_eq!(intent.history.start, smelt_store::HistoryIndex::ZERO);
+            assert_eq!(
+                intent.history.final_len,
+                smelt_store::HistoryLen::new(history_len as u64)
+            );
+            assert_eq!(intent.history.items, session.history);
+            assert_eq!(
+                intent.identity,
+                smelt_core::session::store_identity_from_session(&session).unwrap()
+            );
+            assert_eq!(
+                intent.metadata,
+                smelt_core::session::store_metadata_from_session(&session, history_len).unwrap()
+            );
+            assert_eq!(
+                intent.side_tables,
+                smelt_core::session::store_side_table_suffixes_from_session_at(
+                    &session,
+                    0,
+                    history_len,
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn materialized_descriptor_repair_preserves_store_backed_history_boundary() {
         let session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::Text {
+            content: "reconstructed".into(),
+        });
+        let loaded = crate::app::transcript::LoadedTranscript::full(transcript);
+
+        document.install_loaded_store_session(
+            loaded,
+            empty_live_session_for(&session, 2),
+            smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(0),
+                history_len: smelt_store::HistoryLen::new(2),
+                descriptor_len: smelt_store::DescriptorLen::new(1),
+            },
+            true,
+        );
+
+        assert_eq!(document.dirty_history_from_for_test(), None);
+        assert_eq!(
+            document.transcript.history().descriptor_dirty_from(),
+            Some(0)
+        );
+        assert!(document.has_session_work());
+    }
+
+    #[test]
+    fn store_backed_cumulative_intent_spans_sqlite_prefix_and_live_suffix() {
+        const ID: &str = "7777777777777777777777777777777777777777777777777777777777777777";
+        let root = tempfile::tempdir().expect("session root");
+        let mut stored = Session::new(1, std::path::PathBuf::from("/tmp"));
+        stored.id = ID.into();
+        stored.history = vec![
+            HistoryItem::user(Content::text("stored-0")),
+            HistoryItem::user(Content::text("stored-1")),
+        ];
+        let mut writer = smelt_store::OwnedSessionWriter::open(root.path(), ID).expect("writer");
+        let command = smelt_core::session::initial_store_commit_from_session(&stored)
+            .expect("initial commit");
+        let receipt = writer.commit_session(&command).expect("store prefix");
+        let session_dir = writer.session_dir().to_path_buf();
         let mut meta = meta_with_token_identity();
-        meta.id = session.id.clone();
-        meta.history_len = Some(0);
+        meta.id = ID.into();
+        meta.history_len = Some(2);
         let header = SessionHeader {
             meta,
-            history_len: 0,
-            revision: 0,
+            history_len: 2,
+            revision: receipt.current.revision.get(),
             degraded_warnings: Vec::new(),
         };
-        let mut live_session = LiveSession::from_parts(header, std::path::PathBuf::new(), None);
-        live_session.append_history(HistoryItem::user(Content::text("live")));
-        let transcript = TranscriptDocument::new();
-
-        let prepared = SessionDocument::prepare_save_from_input(SessionSaveInput {
-            session: &session,
-            history: SessionHistoryRef::StoreBacked(&live_session),
-            transcript: &transcript,
-            state: SessionSaveState {
-                generation: DocumentGeneration::new(0, 0),
-                store_ready: true,
-                descriptors_persisted: true,
-                session_dirty: false,
-                dirty_history_from: Some(0),
-                descriptor_dirty_from: transcript.history().descriptor_dirty_from(),
-                history_len: live_session.history_len(),
-                durable_history_len: 0,
-                supports_metadata_only: false,
-            },
-        })
-        .expect("prepare live save");
-
-        match prepared {
-            PreparedSessionSave::History {
-                generation: _,
-                delta,
-            } => {
-                assert_eq!(delta.history.start.get(), 0);
-                assert_eq!(delta.history.final_len.get(), 1);
-                assert_eq!(delta.history.items.len(), 1);
-                assert_eq!(delta.side_tables.start.get(), 0);
-                assert!(delta.descriptors.is_none());
-            }
-            _ => panic!("expected prepared live history save"),
-        }
-    }
-
-    #[test]
-    fn save_ack_plan_marks_matching_history_generation_clean() {
-        let plan = SessionDocument::plan_save_ack(
-            DocumentGeneration::new(3, 4),
-            DocumentGeneration::new(3, 4),
-            crate::persist::PersistSaveKind::History,
-        );
-
-        assert_eq!(
-            plan,
-            SaveAckPlan::MarkClean {
-                clear_descriptors: true
-            }
-        );
-    }
-
-    #[test]
-    fn save_ack_plan_queues_mismatched_generation() {
-        let plan = SessionDocument::plan_save_ack(
-            DocumentGeneration::new(3, 4),
-            DocumentGeneration::new(4, 4),
-            crate::persist::PersistSaveKind::Metadata,
-        );
-
-        assert_eq!(plan, SaveAckPlan::SaveAgain);
-    }
-
-    #[test]
-    fn persist_state_ack_clears_matching_generation() {
-        let mut state = SessionPersistState::new();
-        state.mark_history_dirty_from(2);
-        state.descriptors_persisted = false;
-        let generation = DocumentGeneration::new(state.dirty_generation, 5);
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::History,
-            generation,
-            SubmittedHistoryRange {
-                start_idx: 2,
-                len: 3,
-            },
-            None,
-        );
-
-        let plan = state.ack_save(&save_receipt(save_id, 3, 7), generation);
-
-        assert_eq!(
-            plan,
-            Some(smelt_core::session_save::SaveAckOutcome {
-                plan: SaveAckPlan::MarkClean {
-                    clear_descriptors: true
-                },
-                kind: crate::persist::PersistSaveKind::History,
-                descriptor_append: None,
-            })
-        );
-        assert!(!state.session_dirty);
-        assert_eq!(state.dirty_history_from, None);
-        assert_eq!(state.durable.store_history_len, 3);
-        assert!(state.descriptors_persisted);
-    }
-
-    #[test]
-    fn persist_state_ack_with_unexpected_history_len_forces_retry() {
-        let mut state = SessionPersistState::new();
-        state.install_loaded_store_session(true, 1, 0, 7);
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::History,
-            DocumentGeneration::new(0, 0),
-            SubmittedHistoryRange {
-                start_idx: 1,
-                len: 2,
-            },
-            None,
-        );
-
-        let plan = state.ack_save(&save_receipt(save_id, 1, 8), DocumentGeneration::new(0, 0));
-
-        assert_eq!(
-            plan,
-            Some(smelt_core::session_save::SaveAckOutcome {
-                plan: SaveAckPlan::SaveAgain,
-                kind: crate::persist::PersistSaveKind::History,
-                descriptor_append: None,
-            })
-        );
-        assert!(state.is_save_queued());
-        assert_eq!(state.dirty_history_from, Some(1));
-        assert_eq!(
-            state.durable,
-            DurableCursor {
-                store_history_len: 1,
-                descriptor_len: 0,
-                revision: 7,
-            }
-        );
-    }
-
-    #[test]
-    fn document_ack_clears_matching_descriptor_generation() {
-        let mut state = SessionPersistState::new();
-        state.mark_history_dirty_from(0);
-        let mut transcript = TranscriptDocument::new();
-        transcript.push(Block::Text {
-            content: "dirty descriptor".into(),
-        });
-        let generation = state.current_generation(&transcript);
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::History,
-            generation,
-            SubmittedHistoryRange {
-                start_idx: 0,
-                len: 1,
-            },
-            None,
-        );
-
-        let save_queued = SessionDocument::mark_persisted(
-            &mut state,
-            &mut transcript,
-            None,
-            None,
-            &save_receipt(save_id, 1, 7),
-        );
-
-        assert!(!save_queued);
-        assert!(!state.session_dirty);
-        assert_eq!(state.dirty_history_from, None);
-        assert_eq!(transcript.history().descriptor_dirty_from(), None);
-    }
-
-    #[test]
-    fn document_ack_records_request_descriptor_append() {
-        let mut state = SessionPersistState::new();
-        state.mark_history_dirty_from(0);
-        let descriptor = smelt_store::TranscriptDescriptorRecord {
-            block_idx: 0,
-            history_idx: None,
-            kind: "text".into(),
-            tool_call_id: None,
-            tool_name: None,
-            content_hash: "old".into(),
-            estimated_text_bytes: 3,
-            preview_text: "old".into(),
-            indexed_text: "old".into(),
-            descriptor_json: serde_json::to_string(&smelt_core::TranscriptBlockDescriptor::Text {
-                content: "old".into(),
-            })
-            .unwrap(),
-            origin_json: None,
-            tool_state_json: None,
+        let store_ref = SessionStoreRef {
+            db_path: session_dir.join("session.db"),
+            session_dir,
         };
-        let loaded = crate::app::transcript::LoadedTranscript::from_descriptor_slice(
-            smelt_store::TranscriptDescriptorSlice::new(
-                smelt_store::TranscriptDescriptorIndex::new(0),
-                1,
-                smelt_store::TranscriptDescriptorHydration::Hydrated,
-                vec![descriptor],
-            ),
-            std::path::PathBuf::new(),
-        )
-        .expect("loaded transcript");
-        let mut transcript = TranscriptDocument::from_loaded_transcript(loaded);
-        transcript.push(Block::Text {
-            content: "new descriptor".into(),
+        let mut session = stored.clone();
+        session.history.clear();
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        document.live_session = Some(LiveSession::from_store(header, store_ref));
+        document.changes.install_head(receipt.current);
+        document.set_history_resave_from_for_test(0);
+        let mut parser = StreamParser::new();
+        document.apply(
+            &mut session,
+            &mut parser,
+            true,
+            SessionMutation::AppendHistoryItem {
+                item: HistoryItem::user(Content::text("live-2")),
+            },
+        );
+
+        let intent = document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare intent")
+            .expect("dirty intent");
+        assert_eq!(intent.history.start, smelt_store::HistoryIndex::ZERO);
+        assert_eq!(intent.history.final_len, smelt_store::HistoryLen::new(3));
+        assert_eq!(
+            intent.history.items,
+            vec![
+                HistoryItem::user(Content::text("stored-0")),
+                HistoryItem::user(Content::text("stored-1")),
+                HistoryItem::user(Content::text("live-2")),
+            ]
+        );
+        writer.release().expect("release writer");
+    }
+
+    #[test]
+    fn matching_store_backed_acknowledgement_compacts_live_suffix() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        document.live_session = Some(empty_live_session_for(&session, 2));
+        document.changes.install_head(smelt_store::StoreHead {
+            revision: smelt_store::Revision::new(5),
+            history_len: smelt_store::HistoryLen::new(2),
+            descriptor_len: smelt_store::DescriptorLen::ZERO,
         });
-        let before_ack_total = transcript
-            .descriptor_total_count()
-            .expect("descriptor total");
-        let generation = state.current_generation(&transcript);
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::History,
-            generation,
-            SubmittedHistoryRange {
-                start_idx: 1,
-                len: 2,
+        let mut parser = StreamParser::new();
+        document.apply(
+            &mut session,
+            &mut parser,
+            true,
+            SessionMutation::AppendHistoryItem {
+                item: HistoryItem::user(Content::text("live")),
             },
-            Some(DescriptorAppendSubmission {
-                count: 1,
-                had_descriptor_total: true,
-            }),
         );
 
-        let save_queued = SessionDocument::mark_persisted(
-            &mut state,
-            &mut transcript,
-            None,
-            None,
-            &save_receipt(save_id, 2, 7),
-        );
-
-        assert!(!save_queued);
+        let previous = document.acknowledged_head();
+        let intent = document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare intent")
+            .expect("dirty intent");
+        assert_eq!(intent.history.start, smelt_store::HistoryIndex::new(2));
+        assert_eq!(intent.history.items.len(), 1);
+        let epoch = SessionEpoch::new(9);
+        let receipt = receipt_for(&intent, previous);
+        document.bind_persistence(epoch);
+        assert!(document.acknowledge(epoch, intent.generation, &receipt, &session.id, 3, None));
         assert_eq!(
-            transcript.descriptor_total_count(),
-            Some(before_ack_total.saturating_add(1))
+            document
+                .live_session
+                .as_ref()
+                .expect("live session")
+                .live_suffix_len(),
+            0
         );
-        assert!(!state.is_save_queued());
-    }
-
-    #[test]
-    fn persist_state_ack_queues_mismatched_generation() {
-        let mut state = SessionPersistState::new();
-        state.mark_session_dirty();
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::Metadata,
-            DocumentGeneration::new(state.dirty_generation, 1),
-            SubmittedHistoryRange {
-                start_idx: 0,
-                len: 0,
-            },
-            None,
-        );
-        state.mark_session_dirty();
-
-        let plan = state.ack_save(
-            &save_receipt(save_id, 0, 7),
-            DocumentGeneration::new(state.dirty_generation, 1),
-        );
-
-        assert_eq!(
-            plan,
-            Some(smelt_core::session_save::SaveAckOutcome {
-                plan: SaveAckPlan::SaveAgain,
-                kind: crate::persist::PersistSaveKind::Metadata,
-                descriptor_append: None,
-            })
-        );
-        assert!(state.save_pending);
-        assert!(state.session_dirty);
-    }
-
-    #[test]
-    fn unrecoverable_document_failure_forgets_pending_save_without_retry() {
-        let session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut live_session = empty_live_session_for(&session, 3);
-        let mut state = SessionPersistState::new();
-        state.install_loaded_store_session(true, 3, 0, 7);
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::History,
-            DocumentGeneration::new(0, 0),
-            SubmittedHistoryRange {
-                start_idx: 0,
-                len: 3,
-            },
-            None,
-        );
-
-        let mut transcript = TranscriptDocument::new();
-        SessionDocument::mark_persist_failed(
-            &mut state,
-            &mut transcript,
-            Some(&mut live_session),
-            &crate::persist::PersistFailure {
-                save_id,
-                session_id: "session-a".into(),
-                message: "disk full".into(),
-                commit_failure: None,
-                disposition: smelt_store::SessionPersistenceDisposition::Reopen,
-            },
-        );
-
-        assert!(!state.has_pending_save());
-        assert!(!state.is_save_queued());
-        assert!(state.session_dirty);
-        assert_eq!(state.dirty_history_from, Some(0));
-        assert!(state.store_ready);
-        assert!(state.descriptors_persisted);
-        assert_eq!(
-            state.durable,
-            DurableCursor {
-                store_history_len: 3,
-                descriptor_len: 0,
-                revision: 7,
-            }
-        );
-    }
-
-    #[test]
-    fn document_failure_reconciles_structured_stale_descriptor_base() {
-        let mut state = SessionPersistState::new();
-        state.install_loaded_store_session(true, 1, 303, 7);
-        let save_id = 1;
-        state.set_pending_save_submission_for_test(
-            save_id,
-            "session-a".into(),
-            crate::persist::PersistSaveKind::History,
-            DocumentGeneration::new(0, 0),
-            SubmittedHistoryRange {
-                start_idx: 1,
-                len: 1,
-            },
-            None,
-        );
-        let mut transcript = TranscriptDocument::new();
-
-        SessionDocument::mark_persist_failed(
-            &mut state,
-            &mut transcript,
-            None,
-            &crate::persist::PersistFailure {
-                save_id,
-                session_id: "session-a".into(),
-                message: "save session database: stale descriptor base".into(),
-                commit_failure: Some(smelt_store::SessionCommitFailure::StaleBase {
-                    expected: smelt_store::StoreHead {
-                        revision: smelt_store::Revision::new(7),
-                        history_len: smelt_store::HistoryLen::new(1),
-                        descriptor_len: smelt_store::DescriptorLen::new(303),
-                    },
-                    current: smelt_store::StoreHead {
-                        revision: smelt_store::Revision::new(7),
-                        history_len: smelt_store::HistoryLen::new(1),
-                        descriptor_len: smelt_store::DescriptorLen::new(111),
-                    },
-                }),
-                disposition: smelt_store::SessionPersistenceDisposition::Retry,
-            },
-        );
-
-        assert_eq!(state.durable.descriptor_len, 111);
-        assert_eq!(transcript.descriptor_total_count(), Some(111));
-        assert!(!state.is_save_queued());
-    }
-
-    #[test]
-    fn document_dirty_state_reports_unflushed_work() {
-        assert!(!SessionDocument::has_unflushed_work(
-            DocumentDirtyState::default()
-        ));
-        assert!(SessionDocument::has_unflushed_work(DocumentDirtyState {
-            pending_or_queued_save: true,
-            ..Default::default()
-        }));
-        assert!(SessionDocument::has_unflushed_work(DocumentDirtyState {
-            session_dirty: true,
-            ..Default::default()
-        }));
-        assert!(SessionDocument::has_unflushed_work(DocumentDirtyState {
-            descriptor_dirty_from: Some(0),
-            ..Default::default()
-        }));
-        assert!(SessionDocument::has_unflushed_work(DocumentDirtyState {
-            store_ready: false,
-            history_len: 1,
-            ..Default::default()
-        }));
-        assert!(SessionDocument::has_unflushed_work(DocumentDirtyState {
-            descriptors_persisted: false,
-            transcript_empty: false,
-            ..Default::default()
-        }));
     }
 }

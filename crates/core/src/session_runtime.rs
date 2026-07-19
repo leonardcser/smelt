@@ -335,7 +335,6 @@ mod tests {
     ) {
         let command = smelt_store::SessionCommit {
             session_id: id.into(),
-            save_id: smelt_store::SaveId::new(1),
             expected: smelt_store::StoreHead::default(),
             identity: smelt_store::SessionIdentity {
                 id: id.into(),

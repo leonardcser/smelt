@@ -50,8 +50,6 @@ use std::time::{Duration, Instant};
 
 const TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME: usize = 64;
 const TERMINAL_EVENT_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
-pub(crate) const PERSIST_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
-const PERSIST_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 pub(crate) const DOCKED_DIALOG_TRANSCRIPT_ROWS: u16 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -277,10 +275,11 @@ pub struct TuiApp {
     pub(crate) agent: Option<TurnState>,
     pub(crate) inspect_server: Arc<Mutex<Option<crate::inspect_server::Server>>>,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
-    pub(crate) persister: crate::persist::Persister,
+    pub(crate) persistence: Option<crate::persist::SessionPersistence>,
+    pub(crate) persistence_epoch: crate::persist::SessionEpoch,
+    observed_persistence_status: Option<crate::persist::SessionPersistenceStatus>,
     pub(crate) session_access: SessionAccess,
     pub(crate) session_persistence: SessionPersistence,
-    persistence_retry: PersistenceRetryState,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
     pub(crate) last_width: u16,
@@ -417,113 +416,6 @@ pub enum AppEvent {
         )>,
     },
     ShutdownSignal,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-enum PersistenceRetryState {
-    #[default]
-    Idle,
-    Waiting {
-        session_id: String,
-        failures: u32,
-        deadline: Instant,
-    },
-    InFlight {
-        session_id: String,
-        failures: u32,
-    },
-}
-
-impl PersistenceRetryState {
-    fn schedule(&mut self, session_id: &str, now: Instant) -> u32 {
-        let failures = match self {
-            Self::Waiting {
-                session_id: current,
-                failures,
-                ..
-            }
-            | Self::InFlight {
-                session_id: current,
-                failures,
-            } if current == session_id => failures.saturating_add(1),
-            _ => 1,
-        };
-        *self = Self::Waiting {
-            session_id: session_id.to_string(),
-            failures,
-            deadline: now + persistence_retry_delay(failures),
-        };
-        failures
-    }
-
-    fn start_due(&mut self, now: Instant) -> Option<String> {
-        let Self::Waiting {
-            session_id,
-            failures,
-            deadline,
-        } = self
-        else {
-            return None;
-        };
-        if *deadline > now {
-            return None;
-        }
-        let session_id = session_id.clone();
-        let failures = *failures;
-        *self = Self::InFlight {
-            session_id: session_id.clone(),
-            failures,
-        };
-        Some(session_id)
-    }
-
-    fn start_now(&mut self, session_id: &str) -> bool {
-        let failures = match self {
-            Self::Waiting {
-                session_id: current,
-                failures,
-                ..
-            }
-            | Self::InFlight {
-                session_id: current,
-                failures,
-            } if current == session_id => *failures,
-            _ => return false,
-        };
-        *self = Self::InFlight {
-            session_id: session_id.to_string(),
-            failures,
-        };
-        true
-    }
-
-    fn delays_save(&self, session_id: &str) -> bool {
-        matches!(
-            self,
-            Self::Waiting {
-                session_id: current,
-                ..
-            } if current == session_id
-        )
-    }
-
-    fn next_delay(&self, now: Instant) -> Option<Duration> {
-        match self {
-            Self::Waiting { deadline, .. } => Some(deadline.saturating_duration_since(now)),
-            Self::Idle | Self::InFlight { .. } => None,
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::Idle;
-    }
-}
-
-fn persistence_retry_delay(failures: u32) -> Duration {
-    let exponent = failures.saturating_sub(1).min(31);
-    PERSIST_RETRY_INITIAL_DELAY
-        .saturating_mul(1_u32 << exponent)
-        .min(PERSIST_RETRY_MAX_DELAY)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1761,10 +1653,11 @@ impl TuiApp {
             agent: None,
             inspect_server: Arc::new(Mutex::new(None)),
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
-            persister: crate::persist::Persister::spawn(),
+            persistence: None,
+            persistence_epoch: crate::persist::SessionEpoch::ZERO,
+            observed_persistence_status: None,
             session_access: SessionAccess::Owned,
             session_persistence,
-            persistence_retry: PersistenceRetryState::default(),
             transient_render_requested: false,
             last_width: term_w,
             last_height: term_h,
@@ -2512,28 +2405,55 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_persist_reports(&mut self) {
-        for report in self.persister.drain_reports() {
-            match report {
-                crate::persist::SessionBackendEvent::Saved { receipt, warning } => {
-                    self.ack_persist_save(receipt);
-                    if let Some(warning) = warning {
-                        self.notify_warn(warning);
-                    }
-                }
-                crate::persist::SessionBackendEvent::Failed(err) => self.fail_persist_save(err),
-                crate::persist::SessionBackendEvent::RequestAuditFailed(err) => {
-                    self.notify_warn(format!(
-                        "request audit write failed for session {}: {}",
-                        err.session_id, err.message
-                    ));
-                }
-                crate::persist::SessionBackendEvent::RequestAuditPayloadSkipped(skipped) => {
-                    self.notify_warn(format!(
-                        "request audit payload capture skipped for session {}: queued payload was {} bytes",
-                        skipped.session_id, skipped.estimated_bytes
-                    ));
-                }
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        if !persistence.drain_status_wake() && !persistence.is_finished() {
+            return;
+        }
+        let status = persistence.take_status();
+        if self.observed_persistence_status.as_ref() == Some(&status) {
+            return;
+        }
+        self.observed_persistence_status = Some(status.clone());
+        if let Some(acknowledgement) = status.acknowledgement.as_ref() {
+            let history_len = self.session_history_len();
+            if self.session_document.acknowledge_convergence(
+                status.epoch,
+                acknowledgement,
+                &self.core.session.id,
+                history_len,
+                self.core.session.checkpoint.as_ref(),
+            ) {
+                persistence.confirm_acknowledgement(acknowledgement);
+                self.dismiss_session_save_failure_notification(&acknowledgement.receipt.session_id);
             }
+        }
+        match &status.state {
+            crate::persist::PersistenceState::Blocked { cause, .. } => {
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+            }
+            crate::persist::PersistenceState::OwnershipLost { cause, .. } => {
+                self.session_access = SessionAccess::ReadOnly {
+                    reason: cause.message.clone(),
+                };
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+            }
+            crate::persist::PersistenceState::Stopped {
+                cause: Some(cause), ..
+            } => {
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+            }
+            crate::persist::PersistenceState::Idle { .. }
+            | crate::persist::PersistenceState::Saving { .. }
+            | crate::persist::PersistenceState::Durable { .. }
+            | crate::persist::PersistenceState::Stopped { cause: None, .. } => {}
+        }
+        if let Some(warning) = status.latest_audit_warning {
+            self.notify_warn(warning.message);
+        }
+        if let Some(warning) = status.latest_sidecar_warning {
+            self.notify_warn(warning.message);
         }
     }
 
@@ -3156,13 +3076,11 @@ impl TuiApp {
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
             let next_draft_render_delay = self.next_tool_draft_render_delay();
-            let next_persist_retry_delay = self.next_persistence_retry_delay();
             let next_idle_delay = [
                 next_timer_delay,
                 next_notification_delay,
                 next_keymap_delay,
                 next_draft_render_delay,
-                next_persist_retry_delay,
             ]
             .into_iter()
             .flatten()
@@ -3364,7 +3282,6 @@ impl TuiApp {
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
                     self.flush_due_tool_drafts();
-                    self.try_persistence_retry();
                     self.publish_diff_signals();
                     self.render_normal();
                 }
@@ -3420,31 +3337,6 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn persistence_retry_backoff_increases_and_caps() {
-        assert_eq!(persistence_retry_delay(1), Duration::from_millis(250));
-        assert_eq!(persistence_retry_delay(2), Duration::from_millis(500));
-        assert_eq!(persistence_retry_delay(3), Duration::from_secs(1));
-        assert_eq!(persistence_retry_delay(32), PERSIST_RETRY_MAX_DELAY);
-    }
-
-    #[test]
-    fn persistence_retry_success_resets_deadline_state() {
-        let now = Instant::now();
-        let mut retry = PersistenceRetryState::default();
-        assert_eq!(retry.schedule("session-a", now), 1);
-        assert_eq!(retry.next_delay(now), Some(PERSIST_RETRY_INITIAL_DELAY));
-        assert_eq!(
-            retry.start_due(now + PERSIST_RETRY_INITIAL_DELAY),
-            Some("session-a".into())
-        );
-        assert_eq!(retry.next_delay(now), None);
-
-        retry.reset();
-
-        assert_eq!(retry, PersistenceRetryState::Idle);
-    }
 
     #[test]
     fn worktree_display_path_is_relative_to_project_root() {

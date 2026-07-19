@@ -95,6 +95,10 @@ session.render_preview_into = nil
 ---@type fun(): nil
 session.reset = nil
 
+--- Explicitly retry the latest unsaved generation after session persistence becomes blocked. Returns true when the retry request is accepted. No automatic retry timer is used.
+---@type fun(): boolean
+session.retry_persistence = nil
+
 --- Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 ---@type fun(block_idx: integer?, opts: table?): nil
 session.rewind_to = nil

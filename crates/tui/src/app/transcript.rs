@@ -4239,6 +4239,10 @@ impl TranscriptDocument {
         self.descriptors.sparse.total_count = Some(total.saturating_add(count));
     }
 
+    pub(crate) fn can_reconcile_dense_descriptor_count(&self, total_count: usize) -> bool {
+        self.descriptors.records_for_active_range().len() <= total_count
+    }
+
     pub(crate) fn reconcile_dense_descriptor_count(&mut self, total_count: usize) -> bool {
         let active_records = self.descriptors.records_for_active_range();
         if active_records.len() > total_count {

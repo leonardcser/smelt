@@ -132,7 +132,6 @@ impl TuiApp {
         let mut did_work = self.dismiss_expired_notification();
         did_work |= self.expire_pending_keymap_chord();
         did_work |= self.flush_due_tool_drafts();
-        did_work |= self.try_persistence_retry();
         did_work |= self.poll_managed_auth();
         did_work |= self.try_perform_scheduled_runtime_reconcile();
         did_work |= self.try_perform_scheduled_cwd_change();
@@ -659,20 +658,20 @@ impl TuiApp {
         let smelt_core::session::SessionStoreResume {
             header,
             store_ref,
+            head,
             descriptor_tail,
-            ..
         } = resume;
         let degraded_warnings = header.degraded_warnings.clone();
-        let (transcript, persisted_descriptor_len) =
+        let (transcript, repair_descriptors) =
             match crate::app::transcript::LoadedTranscript::from_descriptor_slice(
                 descriptor_tail,
                 store_ref.session_dir.clone(),
             ) {
-                Some(transcript) => (transcript, None),
+                Some(transcript) => (transcript, false),
                 None => match crate::app::history::materialize_full_transcript_read_only_result(
                     &self.lua, id,
                 ) {
-                    Ok(Some((transcript, descriptor_len))) => (transcript, Some(descriptor_len)),
+                    Ok(Some(transcript)) => (transcript, true),
                     Ok(None) => {
                         self.notify_error_sticky(format!(
                             "session {id:?} has no readable transcript state"
@@ -690,13 +689,14 @@ impl TuiApp {
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
             store_ref,
+            head,
             transcript,
             self.core.env.pid(),
             self.core.env.cwd(),
         );
         let mut document = document.into_store_backed();
-        if let Some(descriptor_len) = persisted_descriptor_len {
-            document = document.with_persisted_descriptor_len(descriptor_len);
+        if repair_descriptors {
+            document = document.requiring_descriptor_repair();
         }
         self.load_store_backed_session(document);
         if !degraded_warnings.is_empty() {

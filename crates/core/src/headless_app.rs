@@ -381,6 +381,7 @@ impl HeadlessApp {
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.core.session.id.clone(),
                 session_dir: crate::session::dir_for(&self.core.session),
+                persistence: protocol::PersistenceScope::default(),
                 permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),
                 tools,

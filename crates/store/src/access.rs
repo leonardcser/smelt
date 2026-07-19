@@ -13,9 +13,9 @@ use crate::db::SessionDb;
 use crate::{
     DescriptorIndex, FullSession, HistoryIndex, HistoryLen, HistorySuffix, ObjectMeta,
     RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery, RequestAuditStats,
-    RequestAuditSummary, Result, SaveId, SaveReceipt, SessionCommit, SessionCommitFailure,
-    SessionIdentity, SessionMeta, SessionMetadata, SideTableSuffixes, StoreError, StoreHead,
-    StoredObject, StoredSession, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
+    RequestAuditSummary, Result, SaveReceipt, SessionCommit, SessionCommitFailure, SessionIdentity,
+    SessionMeta, SessionMetadata, SideTableSuffixes, StoreError, StoreHead, StoredObject,
+    StoredSession, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
     TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
     TranscriptDescriptorSuffix, TranscriptSearchCandidate, TranscriptSearchDirection, WriterOwner,
 };
@@ -727,6 +727,10 @@ impl OwnedSessionWriter {
         self.db()?.store_head()
     }
 
+    pub fn last_session_commit(&self) -> Result<Option<(String, SaveReceipt)>> {
+        self.db()?.last_session_commit()
+    }
+
     pub fn transcript_descriptor_count(&self) -> Result<usize> {
         self.db()?.transcript_descriptor_count()
     }
@@ -737,6 +741,7 @@ impl OwnedSessionWriter {
 
     pub fn reopen_connection(&mut self) -> Result<()> {
         if self.db.is_some() {
+            smelt_perf::perf::record_value("store:db:cached_read_write", 1);
             return Ok(());
         }
         let db = SessionDb::open_current(self.database_path())?;
@@ -847,7 +852,7 @@ impl OwnedSessionWriter {
         self.recover_staged_blobs()
             .map_err(SessionWriteFailure::Stage)?;
         let fingerprint =
-            crate::db::session_commit_fingerprint(command).map_err(SessionWriteFailure::Stage)?;
+            crate::db::session_commit_fingerprint(command).map_err(SessionWriteFailure::Commit)?;
         let staging_token = random_token().map_err(SessionWriteFailure::Stage)?;
         let staged = stage_session_blobs(self.session_dir(), &fingerprint, &staging_token, blobs)
             .map_err(SessionWriteFailure::Stage)?;
@@ -1194,7 +1199,6 @@ fn full_session_commit(
         .map_err(|_| StoreError::Integrity("history length exceeds u64".into()))?;
     Ok(SessionCommit {
         session_id: identity.id.clone(),
-        save_id: maintenance_save_id(expected)?,
         expected,
         identity: identity.clone(),
         metadata: metadata.clone(),
@@ -1225,7 +1229,6 @@ fn metadata_and_descriptor_commit(
     let boundary = history_len.get();
     Ok(SessionCommit {
         session_id: session.session.identity.id.clone(),
-        save_id: maintenance_save_id(session.session.head)?,
         expected: session.session.head,
         identity: session.session.identity.clone(),
         metadata,
@@ -1256,14 +1259,6 @@ fn side_table_rows_from(
         .filter(|(index, _)| *index >= start)
         .map(|(index, value)| (HistoryIndex::new(*index), value.clone()))
         .collect()
-}
-
-fn maintenance_save_id(head: StoreHead) -> Result<SaveId> {
-    head.revision
-        .get()
-        .checked_add(1)
-        .map(SaveId::new)
-        .ok_or_else(|| StoreError::Integrity("maintenance save id overflow".into()))
 }
 
 fn apply_maintenance_commit(
@@ -1801,10 +1796,9 @@ mod tests {
         writer.release().unwrap();
     }
 
-    fn empty_commit(session_id: &str, save_id: u64, base_revision: u64) -> SessionCommit {
+    fn empty_commit(session_id: &str, base_revision: u64) -> SessionCommit {
         SessionCommit {
             session_id: session_id.into(),
-            save_id: crate::SaveId::new(save_id),
             expected: StoreHead {
                 revision: crate::Revision::new(base_revision),
                 history_len: crate::HistoryLen::ZERO,
@@ -1863,9 +1857,7 @@ mod tests {
     fn prepared_publication_is_preserved_if_the_rename_never_starts() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         let staged = writer.session_dir().to_path_buf();
         writer.prepare_publication().unwrap();
 
@@ -1879,9 +1871,7 @@ mod tests {
     fn atomic_publication_never_replaces_an_empty_destination() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         let staged = writer.session_dir().to_path_buf();
         let published = root.path().join(SESSION_ID);
         fs::create_dir(&published).unwrap();
@@ -1895,9 +1885,7 @@ mod tests {
     fn unexpected_publication_destination_preserves_both_paths() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         let staged = writer.session_dir().to_path_buf();
         let published = root.path().join(SESSION_ID);
         fs::create_dir(&published).unwrap();
@@ -1917,9 +1905,7 @@ mod tests {
     fn token_mismatch_after_rename_preserves_the_published_database() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         writer
             .db()
             .unwrap()
@@ -1952,9 +1938,7 @@ mod tests {
     fn identity_change_after_publication_close_never_overwrites_data() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         writer.prepare_publication().unwrap();
         let staged_db = writer.database_path();
         rusqlite::Connection::open(&staged_db)
@@ -1980,9 +1964,7 @@ mod tests {
     fn publication_retries_after_rename_and_reopen_failure() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         writer.prepare_publication().unwrap();
         let staged_db = writer.database_path();
         let recoverable_db = staged_db.with_extension("db.recoverable");
@@ -2018,7 +2000,7 @@ mod tests {
         fs::create_dir(&valid).unwrap();
         let mut valid_db = SessionDb::open(valid.join("session.db")).unwrap();
         valid_db
-            .apply_session_commit(&empty_commit(SESSION_ID, 1, 0))
+            .apply_session_commit(&empty_commit(SESSION_ID, 0))
             .unwrap();
         drop(valid_db);
 
@@ -2026,7 +2008,7 @@ mod tests {
         fs::create_dir(&mismatched).unwrap();
         let mut mismatched_db = SessionDb::open(mismatched.join("session.db")).unwrap();
         mismatched_db
-            .apply_session_commit(&empty_commit(SESSION_ID, 1, 0))
+            .apply_session_commit(&empty_commit(SESSION_ID, 0))
             .unwrap();
         drop(mismatched_db);
 
@@ -2064,9 +2046,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join(SESSION_ID);
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         let first_token = writer.token().to_string();
         #[cfg(unix)]
         {
@@ -2123,9 +2103,7 @@ mod tests {
     fn release_after_token_mismatch_never_clears_the_replacement_token() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         writer.publish().unwrap();
         writer.invalidate_connection();
         let published = root.path().join(SESSION_ID);
@@ -2159,9 +2137,7 @@ mod tests {
         let session_dir = root.path().join(SESSION_ID);
         let mismatched_dir = root.path().join(SECOND_SESSION_ID);
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         publish_and_release(writer);
         fs::rename(&session_dir, &mismatched_dir).unwrap();
 
@@ -2186,9 +2162,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join(SESSION_ID);
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         writer.publish().unwrap();
 
         assert!(matches!(
@@ -2212,9 +2186,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join(SESSION_ID);
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        writer
-            .commit_session(&empty_commit(SESSION_ID, 1, 0))
-            .unwrap();
+        writer.commit_session(&empty_commit(SESSION_ID, 0)).unwrap();
         let blobs = vec![SessionBlob {
             filename: "attachment.png".into(),
             bytes: b"attachment".to_vec(),
@@ -2246,7 +2218,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
         let work_dir = writer.session_dir().to_path_buf();
-        let command = empty_commit(SESSION_ID, 1, 9);
+        let command = empty_commit(SESSION_ID, 9);
         let blobs = vec![SessionBlob {
             filename: "attachment.png".into(),
             bytes: b"attachment".to_vec(),
@@ -2274,7 +2246,7 @@ mod tests {
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
         let work_dir = writer.session_dir().to_path_buf();
         fs::write(work_dir.join("blobs"), b"publication blocker").unwrap();
-        let command = empty_commit(SESSION_ID, 1, 0);
+        let command = empty_commit(SESSION_ID, 0);
         let blobs = vec![SessionBlob {
             filename: "attachment.png".into(),
             bytes: b"attachment".to_vec(),
@@ -2338,7 +2310,7 @@ mod tests {
     fn staged_blobs_reject_paths_outside_the_blob_directory() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
-        let command = empty_commit(SESSION_ID, 1, 0);
+        let command = empty_commit(SESSION_ID, 0);
         let blobs = vec![SessionBlob {
             filename: "../escape".into(),
             bytes: b"attachment".to_vec(),
@@ -2362,7 +2334,7 @@ mod tests {
         hasher.update(data_url.as_bytes());
         let filename = format!("{}.png", crate::object::hex_lower(&hasher.finalize()));
         let reference = format!("blob:{filename}");
-        let mut command = empty_commit(SESSION_ID, 1, 0);
+        let mut command = empty_commit(SESSION_ID, 0);
         command.history.final_len = crate::HistoryLen::new(1);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "legacy".into(),
@@ -2411,7 +2383,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join(SESSION_ID);
         let data_url = "data:image/png;base64,AAAA";
-        let mut command = empty_commit(SESSION_ID, 1, 0);
+        let mut command = empty_commit(SESSION_ID, 0);
         command.history.final_len = crate::HistoryLen::new(1);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "attached".into(),
@@ -2444,7 +2416,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join(SESSION_ID);
         let data_url = "data:image/png;base64,AAAA";
-        let mut command = empty_commit(SESSION_ID, 1, 0);
+        let mut command = empty_commit(SESSION_ID, 0);
         command.history.final_len = crate::HistoryLen::new(1);
         command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
             "attached".into(),
@@ -2479,7 +2451,7 @@ mod tests {
             "attached".into(),
             vec![("attachment.png".into(), data_url.into())],
         ));
-        let mut initial = empty_commit(SESSION_ID, 1, 0);
+        let mut initial = empty_commit(SESSION_ID, 0);
         initial.history.final_len = crate::HistoryLen::new(129);
         initial.history.items = vec![item; 129];
         let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
@@ -2487,7 +2459,7 @@ mod tests {
         let object_hash = crate::object::sha256_hex(data_url.as_bytes());
         assert!(writer.db().unwrap().object(&object_hash).unwrap().is_some());
 
-        let mut rewind = empty_commit(SESSION_ID, 2, 1);
+        let mut rewind = empty_commit(SESSION_ID, 1);
         rewind.expected.history_len = crate::HistoryLen::new(129);
         writer.commit_session(&rewind).unwrap();
 
@@ -2543,7 +2515,7 @@ mod tests {
             Err(StoreError::OwnershipLost)
         ));
 
-        let command = empty_commit(SESSION_ID, 1, 0);
+        let command = empty_commit(SESSION_ID, 0);
         assert_eq!(
             writer.commit_session(&command),
             Err(SessionCommitFailure::OwnershipLost)

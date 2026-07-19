@@ -184,6 +184,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
         permission_overrides: Some(protocol::PermissionOverrides {
             tools: Some(protocol::RuleSetOverride {
                 allow: vec![TOOL_NAME.into()],
@@ -259,6 +260,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                             tools: Vec::new(),
                             session_id: "sess".into(),
                             session_dir: std::path::PathBuf::from("/tmp/sess"),
+                            persistence: protocol::PersistenceScope::default(),
                             stream: false,
                             visible_retries: false,
                         });
@@ -388,6 +390,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
@@ -464,6 +467,7 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
         permission_overrides: Some(protocol::PermissionOverrides {
             tools: Some(protocol::RuleSetOverride {
                 allow: vec![TOOL_NAME.into()],

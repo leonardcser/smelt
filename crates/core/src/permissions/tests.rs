@@ -2091,7 +2091,7 @@ fn workspace_bash_ignores_dev_null_redirect_in_command_substitution() {
 #[test]
 fn workspace_bash_ignores_standard_stream_devices() {
     let p = perms_with_workspace("/home/user/project");
-    let command = "git diff main -- crates/store/src/session_commit.rs crates/core/src/session_save.rs crates/tui/src/persist.rs | git diff --no-index -- /dev/null /dev/stdin >/dev/null || true; git diff main --numstat | awk '{add+=$1; del+=$2} END {printf \"total additions: %d\\ntotal deletions: %d\\n\", add, del}'";
+    let command = "git diff main -- crates/store/src/session_commit.rs crates/core/src/session.rs crates/tui/src/persist.rs | git diff --no-index -- /dev/null /dev/stdin >/dev/null || true; git diff main --numstat | awk '{add+=$1; del+=$2} END {printf \"total additions: %d\\ntotal deletions: %d\\n\", add, del}'";
     let args = args_with("command", command);
     let outcome = p.evaluate_tool(yolo(), ToolOrigin::Lua, "bash", &args);
 

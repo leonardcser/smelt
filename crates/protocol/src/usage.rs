@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Parsed token usage from an API response.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Active model context size reported or derived for this response.
     ///
@@ -60,7 +60,7 @@ impl TokenUsage {
 }
 
 /// Per-turn metadata emitted by the engine at turn completion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnMeta {
     pub elapsed_ms: u64,
     /// Average end-to-end provider request throughput reported by this turn.

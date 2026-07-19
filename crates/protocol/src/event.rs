@@ -671,6 +671,12 @@ impl Default for ModelHistorySource {
 /// enum stays small - the other variants are channel-frequent
 /// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn carries
 /// once-per-turn request metadata and a provider-history source.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersistenceScope {
+    pub epoch: u64,
+    pub required_generation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTurnPayload {
     pub turn_id: u64,
@@ -688,6 +694,9 @@ pub struct StartTurnPayload {
     pub session_id: String,
     /// On-disk directory for this session (date-bucketed).
     pub session_dir: std::path::PathBuf,
+    /// Persistence actor coordinates captured when the turn was dispatched.
+    #[serde(default)]
+    pub persistence: PersistenceScope,
     /// Per-turn permission overrides (from custom commands or Lua).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_overrides: Option<PermissionOverrides>,
@@ -794,9 +803,12 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
-        /// On-disk directory for this session. The engine writes the SQLite
-        /// request audit here for introspection.
+        /// On-disk directory for this session. The host writes the SQLite
+        /// request audit through the fixed-session persistence actor.
         session_dir: PathBuf,
+        /// Persistence actor coordinates captured when this request was dispatched.
+        #[serde(default)]
+        persistence: PersistenceScope,
         /// Emit incremental text deltas as `EngineAskDelta` events.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         stream: bool,
@@ -1047,6 +1059,7 @@ mod tests {
             history: ModelHistorySource::default(),
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp"),
+            persistence: PersistenceScope::default(),
             permission_overrides: None,
             system_prompt: None,
             tools: vec![],
@@ -1091,6 +1104,10 @@ mod tests {
             tools: Vec::new(),
             session_id: "session".into(),
             session_dir: "/tmp/session".into(),
+            persistence: PersistenceScope {
+                epoch: 3,
+                required_generation: 7,
+            },
             stream: true,
             visible_retries: false,
         };

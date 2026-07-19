@@ -125,7 +125,7 @@ pub(crate) fn materialize_full_session_result(
 pub(crate) fn materialize_full_transcript_read_only(
     lua: &crate::lua::LuaRuntime,
     id: &str,
-) -> Option<(crate::app::transcript::LoadedTranscript, usize)> {
+) -> Option<crate::app::transcript::LoadedTranscript> {
     materialize_full_transcript_read_only_result(lua, id)
         .ok()
         .flatten()
@@ -134,14 +134,7 @@ pub(crate) fn materialize_full_transcript_read_only(
 pub(crate) fn materialize_full_transcript_read_only_result(
     lua: &crate::lua::LuaRuntime,
     id: &str,
-) -> session::SessionStoreResult<Option<(crate::app::transcript::LoadedTranscript, usize)>> {
-    let resolved = session::resolve_session_dir_for_read_result(id)?;
-    let db_path = resolved.dir.join("session.db");
-    let db = smelt_store::SessionReader::open_database(&db_path)
-        .map_err(|err| smelt_core::session_store::store_error("open", &db_path, err))?;
-    let descriptor_count = db.transcript_descriptor_count().map_err(|err| {
-        smelt_core::session_store::store_error("read transcript descriptor count", &db_path, err)
-    })?;
+) -> session::SessionStoreResult<Option<crate::app::transcript::LoadedTranscript>> {
     let Some(session) = materialize_full_session_result(
         id,
         FullSessionMaterializationReason::ReadOnlyTranscriptFallback,
@@ -149,11 +142,8 @@ pub(crate) fn materialize_full_transcript_read_only_result(
     else {
         return Ok(None);
     };
-    Ok(Some((
-        crate::app::transcript::LoadedTranscript::full(build_transcript_from_session(
-            lua, &session,
-        )),
-        descriptor_count,
+    Ok(Some(crate::app::transcript::LoadedTranscript::full(
+        build_transcript_from_session(lua, &session),
     )))
 }
 
@@ -804,12 +794,6 @@ impl TuiApp {
         );
     }
 
-    fn mark_history_dirty_from(&mut self, idx: usize) {
-        if !self.session_access.is_read_only() {
-            self.session_document.mark_history_resave_required(idx);
-        }
-    }
-
     pub(crate) fn apply_session_document_mutation(
         &mut self,
         mutation: crate::app::session_document::SessionMutation,
@@ -1017,6 +1001,14 @@ impl TuiApp {
         self.apply_rewindable_session_state(result.turn_meta);
     }
 
+    fn cancel_session_bound_work(&mut self) {
+        if self.agent.is_some() {
+            self.cancel_agent();
+            self.agent = None;
+        }
+        self.lua.cancel_tasks();
+    }
+
     pub(crate) fn fork_session(&mut self) {
         if self.session_document.live_session.is_some() {
             self.fork_live_session();
@@ -1028,12 +1020,11 @@ impl TuiApp {
             return;
         }
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
-        if self.agent.is_some() {
-            self.cancel_agent();
-            self.agent = None;
+        self.cancel_session_bound_work();
+        self.save_session_and_flush();
+        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+            return;
         }
-        self.save_session();
-        self.flush_persist();
         self.stop_background_processes();
         let original_id = self.core.session.id.clone();
         let forked = self.core.session.fork(self.core.env.pid());
@@ -1061,12 +1052,11 @@ impl TuiApp {
             self.notify_error("nothing to fork".into());
             return;
         }
-        if self.agent.is_some() {
-            self.cancel_agent();
-            self.agent = None;
+        self.cancel_session_bound_work();
+        self.save_session_and_flush();
+        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+            return;
         }
-        self.save_session();
-        self.flush_persist();
         self.stop_background_processes();
 
         if let Some(live) = self.session_document.live_session.as_mut() {
@@ -1160,6 +1150,15 @@ impl TuiApp {
             self.notify_error_sticky("failed to load forked session header".into());
             return;
         };
+        let store_head = match smelt_store::SessionReader::open_existing(&fork_dir)
+            .and_then(|reader| reader.store_head())
+        {
+            Ok(head) => head,
+            Err(error) => {
+                self.notify_error_sticky(format!("failed to load forked session head: {error}"));
+                return;
+            }
+        };
         let transcript = crate::app::history::load_transcript_tail_from_sqlite_dir(
             fork_dir.clone(),
             self.last_width,
@@ -1169,6 +1168,7 @@ impl TuiApp {
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
             store_ref,
+            store_head,
             transcript,
             self.core.env.pid(),
             self.core.env.cwd(),
@@ -1181,20 +1181,16 @@ impl TuiApp {
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_perf::perf::begin("app:reset_session");
-        self.session_document.live_session = None;
         // Reset is a hard session boundary: cancel in-flight engine work and all
         // Lua tasks before clearing state so stale events and child processes
         // don't restore old data into the new session.
-        if self.agent.is_some() {
-            self.cancel_agent();
-            self.agent = None;
-        } else {
+        if self.agent.is_none() {
             self.core.engine.send(UiCommand::Cancel);
         }
-        self.lua.cancel_tasks();
-        self.flush_persist();
-        if let Err(err) = self.persister.release() {
-            self.notify_error_sticky(format!("failed to release session writer: {err}"));
+        self.cancel_session_bound_work();
+        self.save_session_and_flush();
+        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+            return;
         }
         let old_id = self.core.session.id.clone();
         self.reset_session_permissions();
@@ -1249,13 +1245,43 @@ impl TuiApp {
     }
 
     fn claim_writer_access_for_current_session(&mut self) {
-        self.session_access = match self.persister.open_owned(&self.core.session.id) {
-            Ok(()) => SessionAccess::Owned,
-            Err(reason) => {
+        debug_assert!(self.persistence.is_none());
+        if self.ephemeral() {
+            self.session_access = SessionAccess::Owned;
+            return;
+        }
+        let epoch = self
+            .persistence_epoch
+            .checked_next()
+            .expect("session persistence epoch overflow");
+        let session_id = match smelt_core::session_id::SessionId::parse(&self.core.session.id) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                let reason = format!("invalid session id: {error}");
                 self.notify_error_sticky(format!("opened session read-only: {reason}"));
-                SessionAccess::ReadOnly { reason }
+                self.session_access = SessionAccess::ReadOnly { reason };
+                return;
             }
         };
+        match crate::persist::SessionPersistence::spawn(
+            session_id,
+            epoch,
+            self.session_document.durable_generation(),
+            self.session_document.acknowledged_head(),
+        ) {
+            Ok(persistence) => {
+                self.persistence_epoch = epoch;
+                self.observed_persistence_status = None;
+                self.session_document.bind_persistence(epoch);
+                self.persistence = Some(persistence);
+                self.session_access = SessionAccess::Owned;
+            }
+            Err(cause) => {
+                let reason = cause.message;
+                self.notify_error_sticky(format!("opened session read-only: {reason}"));
+                self.session_access = SessionAccess::ReadOnly { reason };
+            }
+        }
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
@@ -1276,17 +1302,15 @@ impl TuiApp {
             session: loaded,
             transcript,
         } = document;
-        self.session_document.live_session = None;
-        // Cancel any in-flight turn and Lua tasks before swapping sessions.
-        if self.agent.is_some() {
-            self.cancel_agent();
-            self.agent = None;
-        }
-        // Loading a session is also a hard boundary for Lua work tied to the
-        // previous session.
-        self.lua.cancel_tasks();
+        // Loading a session is a hard boundary for engine and Lua work tied to
+        // the previous session.
+        self.cancel_session_bound_work();
         let old_id = self.core.session.id.clone();
-        self.flush_persist();
+        self.save_session_and_flush();
+        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+            return;
+        }
+        self.session_document.live_session = None;
 
         if self.core.startup_overrides.mode.is_none() {
             if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
@@ -1306,16 +1330,13 @@ impl TuiApp {
         }
 
         self.install_loaded_session(loaded);
+        let store_head =
+            smelt_store::SessionReader::open_existing(session::dir_for(&self.core.session))
+                .and_then(|reader| reader.store_head())
+                .ok();
+        self.session_document
+            .install_loaded_full_session(transcript, store_head);
         self.claim_writer_access_for_current_session();
-        let history_len = self.session_history_len();
-        let revision = session::load_store_header_for_dir(session::dir_for(&self.core.session))
-            .map_or(0, |(header, _)| header.revision);
-        self.session_document.install_loaded_full_session(
-            transcript,
-            !self.session_access.is_read_only(),
-            history_len,
-            revision,
-        );
         self.bump_epoch("session_epoch");
         // Drop snapshots beyond the restored history length.
         let hist_len = self.core.session.history.len();
@@ -1350,15 +1371,15 @@ impl TuiApp {
             session: loaded,
             transcript,
             live_session,
-            persisted_descriptor_len,
+            store_head,
+            repair_descriptors,
         } = document;
-        if self.agent.is_some() {
-            self.cancel_agent();
-            self.agent = None;
-        }
-        self.lua.cancel_tasks();
+        self.cancel_session_bound_work();
         let old_id = self.core.session.id.clone();
-        self.flush_persist();
+        self.save_session_and_flush();
+        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+            return;
+        }
 
         if self.core.startup_overrides.mode.is_none() {
             if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
@@ -1394,12 +1415,10 @@ impl TuiApp {
             live_session.live_suffix_bytes() as u64,
         );
         self.install_loaded_session(loaded);
-        self.claim_writer_access_for_current_session();
         debug_assert!(
             self.core.session.history.is_empty(),
             "store-backed TUI sessions must not retain materialized history"
         );
-        let history_len = live_session.history_len();
         self.bump_epoch("session_epoch");
         self.reset_session_permissions();
         self.queued_inputs.clear();
@@ -1411,10 +1430,10 @@ impl TuiApp {
         self.session_document.install_loaded_store_session(
             transcript,
             live_session,
-            !self.session_access.is_read_only(),
-            history_len,
-            persisted_descriptor_len,
+            store_head,
+            repair_descriptors,
         );
+        self.claim_writer_access_for_current_session();
         self.publish_shared_session_state();
         self.core
             .signals
@@ -1632,257 +1651,92 @@ impl TuiApp {
     }
 
     pub(crate) fn schedule_session_save(&mut self) {
-        self.session_document.queue_save();
+        if !self.prompt_input_is_busy() {
+            self.save_session();
+        }
     }
 
     pub(crate) fn save_session_if_pending(&mut self) {
-        if self.session_document.is_save_queued() && !self.prompt_input_is_busy() {
+        if self.session_document_has_unflushed_work() && !self.prompt_input_is_busy() {
             self.save_session();
         }
     }
 
-    pub(crate) fn next_persistence_retry_delay(&self) -> Option<Duration> {
-        self.persistence_retry
-            .next_delay(self.core.clock.instant_now())
-    }
-
-    pub(crate) fn try_persistence_retry(&mut self) -> bool {
-        let now = self.core.clock.instant_now();
-        let Some(session_id) = self.persistence_retry.start_due(now) else {
+    pub(crate) fn retry_blocked_persistence(&mut self) -> bool {
+        let Some(persistence) = self.persistence.as_ref() else {
             return false;
         };
-        if session_id != self.core.session.id
-            || self.session_access.is_read_only()
-            || self.ephemeral()
-        {
-            self.persistence_retry.reset();
-            return true;
+        match persistence.retry_blocked() {
+            Ok(()) => true,
+            Err(cause) => {
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+                false
+            }
         }
-        if self.session_document.has_pending_save() {
-            return true;
-        }
-        self.session_document.queue_save();
-        self.save_session();
-        if !self.session_document.has_pending_save() {
-            self.persistence_retry.reset();
+    }
+
+    fn submit_save_intent(
+        &mut self,
+        intent: crate::app::session_document::SessionSaveIntent,
+    ) -> bool {
+        let Some(persistence) = self.persistence.as_ref() else {
+            self.notify_session_save_failure(
+                &self.core.session.id.clone(),
+                "persistence actor is unavailable",
+            );
+            return false;
+        };
+        if let Err(cause) = persistence.submit(intent) {
+            self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+            return false;
         }
         true
-    }
-
-    pub(crate) fn ack_persist_save(&mut self, receipt: smelt_store::SaveReceipt) {
-        let session_id = receipt.session_id.clone();
-        let save_queued = self
-            .session_document
-            .mark_persisted(&receipt, self.core.session.checkpoint.as_ref());
-        if session_id == self.core.session.id {
-            self.persistence_retry.reset();
-        }
-        self.dismiss_session_save_failure_notification(&session_id);
-        if save_queued {
-            self.save_session();
-        }
-    }
-
-    pub(crate) fn fail_persist_save(&mut self, err: crate::persist::PersistFailure) {
-        self.session_document.mark_persist_failed(&err);
-        let show_notification = match err.disposition {
-            smelt_store::SessionPersistenceDisposition::Retry => {
-                smelt_perf::perf::record_value("session:save:retryable_failure", 1);
-                self.persistence_retry
-                    .schedule(&err.session_id, self.core.clock.instant_now())
-                    > 1
-            }
-            smelt_store::SessionPersistenceDisposition::Reopen => {
-                self.persistence_retry.reset();
-                true
-            }
-            smelt_store::SessionPersistenceDisposition::ReadOnly => {
-                self.persistence_retry.reset();
-                self.session_access = SessionAccess::ReadOnly {
-                    reason: err.message.clone(),
-                };
-                true
-            }
-            smelt_store::SessionPersistenceDisposition::OwnershipLost => {
-                self.persistence_retry.reset();
-                let reason = "session writer ownership was lost".to_string();
-                if let Err(release_err) = self.persister.release() {
-                    self.notify_error_sticky(format!(
-                        "failed to release session writer after ownership loss: {release_err}"
-                    ));
-                }
-                self.session_access = SessionAccess::ReadOnly { reason };
-                true
-            }
-        };
-        if show_notification {
-            self.notify_session_save_failure(&err.session_id, &err.message);
-        }
-    }
-
-    fn submit_persist_command(&mut self, command: smelt_store::SessionCommit) -> bool {
-        let failure = crate::persist::PersistFailure {
-            save_id: command.save_id.get(),
-            session_id: command.session_id.clone(),
-            message: "persistence worker is disconnected".into(),
-            commit_failure: None,
-            disposition: smelt_store::SessionPersistenceDisposition::Reopen,
-        };
-        if self
-            .persister
-            .save(crate::persist::PersistRequest { command })
-            .is_ok()
-        {
-            return true;
-        }
-        self.fail_persist_save(failure);
-        false
     }
 
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
         if self.ephemeral() {
-            self.session_document.clear_queued_save();
             self.update_session_persist_metadata();
             self.publish_shared_session_state();
-            self.session_document.mark_ephemeral_persisted(None);
+            self.session_document.mark_ephemeral_persisted();
             return;
         }
         if self.session_access.is_read_only() {
-            self.session_document.clear_queued_save();
             return;
         }
-        if self.persistence_retry.delays_save(&self.core.session.id) {
-            self.session_document.queue_save();
-            return;
+        if let Some(live) = self.session_document.live_session.as_ref() {
+            smelt_perf::perf::record_value(
+                "live_session:suffix_items",
+                live.live_suffix_len() as u64,
+            );
+            smelt_perf::perf::record_value(
+                "live_session:suffix_bytes",
+                live.live_suffix_bytes() as u64,
+            );
         }
-        if self.session_document.has_pending_save() {
-            self.session_document.queue_save();
-            return;
-        }
-        if self.session_document.live_session.is_some() {
-            self.save_live_session();
-            return;
-        }
-        self.session_document.clear_queued_save();
         let metadata = self.runtime_session_metadata();
-        let prepared = match self
+        let intent = match self
             .session_document
             .prepare_save(&mut self.core.session, metadata)
         {
-            Ok(prepared) => prepared,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+            Ok(Some(intent)) => intent,
+            Ok(None) => {
+                smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
+                return;
+            }
+            Err(error) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {error}"));
                 return;
             }
         };
-        let session = &self.core.session;
-        let session_id = session.id.clone();
-        if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(crate::app::SharedSessionState {
-                id: session_id.clone(),
-                has_messages: !session.history.is_empty(),
-                ephemeral: self.ephemeral(),
-            });
-        }
-        match prepared {
-            crate::app::session_document::PreparedSessionSave::Skip(reason) => {
-                if reason == crate::app::session_document::SessionSaveSkipReason::Unchanged {
-                    smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
-                }
-            }
-            crate::app::session_document::PreparedSessionSave::MetadataOnly {
-                generation,
-                identity,
-                metadata,
-                side_tables,
-            } => {
-                smelt_perf::perf::record_value("session:save:metadata_only", 1);
-                let Some(submitted) = self.session_document.submit_metadata_save(
-                    session_id,
-                    generation,
-                    *identity,
-                    *metadata,
-                    *side_tables,
-                ) else {
-                    return;
-                };
-                self.submit_persist_command(submitted.command);
-            }
-            crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
-                let submitted = match self
-                    .session_document
-                    .submit_history_save(session_id, generation, *delta, None)
-                {
-                    Ok(Some(submitted)) => submitted,
-                    Ok(None) => return,
-                    Err(err) => {
-                        self.notify_error_sticky(format!(
-                            "failed to prepare session commit: {err}"
-                        ));
-                        return;
-                    }
-                };
-                self.submit_persist_command(submitted.command);
-            }
-            crate::app::session_document::PreparedSessionSave::RequestHistoryAppend { .. } => {
-                unreachable!("full session save preparation must not build request append save")
+        if self.persistence.is_none() {
+            self.claim_writer_access_for_current_session();
+            if self.session_access.is_read_only() {
+                return;
             }
         }
-    }
-
-    fn save_live_session(&mut self) {
-        self.session_document.clear_queued_save();
-        let Some(live) = self.session_document.live_session.as_ref() else {
-            return;
-        };
-        smelt_perf::perf::record_value("live_session:suffix_items", live.live_suffix_len() as u64);
-        smelt_perf::perf::record_value(
-            "live_session:suffix_bytes",
-            live.live_suffix_bytes() as u64,
-        );
-        let metadata = self.runtime_session_metadata();
-        let prepared = match self
-            .session_document
-            .prepare_save(&mut self.core.session, metadata)
-        {
-            Ok(prepared) => prepared,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
-                return;
-            }
-        };
-        let (generation, delta) = match prepared {
-            crate::app::session_document::PreparedSessionSave::Skip(reason) => {
-                if reason == crate::app::session_document::SessionSaveSkipReason::Unchanged {
-                    smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
-                }
-                return;
-            }
-            crate::app::session_document::PreparedSessionSave::MetadataOnly { .. } => {
-                unreachable!("live session saves are always history saves")
-            }
-            crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
-                (generation, *delta)
-            }
-            crate::app::session_document::PreparedSessionSave::RequestHistoryAppend { .. } => {
-                unreachable!("live session save preparation must not build request append save")
-            }
-        };
-        let session_id = self.core.session.id.clone();
         self.publish_shared_session_state();
-        let submitted = match self
-            .session_document
-            .submit_history_save(session_id, generation, delta, None)
-        {
-            Ok(Some(submitted)) => submitted,
-            Ok(None) => return,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session commit: {err}"));
-                return;
-            }
-        };
-        self.submit_persist_command(submitted.command);
+        self.submit_save_intent(intent);
     }
 
     fn runtime_session_metadata(&self) -> crate::app::session_document::RuntimeSessionMetadata {
@@ -1909,83 +1763,106 @@ impl TuiApp {
     }
 
     pub(crate) fn session_document_has_unflushed_work(&self) -> bool {
-        if self.ephemeral() || self.session_access.is_read_only() {
+        if self.ephemeral() {
             return false;
         }
         self.session_document.has_unflushed_work(&self.core.session)
     }
 
-    /// Save the current session, then block until all persistence work triggered by
-    /// that save has either completed or the document can no longer make progress.
+    /// Submit the latest cumulative document intent and wait for its exact generation.
     pub(crate) fn save_session_and_flush(&mut self) {
-        const MAX_FAILURE_RETRIES: usize = 2;
-
-        let mut failure_retries = 0;
-        self.persistence_retry.start_now(&self.core.session.id);
         self.save_session();
-        loop {
-            let outcome = self.flush_persist();
-            if !self.session_document_has_unflushed_work() {
-                break;
-            }
-            let retry_delay = match &outcome {
-                crate::persist::PersistFlushOutcome::Drained => Some(Duration::ZERO),
-                crate::persist::PersistFlushOutcome::CommitFailed(failures) => {
-                    if failure_retries >= MAX_FAILURE_RETRIES
-                        || !failures
-                            .iter()
-                            .all(|failure| failure.disposition.should_retry_automatically())
-                    {
-                        None
-                    } else {
-                        failure_retries += 1;
-                        Some(crate::app::persistence_retry_delay(failure_retries as u32))
-                    }
-                }
-                crate::persist::PersistFlushOutcome::WorkerExited
-                | crate::persist::PersistFlushOutcome::Disconnected => None,
-            };
-            let Some(retry_delay) = retry_delay else {
-                break;
-            };
-            if retry_delay != Duration::ZERO {
-                std::thread::sleep(retry_delay);
-                self.persistence_retry.start_now(&self.core.session.id);
-            }
-            if !self.session_document.has_pending_save() {
-                self.save_session();
-                if !self.session_document.has_pending_save() {
-                    break;
-                }
-            }
+        if self.persistence.is_some() {
+            let _ = self.flush_persist();
         }
     }
 
-    /// Block until all queued persist writes complete. Call before reading session files from disk.
-    pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistFlushOutcome {
-        let outcome = self.persister.flush();
+    /// Wait for the current document generation without retrying or sleeping.
+    pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
+        let target = self.session_document.generation();
+        let Some(persistence) = self.persistence.as_ref() else {
+            return crate::persist::PersistenceFlushOutcome::Stopped {
+                epoch: self.persistence_epoch,
+                target,
+                durable: self.session_document.durable_generation(),
+                cause: crate::persist::PersistenceCause::unavailable(
+                    "persistence actor is unavailable",
+                ),
+            };
+        };
+        let outcome = persistence.flush(
+            target,
+            std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+        );
         self.drain_persist_reports();
         match &outcome {
-            crate::persist::PersistFlushOutcome::WorkerExited => {
-                self.notify_error_sticky(
-                    "persistence worker exited before queued writes completed".into(),
+            crate::persist::PersistenceFlushOutcome::Blocked { cause, .. }
+            | crate::persist::PersistenceFlushOutcome::OwnershipLost { cause, .. }
+            | crate::persist::PersistenceFlushOutcome::Stopped { cause, .. } => {
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+            }
+            crate::persist::PersistenceFlushOutcome::Deadline { .. } => {
+                self.notify_session_save_failure(
+                    &self.core.session.id.clone(),
+                    "persistence deadline elapsed before the requested generation became durable",
                 );
             }
-            crate::persist::PersistFlushOutcome::Disconnected => {
-                self.notify_error_sticky("persistence worker is disconnected".into());
-            }
-            crate::persist::PersistFlushOutcome::Drained
-            | crate::persist::PersistFlushOutcome::CommitFailed(_) => {}
+            crate::persist::PersistenceFlushOutcome::Durable { .. } => {}
         }
         outcome
     }
 
-    pub(crate) fn shutdown_persist(&mut self) -> Result<(), String> {
-        let result = self.persister.shutdown();
-        if let Err(err) = &result {
-            self.notify_error_sticky(format!("failed to stop persistence worker: {err}"));
+    fn close_session_persistence(&mut self, policy: crate::persist::ClosePolicy) -> bool {
+        let Some(persistence) = self.persistence.as_mut() else {
+            return true;
+        };
+        let target = self.session_document.generation();
+        let epoch = persistence.epoch();
+        let outcome = persistence.close(
+            target,
+            std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+            policy,
+        );
+        if outcome.durable >= outcome.target || outcome.omitted.is_some() {
+            if let Some(receipt) = outcome.receipt.as_ref() {
+                let history_len = self.session_history_len();
+                self.session_document.acknowledge(
+                    epoch,
+                    outcome.durable,
+                    receipt,
+                    &self.core.session.id,
+                    history_len,
+                    self.core.session.checkpoint.as_ref(),
+                );
+            }
+            self.session_document.unbind_persistence(epoch);
+            self.persistence = None;
+            self.observed_persistence_status = None;
+            if let Some(cause) = outcome.cause {
+                self.notify_warn(cause.message);
+            }
+            return true;
         }
-        result
+        let message = outcome.cause.map_or_else(
+            || {
+                format!(
+                    "generation {} did not become durable before session close",
+                    target.get()
+                )
+            },
+            |cause| cause.message,
+        );
+        self.notify_session_save_failure(&self.core.session.id.clone(), &message);
+        false
+    }
+
+    pub(crate) fn shutdown_persist(&mut self) -> Result<(), String> {
+        self.save_session_and_flush();
+        if self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+            Ok(())
+        } else {
+            Err("session persistence did not close at the current generation".into())
+        }
     }
 
     fn suppress_duplicate_carried_tail_before(&mut self, index: usize) -> usize {
@@ -2316,89 +2193,6 @@ impl TuiApp {
         self.publish_history_delta("rewound");
     }
 
-    fn persist_history_suffix(
-        &mut self,
-        generation: crate::app::session_document::DocumentGeneration,
-        delta: Box<smelt_core::session_save::PersistDelta>,
-        descriptor_append: Option<crate::app::session_document::DescriptorAppendSubmission>,
-    ) -> bool {
-        self.publish_shared_session_state();
-        if self.ephemeral() {
-            self.session_document
-                .mark_ephemeral_persisted(descriptor_append);
-            return true;
-        }
-        let session = &self.core.session;
-        let session_id = session.id.clone();
-        let submitted = match self.session_document.submit_history_save(
-            session_id,
-            generation,
-            *delta,
-            descriptor_append,
-        ) {
-            Ok(Some(submitted)) => submitted,
-            Ok(None) => return false,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session commit: {err}"));
-                return false;
-            }
-        };
-        self.submit_persist_command(submitted.command)
-    }
-
-    fn commit_live_session_request_history_item(
-        &mut self,
-        item: HistoryItem,
-        block: Option<Block>,
-        first_user_message: Option<String>,
-    ) -> protocol::ModelHistorySource {
-        let history = self.model_history_source();
-        let history_index = self.session_history_len();
-        let descriptor_order_start = self.session_document.transcript.history().len();
-        self.commit_request_history_item_to_document(item.clone(), block, first_user_message);
-        let metadata = self.runtime_session_metadata();
-        let prepared = match self.session_document.prepare_request_history_append_save(
-            &mut self.core.session,
-            metadata,
-            crate::app::session_document::RuntimeRequestHistoryAppendSave {
-                history_index,
-                descriptor_order_start,
-                item: &item,
-                include_side_tables: false,
-            },
-        ) {
-            Ok(plan) => plan,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
-                self.mark_history_dirty_from(history_index);
-                self.publish_history_delta("request");
-                self.save_session();
-                self.flush_persist();
-                return history;
-            }
-        };
-        match prepared {
-            crate::app::session_document::PreparedSessionSave::RequestHistoryAppend {
-                generation,
-                delta,
-                descriptor_append,
-            } => {
-                self.persist_history_suffix(generation, delta, Some(descriptor_append));
-            }
-            crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
-                self.persist_history_suffix(generation, delta, None);
-            }
-            crate::app::session_document::PreparedSessionSave::Skip(_)
-            | crate::app::session_document::PreparedSessionSave::MetadataOnly { .. } => {
-                self.mark_history_dirty_from(history_index);
-                self.save_session();
-            }
-        }
-        self.publish_history_delta("request");
-        self.flush_persist();
-        history
-    }
-
     pub(crate) fn commit_request_history_item(
         &mut self,
         item: HistoryItem,
@@ -2413,62 +2207,11 @@ impl TuiApp {
         block: Option<Block>,
         first_user_message: Option<String>,
     ) -> protocol::ModelHistorySource {
-        if self.session_document.live_session.is_some() {
-            return self.commit_live_session_request_history_item(item, block, first_user_message);
-        }
         let history = self.model_history_source();
-        let history_index = self.core.session.history.len();
-        let descriptor_order_start = self.session_document.transcript.history().len();
-        self.commit_request_history_item_to_document(item.clone(), block, first_user_message);
-        let metadata = self.runtime_session_metadata();
-        let prepared = match self.session_document.prepare_request_history_append_save(
-            &mut self.core.session,
-            metadata,
-            crate::app::session_document::RuntimeRequestHistoryAppendSave {
-                history_index,
-                descriptor_order_start,
-                item: &item,
-                include_side_tables: true,
-            },
-        ) {
-            Ok(plan) => plan,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
-                self.mark_history_dirty_from(history_index);
-                self.sync_session_snapshot();
-                self.publish_history_delta("request");
-                self.save_session();
-                self.flush_persist();
-                return history;
-            }
-        };
-        match prepared {
-            crate::app::session_document::PreparedSessionSave::RequestHistoryAppend {
-                generation,
-                delta,
-                descriptor_append,
-            } => {
-                let persisted =
-                    self.persist_history_suffix(generation, delta, Some(descriptor_append));
-                if !persisted {
-                    self.mark_history_dirty_from(history_index);
-                }
-            }
-            crate::app::session_document::PreparedSessionSave::History { generation, delta } => {
-                let persisted = self.persist_history_suffix(generation, delta, None);
-                if !persisted {
-                    self.mark_history_dirty_from(history_index);
-                }
-            }
-            crate::app::session_document::PreparedSessionSave::Skip(_)
-            | crate::app::session_document::PreparedSessionSave::MetadataOnly { .. } => {
-                self.mark_history_dirty_from(history_index);
-                self.sync_session_snapshot();
-                self.save_session();
-            }
-        }
+        self.commit_request_history_item_to_document(item, block, first_user_message);
+        self.sync_session_snapshot();
         self.publish_history_delta("request");
-        self.flush_persist();
+        self.save_session_and_flush();
         history
     }
 
@@ -2617,7 +2360,6 @@ mod checkpoint_tests {
 
         app.app.load_session(session);
         app.app.restore_screen();
-        app.app.session_document.mark_session_unpersisted();
         app.app.save_session();
         app.app.flush_persist();
         app
@@ -2656,6 +2398,33 @@ mod checkpoint_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(visible_text, vec!["loaded user", "loaded assistant"]);
+    }
+
+    #[test]
+    fn full_session_load_replaces_same_length_stored_history() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut initial = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        initial.history = vec![user("initial user"), assistant("initial assistant")];
+        let id = initial.id.clone();
+
+        app.app.load_session(initial.clone());
+        app.app.restore_screen();
+        app.app.save_session_and_flush();
+
+        initial.history = vec![user("replacement user"), assistant("replacement assistant")];
+        app.app.load_session(initial);
+        app.app.restore_screen();
+        app.app.save_session_and_flush();
+
+        let reader = smelt_store::SessionReader::open_existing(session::dir_for_id(&id))
+            .expect("open replaced full-session store");
+        let history = reader
+            .read_history_items_range(0..2)
+            .expect("read replaced full-session history");
+        assert_eq!(
+            history,
+            vec![user("replacement user"), assistant("replacement assistant")]
+        );
     }
 
     fn is_compaction_summary_item(item: &HistoryItem) -> bool {
@@ -2770,18 +2539,22 @@ mod checkpoint_tests {
 
         app.app.load_session(session);
         app.app.restore_screen();
-        app.app.session_document.mark_session_unpersisted();
-        app.app.save_session();
-        app.app.flush_persist();
+        app.app
+            .shutdown_persist()
+            .expect("persist and close loaded fixture actor");
 
         let id = app.app.core.session.id.clone();
         let loaded_transcript = load_transcript_tail_from_sqlite_id(&id, 80, 24)
             .expect("display-only transcript tail should load");
         let (header, store_ref) =
             session::load_store_header(&id).expect("stored session header should load");
+        let store_head = smelt_store::SessionReader::open_existing(session::dir_for_id(&id))
+            .and_then(|reader| reader.store_head())
+            .expect("stored session head should load");
         let document = crate::app::session_document::SessionDocument::from_store(
             header,
             store_ref,
+            store_head,
             loaded_transcript,
             app.app.core.env.pid(),
             app.app.core.env.cwd(),
@@ -2851,9 +2624,9 @@ mod checkpoint_tests {
 
         app.app.load_session(session);
         app.app.restore_screen();
-        app.app.session_document.mark_session_unpersisted();
-        app.app.save_session();
-        app.app.flush_persist();
+        app.app
+            .shutdown_persist()
+            .expect("persist and close loaded fixture actor");
 
         let id = app.app.core.session.id.clone();
         let source = app.app.commit_request_history_item(
@@ -2912,7 +2685,6 @@ mod checkpoint_tests {
                 image_labels: vec![],
             }),
         );
-        let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
 
         assert!(matches!(
@@ -2924,16 +2696,9 @@ mod checkpoint_tests {
             }
         ));
         assert_eq!(app.app.core.session.history.len(), OLD_HISTORY_LEN + 1);
-        assert!(snapshot
-            .values
-            .iter()
-            .any(|row| row.label == "persist:write:history_items"));
-        assert_perf_value_at_most("persist:write:history_items", 1);
-        assert_perf_value_at_most("store:session:dirty_suffix_history_rows", 1);
+        assert_eq!(perf_value_max("store:session:history_rows_inserted"), 1);
         assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
-        assert_perf_value_at_most("store:session:history_rows_inserted", 1);
         assert_perf_value_at_most("store:session:history_rows_deleted", 0);
-        assert_perf_value_at_most("persist:write:descriptor_records", 1);
         assert_perf_value_at_most("store:transcript:dirty_descriptor_suffix_rows", 1);
         assert_perf_value_at_most("store:transcript:descriptor_db_rows_inserted", 1);
         assert_cached_persist_db();
@@ -2989,7 +2754,7 @@ mod checkpoint_tests {
                 panic!("expected store-backed model history")
             }
         }
-        assert!(app.app.session_document.is_save_queued());
+        assert!(app.app.session_document.has_session_work());
     }
 
     #[test]
@@ -3011,8 +2776,6 @@ mod checkpoint_tests {
 
         assert_eq!(app.app.session_history_len(), OLD_HISTORY_LEN + 1);
         assert!(app.app.core.session.history.is_empty());
-        assert_perf_value_at_most("persist:write:history_items", 1);
-        assert_perf_value_at_most("store:session:dirty_suffix_history_rows", 1);
         assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
         assert_perf_value_at_most("store:session:history_rows_inserted", 1);
         assert_perf_value_at_most("store:session:history_rows_deleted", 0);
@@ -3112,8 +2875,7 @@ mod checkpoint_tests {
         );
 
         app.app
-            .persister
-            .release()
+            .shutdown_persist()
             .expect("release history-only fixture");
         session::delete(id).expect("delete history-only fixture");
     }
@@ -3131,8 +2893,6 @@ mod checkpoint_tests {
         smelt_perf::perf::set_enabled(false);
 
         assert_eq!(app.app.core.session.history.len(), OLD_HISTORY_LEN + 1);
-        assert_perf_value_at_most("persist:write:history_items", 1);
-        assert_perf_value_at_most("store:session:dirty_suffix_history_rows", 1);
         assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
         assert_perf_value_at_most("store:session:history_rows_inserted", 1);
         assert_perf_value_at_most("store:session:history_rows_deleted", 0);
@@ -3155,9 +2915,6 @@ mod checkpoint_tests {
             skipped, 1,
             "no-op save did not take the unchanged fast path"
         );
-        assert_perf_value_absent("persist:write:history_items");
-        assert_perf_value_absent("persist:write:descriptor_records");
-        assert_perf_value_absent("store:session:dirty_suffix_history_rows");
         assert_perf_value_absent("store:history:dirty_suffix_rows");
         assert_perf_value_absent("store:transcript:dirty_descriptor_suffix_rows");
         assert_no_full_store_reads();
@@ -3201,9 +2958,9 @@ mod checkpoint_tests {
 
         app.app.load_session(session);
         app.app.restore_screen();
-        app.app.session_document.mark_session_unpersisted();
-        app.app.save_session();
-        app.app.flush_persist();
+        app.app
+            .shutdown_persist()
+            .expect("persist and close loaded fixture actor");
 
         let id = app.app.core.session.id.clone();
         app.app.rewind_to_start();
@@ -3395,7 +3152,7 @@ mod checkpoint_tests {
             })
             .collect();
         assert_eq!(markers, vec![(3, "new summary")]);
-        assert!(app.app.session_document.is_save_queued());
+        assert!(app.app.session_document.has_session_work());
     }
 
     #[test]
@@ -3617,6 +3374,41 @@ mod checkpoint_tests {
 
         assert_eq!(app.app.core.processes.running_count(), 0);
         assert!(app.app.core.processes.list().is_empty());
+    }
+
+    #[test]
+    fn fork_session_cancels_all_lua_tasks() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![user("hello")];
+        app.app
+            .lua
+            .lua
+            .load(
+                r#"
+                _G.__fork_task_completed__ = false
+                smelt.spawn(function()
+                    smelt.sleep(10000)
+                    _G.__fork_task_completed__ = true
+                end)
+                "#,
+            )
+            .exec()
+            .expect("start session-bound Lua task");
+
+        app.app.fork_session();
+
+        let outputs = app.app.lua.drive_tasks(
+            app.app.core.clock.instant_now() + std::time::Duration::from_secs(20),
+        );
+        assert!(outputs.is_empty(), "cancelled task produced output");
+        let completed: bool = app
+            .app
+            .lua
+            .lua
+            .load("return _G.__fork_task_completed__")
+            .eval()
+            .expect("read cancelled task state");
+        assert!(!completed, "pre-fork Lua task crossed the session boundary");
     }
 
     #[tokio::test(flavor = "current_thread")]

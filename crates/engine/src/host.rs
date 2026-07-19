@@ -71,11 +71,11 @@ pub enum HostCall {
         reply: oneshot::Sender<HostRequestDecision>,
     },
 
-    /// Append a provider request audit row through the host's session
-    /// persistence worker. The worker owns the session database writer, so
-    /// audit writes stay ordered with history and metadata saves.
+    /// Append a provider request audit row through the host's fixed-session
+    /// persistence actor after the required document generation is durable.
     RequestAudit {
         session_dir: PathBuf,
+        persistence: protocol::PersistenceScope,
         entry: Box<protocol::request_log::RequestLogEntry>,
         payload_mode: smelt_store::RequestAuditPayloadMode,
     },

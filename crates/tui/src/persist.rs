@@ -1,105 +1,288 @@
-//! Background session persistence.
-//!
-//! Serialisation and disk I/O run on a worker thread. The main loop sends
-//! a session backend command; the worker writes requests in FIFO order. Call
-//! [`Persister::flush`] when the on-disk state must be current (session load,
-//! fork, shutdown).
+//! Fixed-session persistence convergence actor.
 
-use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
+use crate::app::session_document::{PersistenceGeneration, SessionSaveIntent};
+
+const CONTROL_CAPACITY: usize = 64;
+const MAX_PENDING_AUDITS: usize = 64;
 const MAX_PENDING_FULL_AUDIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_AUDIT_SUMMARY_TEXT_BYTES: usize = 512;
+pub(crate) const DEFAULT_PERSISTENCE_DEADLINE: Duration = Duration::from_secs(5);
 
-pub(crate) struct PersistRequest {
-    pub(crate) command: smelt_store::SessionCommit,
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct SessionEpoch(u64);
+
+impl SessionEpoch {
+    pub(crate) const ZERO: Self = Self(0);
+
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
 }
 
-pub(crate) struct PersistRequestAudit {
-    pub(crate) session_id: String,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PersistenceFailureClass {
+    Invariant,
+    Environment,
+    Ownership,
+    Unsupported,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PersistenceCause {
+    pub(crate) class: PersistenceFailureClass,
+    pub(crate) message: String,
+}
+
+impl PersistenceCause {
+    fn new(class: PersistenceFailureClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(PersistenceFailureClass::Unavailable, message)
+    }
+
+    fn invariant(message: impl Into<String>) -> Self {
+        Self::new(PersistenceFailureClass::Invariant, message)
+    }
+
+    fn from_store(operation: &str, error: smelt_store::StoreError) -> Self {
+        let class = match &error {
+            smelt_store::StoreError::OwnershipConflict { .. }
+            | smelt_store::StoreError::OwnershipLost => PersistenceFailureClass::Ownership,
+            smelt_store::StoreError::UnsupportedSchema { .. }
+            | smelt_store::StoreError::Integrity(_)
+            | smelt_store::StoreError::MissingObject { .. }
+            | smelt_store::StoreError::ObjectTooLarge { .. }
+            | smelt_store::StoreError::Json(_) => PersistenceFailureClass::Unsupported,
+            smelt_store::StoreError::Busy { .. } => PersistenceFailureClass::Invariant,
+            smelt_store::StoreError::Io(_)
+            | smelt_store::StoreError::Sqlite(_)
+            | smelt_store::StoreError::TransactionCleanup { .. }
+            | smelt_store::StoreError::OperationCleanup { .. } => {
+                PersistenceFailureClass::Environment
+            }
+        };
+        Self::new(class, format!("{operation}: {error}"))
+    }
+
+    fn from_commit(error: &smelt_store::SessionCommitFailure) -> Self {
+        let class = match error {
+            smelt_store::SessionCommitFailure::OwnershipLost => PersistenceFailureClass::Ownership,
+            smelt_store::SessionCommitFailure::UnsupportedSchema { .. } => {
+                PersistenceFailureClass::Unsupported
+            }
+            smelt_store::SessionCommitFailure::Busy { .. } => PersistenceFailureClass::Invariant,
+            smelt_store::SessionCommitFailure::Io { .. }
+            | smelt_store::SessionCommitFailure::Sqlite { .. } => {
+                PersistenceFailureClass::Environment
+            }
+            smelt_store::SessionCommitFailure::SessionMismatch { .. }
+            | smelt_store::SessionCommitFailure::IdentityMismatch { .. }
+            | smelt_store::SessionCommitFailure::StaleBase { .. }
+            | smelt_store::SessionCommitFailure::InvalidHistorySuffix { .. }
+            | smelt_store::SessionCommitFailure::InvalidDescriptorSuffix { .. }
+            | smelt_store::SessionCommitFailure::InvalidSideTableSuffix { .. }
+            | smelt_store::SessionCommitFailure::InvalidSideTableRow { .. }
+            | smelt_store::SessionCommitFailure::InvalidCommand { .. }
+            | smelt_store::SessionCommitFailure::Integrity { .. } => {
+                PersistenceFailureClass::Invariant
+            }
+        };
+        Self::new(class, describe_commit_failure(error))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PersistenceState {
+    Idle {
+        durable: PersistenceGeneration,
+        head: smelt_store::StoreHead,
+    },
+    Saving {
+        generation: PersistenceGeneration,
+        durable: PersistenceGeneration,
+    },
+    Durable {
+        generation: PersistenceGeneration,
+        receipt: smelt_store::SaveReceipt,
+    },
+    Blocked {
+        desired: PersistenceGeneration,
+        durable: PersistenceGeneration,
+        cause: PersistenceCause,
+    },
+    OwnershipLost {
+        desired: PersistenceGeneration,
+        durable: PersistenceGeneration,
+        cause: PersistenceCause,
+    },
+    Stopped {
+        durable: PersistenceGeneration,
+        omitted: Option<PersistenceGeneration>,
+        cause: Option<PersistenceCause>,
+    },
+}
+
+fn persistence_state_durable(state: &PersistenceState) -> PersistenceGeneration {
+    match state {
+        PersistenceState::Idle { durable, .. }
+        | PersistenceState::Saving { durable, .. }
+        | PersistenceState::Blocked { durable, .. }
+        | PersistenceState::OwnershipLost { durable, .. }
+        | PersistenceState::Stopped { durable, .. } => *durable,
+        PersistenceState::Durable { generation, .. } => *generation,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PersistenceAcknowledgement {
+    pub(crate) generation: PersistenceGeneration,
+    pub(crate) previous: smelt_store::StoreHead,
+    pub(crate) receipt: smelt_store::SaveReceipt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionPersistenceStatus {
+    pub(crate) epoch: SessionEpoch,
+    pub(crate) state: PersistenceState,
+    pub(crate) acknowledgement: Option<PersistenceAcknowledgement>,
+    pub(crate) latest_audit_warning: Option<PersistenceCause>,
+    pub(crate) latest_sidecar_warning: Option<PersistenceCause>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClosePolicy {
+    RequireDurable,
+    AllowUnsaved,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PersistenceFlushOutcome {
+    Durable {
+        epoch: SessionEpoch,
+        target: PersistenceGeneration,
+        durable: PersistenceGeneration,
+        receipt: Option<smelt_store::SaveReceipt>,
+    },
+    Blocked {
+        epoch: SessionEpoch,
+        target: PersistenceGeneration,
+        durable: PersistenceGeneration,
+        cause: PersistenceCause,
+    },
+    OwnershipLost {
+        epoch: SessionEpoch,
+        target: PersistenceGeneration,
+        durable: PersistenceGeneration,
+        cause: PersistenceCause,
+    },
+    Deadline {
+        epoch: SessionEpoch,
+        target: PersistenceGeneration,
+        durable: PersistenceGeneration,
+    },
+    Stopped {
+        epoch: SessionEpoch,
+        target: PersistenceGeneration,
+        durable: PersistenceGeneration,
+        cause: PersistenceCause,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PersistenceCloseOutcome {
+    pub(crate) epoch: SessionEpoch,
+    pub(crate) target: PersistenceGeneration,
+    pub(crate) durable: PersistenceGeneration,
+    pub(crate) omitted: Option<PersistenceGeneration>,
+    pub(crate) receipt: Option<smelt_store::SaveReceipt>,
+    pub(crate) cause: Option<PersistenceCause>,
+}
+
+pub(crate) struct RequestAuditIntent {
+    pub(crate) epoch: SessionEpoch,
+    pub(crate) required_generation: PersistenceGeneration,
     pub(crate) entry: protocol::request_log::RequestLogEntry,
     pub(crate) payload_mode: smelt_store::RequestAuditPayloadMode,
     pub(crate) payload_capture_skipped_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PersistRequestAuditFailure {
-    pub(crate) session_id: String,
-    pub(crate) message: String,
+enum PersistenceControl {
+    WakeDesired,
+    AppendRequestAudit(Box<QueuedAudit>),
+    RetryBlocked,
+    Flush {
+        target: PersistenceGeneration,
+        deadline: Instant,
+        reply: mpsc::Sender<PersistenceFlushOutcome>,
+    },
+    Close {
+        target: PersistenceGeneration,
+        deadline: Instant,
+        policy: ClosePolicy,
+        reply: mpsc::Sender<PersistenceCloseOutcome>,
+    },
+    #[cfg(test)]
+    InjectCommitFailure(smelt_store::SessionCommitFailure, mpsc::Sender<()>),
+    #[cfg(test)]
+    InjectPublishFailure(mpsc::Sender<()>),
+    #[cfg(test)]
+    Pause(mpsc::Sender<()>, mpsc::Receiver<()>),
+    #[cfg(test)]
+    InstallCommitBarrier(mpsc::Sender<()>, mpsc::Receiver<()>, mpsc::Sender<()>),
+    #[cfg(test)]
+    InjectPanic,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PersistRequestAuditPayloadSkipped {
-    pub(crate) session_id: String,
-    pub(crate) estimated_bytes: usize,
-}
-
-pub(crate) type PersistSaveKind = smelt_core::session_save::SessionSaveKind;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PersistFailure {
-    pub(crate) save_id: u64,
-    pub(crate) session_id: String,
-    pub(crate) message: String,
-    pub(crate) commit_failure: Option<smelt_store::SessionCommitFailure>,
-    pub(crate) disposition: smelt_store::SessionPersistenceDisposition,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PersistFlushOutcome {
-    Drained,
-    CommitFailed(Vec<PersistFailure>),
-    WorkerExited,
+#[derive(Clone, Copy)]
+enum ControlSendError {
+    Deadline,
     Disconnected,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum SessionBackendEvent {
-    Saved {
-        receipt: smelt_store::SaveReceipt,
-        warning: Option<String>,
-    },
-    Failed(PersistFailure),
-    RequestAuditFailed(PersistRequestAuditFailure),
-    RequestAuditPayloadSkipped(PersistRequestAuditPayloadSkipped),
-}
-
-enum SessionBackendCommand {
-    OpenOwned(
-        smelt_core::session_id::SessionId,
-        Sender<Result<(), String>>,
-    ),
-    CommitSession(Box<PersistRequest>),
-    AppendRequestAudit(Box<PersistRequestAudit>),
-    #[cfg(any(test, feature = "harness"))]
-    #[allow(dead_code)]
-    InjectTransientOpenFailure(Sender<()>),
-    #[cfg(any(test, feature = "harness"))]
-    #[allow(dead_code)]
-    InjectCommitFailure(smelt_store::SessionCommitFailure, Sender<()>),
-    #[cfg(any(test, feature = "harness"))]
-    #[allow(dead_code)]
-    InjectPublishReopenFailure(Sender<()>),
-    Flush(Sender<Vec<PersistFailure>>),
-    Release(Sender<Result<(), String>>),
-    Shutdown(Sender<Result<(), String>>),
-}
-
-impl SessionBackendCommand {
-    fn estimated_payload_bytes(&self) -> usize {
-        match self {
-            Self::CommitSession(req) => serialized_size(&req.command),
-            Self::AppendRequestAudit(req) => serialized_size(&req.entry),
-            Self::OpenOwned(..) | Self::Flush(_) | Self::Release(_) | Self::Shutdown(_) => 0,
-            #[cfg(any(test, feature = "harness"))]
-            Self::InjectTransientOpenFailure(_)
-            | Self::InjectCommitFailure(..)
-            | Self::InjectPublishReopenFailure(_) => 0,
+fn send_control_until(
+    sender: &SyncSender<PersistenceControl>,
+    mut control: PersistenceControl,
+    deadline: Instant,
+) -> Result<(), ControlSendError> {
+    loop {
+        match sender.try_send(control) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Disconnected(_)) => return Err(ControlSendError::Disconnected),
+            Err(TrySendError::Full(returned)) => {
+                if Instant::now() >= deadline {
+                    return Err(ControlSendError::Deadline);
+                }
+                control = returned;
+                thread::yield_now();
+            }
         }
     }
+}
+
+struct QueuedAudit {
+    intent: RequestAuditIntent,
+    reserved_full_bytes: usize,
 }
 
 #[derive(Default)]
@@ -126,10 +309,39 @@ fn serialized_size(value: &impl serde::Serialize) -> usize {
     serde_json::to_writer(&mut writer, value).map_or(0, |()| writer.bytes)
 }
 
-struct QueuedCommand {
-    command: SessionBackendCommand,
-    estimated_payload_bytes: usize,
-    reserved_full_audit_bytes: usize,
+fn approximate_intent_size(intent: &SessionSaveIntent) -> usize {
+    if !smelt_perf::perf::enabled() {
+        return 0;
+    }
+    [
+        serialized_size(&intent.identity),
+        serialized_size(&intent.metadata),
+        serialized_size(&intent.history),
+        serialized_size(&intent.side_tables),
+        serialized_size(&intent.descriptors),
+    ]
+    .into_iter()
+    .fold(0, usize::saturating_add)
+}
+
+fn record_failure_transition(prefix: &'static str, class: PersistenceFailureClass) {
+    smelt_perf::perf::record_value(prefix, 1);
+    smelt_perf::perf::record_value(
+        match class {
+            PersistenceFailureClass::Invariant => "persist:blocked:invariant",
+            PersistenceFailureClass::Environment => "persist:blocked:environment",
+            PersistenceFailureClass::Ownership => "persist:blocked:ownership",
+            PersistenceFailureClass::Unsupported => "persist:blocked:unsupported",
+            PersistenceFailureClass::Unavailable => "persist:blocked:unavailable",
+        },
+        1,
+    );
+}
+
+struct LatestIntentState {
+    accepting: bool,
+    wake_pending: bool,
+    desired: Option<Arc<SessionSaveIntent>>,
 }
 
 fn reserve_bytes(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
@@ -140,7 +352,11 @@ fn reserve_bytes(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
         .is_ok()
 }
 
-fn compact_request_audit(req: &mut PersistRequestAudit, raw_payload_bytes: usize) {
+fn reserve_one(counter: &AtomicUsize, limit: usize) -> bool {
+    reserve_bytes(counter, 1, limit)
+}
+
+fn compact_request_audit(req: &mut RequestAuditIntent, raw_payload_bytes: usize) {
     let raw_body_size = serialized_size(&req.entry.body) as u64;
     req.entry.body = serde_json::Value::Null;
     if let Some(response) = &mut req.entry.response {
@@ -169,703 +385,1395 @@ fn audit_summary_text(text: &str) -> String {
     smelt_buffer::text::slice(text, 0..MAX_AUDIT_SUMMARY_TEXT_BYTES).to_string()
 }
 
-pub(crate) struct Persister {
-    tx: Option<Sender<QueuedCommand>>,
-    reports: Receiver<SessionBackendEvent>,
-    queued_commands: Arc<AtomicUsize>,
-    queued_payload_bytes: Arc<AtomicUsize>,
-    pending_full_audit_bytes: Arc<AtomicUsize>,
-    handle: Option<thread::JoinHandle<()>>,
+fn reject_audit(cause: PersistenceCause) -> Result<(), PersistenceCause> {
+    smelt_perf::perf::record_value("persist:audit:rejected", 1);
+    Err(cause)
 }
 
-impl Persister {
-    pub(crate) fn spawn() -> Self {
-        let (tx, rx) = mpsc::channel();
-        let (report_tx, reports) = mpsc::channel();
-        let queued_commands = Arc::new(AtomicUsize::new(0));
-        let queued_payload_bytes = Arc::new(AtomicUsize::new(0));
+pub(crate) struct SessionPersistence {
+    session_id: smelt_core::session_id::SessionId,
+    epoch: SessionEpoch,
+    latest: Arc<Mutex<LatestIntentState>>,
+    control: Option<SyncSender<PersistenceControl>>,
+    status: Arc<Mutex<SessionPersistenceStatus>>,
+    status_wake: Receiver<()>,
+    pending_audits: Arc<AtomicUsize>,
+    pending_full_audit_bytes: Arc<AtomicUsize>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl SessionPersistence {
+    pub(crate) fn spawn(
+        session_id: smelt_core::session_id::SessionId,
+        epoch: SessionEpoch,
+        generation: PersistenceGeneration,
+        acknowledged_head: smelt_store::StoreHead,
+    ) -> Result<Self, PersistenceCause> {
+        let latest = Arc::new(Mutex::new(LatestIntentState {
+            accepting: true,
+            wake_pending: false,
+            desired: None,
+        }));
+        let status = Arc::new(Mutex::new(SessionPersistenceStatus {
+            epoch,
+            state: PersistenceState::Idle {
+                durable: generation,
+                head: acknowledged_head,
+            },
+            acknowledgement: None,
+            latest_audit_warning: None,
+            latest_sidecar_warning: None,
+        }));
+        let pending_audits = Arc::new(AtomicUsize::new(0));
         let pending_full_audit_bytes = Arc::new(AtomicUsize::new(0));
-        let worker_queue = Arc::clone(&queued_commands);
-        let worker_payload_bytes = Arc::clone(&queued_payload_bytes);
-        let worker_full_audit_bytes = Arc::clone(&pending_full_audit_bytes);
-        let handle = thread::Builder::new()
-            .name("smelt-persist".into())
+        let (control, controls) = mpsc::sync_channel(CONTROL_CAPACITY);
+        let (status_wake_tx, status_wake) = mpsc::sync_channel(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker_session_id = session_id.clone();
+        let worker_latest = Arc::clone(&latest);
+        let worker_status = Arc::clone(&status);
+        let worker_pending_audits = Arc::clone(&pending_audits);
+        let worker_pending_full_audit_bytes = Arc::clone(&pending_full_audit_bytes);
+        let panic_latest = Arc::clone(&latest);
+        let panic_status = Arc::clone(&status);
+        let panic_status_wake = status_wake_tx.clone();
+        let panic_pending_audits = Arc::clone(&pending_audits);
+        let panic_pending_full_audit_bytes = Arc::clone(&pending_full_audit_bytes);
+        let thread = thread::Builder::new()
+            .name(format!("smelt-persist-{}", &session_id.as_str()[..8]))
             .spawn(move || {
-                worker_loop(
-                    rx,
-                    report_tx,
-                    worker_queue,
-                    worker_payload_bytes,
-                    worker_full_audit_bytes,
-                )
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    persistence_actor(
+                        worker_session_id,
+                        epoch,
+                        generation,
+                        acknowledged_head,
+                        worker_latest,
+                        controls,
+                        worker_status,
+                        status_wake_tx,
+                        worker_pending_audits,
+                        worker_pending_full_audit_bytes,
+                        started_tx,
+                    );
+                }));
+                if result.is_err() {
+                    panic_pending_audits.store(0, Ordering::Release);
+                    panic_pending_full_audit_bytes.store(0, Ordering::Release);
+                    panic_latest
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .accepting = false;
+                    let mut status = panic_status
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    let durable = persistence_state_durable(&status.state);
+                    status.state = PersistenceState::Stopped {
+                        durable,
+                        omitted: None,
+                        cause: Some(PersistenceCause::unavailable("persistence actor panicked")),
+                    };
+                    drop(status);
+                    let _ = panic_status_wake.try_send(());
+                }
             })
-            .expect("spawn persist worker");
-        Self {
-            tx: Some(tx),
-            reports,
-            queued_commands,
-            queued_payload_bytes,
-            pending_full_audit_bytes,
-            handle: Some(handle),
+            .map_err(|error| {
+                PersistenceCause::unavailable(format!("spawn persistence actor: {error}"))
+            })?;
+        match started_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                session_id,
+                epoch,
+                latest,
+                control: Some(control),
+                status,
+                status_wake,
+                pending_audits,
+                pending_full_audit_bytes,
+                thread: Some(thread),
+            }),
+            Ok(Err(cause)) => {
+                let _ = thread.join();
+                Err(cause)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(PersistenceCause::unavailable(
+                    "persistence actor stopped during startup",
+                ))
+            }
         }
     }
 
-    fn enqueue(
-        &self,
-        command: SessionBackendCommand,
-        reserved_full_audit_bytes: usize,
-    ) -> Result<(), ()> {
-        let Some(tx) = &self.tx else {
-            return Err(());
-        };
-        let estimated_payload_bytes = if smelt_perf::perf::enabled() {
-            command.estimated_payload_bytes()
-        } else {
-            0
-        };
-        let depth = self.queued_commands.fetch_add(1, Ordering::AcqRel) + 1;
-        let payload_bytes = self
-            .queued_payload_bytes
-            .fetch_add(estimated_payload_bytes, Ordering::AcqRel)
-            .saturating_add(estimated_payload_bytes);
-        smelt_perf::perf::record_value("persist:queue:depth", depth as u64);
+    pub(crate) fn epoch(&self) -> SessionEpoch {
+        self.epoch
+    }
+
+    pub(crate) fn submit(&self, intent: SessionSaveIntent) -> Result<(), PersistenceCause> {
+        if intent.identity.id != self.session_id.as_str() {
+            return Err(PersistenceCause::invariant(format!(
+                "save intent session {} does not match actor session {}",
+                intent.identity.id, self.session_id
+            )));
+        }
+        let mut latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !latest.accepting {
+            return Err(PersistenceCause::unavailable(
+                "persistence actor is not accepting save intents",
+            ));
+        }
+        let durable = self.durable_generation();
+        if intent.generation < durable {
+            return Err(PersistenceCause::invariant(format!(
+                "save intent generation {} is older than durable generation {}",
+                intent.generation.get(),
+                durable.get()
+            )));
+        }
+        if let Some(current) = latest.desired.as_ref() {
+            if current.generation > intent.generation {
+                return Err(PersistenceCause::invariant(format!(
+                    "save intent generation {} is older than queued generation {}",
+                    intent.generation.get(),
+                    current.generation.get()
+                )));
+            }
+            if current.generation == intent.generation && current.as_ref() != &intent {
+                return Err(PersistenceCause::invariant(format!(
+                    "save intent generation {} changed without advancing the document generation",
+                    intent.generation.get()
+                )));
+            }
+            if current.generation < intent.generation {
+                smelt_perf::perf::record_value("persist:latest_slot:replacements", 1);
+            }
+        }
         smelt_perf::perf::record_value(
-            "persist:queue:command_payload_bytes",
-            estimated_payload_bytes as u64,
+            "persist:generation:desired_lag",
+            intent.generation.get().saturating_sub(durable.get()),
         );
-        smelt_perf::perf::record_value("persist:queue:payload_bytes", payload_bytes as u64);
-        if tx
-            .send(QueuedCommand {
-                command,
-                estimated_payload_bytes,
-                reserved_full_audit_bytes,
-            })
-            .is_err()
-        {
-            self.queued_commands.fetch_sub(1, Ordering::AcqRel);
-            self.queued_payload_bytes
-                .fetch_sub(estimated_payload_bytes, Ordering::AcqRel);
-            self.pending_full_audit_bytes
-                .fetch_sub(reserved_full_audit_bytes, Ordering::AcqRel);
-            return Err(());
+        smelt_perf::perf::record_value("persist:latest_slot:occupied", 1);
+        smelt_perf::perf::record_value(
+            "persist:latest_slot:approximate_bytes",
+            approximate_intent_size(&intent) as u64,
+        );
+        latest.desired = Some(Arc::new(intent));
+        if !latest.wake_pending {
+            latest.wake_pending = true;
+            let Some(control) = &self.control else {
+                latest.accepting = false;
+                return Err(PersistenceCause::unavailable(
+                    "persistence actor control lane is closed",
+                ));
+            };
+            match control.try_send(PersistenceControl::WakeDesired) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => {
+                    latest.accepting = false;
+                    return Err(PersistenceCause::unavailable(
+                        "persistence actor control lane disconnected",
+                    ));
+                }
+            }
         }
         Ok(())
     }
 
-    pub(crate) fn open_owned(&self, session_id: &str) -> Result<(), String> {
-        let session_id = smelt_core::session_id::SessionId::parse(session_id)
-            .map_err(|err| format!("invalid session id: {err}"))?;
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.enqueue(SessionBackendCommand::OpenOwned(session_id, reply_tx), 0)
-            .map_err(|()| "persistence worker is closed".to_string())?;
-        reply_rx
-            .recv()
-            .map_err(|_| "persistence worker stopped during open".to_string())?
-    }
-
-    pub(crate) fn release(&self) -> Result<(), String> {
-        if self.tx.is_none() {
-            return Ok(());
+    pub(crate) fn append_request_audit(
+        &self,
+        mut intent: RequestAuditIntent,
+    ) -> Result<(), PersistenceCause> {
+        if intent.epoch != self.epoch {
+            return reject_audit(PersistenceCause::invariant(format!(
+                "request audit epoch {} does not match actor epoch {}",
+                intent.epoch.get(),
+                self.epoch.get()
+            )));
         }
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.enqueue(SessionBackendCommand::Release(reply_tx), 0)
-            .map_err(|()| "persistence worker is closed".to_string())?;
-        reply_rx
-            .recv()
-            .map_err(|_| "persistence worker stopped during release".to_string())?
-    }
-
-    pub(crate) fn save(&self, req: PersistRequest) -> Result<(), ()> {
-        self.enqueue(SessionBackendCommand::CommitSession(Box::new(req)), 0)
-    }
-
-    #[cfg(any(test, feature = "harness"))]
-    #[allow(dead_code)]
-    pub(crate) fn inject_transient_open_failure(&self) {
-        let (done_tx, done_rx) = mpsc::channel();
-        self.enqueue(
-            SessionBackendCommand::InjectTransientOpenFailure(done_tx),
-            0,
-        )
-        .expect("persistence worker accepts transient failure injection");
-        done_rx
-            .recv()
-            .expect("persistence worker acknowledges transient failure injection");
-    }
-
-    #[cfg(any(test, feature = "harness"))]
-    #[allow(dead_code)]
-    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::SessionCommitFailure) {
-        let (done_tx, done_rx) = mpsc::channel();
-        self.enqueue(
-            SessionBackendCommand::InjectCommitFailure(failure, done_tx),
-            0,
-        )
-        .expect("persistence worker accepts commit failure injection");
-        done_rx
-            .recv()
-            .expect("persistence worker acknowledges commit failure injection");
-    }
-
-    #[cfg(any(test, feature = "harness"))]
-    #[allow(dead_code)]
-    pub(crate) fn inject_publish_reopen_failure(&self) {
-        let (done_tx, done_rx) = mpsc::channel();
-        self.enqueue(
-            SessionBackendCommand::InjectPublishReopenFailure(done_tx),
-            0,
-        )
-        .expect("persistence worker accepts publication failure injection");
-        done_rx
-            .recv()
-            .expect("persistence worker acknowledges publication failure injection");
-    }
-
-    pub(crate) fn append_request_audit(&self, mut req: PersistRequestAudit) {
-        if self.tx.is_none() {
-            return;
+        let latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !latest.accepting {
+            return reject_audit(PersistenceCause::unavailable(
+                "persistence actor is not accepting request audits",
+            ));
         }
-        req.entry.system_prompt = None;
-        req.entry.messages = None;
-        req.entry.tools = None;
-        let estimated_bytes = serialized_size(&req.entry);
-        let mut reserved_full_audit_bytes = 0;
-        let mut payload_capture_skipped = false;
-        if req.payload_mode == smelt_store::RequestAuditPayloadMode::Full {
-            if reserve_bytes(
+        let Some(control) = &self.control else {
+            return reject_audit(PersistenceCause::unavailable(
+                "persistence actor control lane is closed",
+            ));
+        };
+        if !reserve_one(&self.pending_audits, MAX_PENDING_AUDITS) {
+            return reject_audit(PersistenceCause::unavailable(format!(
+                "request audit queue reached its {MAX_PENDING_AUDITS}-entry limit"
+            )));
+        }
+        intent.entry.system_prompt = None;
+        intent.entry.messages = None;
+        intent.entry.tools = None;
+        let estimated_bytes = serialized_size(&intent.entry);
+        let reserved_full_bytes = if intent.payload_mode
+            == smelt_store::RequestAuditPayloadMode::Full
+            && reserve_bytes(
                 &self.pending_full_audit_bytes,
                 estimated_bytes,
                 MAX_PENDING_FULL_AUDIT_BYTES,
             ) {
-                reserved_full_audit_bytes = estimated_bytes;
-            } else {
-                compact_request_audit(&mut req, estimated_bytes);
-                payload_capture_skipped = true;
+            estimated_bytes
+        } else {
+            if intent.payload_mode == smelt_store::RequestAuditPayloadMode::Full {
+                compact_request_audit(&mut intent, estimated_bytes);
                 smelt_perf::perf::record_value("persist:queue:audit_payload_skipped", 1);
             }
-        }
-        if payload_capture_skipped {
-            req.payload_capture_skipped_bytes = Some(estimated_bytes);
-        }
-        let _ = self.enqueue(
-            SessionBackendCommand::AppendRequestAudit(Box::new(req)),
-            reserved_full_audit_bytes,
-        );
-    }
-
-    pub(crate) fn drain_reports(&self) -> Vec<SessionBackendEvent> {
-        let mut reports = Vec::new();
-        while let Ok(report) = self.reports.try_recv() {
-            reports.push(report);
-        }
-        reports
-    }
-
-    /// Block until all commands queued before this call have completed.
-    pub(crate) fn flush(&self) -> PersistFlushOutcome {
-        if self.tx.is_none() {
-            return PersistFlushOutcome::Disconnected;
-        }
-        if self
-            .handle
-            .as_ref()
-            .is_some_and(|handle| handle.is_finished())
-        {
-            return PersistFlushOutcome::WorkerExited;
-        }
-        let (done_tx, done_rx) = mpsc::channel();
-        if self
-            .enqueue(SessionBackendCommand::Flush(done_tx), 0)
-            .is_err()
-        {
-            return PersistFlushOutcome::WorkerExited;
-        }
-        match done_rx.recv() {
-            Ok(failures) if failures.is_empty() => PersistFlushOutcome::Drained,
-            Ok(failures) => PersistFlushOutcome::CommitFailed(failures),
-            Err(_) => PersistFlushOutcome::WorkerExited,
-        }
-    }
-
-    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
-        if self.tx.is_none() {
-            return match self.handle.take() {
-                Some(handle) => handle
-                    .join()
-                    .map_err(|_| "persistence worker panicked".to_string()),
-                None => Ok(()),
-            };
-        }
-
-        let result = if self
-            .handle
-            .as_ref()
-            .is_some_and(|handle| handle.is_finished())
-        {
-            Err("persistence worker exited before shutdown".to_string())
-        } else {
-            let (done_tx, done_rx) = mpsc::channel();
-            match self.enqueue(SessionBackendCommand::Shutdown(done_tx), 0) {
-                Ok(()) => done_rx
-                    .recv()
-                    .map_err(|_| "persistence worker stopped during shutdown".to_string())
-                    .and_then(|result| result),
-                Err(()) => Err("persistence worker is closed".to_string()),
-            }
+            0
         };
-        self.tx = None;
-        let joined = self.handle.take().map_or(Ok(()), |handle| {
-            handle
-                .join()
-                .map_err(|_| "persistence worker panicked".to_string())
-        });
-        result.and(joined)
-    }
-}
-
-impl Drop for Persister {
-    fn drop(&mut self) {
-        let _ = self.flush();
-        let _ = self.shutdown();
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SessionBackendError {
-    message: String,
-    disposition: smelt_store::SessionPersistenceDisposition,
-}
-
-impl SessionBackendError {
-    fn from_store_error(context: &str, err: smelt_store::StoreError) -> Self {
-        let disposition = err.session_persistence_disposition();
-        Self {
-            message: format!("{context}: {err}"),
-            disposition,
-        }
-    }
-
-    fn reopenable(message: String) -> Self {
-        Self {
-            message,
-            disposition: smelt_store::SessionPersistenceDisposition::Reopen,
-        }
-    }
-
-    #[cfg(any(test, feature = "harness"))]
-    fn injected_transient() -> Self {
-        Self::from_store_error(
-            "injected transient session writer open failure",
-            smelt_store::StoreError::Busy {
-                operation: "open session writer",
-                attempts: 1,
-                waited_ms: 0,
+        let result = match control.try_send(PersistenceControl::AppendRequestAudit(Box::new(
+            QueuedAudit {
+                intent,
+                reserved_full_bytes,
             },
-        )
+        ))) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.release_audit_reservation(reserved_full_bytes);
+                reject_audit(PersistenceCause::unavailable(
+                    "persistence actor control lane is full",
+                ))
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.release_audit_reservation(reserved_full_bytes);
+                reject_audit(PersistenceCause::unavailable(
+                    "persistence actor control lane disconnected",
+                ))
+            }
+        };
+        drop(latest);
+        result
     }
-}
 
-enum SessionBackendState {
-    Closed,
-    ReadOnly {
-        session_id: smelt_core::session_id::SessionId,
-        error: SessionBackendError,
-    },
-    Owned {
-        session_id: smelt_core::session_id::SessionId,
-        writer: Box<smelt_store::OwnedSessionWriter>,
-    },
-}
+    fn release_audit_reservation(&self, full_bytes: usize) {
+        self.pending_audits.fetch_sub(1, Ordering::AcqRel);
+        self.pending_full_audit_bytes
+            .fetch_sub(full_bytes, Ordering::AcqRel);
+    }
 
-struct SessionBackend {
-    state: SessionBackendState,
-    #[cfg(any(test, feature = "harness"))]
-    fail_next_open: bool,
-    #[cfg(any(test, feature = "harness"))]
-    fail_next_commit: Option<smelt_store::SessionCommitFailure>,
-    #[cfg(any(test, feature = "harness"))]
-    fail_next_publish_reopen: bool,
-}
+    pub(crate) fn retry_blocked(&self) -> Result<(), PersistenceCause> {
+        if let PersistenceState::OwnershipLost { cause, .. } = self.status().state {
+            return Err(cause);
+        }
+        let latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !latest.accepting {
+            return Err(PersistenceCause::unavailable(
+                "persistence actor is not accepting retry requests",
+            ));
+        }
+        let Some(control) = &self.control else {
+            return Err(PersistenceCause::unavailable(
+                "persistence actor control lane is closed",
+            ));
+        };
+        let result = control
+            .try_send(PersistenceControl::RetryBlocked)
+            .map_err(|error| {
+                PersistenceCause::unavailable(match error {
+                    TrySendError::Full(_) => "persistence actor control lane is full",
+                    TrySendError::Disconnected(_) => "persistence actor control lane disconnected",
+                })
+            });
+        if result.is_ok() {
+            smelt_perf::perf::record_value("persist:recovery:explicit_retry", 1);
+        }
+        drop(latest);
+        result
+    }
 
-impl SessionBackend {
-    fn new() -> Self {
-        Self {
-            state: SessionBackendState::Closed,
-            #[cfg(any(test, feature = "harness"))]
-            fail_next_open: false,
-            #[cfg(any(test, feature = "harness"))]
-            fail_next_commit: None,
-            #[cfg(any(test, feature = "harness"))]
-            fail_next_publish_reopen: false,
+    pub(crate) fn status(&self) -> SessionPersistenceStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn take_status(&self) -> SessionPersistenceStatus {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let snapshot = status.clone();
+        status.latest_audit_warning = None;
+        status.latest_sidecar_warning = None;
+        snapshot
+    }
+
+    pub(crate) fn confirm_acknowledgement(&self, acknowledgement: &PersistenceAcknowledgement) {
+        let confirmed = {
+            let mut status = self
+                .status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if status.acknowledgement.as_ref() != Some(acknowledgement) {
+                false
+            } else {
+                status.acknowledgement = None;
+                true
+            }
+        };
+        if !confirmed {
+            return;
+        }
+        let mut latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if latest
+            .desired
+            .as_ref()
+            .is_some_and(|intent| intent.generation <= acknowledgement.generation)
+        {
+            latest.desired = None;
+            smelt_perf::perf::record_value("persist:latest_slot:released", 1);
         }
     }
 
-    fn record_open_failure(
+    pub(crate) fn drain_status_wake(&self) -> bool {
+        let mut changed = false;
+        while self.status_wake.try_recv().is_ok() {
+            changed = true;
+        }
+        changed
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
+    }
+
+    pub(crate) fn flush(
+        &self,
+        target: PersistenceGeneration,
+        deadline: Instant,
+    ) -> PersistenceFlushOutcome {
+        smelt_perf::perf::record_value(
+            "persist:flush:target_lag",
+            target.get().saturating_sub(self.durable_generation().get()),
+        );
+        let Some(control) = &self.control else {
+            return self.stopped_flush(target, "persistence actor control lane is closed");
+        };
+        let (reply, outcome) = mpsc::channel();
+        match send_control_until(
+            control,
+            PersistenceControl::Flush {
+                target,
+                deadline,
+                reply,
+            },
+            deadline,
+        ) {
+            Ok(()) => {}
+            Err(ControlSendError::Deadline) => return self.deadline_flush(target),
+            Err(ControlSendError::Disconnected) => {
+                return self.stopped_flush(target, "persistence actor control lane disconnected");
+            }
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return self.deadline_flush(target);
+        };
+        outcome
+            .recv_timeout(remaining)
+            .unwrap_or_else(|_| self.deadline_flush(target))
+    }
+
+    pub(crate) fn close(
         &mut self,
-        session_id: smelt_core::session_id::SessionId,
-        error: SessionBackendError,
-    ) -> SessionBackendError {
-        if error.disposition == smelt_store::SessionPersistenceDisposition::ReadOnly {
-            self.state = SessionBackendState::ReadOnly {
-                session_id,
-                error: error.clone(),
+        target: PersistenceGeneration,
+        deadline: Instant,
+        policy: ClosePolicy,
+    ) -> PersistenceCloseOutcome {
+        smelt_perf::perf::record_value(
+            "persist:close:target_lag",
+            target.get().saturating_sub(self.durable_generation().get()),
+        );
+        let effective_target = {
+            let mut latest = self
+                .latest
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            latest.accepting = false;
+            latest
+                .desired
+                .as_ref()
+                .map_or(target, |intent| target.max(intent.generation))
+        };
+        let Some(control) = &self.control else {
+            return self.disconnected_close(effective_target);
+        };
+        let (reply, outcome) = mpsc::channel();
+        let send = send_control_until(
+            control,
+            PersistenceControl::Close {
+                target: effective_target,
+                deadline,
+                policy,
+                reply,
+            },
+            deadline,
+        );
+        if let Err(error) = send {
+            if policy == ClosePolicy::RequireDurable {
+                self.latest
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .accepting = true;
+            }
+            return match error {
+                ControlSendError::Deadline => self.deadline_close(effective_target),
+                ControlSendError::Disconnected => self.disconnected_close(effective_target),
             };
         }
-        error
-    }
-
-    fn open_owned(
-        &mut self,
-        session_id: smelt_core::session_id::SessionId,
-    ) -> Result<(), SessionBackendError> {
-        if matches!(
-            &self.state,
-            SessionBackendState::Owned {
-                session_id: current,
-                ..
-            } if current == &session_id
-        ) {
-            return Ok(());
-        }
-        self.release().map_err(|message| {
-            SessionBackendError::reopenable(format!("release previous session writer: {message}"))
-        })?;
-        #[cfg(any(test, feature = "harness"))]
-        if std::mem::take(&mut self.fail_next_open) {
-            let error = SessionBackendError::injected_transient();
-            return Err(self.record_open_failure(session_id, error));
-        }
-        let session_dir = smelt_core::session::session_dir(&session_id);
-        let root = session_dir.parent().expect("session root");
-        match smelt_store::OwnedSessionWriter::open(root, session_id.as_str()) {
-            Ok(writer) => {
-                self.state = SessionBackendState::Owned {
-                    session_id,
-                    writer: Box::new(writer),
+        let result = outcome
+            .recv()
+            .unwrap_or_else(|_| self.disconnected_close(effective_target));
+        let stopped = result.durable >= result.target || result.omitted.is_some();
+        if stopped {
+            self.control = None;
+            if self
+                .thread
+                .take()
+                .is_some_and(|thread| thread.join().is_err())
+                && result.cause.is_none()
+            {
+                return PersistenceCloseOutcome {
+                    cause: Some(PersistenceCause::unavailable(
+                        "persistence actor panicked during close",
+                    )),
+                    ..result
                 };
-                Ok(())
             }
-            Err(err) => {
-                let error = SessionBackendError::from_store_error("open session writer", err);
-                Err(self.record_open_failure(session_id, error))
-            }
+        } else if policy == ClosePolicy::RequireDurable {
+            self.latest
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .accepting = true;
+        }
+        result
+    }
+
+    fn durable_generation(&self) -> PersistenceGeneration {
+        match self.status().state {
+            PersistenceState::Idle { durable, .. }
+            | PersistenceState::Blocked { durable, .. }
+            | PersistenceState::OwnershipLost { durable, .. }
+            | PersistenceState::Stopped { durable, .. } => durable,
+            PersistenceState::Saving { durable, .. } => durable,
+            PersistenceState::Durable { generation, .. } => generation,
         }
     }
 
-    fn writer(
-        &mut self,
-        session_id: &str,
-    ) -> Result<(&mut smelt_store::OwnedSessionWriter, PathBuf), SessionBackendError> {
-        let session_id = smelt_core::session_id::SessionId::parse(session_id)
-            .map_err(|err| SessionBackendError::reopenable(format!("invalid session id: {err}")))?;
-        let already_owned = match &self.state {
-            SessionBackendState::ReadOnly {
-                session_id: current,
-                error,
-            } if current == &session_id => return Err(error.clone()),
-            SessionBackendState::Owned {
-                session_id: current,
-                ..
-            } if current == &session_id => true,
-            _ => false,
-        };
-        if already_owned {
-            smelt_perf::perf::record_value("store:db:cached_read_write", 1);
-        } else {
-            self.open_owned(session_id.clone())?;
+    fn deadline_flush(&self, target: PersistenceGeneration) -> PersistenceFlushOutcome {
+        smelt_perf::perf::record_value("persist:flush:deadline", 1);
+        PersistenceFlushOutcome::Deadline {
+            epoch: self.epoch,
+            target,
+            durable: self.durable_generation(),
         }
-        match &mut self.state {
-            SessionBackendState::Owned { writer, .. } => {
-                writer.reopen_connection().map_err(|err| {
-                    SessionBackendError::from_store_error("reopen session writer", err)
-                })?;
-                let session_dir = writer.session_dir().to_path_buf();
-                Ok((writer, session_dir))
-            }
-            _ => Err(SessionBackendError::reopenable(
-                "persistence backend did not enter owned state".into(),
+    }
+
+    fn stopped_flush(
+        &self,
+        target: PersistenceGeneration,
+        message: &str,
+    ) -> PersistenceFlushOutcome {
+        PersistenceFlushOutcome::Stopped {
+            epoch: self.epoch,
+            target,
+            durable: self.durable_generation(),
+            cause: PersistenceCause::unavailable(message),
+        }
+    }
+
+    fn deadline_close(&self, target: PersistenceGeneration) -> PersistenceCloseOutcome {
+        smelt_perf::perf::record_value("persist:close:deadline", 1);
+        PersistenceCloseOutcome {
+            epoch: self.epoch,
+            target,
+            durable: self.durable_generation(),
+            omitted: None,
+            receipt: None,
+            cause: Some(PersistenceCause::unavailable(
+                "persistence actor close was not admitted before the deadline",
             )),
         }
     }
 
-    fn publish_staged(&mut self) -> Result<Option<String>, String> {
-        let SessionBackendState::Owned { writer, .. } = &mut self.state else {
-            return Ok(None);
-        };
-        if !writer.is_staged() {
-            return Ok(None);
-        }
-        writer
-            .publish()
-            .map_err(|err| format!("publish staged session: {err}"))?;
-        #[cfg(any(test, feature = "harness"))]
-        if std::mem::take(&mut self.fail_next_publish_reopen) {
-            writer.invalidate_connection();
-            return Ok(Some(SessionBackendError::injected_transient().message));
-        }
-        Ok(None)
-    }
-
-    fn release(&mut self) -> Result<(), String> {
-        match std::mem::replace(&mut self.state, SessionBackendState::Closed) {
-            SessionBackendState::Owned { writer, .. } => {
-                (*writer).release().map_err(|err| err.to_string())
-            }
-            SessionBackendState::Closed | SessionBackendState::ReadOnly { .. } => Ok(()),
+    fn disconnected_close(&self, target: PersistenceGeneration) -> PersistenceCloseOutcome {
+        PersistenceCloseOutcome {
+            epoch: self.epoch,
+            target,
+            durable: self.durable_generation(),
+            omitted: None,
+            receipt: None,
+            cause: Some(PersistenceCause::unavailable(
+                "persistence actor stopped before completing close",
+            )),
         }
     }
 
-    fn discard_owned_writer(&mut self) {
-        let state = std::mem::replace(&mut self.state, SessionBackendState::Closed);
-        if !matches!(state, SessionBackendState::Owned { .. }) {
-            self.state = state;
-        }
+    #[cfg(test)]
+    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::SessionCommitFailure) {
+        let (reply, done) = mpsc::channel();
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::InjectCommitFailure(failure, reply))
+            .expect("persistence actor accepts commit failure injection");
+        done.recv()
+            .expect("persistence actor acknowledges commit failure injection");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_publish_failure(&self) {
+        let (reply, done) = mpsc::channel();
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::InjectPublishFailure(reply))
+            .expect("persistence actor accepts publication failure injection");
+        done.recv()
+            .expect("persistence actor acknowledges publication failure injection");
+    }
+
+    #[cfg(test)]
+    fn pause(&self) -> mpsc::Sender<()> {
+        let (paused, waiting) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::Pause(paused, released))
+            .expect("persistence actor accepts pause injection");
+        waiting
+            .recv()
+            .expect("persistence actor reaches pause injection");
+        release
+    }
+
+    #[cfg(test)]
+    fn install_commit_barrier(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started, waiting) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (installed, acknowledged) = mpsc::channel();
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::InstallCommitBarrier(
+                started, released, installed,
+            ))
+            .expect("persistence actor accepts commit barrier");
+        acknowledged
+            .recv()
+            .expect("persistence actor installs commit barrier");
+        (waiting, release)
+    }
+
+    #[cfg(test)]
+    fn inject_panic(&self) {
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::InjectPanic)
+            .expect("persistence actor accepts panic injection");
     }
 }
 
-fn worker_loop(
-    rx: Receiver<QueuedCommand>,
-    reports: Sender<SessionBackendEvent>,
-    queued_commands: Arc<AtomicUsize>,
-    queued_payload_bytes: Arc<AtomicUsize>,
-    pending_full_audit_bytes: Arc<AtomicUsize>,
-) {
-    smelt_core::session::cleanup_abandoned_session_artifacts();
-    let mut backend = SessionBackend::new();
-    let mut failures_since_flush = Vec::new();
-    while let Ok(queued) = rx.recv() {
-        let depth = queued_commands
-            .fetch_sub(1, Ordering::AcqRel)
-            .saturating_sub(1);
-        let payload_bytes = queued_payload_bytes
-            .fetch_sub(queued.estimated_payload_bytes, Ordering::AcqRel)
-            .saturating_sub(queued.estimated_payload_bytes);
-        smelt_perf::perf::record_value("persist:queue:remaining", depth as u64);
-        smelt_perf::perf::record_value(
-            "persist:queue:remaining_payload_bytes",
-            payload_bytes as u64,
-        );
-        let reserved_full_audit_bytes = queued.reserved_full_audit_bytes;
-        let mut shutdown = false;
-        match queued.command {
-            SessionBackendCommand::OpenOwned(session_id, reply) => {
-                let result = backend
-                    .open_owned(session_id)
-                    .map_err(|error| error.message);
-                let _ = reply.send(result);
-            }
-            SessionBackendCommand::CommitSession(req) => {
-                #[cfg(any(test, feature = "harness"))]
-                let injected_failure = backend.fail_next_commit.take();
-                #[cfg(not(any(test, feature = "harness")))]
-                let injected_failure = None;
-                let result = match injected_failure {
-                    Some(failure) => Err(PersistWriteError::Commit(failure)),
-                    None => backend
-                        .writer(&req.command.session_id)
-                        .map_err(PersistWriteError::Backend)
-                        .and_then(|(writer, session_dir)| write(&req, writer, &session_dir)),
-                };
-                let result = result.and_then(|mut success| {
-                    let publish_warning = backend.publish_staged().map_err(persist_write_error)?;
-                    if let Some(publish_warning) = publish_warning {
-                        success.warning = Some(match success.warning.take() {
-                            Some(warning) => format!("{warning}; {publish_warning}"),
-                            None => publish_warning,
-                        });
-                    }
-                    Ok(success)
-                });
-                if result
-                    .as_ref()
-                    .is_err_and(PersistWriteError::invalidates_connection)
-                {
-                    backend.discard_owned_writer();
-                }
-                if let Some(failure) = report_save_result(result, &req, &reports) {
-                    failures_since_flush.push(failure);
-                }
-            }
-            SessionBackendCommand::AppendRequestAudit(req) => {
-                let result = backend
-                    .writer(&req.session_id)
-                    .map_err(|error| PersistRequestAuditError::Message(error.message))
-                    .and_then(|(writer, _)| write_request_audit(&req, writer));
-                if result
-                    .as_ref()
-                    .is_err_and(PersistRequestAuditError::invalidates_connection)
-                {
-                    backend.discard_owned_writer();
-                }
-                report_request_audit_result(result, &req, &reports);
-            }
-            #[cfg(any(test, feature = "harness"))]
-            SessionBackendCommand::InjectTransientOpenFailure(done) => {
-                backend.discard_owned_writer();
-                backend.fail_next_open = true;
-                let _ = done.send(());
-            }
-            #[cfg(any(test, feature = "harness"))]
-            SessionBackendCommand::InjectCommitFailure(failure, done) => {
-                backend.fail_next_commit = Some(failure);
-                let _ = done.send(());
-            }
-            #[cfg(any(test, feature = "harness"))]
-            SessionBackendCommand::InjectPublishReopenFailure(done) => {
-                backend.fail_next_publish_reopen = true;
-                let _ = done.send(());
-            }
-            SessionBackendCommand::Flush(done) => {
-                let _ = done.send(std::mem::take(&mut failures_since_flush));
-            }
-            SessionBackendCommand::Release(done) => {
-                let _ = done.send(backend.release());
-            }
-            SessionBackendCommand::Shutdown(done) => {
-                let _ = done.send(backend.release());
-                shutdown = true;
-            }
-        }
-        let full_audit_bytes = pending_full_audit_bytes
-            .fetch_sub(reserved_full_audit_bytes, Ordering::AcqRel)
-            .saturating_sub(reserved_full_audit_bytes);
-        smelt_perf::perf::record_value(
-            "persist:queue:remaining_full_audit_bytes",
-            full_audit_bytes as u64,
-        );
-        if shutdown {
+impl Drop for SessionPersistence {
+    fn drop(&mut self) {
+        if self.thread.is_none() {
             return;
         }
+        let target = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .desired
+            .as_ref()
+            .map_or_else(|| self.durable_generation(), |intent| intent.generation);
+        let _ = self.close(
+            target,
+            Instant::now() + DEFAULT_PERSISTENCE_DEADLINE,
+            ClosePolicy::AllowUnsaved,
+        );
+        self.control = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
-    let _ = backend.release();
 }
 
-struct PersistSuccess {
-    receipt: smelt_store::SaveReceipt,
-    warning: Option<String>,
+struct StatusPublisher {
+    status: Arc<Mutex<SessionPersistenceStatus>>,
+    wake: SyncSender<()>,
 }
 
-fn report_save_result(
-    result: Result<PersistSuccess, PersistWriteError>,
-    req: &PersistRequest,
-    reports: &Sender<SessionBackendEvent>,
-) -> Option<PersistFailure> {
-    let (report, failure) = match result {
-        Ok(success) => (
-            SessionBackendEvent::Saved {
-                receipt: success.receipt,
-                warning: success.warning,
-            },
-            None,
-        ),
-        Err(err) => {
-            let failure = PersistFailure {
-                save_id: req.command.save_id.get(),
-                session_id: req.command.session_id.clone(),
-                message: err.message(),
-                commit_failure: err.commit_failure(),
-                disposition: err.disposition(),
-            };
-            (SessionBackendEvent::Failed(failure.clone()), Some(failure))
+impl StatusPublisher {
+    fn publish_state(&self, state: PersistenceState) {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .state = state;
+        let _ = self.wake.try_send(());
+    }
+
+    fn publish_durable(
+        &self,
+        generation: PersistenceGeneration,
+        receipt: smelt_store::SaveReceipt,
+    ) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = status
+            .acknowledgement
+            .as_ref()
+            .map_or(receipt.previous, |current| {
+                assert_eq!(
+                    current.receipt.current, receipt.previous,
+                    "persistence acknowledgement receipts must form one store-head chain"
+                );
+                current.previous
+            });
+        status.acknowledgement = Some(PersistenceAcknowledgement {
+            generation,
+            previous,
+            receipt: receipt.clone(),
+        });
+        status.state = PersistenceState::Durable {
+            generation,
+            receipt,
+        };
+        drop(status);
+        let _ = self.wake.try_send(());
+    }
+
+    fn publish_audit_warning(&self, warning: Option<PersistenceCause>) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if status.latest_audit_warning.is_some() {
+            smelt_perf::perf::record_value("persist:audit:warning_overwritten", 1);
+        }
+        if warning.is_some() {
+            smelt_perf::perf::record_value("persist:audit:warnings", 1);
+        }
+        status.latest_audit_warning = warning;
+        drop(status);
+        let _ = self.wake.try_send(());
+    }
+
+    fn publish_sidecar_warning(&self, warning: Option<PersistenceCause>) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if status.latest_sidecar_warning.is_some() {
+            smelt_perf::perf::record_value("persist:sidecar:warning_overwritten", 1);
+        }
+        if warning.is_some() {
+            smelt_perf::perf::record_value("persist:sidecar:warnings", 1);
+        }
+        status.latest_sidecar_warning = warning;
+        drop(status);
+        let _ = self.wake.try_send(());
+    }
+}
+
+struct PersistenceActor {
+    session_id: smelt_core::session_id::SessionId,
+    epoch: SessionEpoch,
+    latest: Arc<Mutex<LatestIntentState>>,
+    publisher: StatusPublisher,
+    writer: Option<smelt_store::OwnedSessionWriter>,
+    head: smelt_store::StoreHead,
+    durable: PersistenceGeneration,
+    last_receipt: Option<smelt_store::SaveReceipt>,
+    blocked: Option<(PersistenceGeneration, PersistenceCause)>,
+    audits: VecDeque<QueuedAudit>,
+    pending_audits: Arc<AtomicUsize>,
+    pending_full_audit_bytes: Arc<AtomicUsize>,
+    #[cfg(test)]
+    fail_next_commit: Option<smelt_store::SessionCommitFailure>,
+    #[cfg(test)]
+    fail_next_publish: bool,
+    #[cfg(test)]
+    commit_barrier: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persistence_actor(
+    session_id: smelt_core::session_id::SessionId,
+    epoch: SessionEpoch,
+    generation: PersistenceGeneration,
+    acknowledged_head: smelt_store::StoreHead,
+    latest: Arc<Mutex<LatestIntentState>>,
+    controls: Receiver<PersistenceControl>,
+    status: Arc<Mutex<SessionPersistenceStatus>>,
+    status_wake: SyncSender<()>,
+    pending_audits: Arc<AtomicUsize>,
+    pending_full_audit_bytes: Arc<AtomicUsize>,
+    started: mpsc::Sender<Result<(), PersistenceCause>>,
+) {
+    let publisher = StatusPublisher {
+        status,
+        wake: status_wake,
+    };
+    let session_dir = smelt_core::session::session_dir(&session_id);
+    let Some(root) = session_dir.parent() else {
+        let cause = PersistenceCause::invariant("session directory has no storage root");
+        publisher.publish_state(PersistenceState::Stopped {
+            durable: generation,
+            omitted: None,
+            cause: Some(cause.clone()),
+        });
+        let _ = started.send(Err(cause));
+        return;
+    };
+    let writer = match smelt_store::OwnedSessionWriter::open(root, session_id.as_str()) {
+        Ok(writer) => writer,
+        Err(error) => {
+            let cause = PersistenceCause::from_store("open session writer", error);
+            publisher.publish_state(PersistenceState::Stopped {
+                durable: generation,
+                omitted: None,
+                cause: Some(cause.clone()),
+            });
+            let _ = started.send(Err(cause));
+            return;
         }
     };
-    let _ = reports.send(report);
-    failure
+    let actual_head = match writer.store_head() {
+        Ok(head) => head,
+        Err(error) => {
+            let cause = PersistenceCause::from_store("read session store head", error);
+            publisher.publish_state(PersistenceState::Stopped {
+                durable: generation,
+                omitted: None,
+                cause: Some(cause.clone()),
+            });
+            let _ = started.send(Err(cause));
+            let _ = writer.release();
+            return;
+        }
+    };
+    if actual_head != acknowledged_head {
+        let cause = PersistenceCause::invariant(format!(
+            "document store head {acknowledged_head:?} does not match actor store head {actual_head:?}"
+        ));
+        publisher.publish_state(PersistenceState::Stopped {
+            durable: generation,
+            omitted: None,
+            cause: Some(cause.clone()),
+        });
+        let _ = started.send(Err(cause));
+        let _ = writer.release();
+        return;
+    }
+    let mut actor = PersistenceActor {
+        session_id,
+        epoch,
+        latest,
+        publisher,
+        writer: Some(writer),
+        head: actual_head,
+        durable: generation,
+        last_receipt: None,
+        blocked: None,
+        audits: VecDeque::new(),
+        pending_audits,
+        pending_full_audit_bytes,
+        #[cfg(test)]
+        fail_next_commit: None,
+        #[cfg(test)]
+        fail_next_publish: false,
+        #[cfg(test)]
+        commit_barrier: None,
+    };
+    let _ = started.send(Ok(()));
+    actor.run(controls);
 }
 
-fn report_request_audit_result(
-    result: Result<i64, PersistRequestAuditError>,
-    req: &PersistRequestAudit,
-    reports: &Sender<SessionBackendEvent>,
-) {
-    match result {
-        Err(err) => {
-            let _ = reports.send(SessionBackendEvent::RequestAuditFailed(
-                PersistRequestAuditFailure {
-                    session_id: req.session_id.clone(),
-                    message: err.message(),
-                },
+impl PersistenceActor {
+    fn run(&mut self, controls: Receiver<PersistenceControl>) {
+        loop {
+            self.drive_latest();
+            self.drive_audits();
+            let control = match controls.recv() {
+                Ok(control) => control,
+                Err(_) => {
+                    let omitted = self
+                        .latest_generation()
+                        .filter(|target| *target > self.durable);
+                    self.finish(
+                        omitted,
+                        Some(PersistenceCause::unavailable(
+                            "persistence actor control lane disconnected",
+                        )),
+                    );
+                    return;
+                }
+            };
+            match control {
+                PersistenceControl::WakeDesired => {
+                    self.latest
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .wake_pending = false;
+                }
+                PersistenceControl::AppendRequestAudit(audit) => {
+                    if audit.intent.epoch != self.epoch {
+                        self.release_audit(&audit);
+                        smelt_perf::perf::record_value("persist:audit:rejected", 1);
+                        self.publisher
+                            .publish_audit_warning(Some(PersistenceCause::invariant(format!(
+                                "discarded request audit for stale epoch {} (actor epoch {})",
+                                audit.intent.epoch.get(),
+                                self.epoch.get()
+                            ))));
+                    } else {
+                        self.audits.push_back(*audit);
+                    }
+                }
+                PersistenceControl::RetryBlocked => {
+                    self.blocked = None;
+                }
+                PersistenceControl::Flush {
+                    target,
+                    deadline,
+                    reply,
+                } => {
+                    self.drive_latest();
+                    self.drive_audits();
+                    let _ = reply.send(self.flush_outcome(target, deadline));
+                }
+                PersistenceControl::Close {
+                    target,
+                    deadline,
+                    policy,
+                    reply,
+                } => {
+                    self.drive_latest();
+                    self.drive_audits();
+                    if self.durable >= target {
+                        let receipt = self.last_receipt.clone();
+                        let cause = self.finish(None, None);
+                        let _ = reply.send(PersistenceCloseOutcome {
+                            epoch: self.epoch,
+                            target,
+                            durable: self.durable,
+                            omitted: None,
+                            receipt,
+                            cause,
+                        });
+                        return;
+                    }
+                    if policy == ClosePolicy::AllowUnsaved {
+                        let receipt = self.last_receipt.clone();
+                        let cause = self.finish(Some(target), None);
+                        let _ = reply.send(PersistenceCloseOutcome {
+                            epoch: self.epoch,
+                            target,
+                            durable: self.durable,
+                            omitted: Some(target),
+                            receipt,
+                            cause,
+                        });
+                        return;
+                    }
+                    let cause = if Instant::now() >= deadline {
+                        smelt_perf::perf::record_value("persist:close:deadline", 1);
+                        PersistenceCause::unavailable(format!(
+                            "close deadline reached before generation {} became durable",
+                            target.get()
+                        ))
+                    } else {
+                        self.blocked.as_ref().map_or_else(
+                            || {
+                                PersistenceCause::unavailable(format!(
+                                    "generation {} is not available to the persistence actor",
+                                    target.get()
+                                ))
+                            },
+                            |(_, cause)| cause.clone(),
+                        )
+                    };
+                    let _ = reply.send(PersistenceCloseOutcome {
+                        epoch: self.epoch,
+                        target,
+                        durable: self.durable,
+                        omitted: None,
+                        receipt: self.last_receipt.clone(),
+                        cause: Some(cause),
+                    });
+                }
+                #[cfg(test)]
+                PersistenceControl::InjectCommitFailure(failure, reply) => {
+                    self.fail_next_commit = Some(failure);
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
+                PersistenceControl::InjectPublishFailure(reply) => {
+                    self.fail_next_publish = true;
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
+                PersistenceControl::Pause(paused, release) => {
+                    let _ = paused.send(());
+                    let _ = release.recv();
+                }
+                #[cfg(test)]
+                PersistenceControl::InstallCommitBarrier(started, release, installed) => {
+                    self.commit_barrier = Some((started, release));
+                    let _ = installed.send(());
+                }
+                #[cfg(test)]
+                PersistenceControl::InjectPanic => panic!("injected persistence actor panic"),
+            }
+        }
+    }
+
+    fn latest_generation(&self) -> Option<PersistenceGeneration> {
+        self.latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .desired
+            .as_ref()
+            .map(|intent| intent.generation)
+    }
+
+    fn latest_intent(&self) -> Option<Arc<SessionSaveIntent>> {
+        let mut latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        latest.wake_pending = false;
+        latest.desired.clone()
+    }
+
+    fn drive_latest(&mut self) {
+        let Some(intent) = self.latest_intent() else {
+            return;
+        };
+        if intent.generation <= self.durable || self.blocked.is_some() {
+            return;
+        }
+        self.publisher.publish_state(PersistenceState::Saving {
+            generation: intent.generation,
+            durable: self.durable,
+        });
+        match self.converge(&intent) {
+            Ok(receipt) => {
+                self.head = receipt.current;
+                self.durable = intent.generation;
+                self.last_receipt = Some(receipt.clone());
+                self.blocked = None;
+                self.publisher.publish_durable(intent.generation, receipt);
+            }
+            Err(cause) => {
+                self.blocked = Some((intent.generation, cause.clone()));
+                let state = if cause.class == PersistenceFailureClass::Ownership {
+                    record_failure_transition("persist:ownership_lost:transitions", cause.class);
+                    PersistenceState::OwnershipLost {
+                        desired: intent.generation,
+                        durable: self.durable,
+                        cause,
+                    }
+                } else {
+                    record_failure_transition("persist:blocked:transitions", cause.class);
+                    PersistenceState::Blocked {
+                        desired: intent.generation,
+                        durable: self.durable,
+                        cause,
+                    }
+                };
+                self.publisher.publish_state(state);
+            }
+        }
+    }
+
+    fn drive_audits(&mut self) {
+        while let Some(index) = self
+            .audits
+            .iter()
+            .position(|audit| audit.intent.required_generation <= self.durable)
+        {
+            let result = {
+                let audit = &self.audits.get(index).expect("ready audit").intent;
+                self.writer
+                    .as_mut()
+                    .expect("actor writer")
+                    .reopen_connection()
+                    .and_then(|()| {
+                        self.writer
+                            .as_mut()
+                            .expect("actor writer")
+                            .append_request_attempt(&audit.entry, audit.payload_mode)
+                    })
+            };
+            match result {
+                Ok(_) => {
+                    let audit = self.audits.remove(index).expect("completed audit");
+                    let warning = audit.intent.payload_capture_skipped_bytes.map(|bytes| {
+                        PersistenceCause::new(
+                            PersistenceFailureClass::Environment,
+                            format!(
+                                "request audit payload was compacted after reaching the byte budget ({bytes} bytes omitted)"
+                            ),
+                        )
+                    });
+                    self.publisher.publish_audit_warning(warning);
+                    self.release_audit(&audit);
+                }
+                Err(error) => {
+                    smelt_perf::perf::record_value("persist:audit:failures", 1);
+                    let invalidates_connection = error.invalidates_connection();
+                    let warning = PersistenceCause::from_store("append request audit", error);
+                    let audit = self.audits.remove(index).expect("failed audit");
+                    self.release_audit(&audit);
+                    self.publisher.publish_audit_warning(Some(warning));
+                    if invalidates_connection {
+                        let writer = self.writer.as_mut().expect("actor writer");
+                        writer.invalidate_connection();
+                        if let Err(error) = writer.reopen_connection() {
+                            let cause = PersistenceCause::from_store(
+                                "reopen session writer after request audit failure",
+                                error,
+                            );
+                            let desired = self.latest_generation().unwrap_or(self.durable);
+                            self.blocked = Some((desired, cause.clone()));
+                            self.publisher.publish_state(PersistenceState::Blocked {
+                                desired,
+                                durable: self.durable,
+                                cause,
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn release_audit(&self, audit: &QueuedAudit) {
+        self.pending_audits.fetch_sub(1, Ordering::AcqRel);
+        self.pending_full_audit_bytes
+            .fetch_sub(audit.reserved_full_bytes, Ordering::AcqRel);
+    }
+
+    fn flush_outcome(
+        &self,
+        target: PersistenceGeneration,
+        deadline: Instant,
+    ) -> PersistenceFlushOutcome {
+        if self.durable >= target {
+            return PersistenceFlushOutcome::Durable {
+                epoch: self.epoch,
+                target,
+                durable: self.durable,
+                receipt: self.last_receipt.clone(),
+            };
+        }
+        if Instant::now() >= deadline {
+            smelt_perf::perf::record_value("persist:flush:deadline", 1);
+            return PersistenceFlushOutcome::Deadline {
+                epoch: self.epoch,
+                target,
+                durable: self.durable,
+            };
+        }
+        let cause = self.blocked.as_ref().map_or_else(
+            || {
+                PersistenceCause::unavailable(format!(
+                    "generation {} has not been submitted",
+                    target.get()
+                ))
+            },
+            |(_, cause)| cause.clone(),
+        );
+        if cause.class == PersistenceFailureClass::Ownership {
+            PersistenceFlushOutcome::OwnershipLost {
+                epoch: self.epoch,
+                target,
+                durable: self.durable,
+                cause,
+            }
+        } else {
+            PersistenceFlushOutcome::Blocked {
+                epoch: self.epoch,
+                target,
+                durable: self.durable,
+                cause,
+            }
+        }
+    }
+
+    fn finish(
+        &mut self,
+        omitted: Option<PersistenceGeneration>,
+        cause: Option<PersistenceCause>,
+    ) -> Option<PersistenceCause> {
+        self.latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .accepting = false;
+        while let Some(audit) = self.audits.pop_front() {
+            self.release_audit(&audit);
+        }
+        let release_cause = self.writer.take().and_then(|writer| {
+            writer
+                .release()
+                .err()
+                .map(|error| PersistenceCause::from_store("release session writer", error))
+        });
+        let final_cause = cause.or_else(|| release_cause.clone());
+        self.publisher.publish_state(PersistenceState::Stopped {
+            durable: self.durable,
+            omitted,
+            cause: final_cause,
+        });
+        release_cause
+    }
+}
+
+impl PersistenceActor {
+    fn converge(
+        &mut self,
+        intent: &SessionSaveIntent,
+    ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
+        let command = smelt_store::SessionCommit {
+            session_id: self.session_id.as_str().to_string(),
+            expected: self.head,
+            identity: intent.identity.clone(),
+            metadata: intent.metadata.clone(),
+            history: intent.history.clone(),
+            side_tables: intent.side_tables.clone(),
+            descriptors: intent.descriptors.clone(),
+        };
+        let fingerprint = smelt_store::session_commit_fingerprint(&command)
+            .map_err(|failure| PersistenceCause::from_commit(&failure))?;
+        self.writer
+            .as_mut()
+            .expect("actor writer")
+            .reopen_connection()
+            .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
+        if let Some(receipt) = self.matching_persisted_commit(&fingerprint)? {
+            return self.complete_commit(&command, receipt);
+        }
+        let actual_head = self
+            .writer
+            .as_ref()
+            .expect("actor writer")
+            .store_head()
+            .map_err(|error| PersistenceCause::from_store("read session store head", error))?;
+        if actual_head != command.expected {
+            return Err(PersistenceCause::invariant(format!(
+                "session store advanced unexpectedly: actor head {:?}, store head {:?}",
+                command.expected, actual_head
+            )));
+        }
+
+        #[cfg(test)]
+        if let Some((started, release)) = self.commit_barrier.take() {
+            let _ = started.send(());
+            let _ = release.recv();
+        }
+
+        let commit_perf = smelt_perf::perf::begin("persist:canonical_commit");
+        #[cfg(test)]
+        let result = self.fail_next_commit.take().map_or_else(
+            || {
+                self.writer
+                    .as_mut()
+                    .expect("actor writer")
+                    .commit_session(&command)
+            },
+            Err,
+        );
+        #[cfg(not(test))]
+        let result = self
+            .writer
+            .as_mut()
+            .expect("actor writer")
+            .commit_session(&command);
+        drop(commit_perf);
+
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(failure) => {
+                let cause = PersistenceCause::from_commit(&failure);
+                if cause.class != PersistenceFailureClass::Environment {
+                    return Err(cause);
+                }
+                self.recover_ambiguous_commit(&command, &fingerprint, cause)?
+            }
+        };
+        self.complete_commit(&command, receipt)
+    }
+
+    fn matching_persisted_commit(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<smelt_store::SaveReceipt>, PersistenceCause> {
+        self.writer
+            .as_ref()
+            .expect("actor writer")
+            .last_session_commit()
+            .map_err(|error| PersistenceCause::from_store("read last session commit", error))
+            .map(|last| {
+                last.and_then(|(persisted_fingerprint, receipt)| {
+                    (persisted_fingerprint == fingerprint).then_some(receipt)
+                })
+            })
+    }
+
+    fn recover_ambiguous_commit(
+        &mut self,
+        command: &smelt_store::SessionCommit,
+        fingerprint: &str,
+        original: PersistenceCause,
+    ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
+        smelt_perf::perf::record_value("persist:recovery:structural_reopen", 1);
+        let writer = self.writer.as_mut().expect("actor writer");
+        writer.invalidate_connection();
+        writer.reopen_connection().map_err(|error| {
+            PersistenceCause::from_store(
+                &format!("recover ambiguous commit after {}", original.message),
+                error,
+            )
+        })?;
+        smelt_perf::perf::record_value("persist:recovery:fingerprint_checks", 1);
+        if let Some(receipt) = self.matching_persisted_commit(fingerprint)? {
+            smelt_perf::perf::record_value("persist:recovery:fingerprint_matches", 1);
+            return validate_receipt(command, receipt);
+        }
+        let head = self
+            .writer
+            .as_ref()
+            .expect("actor writer")
+            .store_head()
+            .map_err(|error| {
+                PersistenceCause::from_store("read store head during commit recovery", error)
+            })?;
+        if head != command.expected {
+            return Err(PersistenceCause::invariant(format!(
+                "ambiguous commit was not recorded but changed the store head from {:?} to {:?}",
+                command.expected, head
+            )));
+        }
+        smelt_perf::perf::record_value("persist:recovery:exact_repeats", 1);
+        let repeat_perf = smelt_perf::perf::begin("persist:canonical_commit_repeat");
+        let repeated = self
+            .writer
+            .as_mut()
+            .expect("actor writer")
+            .commit_session(command)
+            .map_err(|failure| {
+                let repeated = PersistenceCause::from_commit(&failure);
+                PersistenceCause::new(
+                    repeated.class,
+                    format!(
+                        "ambiguous commit failed ({}) and its single exact repeat failed ({})",
+                        original.message, repeated.message
+                    ),
+                )
+            })?;
+        drop(repeat_perf);
+        validate_receipt(command, repeated)
+    }
+
+    fn complete_commit(
+        &mut self,
+        command: &smelt_store::SessionCommit,
+        receipt: smelt_store::SaveReceipt,
+    ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
+        let receipt = validate_receipt(command, receipt)?;
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_publish) {
+            self.writer
+                .as_mut()
+                .expect("actor writer")
+                .invalidate_connection();
+            return Err(PersistenceCause::new(
+                PersistenceFailureClass::Environment,
+                "injected failure while publishing the committed session",
             ));
         }
-        Ok(_) => {
-            if let Some(estimated_bytes) = req.payload_capture_skipped_bytes {
-                let _ = reports.send(SessionBackendEvent::RequestAuditPayloadSkipped(
-                    PersistRequestAuditPayloadSkipped {
-                        session_id: req.session_id.clone(),
-                        estimated_bytes,
-                    },
-                ));
-            }
+        let writer = self.writer.as_mut().expect("actor writer");
+        if writer.is_staged() {
+            let publication_perf = smelt_perf::perf::begin("persist:staged_publication");
+            writer
+                .publish()
+                .map_err(|error| PersistenceCause::from_store("publish session", error))?;
+            drop(publication_perf);
         }
+        record_save_receipt(&receipt);
+        let warning = smelt_core::session::refresh_derived_files(writer.session_dir())
+            .err()
+            .map(|error| {
+                PersistenceCause::new(
+                    PersistenceFailureClass::Environment,
+                    format!(
+                        "session {} is durable, but derived cache refresh failed: {error}",
+                        receipt.session_id
+                    ),
+                )
+            });
+        self.publisher.publish_sidecar_warning(warning);
+        Ok(receipt)
     }
 }
 
-#[derive(Clone, Debug)]
-enum PersistWriteError {
-    Message(String),
-    Backend(SessionBackendError),
-    Commit(smelt_store::SessionCommitFailure),
-}
-
-impl PersistWriteError {
-    fn message(&self) -> String {
-        match self {
-            Self::Message(message) => message.clone(),
-            Self::Backend(error) => error.message.clone(),
-            Self::Commit(failure) => format!(
-                "save session database: {}",
-                describe_commit_failure(failure)
-            ),
-        }
+fn validate_receipt(
+    command: &smelt_store::SessionCommit,
+    receipt: smelt_store::SaveReceipt,
+) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
+    let advanced_revision = command.expected.revision.checked_add(1);
+    let expected_descriptor_len = match &command.descriptors {
+        Some(descriptors) => descriptors
+            .start
+            .get()
+            .checked_add(descriptors.records.len() as u64)
+            .map(smelt_store::DescriptorLen::new)
+            .ok_or_else(|| PersistenceCause::invariant("descriptor length overflow"))?,
+        None => command.expected.descriptor_len,
+    };
+    let current_shape_matches = receipt.current.history_len == command.history.final_len
+        && receipt.current.descriptor_len == expected_descriptor_len;
+    let revision_matches = receipt.current.revision == command.expected.revision
+        || advanced_revision == Some(receipt.current.revision);
+    if receipt.session_id != command.session_id
+        || receipt.previous != command.expected
+        || !current_shape_matches
+        || !revision_matches
+    {
+        return Err(PersistenceCause::invariant(format!(
+            "malformed save receipt: expected session {}, previous head {:?}, history length {}, descriptor length {}, and unchanged or singly advanced revision; got {:?}",
+            command.session_id,
+            command.expected,
+            command.history.final_len.get(),
+            expected_descriptor_len.get(),
+            receipt
+        )));
     }
-
-    fn commit_failure(&self) -> Option<smelt_store::SessionCommitFailure> {
-        match self {
-            Self::Backend(error)
-                if error.disposition
-                    == smelt_store::SessionPersistenceDisposition::OwnershipLost =>
-            {
-                Some(smelt_store::SessionCommitFailure::OwnershipLost)
-            }
-            Self::Commit(failure) => Some(failure.clone()),
-            Self::Message(_) | Self::Backend(_) => None,
-        }
-    }
-
-    fn disposition(&self) -> smelt_store::SessionPersistenceDisposition {
-        match self {
-            Self::Backend(error) => error.disposition,
-            Self::Commit(failure) => failure.disposition(),
-            Self::Message(_) => smelt_store::SessionPersistenceDisposition::Reopen,
-        }
-    }
-
-    fn invalidates_connection(&self) -> bool {
-        matches!(self, Self::Commit(failure) if failure.invalidates_connection())
-    }
-}
-
-#[derive(Debug)]
-enum PersistRequestAuditError {
-    Message(String),
-    Store(smelt_store::StoreError),
-}
-
-impl PersistRequestAuditError {
-    fn message(&self) -> String {
-        match self {
-            Self::Message(message) => message.clone(),
-            Self::Store(err) => err.to_string(),
-        }
-    }
-
-    fn invalidates_connection(&self) -> bool {
-        matches!(self, Self::Store(err) if err.invalidates_connection())
-    }
-}
-
-fn persist_write_error(message: impl Into<String>) -> PersistWriteError {
-    PersistWriteError::Message(message.into())
+    Ok(receipt)
 }
 
 fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> String {
@@ -964,57 +1872,6 @@ fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
     );
 }
 
-fn write(
-    req: &PersistRequest,
-    writer: &mut smelt_store::OwnedSessionWriter,
-    session_dir: &Path,
-) -> Result<PersistSuccess, PersistWriteError> {
-    let _perf = smelt_perf::perf::begin("persist:write");
-    smelt_perf::perf::record_value(
-        "persist:write:history_items",
-        req.command.history.items.len() as u64,
-    );
-    let descriptor_records = req
-        .command
-        .descriptors
-        .as_ref()
-        .map_or(0, |descriptors| descriptors.records.len() as u64);
-    smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
-
-    let command = &req.command;
-    let receipt = writer
-        .commit_session(command)
-        .map_err(PersistWriteError::Commit)?;
-    let mut warnings = Vec::new();
-    record_save_receipt(&receipt);
-    let (descriptor_start_idx, descriptor_records) = command
-        .descriptors
-        .as_ref()
-        .map(|descriptors| (descriptors.start.get(), descriptors.records.len() as u64))
-        .unwrap_or((0, 0));
-    smelt_perf::perf::record_value("persist:write:descriptor_start_idx", descriptor_start_idx);
-    smelt_perf::perf::record_value("persist:write:descriptor_records", descriptor_records);
-    if let Err(err) = smelt_core::session::refresh_derived_files(session_dir) {
-        smelt_perf::perf::record_value("persist:write:derived_refresh_failed", 1);
-        warnings.push(format!(
-            "session {} was saved, but derived cache refresh failed: {err}",
-            receipt.session_id
-        ));
-    }
-    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
-    Ok(PersistSuccess { receipt, warning })
-}
-
-fn write_request_audit(
-    req: &PersistRequestAudit,
-    writer: &mut smelt_store::OwnedSessionWriter,
-) -> Result<i64, PersistRequestAuditError> {
-    let _perf = smelt_perf::perf::begin("persist:request_audit");
-    writer
-        .append_request_attempt(&req.entry, req.payload_mode)
-        .map_err(PersistRequestAuditError::Store)
-}
-
 #[cfg(any(test, feature = "harness"))]
 pub(crate) fn write_transcript_descriptor_suffix(
     session_dir: &std::path::Path,
@@ -1052,39 +1909,22 @@ mod tests {
     use super::*;
 
     const SESSION_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const SECOND_SESSION_ID: &str =
-        "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    struct StateHomeGuard(Option<std::ffi::OsString>);
-
-    impl StateHomeGuard {
-        fn install(path: &Path) -> Self {
-            let previous = std::env::var_os("XDG_STATE_HOME");
-            std::env::set_var("XDG_STATE_HOME", path);
-            Self(previous)
-        }
+    fn actor() -> SessionPersistence {
+        SessionPersistence::spawn(
+            smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap(),
+            SessionEpoch::new(1),
+            PersistenceGeneration::ZERO,
+            smelt_store::StoreHead::default(),
+        )
+        .unwrap()
     }
 
-    impl Drop for StateHomeGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-                None => std::env::remove_var("XDG_STATE_HOME"),
-            }
-        }
-    }
-
-    fn commit(session_id: &str, base_revision: u64) -> smelt_store::SessionCommit {
-        smelt_store::SessionCommit {
-            session_id: session_id.into(),
-            save_id: smelt_store::SaveId::new(1),
-            expected: smelt_store::StoreHead {
-                revision: smelt_store::Revision::new(base_revision),
-                history_len: smelt_store::HistoryLen::ZERO,
-                descriptor_len: smelt_store::DescriptorLen::ZERO,
-            },
+    fn intent(generation: u64, history: &[&str]) -> SessionSaveIntent {
+        SessionSaveIntent {
+            generation: PersistenceGeneration::new(generation),
             identity: smelt_store::SessionIdentity {
-                id: session_id.into(),
+                id: SESSION_ID.into(),
                 created_at: 1,
                 parent_id: None,
             },
@@ -1103,14 +1943,15 @@ mod tests {
                 context_tokens_history_len: None,
                 display_context_tokens: None,
                 session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
-                updated_at: 1,
+                updated_at: i64::try_from(generation).expect("test generation fits i64"),
             },
             history: smelt_store::HistorySuffix {
                 start: smelt_store::HistoryIndex::ZERO,
-                final_len: smelt_store::HistoryLen::new(1),
-                items: vec![protocol::HistoryItem::user(protocol::Content::text(
-                    "saved",
-                ))],
+                final_len: smelt_store::HistoryLen::new(history.len() as u64),
+                items: history
+                    .iter()
+                    .map(|text| protocol::HistoryItem::user(protocol::Content::text(*text)))
+                    .collect(),
             },
             side_tables: smelt_store::SideTableSuffixes {
                 start: smelt_store::HistoryIndex::ZERO,
@@ -1122,331 +1963,18 @@ mod tests {
         }
     }
 
-    fn request_audit(body: serde_json::Value) -> PersistRequestAudit {
-        PersistRequestAudit {
-            session_id: SESSION_ID.into(),
+    fn audit(epoch: u64, required_generation: u64, request_id: u64) -> RequestAuditIntent {
+        RequestAuditIntent {
+            epoch: SessionEpoch::new(epoch),
+            required_generation: PersistenceGeneration::new(required_generation),
             payload_mode: smelt_store::RequestAuditPayloadMode::Full,
             payload_capture_skipped_bytes: None,
             entry: protocol::request_log::RequestLogEntry {
-                request_id: 42,
+                request_id,
                 kind: "turn".into(),
-                turn_id: Some(42),
+                turn_id: Some(request_id),
                 ask_id: None,
-                history_len: Some(1),
-                timestamp_ms: 1000,
-                provider_kind: "openai".into(),
-                api_base: "https://api.example.test".into(),
-                model: "model-a".into(),
-                url: "https://api.example.test/v1/chat/completions".into(),
-                http_status: Some(200),
-                body,
-                prompt_cache_key: None,
-                stream: true,
-                system_prompt: None,
-                messages: None,
-                tools: None,
-                response: None,
-                usage: None,
-                cost_usd: None,
-                tokens_per_sec: None,
-                elapsed_ms: Some(250),
-                attempt: 1,
-                error: None,
-                background: false,
-            },
-        }
-    }
-
-    #[test]
-    fn queue_payload_estimate_accounts_for_serialized_commit_data() {
-        let mut command = commit(SESSION_ID, 0);
-        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::text(
-            "a queued payload",
-        ))];
-        let expected = serde_json::to_vec(&command).unwrap().len();
-        let queued = SessionBackendCommand::CommitSession(Box::new(PersistRequest { command }));
-
-        assert_eq!(queued.estimated_payload_bytes(), expected);
-    }
-
-    #[test]
-    fn full_audit_budget_overflow_compacts_payload_without_losing_body_size() {
-        let counter = AtomicUsize::new(0);
-        assert!(reserve_bytes(&counter, 10, 16));
-        assert!(!reserve_bytes(&counter, 7, 16));
-        assert_eq!(counter.load(Ordering::Acquire), 10);
-
-        let body = serde_json::json!({"prompt": "x".repeat(1024)});
-        let raw_body_size = serialized_size(&body);
-        let mut req = request_audit(body);
-        let full_size = serialized_size(&req.entry);
-
-        compact_request_audit(&mut req, full_size);
-
-        assert_eq!(req.entry.body, serde_json::Value::Null);
-        assert_eq!(req.payload_capture_skipped_bytes, Some(full_size));
-        assert_eq!(
-            req.payload_mode,
-            smelt_store::RequestAuditPayloadMode::Summary {
-                raw_body_size: Some(raw_body_size as u64),
-            }
-        );
-        assert!(serialized_size(&req.entry) < full_size);
-    }
-
-    #[test]
-    fn failed_commit_does_not_publish_attachment_or_session_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join(SESSION_ID);
-        let request = PersistRequest {
-            command: commit(SESSION_ID, 9),
-        };
-        let mut writer = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID).unwrap();
-        let work_dir = writer.session_dir().to_path_buf();
-
-        let result = write(&request, &mut writer, &work_dir);
-
-        assert!(result.is_err(), "stale commit should fail");
-        assert!(
-            !session_dir.exists(),
-            "a failed first commit must not publish the session destination"
-        );
-        assert!(
-            !work_dir.join("blobs/attachment.png").exists(),
-            "failed canonical transaction must not publish its attachment"
-        );
-        let staging_root = work_dir.join(".blob-staging");
-        if staging_root.exists() {
-            assert_eq!(std::fs::read_dir(staging_root).unwrap().count(), 0);
-        }
-        let db = smelt_store::SessionDb::open_read_only(work_dir.join("session.db")).unwrap();
-        assert!(db.stored_session().unwrap().is_none());
-        assert_eq!(
-            db.connection()
-                .query_row("SELECT COUNT(*) FROM objects", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn attachment_is_stored_in_the_canonical_transaction() {
-        let dir = tempfile::tempdir().unwrap();
-        let data_url = "data:image/png;base64,AAAA";
-        let mut command = commit(SESSION_ID, 0);
-        command.history.items = vec![protocol::HistoryItem::user(protocol::Content::with_images(
-            "attached".into(),
-            vec![("attachment.png".into(), data_url.into())],
-        ))];
-        let request = PersistRequest { command };
-        let mut writer = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID).unwrap();
-        let work_dir = writer.session_dir().to_path_buf();
-
-        let success = write(&request, &mut writer, &work_dir).expect("canonical commit succeeds");
-
-        assert_eq!(success.receipt.current.revision.get(), 1);
-        assert!(success.warning.is_none());
-        assert!(!work_dir.join("blobs").exists());
-        let db = smelt_store::SessionDb::open_read_only(work_dir.join("session.db")).unwrap();
-        assert_eq!(
-            db.connection()
-                .query_row("SELECT COUNT(*) FROM objects", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        let rows = smelt_store::SessionReader::open_existing(&work_dir)
-            .unwrap()
-            .read_history_items_range(0..1)
-            .unwrap();
-        let protocol::HistoryItem::User { content, .. } = &rows[0] else {
-            panic!("expected user history item");
-        };
-        assert!(matches!(
-            content,
-            protocol::Content::Parts(parts)
-                if parts.iter().any(|part| matches!(
-                    part,
-                    protocol::ContentPart::ImageUrl { url, .. } if url == data_url
-                ))
-        ));
-    }
-
-    #[test]
-    fn derived_refresh_failure_does_not_undo_canonical_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let request = PersistRequest {
-            command: commit(SESSION_ID, 0),
-        };
-        let mut writer = smelt_store::OwnedSessionWriter::open(dir.path(), SESSION_ID).unwrap();
-        let work_dir = writer.session_dir().to_path_buf();
-        std::fs::create_dir_all(work_dir.join("meta.json")).unwrap();
-
-        let success = write(&request, &mut writer, &work_dir).expect("canonical commit succeeds");
-
-        assert_eq!(success.receipt.current.revision.get(), 1);
-        assert!(success
-            .warning
-            .is_some_and(|warning| warning.contains("derived cache refresh failed")));
-        assert!(work_dir.join("meta.json").is_dir());
-        let db = smelt_store::SessionReader::open_existing(&work_dir).unwrap();
-        assert_eq!(db.store_head().unwrap().history_len.get(), 1);
-        assert_eq!(db.read_history_items_range(0..1).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn failed_first_commit_does_not_publish_session_directory() {
-        let _serial = crate::app::test_harness::test_home_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let _state_home = StateHomeGuard::install(dir.path());
-        let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
-        let persister = Persister::spawn();
-
-        persister
-            .save(PersistRequest {
-                command: commit(SESSION_ID, 9),
-            })
-            .unwrap();
-        let outcome = persister.flush();
-
-        assert!(matches!(
-            outcome,
-            PersistFlushOutcome::CommitFailed(failures)
-                if failures.len() == 1 && failures[0].session_id == SESSION_ID
-        ));
-        assert!(matches!(
-            persister.drain_reports().as_slice(),
-            [SessionBackendEvent::Failed(_)]
-        ));
-        assert!(!session_dir.exists());
-    }
-
-    #[test]
-    fn flush_distinguishes_disconnected_and_exited_workers() {
-        let mut disconnected = Persister::spawn();
-        disconnected.shutdown().unwrap();
-        assert_eq!(disconnected.flush(), PersistFlushOutcome::Disconnected);
-
-        let (tx, rx) = mpsc::channel::<QueuedCommand>();
-        drop(rx);
-        let (_report_tx, reports) = mpsc::channel();
-        let mut exited = Persister {
-            tx: Some(tx),
-            reports,
-            queued_commands: Arc::new(AtomicUsize::new(0)),
-            queued_payload_bytes: Arc::new(AtomicUsize::new(0)),
-            pending_full_audit_bytes: Arc::new(AtomicUsize::new(0)),
-            handle: Some(std::thread::spawn(|| {})),
-        };
-        assert_eq!(exited.flush(), PersistFlushOutcome::WorkerExited);
-        let _ = exited.shutdown();
-    }
-
-    #[test]
-    fn discarding_an_invalid_writer_allows_clean_reacquisition() {
-        let _serial = crate::app::test_harness::test_home_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let _state_home = StateHomeGuard::install(dir.path());
-        let session_id = smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap();
-        let mut backend = SessionBackend::new();
-        backend.open_owned(session_id.clone()).unwrap();
-
-        backend.discard_owned_writer();
-
-        backend.open_owned(session_id).unwrap();
-        backend.release().unwrap();
-    }
-
-    #[test]
-    fn transient_open_failure_leaves_backend_reopenable() {
-        let _serial = crate::app::test_harness::test_home_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let _state_home = StateHomeGuard::install(dir.path());
-        let session_id = smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap();
-        let mut backend = SessionBackend::new();
-        backend.fail_next_open = true;
-
-        let error = backend.open_owned(session_id.clone()).unwrap_err();
-
-        assert_eq!(
-            error.disposition,
-            smelt_store::SessionPersistenceDisposition::Retry
-        );
-        assert!(matches!(backend.state, SessionBackendState::Closed));
-        backend.open_owned(session_id).unwrap();
-        backend.release().unwrap();
-    }
-
-    #[test]
-    fn opening_another_session_releases_the_previous_session_lock() {
-        let _serial = crate::app::test_harness::test_home_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let _state_home = StateHomeGuard::install(dir.path());
-        let first_dir = smelt_core::session::dir_for_id(SESSION_ID);
-        let root = first_dir.parent().expect("sessions root");
-        let persister = Persister::spawn();
-
-        persister.open_owned(SESSION_ID).unwrap();
-        assert!(!first_dir.exists(), "uncommitted session must stay hidden");
-        persister
-            .save(PersistRequest {
-                command: commit(SESSION_ID, 0),
-            })
-            .unwrap();
-        persister.flush();
-        assert!(matches!(
-            persister.drain_reports().as_slice(),
-            [SessionBackendEvent::Saved { .. }]
-        ));
-        assert!(smelt_store::OwnedSessionWriter::open(root, SESSION_ID).is_err());
-
-        persister.open_owned(SECOND_SESSION_ID).unwrap();
-        persister
-            .save(PersistRequest {
-                command: commit(SECOND_SESSION_ID, 0),
-            })
-            .unwrap();
-        persister.flush();
-        assert!(matches!(
-            persister.drain_reports().as_slice(),
-            [SessionBackendEvent::Saved { .. }]
-        ));
-        let first_replacement = smelt_store::OwnedSessionWriter::open(root, SESSION_ID).unwrap();
-        assert!(smelt_store::OwnedSessionWriter::open(root, SECOND_SESSION_ID).is_err());
-
-        persister.release().unwrap();
-        let second_replacement =
-            smelt_store::OwnedSessionWriter::open(root, SECOND_SESSION_ID).unwrap();
-        drop((first_replacement, second_replacement));
-    }
-
-    #[test]
-    fn request_audit_is_written_by_worker() {
-        let _serial = crate::app::test_harness::test_home_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let _state_home = StateHomeGuard::install(dir.path());
-        let persister = Persister::spawn();
-        persister
-            .save(PersistRequest {
-                command: commit(SESSION_ID, 0),
-            })
-            .unwrap();
-        persister.flush();
-        assert!(matches!(
-            persister.drain_reports().as_slice(),
-            [SessionBackendEvent::Saved { .. }]
-        ));
-        persister.append_request_audit(PersistRequestAudit {
-            session_id: SESSION_ID.into(),
-            payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
-            payload_capture_skipped_bytes: None,
-            entry: protocol::request_log::RequestLogEntry {
-                request_id: 42,
-                kind: "turn".into(),
-                turn_id: Some(42),
-                ask_id: None,
-                history_len: Some(1),
+                history_len: Some(required_generation as usize),
                 timestamp_ms: 1000,
                 provider_kind: "openai".into(),
                 api_base: "https://api.example.test".into(),
@@ -1456,9 +1984,9 @@ mod tests {
                 body: serde_json::json!({"model": "model-a"}),
                 prompt_cache_key: None,
                 stream: true,
-                system_prompt: None,
-                messages: None,
-                tools: None,
+                system_prompt: Some("removed".into()),
+                messages: Some(Vec::new()),
+                tools: Some(Vec::new()),
                 response: None,
                 usage: None,
                 cost_usd: None,
@@ -1468,17 +1996,474 @@ mod tests {
                 error: None,
                 background: false,
             },
+        }
+    }
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    fn wait_until_finished(actor: &SessionPersistence) {
+        let deadline = deadline();
+        while !actor.is_finished() {
+            assert!(Instant::now() < deadline, "actor did not stop");
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn full_audit_budget_overflow_compacts_payload_without_losing_body_size() {
+        let counter = AtomicUsize::new(0);
+        assert!(reserve_bytes(&counter, 10, 16));
+        assert!(!reserve_bytes(&counter, 7, 16));
+        assert_eq!(counter.load(Ordering::Acquire), 10);
+
+        let mut request = audit(1, 0, 42);
+        request.entry.body = serde_json::json!({"prompt": "x".repeat(1024)});
+        let raw_body_size = serialized_size(&request.entry.body);
+        let full_size = serialized_size(&request.entry);
+        compact_request_audit(&mut request, full_size);
+
+        assert_eq!(request.entry.body, serde_json::Value::Null);
+        assert_eq!(request.payload_capture_skipped_bytes, Some(full_size));
+        assert_eq!(
+            request.payload_mode,
+            smelt_store::RequestAuditPayloadMode::Summary {
+                raw_body_size: Some(raw_body_size as u64),
+            }
+        );
+        assert!(serialized_size(&request.entry) < full_size);
+    }
+
+    #[test]
+    fn actor_flushes_and_closes_the_exact_generation() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.submit(intent(1, &["saved"])).unwrap();
+
+        let outcome = actor.flush(PersistenceGeneration::new(1), deadline());
+        assert!(matches!(
+            outcome,
+            PersistenceFlushOutcome::Durable {
+                epoch,
+                target,
+                durable,
+                receipt: Some(_),
+            } if epoch == SessionEpoch::new(1)
+                && target == PersistenceGeneration::new(1)
+                && durable == PersistenceGeneration::new(1)
+        ));
+        let close = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert_eq!(close.target, PersistenceGeneration::new(1));
+        assert_eq!(close.durable, PersistenceGeneration::new(1));
+        assert!(close.omitted.is_none());
+        assert!(actor.thread.is_none());
+
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        assert_eq!(reader.store_head().unwrap().history_len.get(), 1);
+    }
+
+    #[test]
+    fn latest_slot_replaces_an_intent_before_consumption() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+        actor.submit(intent(1, &["obsolete"])).unwrap();
+        actor.submit(intent(2, &[])).unwrap();
+        release.send(()).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable {
+                durable,
+                receipt: Some(ref receipt),
+                ..
+            } if durable == PersistenceGeneration::new(2)
+                && receipt.current.history_len == smelt_store::HistoryLen::ZERO
+                && receipt.current.revision.get() == 1
+        ));
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn acknowledgement_does_not_release_a_newer_latest_intent() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.submit(intent(1, &["saved"])).unwrap();
+        let _ = actor.flush(PersistenceGeneration::new(1), deadline());
+        let acknowledgement = actor
+            .take_status()
+            .acknowledgement
+            .expect("first durable acknowledgement");
+
+        let release = actor.pause();
+        actor.submit(intent(2, &["saved", "new"])).unwrap();
+        actor.confirm_acknowledgement(&acknowledgement);
+        assert_eq!(
+            actor
+                .latest
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .desired
+                .as_ref()
+                .map(|intent| intent.generation),
+            Some(PersistenceGeneration::new(2))
+        );
+
+        release.send(()).unwrap();
+        let _ = actor.flush(PersistenceGeneration::new(2), deadline());
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn truncation_supersedes_an_append_in_flight() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let (started, release) = actor.install_commit_barrier();
+        actor.submit(intent(1, &["obsolete"])).unwrap();
+        started.recv().unwrap();
+        actor.submit(intent(2, &[])).unwrap();
+        release.send(()).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable {
+                durable,
+                receipt: Some(ref receipt),
+                ..
+            } if durable == PersistenceGeneration::new(2)
+                && receipt.current.history_len == smelt_store::HistoryLen::ZERO
+                && receipt.current.revision.get() == 2
+        ));
+        let status = actor.take_status();
+        let acknowledgement = status
+            .acknowledgement
+            .as_ref()
+            .expect("coalesced durable acknowledgement");
+        assert_eq!(acknowledgement.generation, PersistenceGeneration::new(2));
+        assert_eq!(acknowledgement.previous, smelt_store::StoreHead::default());
+        assert_eq!(acknowledgement.receipt.previous.revision.get(), 1);
+        assert_eq!(acknowledgement.receipt.current.revision.get(), 2);
+        actor.confirm_acknowledgement(acknowledgement);
+        assert!(actor.status().acknowledgement.is_none());
+        assert!(
+            actor
+                .latest
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .desired
+                .is_none(),
+            "acknowledged intent remained resident in the latest slot"
+        );
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn full_control_lane_cannot_lose_the_latest_intent() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+        for request_id in 0..MAX_PENDING_AUDITS as u64 {
+            actor
+                .append_request_audit(audit(1, 99, request_id))
+                .unwrap();
+        }
+        assert_eq!(
+            actor.pending_audits.load(Ordering::Acquire),
+            MAX_PENDING_AUDITS
+        );
+        actor.submit(intent(1, &["saved"])).unwrap();
+        release.send(()).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let close = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(close.cause.is_none());
+        assert_eq!(actor.pending_audits.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn equal_and_older_generations_require_an_identical_intent() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+        let latest = intent(2, &["latest"]);
+        actor.submit(latest.clone()).unwrap();
+        actor.submit(latest).unwrap();
+        assert!(actor.submit(intent(2, &["different"])).is_err());
+        assert!(actor.submit(intent(1, &["older"])).is_err());
+        release.send(()).unwrap();
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn no_op_commit_advances_actor_generation_without_store_revision() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let first = intent(1, &["saved"]);
+        actor.submit(first.clone()).unwrap();
+        let first_outcome = actor.flush(PersistenceGeneration::new(1), deadline());
+        let first_revision = match first_outcome {
+            PersistenceFlushOutcome::Durable {
+                receipt: Some(receipt),
+                ..
+            } => receipt.current.revision,
+            outcome => panic!("expected durable first commit, got {outcome:?}"),
+        };
+        let mut no_op = first;
+        no_op.generation = PersistenceGeneration::new(2);
+        actor.submit(no_op).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable {
+                durable,
+                receipt: Some(ref receipt),
+                ..
+            } if durable == PersistenceGeneration::new(2)
+                && receipt.previous.revision == first_revision
+                && receipt.current.revision == first_revision
+        ));
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn environmental_commit_failure_uses_one_structural_repeat() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::Io {
+            message: "injected ambiguous result".into(),
         });
+        actor.submit(intent(1, &["saved"])).unwrap();
 
-        assert_eq!(persister.flush(), PersistFlushOutcome::Drained);
-        assert!(persister.drain_reports().is_empty());
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
 
-        let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
-        let db = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
-        let attempts = db
+    #[test]
+    fn persistent_busy_is_an_invariant_failure() {
+        let cause = PersistenceCause::from_commit(&smelt_store::SessionCommitFailure::Busy {
+            operation: "begin transaction".into(),
+            attempts: 1,
+            waited_ms: 100,
+        });
+        assert_eq!(cause.class, PersistenceFailureClass::Invariant);
+    }
+
+    #[test]
+    fn newer_intent_does_not_implicitly_retry_a_blocked_actor() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::UnsupportedSchema {
+            found: i32::MAX,
+            expected: 0,
+        });
+        actor.submit(intent(1, &["blocked"])).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Blocked { durable, .. }
+                if durable == PersistenceGeneration::ZERO
+        ));
+
+        actor.submit(intent(2, &["latest"])).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Blocked {
+                target,
+                durable,
+                ..
+            } if target == PersistenceGeneration::new(2)
+                && durable == PersistenceGeneration::ZERO
+        ));
+        actor.retry_blocked().unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(2)
+        ));
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn publication_failure_blocks_until_explicit_retry() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_publish_failure();
+        actor.submit(intent(1, &["saved"])).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Blocked {
+                target,
+                durable,
+                ..
+            } if target == PersistenceGeneration::new(1)
+                && durable == PersistenceGeneration::ZERO
+        ));
+        assert!(!smelt_core::session::dir_for_id(SESSION_ID).exists());
+        actor.retry_blocked().unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn audits_wait_for_their_generation_and_reject_stale_epochs() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        assert!(actor.append_request_audit(audit(2, 0, 1)).is_err());
+        actor.append_request_audit(audit(1, 2, 84)).unwrap();
+        actor.append_request_audit(audit(1, 1, 42)).unwrap();
+        actor.submit(intent(1, &["saved"])).unwrap();
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        let attempts = reader
             .query_request_attempts(&smelt_store::RequestAuditQuery::default())
             .unwrap();
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].request_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn disconnected_status_wake_does_not_block_commit() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let (_replacement_tx, replacement_rx) = mpsc::sync_channel(1);
+        drop(std::mem::replace(&mut actor.status_wake, replacement_rx));
+        actor.submit(intent(1, &["saved"])).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn actor_panic_stops_submission_without_advancing_durability() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let actor = actor();
+        actor.append_request_audit(audit(1, 99, 1)).unwrap();
+        actor.inject_panic();
+        wait_until_finished(&actor);
+
+        assert!(matches!(
+            actor.status().state,
+            PersistenceState::Stopped {
+                durable,
+                cause: Some(_),
+                ..
+            } if durable == PersistenceGeneration::ZERO
+        ));
+        assert!(actor.submit(intent(1, &["unsaved"])).is_err());
+        assert_eq!(actor.pending_audits.load(Ordering::Acquire), 0);
+        assert_eq!(actor.pending_full_audit_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn control_disconnect_stops_submission_without_advancing_durability() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.append_request_audit(audit(1, 99, 1)).unwrap();
+        actor.control = None;
+        wait_until_finished(&actor);
+
+        assert!(actor.submit(intent(1, &["unsaved"])).is_err());
+        assert_eq!(actor.durable_generation(), PersistenceGeneration::ZERO);
+        assert_eq!(actor.pending_audits.load(Ordering::Acquire), 0);
+        assert_eq!(actor.pending_full_audit_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn no_op_receipt_is_valid_but_wrong_previous_head_is_not() {
+        let command = smelt_store::SessionCommit {
+            session_id: SESSION_ID.into(),
+            expected: smelt_store::StoreHead::default(),
+            identity: intent(1, &[]).identity,
+            metadata: intent(1, &[]).metadata,
+            history: intent(1, &[]).history,
+            side_tables: intent(1, &[]).side_tables,
+            descriptors: None,
+        };
+        let no_op = smelt_store::SaveReceipt {
+            session_id: SESSION_ID.into(),
+            previous: command.expected,
+            current: command.expected,
+        };
+        assert!(validate_receipt(&command, no_op).is_ok());
+
+        let malformed = smelt_store::SaveReceipt {
+            session_id: SESSION_ID.into(),
+            previous: smelt_store::StoreHead {
+                revision: smelt_store::Revision::new(1),
+                ..smelt_store::StoreHead::default()
+            },
+            current: command.expected,
+        };
+        assert!(validate_receipt(&command, malformed).is_err());
     }
 }

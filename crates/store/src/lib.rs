@@ -21,7 +21,10 @@ pub use compression::{
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use db::SessionDb;
-pub use db::{DoctorReport, FullSession, SessionResumeSnapshot, StorageStats, StoredSession};
+pub use db::{
+    session_commit_fingerprint, DoctorReport, FullSession, SessionResumeSnapshot, StorageStats,
+    StoredSession,
+};
 pub use error::{Result, StoreError};
 pub use history::{
     TranscriptBlockMetadataRecord, TranscriptDescriptorHydration, TranscriptDescriptorIndex,
@@ -37,6 +40,6 @@ pub use request_audit::{
 pub use schema::SCHEMA_VERSION;
 pub use session_commit::{
     DescriptorIndex, DescriptorLen, HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix,
-    Revision, SaveId, SaveReceipt, SessionCommit, SessionCommitFailure,
-    SessionPersistenceDisposition, SideTableSuffixes, StoreHead, TranscriptDescriptorSuffix,
+    Revision, SaveReceipt, SessionCommit, SessionCommitFailure, SideTableSuffixes, StoreHead,
+    TranscriptDescriptorSuffix,
 };

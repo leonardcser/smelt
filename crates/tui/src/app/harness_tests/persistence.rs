@@ -1,5 +1,4 @@
 use super::*;
-use crate::persist::{PersistFailure, PersistSaveKind};
 use protocol::{
     AssistantStep, Content, EngineEvent, HistoryAppend, HistoryAppendResult, HistoryItem, Role,
     TokenUsage, ToolInvocation, ToolOutcome,
@@ -32,31 +31,6 @@ fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
                     if owner_session_id == session_id
             )
     })
-}
-
-fn save_receipt(
-    save_id: u64,
-    session_id: &str,
-    history_len: usize,
-    descriptor_len: usize,
-    revision: u64,
-) -> smelt_store::SaveReceipt {
-    let history_len = smelt_store::HistoryLen::new(history_len as u64);
-    let descriptor_len = smelt_store::DescriptorLen::new(descriptor_len as u64);
-    smelt_store::SaveReceipt {
-        session_id: session_id.to_string(),
-        save_id: smelt_store::SaveId::new(save_id),
-        previous: smelt_store::StoreHead {
-            revision: smelt_store::Revision::new(revision.saturating_sub(1)),
-            history_len,
-            descriptor_len,
-        },
-        current: smelt_store::StoreHead {
-            revision: smelt_store::Revision::new(revision),
-            history_len,
-            descriptor_len,
-        },
-    }
 }
 
 fn request_audit_entry(request_id: u64) -> protocol::request_log::RequestLogEntry {
@@ -266,12 +240,12 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
     app.app
         .session_append_history(HistoryItem::user(Content::text("first generation")));
     app.app.save_session();
-    assert!(app.app.session_document.has_pending_save());
+    assert!(app.app.session_document_has_unflushed_work());
 
     app.app
         .session_append_history(HistoryItem::user(Content::text("final generation")));
     app.app.save_session();
-    assert!(app.app.session_document.is_save_queued());
+    assert!(app.app.session_document_has_unflushed_work());
 
     app.app.save_session_and_flush();
 
@@ -284,24 +258,46 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
 }
 
 #[test]
-fn shutdown_retries_after_transient_session_directory_failure() {
+fn blocked_save_requires_explicit_retry() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.app.core.session.id.clone();
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    std::fs::create_dir_all(session_dir.parent().unwrap()).unwrap();
-    std::fs::write(&session_dir, "temporarily blocks directory creation").unwrap();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.app.save_session_and_flush();
+    app.app
+        .persistence
+        .as_ref()
+        .expect("persistence actor")
+        .inject_commit_failure(smelt_store::SessionCommitFailure::UnsupportedSchema {
+            found: i32::MAX,
+            expected: 0,
+        });
     app.app
         .session_append_history(HistoryItem::user(Content::text("retry me")));
 
     app.app.save_session_and_flush();
     assert!(app.app.session_document_has_unflushed_work());
-    assert!(app.app.notification.is_some());
+    assert!(has_sticky_session_save_failure(&app, &session_id));
 
-    std::fs::remove_file(&session_dir).unwrap();
-    app.app.save_session_and_flush();
+    let retry_accepted = {
+        let _app_guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load("return smelt.session.retry_persistence()")
+            .eval::<bool>()
+            .unwrap()
+    };
+    assert!(retry_accepted);
+    let outcome = app.app.flush_persist();
+    assert!(
+        !app.app.session_document_has_unflushed_work(),
+        "retry flush left work pending: {outcome:?}; status: {:?}",
+        app.app.persistence.as_ref().map(|actor| actor.status())
+    );
     let loaded = loaded_session(&session_id);
-    assert_eq!(loaded.history.len(), 1);
+    assert_eq!(loaded.history.len(), 2);
 }
 
 #[test]
@@ -353,129 +349,6 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
 }
 
 #[test]
-fn canonical_enqueue_failure_leaves_document_visibly_unsaved() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app.shutdown_persist().unwrap();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text("cannot enqueue")));
-
-    app.app.save_session();
-
-    assert!(app.app.session_document_has_unflushed_work());
-    assert!(!app.app.session_document.has_pending_save());
-    assert!(has_sticky_session_save_failure(&app, &session_id));
-    assert!(!smelt_core::session::dir_for_id(&session_id).exists());
-}
-
-#[test]
-fn storage_failure_causes_have_distinct_visible_outcomes() {
-    let guard = test_home_guard();
-    let schema_dir = tempfile::tempdir().unwrap();
-    let schema_version = smelt_store::SessionDb::open(schema_dir.path().join("session.db"))
-        .unwrap()
-        .schema_version()
-        .unwrap();
-    let unsupported_schema = schema_version.checked_add(1).unwrap();
-    let cases = [
-        (
-            "disk full",
-            smelt_store::SessionCommitFailure::Sqlite {
-                message: "database or disk is full".into(),
-                disposition: smelt_store::SessionPersistenceDisposition::Reopen,
-            },
-            "database or disk is full".to_string(),
-        ),
-        (
-            "unwritable root",
-            smelt_store::SessionCommitFailure::Io {
-                message: "permission denied while creating session root".into(),
-                disposition: smelt_store::SessionPersistenceDisposition::ReadOnly,
-            },
-            "permission denied while creating session root".to_string(),
-        ),
-        (
-            "unsupported schema",
-            smelt_store::SessionCommitFailure::UnsupportedSchema {
-                found: unsupported_schema,
-                expected: schema_version,
-            },
-            format!("unsupported schema version {unsupported_schema}; expected {schema_version}"),
-        ),
-        (
-            "ownership conflict",
-            smelt_store::SessionCommitFailure::OwnershipLost,
-            "session writer ownership was lost".to_string(),
-        ),
-    ];
-    let case_count = cases.len();
-    let mut summaries = Vec::new();
-
-    for (label, failure, expected_message) in cases {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-        let session_id = app.app.core.session.id.clone();
-        app.app.persister.inject_commit_failure(failure);
-        app.app
-            .session_append_history(HistoryItem::user(Content::text(label)));
-
-        app.app.save_session_and_flush();
-
-        let notification = app
-            .app
-            .notification
-            .as_ref()
-            .unwrap_or_else(|| panic!("{label} must leave a visible persistence notification"));
-        assert!(notification.lifetime.is_sticky(), "{label}");
-        assert!(notification.summary.contains(&expected_message), "{label}");
-        assert!(matches!(
-            notification.owner.as_ref(),
-            Some(crate::app::NotificationOwner::SessionPersistence(owner)) if owner == &session_id
-        ));
-        summaries.push(notification.summary.clone());
-    }
-
-    summaries.sort();
-    summaries.dedup();
-    assert_eq!(summaries.len(), case_count);
-}
-
-#[test]
-fn publish_reopen_failure_preserves_the_committed_session() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.app.persister.inject_publish_reopen_failure();
-    app.app
-        .session_append_history(HistoryItem::user(Content::text(
-            "committed before publication reopen",
-        )));
-
-    app.app.save_session_and_flush();
-
-    assert!(!app.app.session_document_has_unflushed_work());
-    let loaded = loaded_session(&session_id);
-    assert_eq!(loaded.history.len(), 1);
-    assert!(matches!(
-        &loaded.history[0],
-        HistoryItem::User { content, .. }
-            if content.text_content() == "committed before publication reopen"
-    ));
-    assert!(app.app.notification.as_ref().is_some_and(|notification| {
-        notification
-            .summary
-            .contains("injected transient session writer open failure")
-    }));
-
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let root = session_dir.parent().expect("sessions root");
-    assert!(matches!(
-        smelt_store::OwnedSessionWriter::open(root, &session_id),
-        Err(smelt_store::StoreError::OwnershipConflict { .. })
-    ));
-}
-
-#[test]
 fn new_empty_session_does_not_create_a_directory() {
     let guard = test_home_guard();
     let app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -505,6 +378,10 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
 
     app.app.dispatch_host_call(engine::HostCall::RequestAudit {
         session_dir: smelt_core::session::dir_for_id(&session_id),
+        persistence: protocol::PersistenceScope {
+            epoch: app.app.persistence_epoch.get(),
+            required_generation: app.app.session_document.generation().get(),
+        },
         entry: Box::new(audit),
         payload_mode: smelt_store::RequestAuditPayloadMode::Full,
     });
@@ -544,6 +421,10 @@ fn stale_request_audit_after_session_switch_is_rejected() {
     app.app.save_session_and_flush();
     let old_id = app.app.core.session.id.clone();
     let old_dir = smelt_core::session::dir_for_id(&old_id);
+    let old_scope = protocol::PersistenceScope {
+        epoch: app.app.persistence_epoch.get(),
+        required_generation: app.app.session_document.generation().get(),
+    };
 
     app.app.reset_session();
     app.app
@@ -553,6 +434,7 @@ fn stale_request_audit_after_session_switch_is_rejected() {
 
     app.app.dispatch_host_call(engine::HostCall::RequestAudit {
         session_dir: old_dir.clone(),
+        persistence: old_scope,
         entry: Box::new(request_audit_entry(42)),
         payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
     });
@@ -649,7 +531,6 @@ fn sparse_fork_rejects_symlinked_legacy_attachment() {
     writer
         .commit_session(&smelt_store::SessionCommit {
             session_id: session_id.clone(),
-            save_id: smelt_store::SaveId::new(99),
             expected: stored.head,
             identity: stored.identity,
             metadata: stored.metadata,
@@ -940,95 +821,6 @@ fn cancel_or_shutdown_preserves_committed_tool_invocations() {
 }
 
 #[test]
-fn long_agent_turn_retries_transient_writer_failure_without_more_history() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.app.core.session.id.clone();
-    app.start_turn(42);
-
-    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
-        turn_id: 42,
-        delta: protocol::CanonicalHistoryDelta::new(0, tool_history()),
-    }));
-    for (index, text) in ["first long-running update", "second long-running update"]
-        .into_iter()
-        .enumerate()
-    {
-        app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
-            turn_id: 42,
-            delta: protocol::CanonicalHistoryDelta::new(
-                2 + index,
-                vec![HistoryItem::Assistant(AssistantStep::terminal(
-                    Some(Content::text(text)),
-                    None,
-                    Vec::new(),
-                ))],
-            ),
-        }));
-    }
-    app.app.save_session_and_flush();
-    assert!(!app.app.session_document_has_unflushed_work());
-
-    app.app.persister.inject_transient_open_failure();
-    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
-        turn_id: 42,
-        delta: protocol::CanonicalHistoryDelta::new(
-            4,
-            vec![HistoryItem::Assistant(AssistantStep::terminal(
-                Some(Content::text("later agent update")),
-                None,
-                Vec::new(),
-            ))],
-        ),
-    }));
-    assert!(matches!(
-        app.app.flush_persist(),
-        crate::persist::PersistFlushOutcome::CommitFailed(_)
-    ));
-    assert!(app.agent_running());
-    assert!(app.app.session_document_has_unflushed_work());
-    assert!(!has_sticky_session_save_failure(&app, &session_id));
-
-    app.app.persister.inject_transient_open_failure();
-    app.feed_one(SourceEvent::Tick(
-        crate::app::PERSIST_RETRY_INITIAL_DELAY.as_millis() as u64,
-    ));
-    assert!(matches!(
-        app.app.flush_persist(),
-        crate::persist::PersistFlushOutcome::CommitFailed(_)
-    ));
-    assert!(
-        has_sticky_session_save_failure(&app, &session_id),
-        "repeated failure must remain visible while retries continue"
-    );
-
-    app.feed_one(SourceEvent::Tick(
-        crate::app::PERSIST_RETRY_INITIAL_DELAY.as_millis() as u64 * 2,
-    ));
-    assert_eq!(
-        app.app.flush_persist(),
-        crate::persist::PersistFlushOutcome::Drained
-    );
-
-    assert!(
-        !app.app.session_document_has_unflushed_work(),
-        "scheduled recovery must make the session fully durable"
-    );
-    let loaded = loaded_session(&session_id);
-    assert_eq!(loaded.history.len(), 5);
-    assert!(matches!(
-        loaded.history.last(),
-        Some(HistoryItem::Assistant(step))
-            if step.content.as_ref().is_some_and(|content| content.text_content() == "later agent update")
-    ));
-    assert!(
-        !has_sticky_session_save_failure(&app, &session_id),
-        "successful recovery must clear its owned save notification"
-    );
-    assert!(app.app.next_persistence_retry_delay().is_none());
-}
-
-#[test]
 fn store_backed_resume_restores_tool_calls_for_model_history() {
     let guard = test_home_guard();
     let session_id = {
@@ -1241,352 +1033,30 @@ fn resuming_session_with_active_writer_is_read_only() {
     );
 }
 
-fn fake_pending_history_save(app: &mut TestApp, save_id: u64, history_len: usize) {
-    let generation = app.app.session_document.current_generation_for_test();
-    app.app.session_document.set_pending_save_for_test(
-        save_id,
-        app.app.core.session.id.clone(),
-        PersistSaveKind::History,
-        generation,
-        history_len,
-    );
-}
-
 #[test]
-fn stale_live_save_ack_does_not_drop_later_live_history() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.session_document.live_session.is_some());
-    let before_len = resumed.app.session_history_len();
-    fake_pending_history_save(&mut resumed, 700, before_len);
-
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text("appended after stale ack")));
-    assert_eq!(resumed.app.session_history_len(), before_len + 1);
-
-    resumed
-        .app
-        .ack_persist_save(save_receipt(700, &session_id, before_len, before_len, 7));
-
-    assert_eq!(
-        resumed.app.session_history_len(),
-        before_len + 1,
-        "stale ack must not drop live history appended after the save began"
-    );
-    resumed.app.save_session_and_flush();
-
-    let loaded = loaded_session(&session_id);
-    assert_eq!(loaded.history.len(), before_len + 1);
-    assert!(matches!(
-        loaded.history.last(),
-        Some(HistoryItem::User { content, .. }) if content.text_content() == "appended after stale ack"
-    ));
-}
-
-#[test]
-fn stale_live_save_ack_does_not_drop_later_transcript_blocks() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.session_document.live_session.is_some());
-    let before_len = resumed.app.session_history_len();
-    fake_pending_history_save(&mut resumed, 701, before_len);
-
-    resumed.app.push_block(Block::Thinking {
-        title: None,
-        summary_titles: Vec::new(),
-        kind: protocol::ReasoningKind::Raw,
-        content: "late thinking block".into(),
-    });
-    assert!(resumed
-        .app
-        .session_document
-        .transcript
-        .history()
-        .descriptor_dirty_from()
-        .is_some());
-
-    resumed
-        .app
-        .ack_persist_save(save_receipt(701, &session_id, before_len, before_len, 7));
-
-    assert!(
-        resumed
-            .app
-            .session_document
-            .transcript
-            .history()
-            .descriptor_dirty_from()
-            .is_some(),
-        "stale ack must not clear transcript blocks appended after the save began"
-    );
-    resumed.app.save_session_and_flush();
-    assert!(
-        !resumed.app.session_document_has_unflushed_work(),
-        "flush must wait for stale-head retries enqueued while draining reports"
-    );
-
-    let db = smelt_store::SessionReader::open_database(
-        smelt_core::session::dir_for_id(&session_id).join("session.db"),
-    )
-    .unwrap();
-    let rows = db.read_all_transcript_descriptor_records().unwrap();
-    assert!(
-        rows.iter()
-            .any(|row| row.preview_text.contains("late thinking block")),
-        "persisted transcript descriptors should contain the interrupted thinking block: {rows:#?}"
-    );
-}
-
-#[test]
-fn stale_live_save_ack_does_not_drop_later_streaming_text() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    assert!(resumed.app.session_document.live_session.is_some());
-    let before_len = resumed.app.session_history_len();
-    fake_pending_history_save(&mut resumed, 703, before_len);
-
-    resumed.start_turn(7030);
-    resumed.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
-        delta: "late streaming text before interrupt".into(),
-    }));
-    assert!(resumed
-        .app
-        .session_document
-        .transcript
-        .history()
-        .descriptor_dirty_from()
-        .is_some());
-
-    resumed
-        .app
-        .ack_persist_save(save_receipt(703, &session_id, before_len, before_len, 7));
-
-    assert!(
-        resumed
-            .app
-            .session_document
-            .transcript
-            .history()
-            .descriptor_dirty_from()
-            .is_some(),
-        "stale ack must not clear streaming text appended after the save began"
-    );
-    resumed.cancel();
-    resumed.app.save_session_and_flush();
-    assert!(
-        !resumed.app.session_document_has_unflushed_work(),
-        "flush must wait for stale-head retries enqueued while draining reports"
-    );
-
-    let db = smelt_store::SessionReader::open_database(
-        smelt_core::session::dir_for_id(&session_id).join("session.db"),
-    )
-    .unwrap();
-    let rows = db.read_all_transcript_descriptor_records().unwrap();
-    assert!(
-        rows.iter().any(|row| row
-            .preview_text
-            .contains("late streaming text before interrupt")),
-        "persisted transcript descriptors should contain interrupted streaming text: {rows:#?}"
-    );
-}
-
-#[test]
-fn stale_live_save_ack_does_not_drop_later_tool_blocks() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    let before_len = resumed.app.session_history_len();
-    fake_pending_history_save(&mut resumed, 702, before_len);
-
-    resumed.start_turn(7020);
-    resumed.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
-        call_id: "call-late-tool".into(),
-        tool_name: "bash".into(),
-        args: std::collections::HashMap::new(),
-    }));
-    resumed.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
-        call_id: "call-late-tool".into(),
-        chunk: "tool output after stale ack\n".into(),
-    }));
-    resumed.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
-        call_id: "call-late-tool".into(),
-        result: ToolOutcome {
-            content: "tool output after stale ack\n".into(),
-            is_error: false,
-            metadata: None,
-        },
-        elapsed_ms: Some(5),
-    }));
-
-    resumed
-        .app
-        .ack_persist_save(save_receipt(702, &session_id, before_len, before_len, 7));
-    assert!(
-        resumed
-            .app
-            .session_document
-            .transcript
-            .history()
-            .descriptor_dirty_from()
-            .is_some(),
-        "stale ack must not clear tool blocks appended after the save began"
-    );
-
-    resumed.cancel();
-    resumed.app.save_session_and_flush();
-    assert!(
-        !resumed.app.session_document_has_unflushed_work(),
-        "flush must wait for stale-head retries enqueued while draining reports"
-    );
-
-    let db = smelt_store::SessionReader::open_database(
-        smelt_core::session::dir_for_id(&session_id).join("session.db"),
-    )
-    .unwrap();
-    let rows = db.read_all_transcript_descriptor_records().unwrap();
-    assert!(
-        rows.iter()
-            .any(|row| row.tool_name.as_deref() == Some("bash"))
-            || rows
-                .iter()
-                .any(|row| row.preview_text.contains("tool output after stale ack")),
-        "persisted transcript descriptors should contain the interrupted tool block: {rows:#?}"
-    );
-}
-
-#[test]
-fn live_save_failure_forces_full_retry_instead_of_repeating_bad_suffix() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    let before_len = resumed.app.session_history_len();
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text("recover after failure")));
-
-    resumed.app.fail_persist_save(PersistFailure {
-        save_id: 900,
-        session_id: session_id.clone(),
-        message: "save session database: integrity error: history unchanged prefix exceeds stored rows: prefix 2, stored 1".into(),
-        commit_failure: None,
-        disposition: smelt_store::SessionPersistenceDisposition::Reopen,
-    });
-    assert_eq!(
-        resumed.app.session_document.dirty_history_from_for_test(),
-        Some(0),
-        "a live-session save failure should force the retry to start from the beginning"
-    );
-    assert_eq!(
-        resumed.app.session_document.durable_history_len_for_test(),
-        before_len,
-        "save failure must not make the durable cursor forget stored rows"
-    );
-    assert!(
-        resumed.app.next_persistence_retry_delay().is_none(),
-        "reopen-only failures must not schedule automatic retries"
-    );
-
-    resumed.app.save_session_and_flush();
-    let loaded = loaded_session(&session_id);
-    assert_eq!(loaded.history.len(), before_len + 1);
-    assert!(matches!(
-        loaded.history.last(),
-        Some(HistoryItem::User { content, .. }) if content.text_content() == "recover after failure"
-    ));
-}
-
-#[test]
-fn recoverable_stale_persist_failure_retries_without_sticky_notification() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    let reader =
-        smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
-            .unwrap();
-    let persisted_head = reader.store_head().unwrap();
-    let persisted_descriptor_len = reader.transcript_descriptor_count().unwrap();
-    drop(reader);
-
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    resumed.app.load_session_by_id(&session_id);
-    let before_len = resumed.app.session_history_len();
-    resumed
-        .app
-        .session_append_history(HistoryItem::user(Content::text(
-            "recover after stale descriptor",
-        )));
-    fake_pending_history_save(&mut resumed, 901, before_len);
-
-    resumed.app.fail_persist_save(PersistFailure {
-        save_id: 901,
-        session_id: session_id.clone(),
-        message: "save session database: stale descriptor base: base 303, current 1".into(),
-        commit_failure: Some(smelt_store::SessionCommitFailure::StaleBase {
-            expected: smelt_store::StoreHead {
-                revision: persisted_head.revision,
-                history_len: smelt_store::HistoryLen::new(before_len as u64),
-                descriptor_len: smelt_store::DescriptorLen::new(303),
-            },
-            current: smelt_store::StoreHead {
-                revision: persisted_head.revision,
-                history_len: persisted_head.history_len,
-                descriptor_len: smelt_store::DescriptorLen::new(persisted_descriptor_len as u64),
-            },
-        }),
-        disposition: smelt_store::SessionPersistenceDisposition::Retry,
-    });
-
-    assert!(
-        resumed.app.notification.is_none(),
-        "recoverable stale commit failures should retry without sticky user-facing errors"
-    );
-    resumed.app.save_session_and_flush();
-
-    let loaded = loaded_session(&session_id);
-    assert_eq!(loaded.history.len(), before_len + 1);
-    assert!(matches!(
-        loaded.history.last(),
-        Some(HistoryItem::User { content, .. }) if content.text_content() == "recover after stale descriptor"
-    ));
-}
-
-#[test]
-fn ownership_loss_moves_session_to_read_only_and_releases_lock() {
+fn ownership_loss_moves_session_to_read_only_and_keeps_document_dirty() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.app.load_session_by_id(&session_id);
     assert!(!resumed.app.session_is_read_only());
+    resumed
+        .app
+        .persistence
+        .as_ref()
+        .expect("persistence actor")
+        .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    resumed
+        .app
+        .session_append_history(HistoryItem::user(Content::text(
+            "unsaved after ownership loss",
+        )));
 
-    resumed.app.fail_persist_save(PersistFailure {
-        save_id: 902,
-        session_id: session_id.clone(),
-        message: "session writer ownership was lost".into(),
-        commit_failure: Some(smelt_store::SessionCommitFailure::OwnershipLost),
-        disposition: smelt_store::SessionPersistenceDisposition::OwnershipLost,
-    });
+    resumed.app.save_session_and_flush();
 
     assert!(resumed.app.session_is_read_only());
-    assert!(resumed.app.next_persistence_retry_delay().is_none());
-    let session_dir = smelt_core::session::dir_for_id(&session_id);
-    let root = session_dir.parent().expect("sessions root");
-    let replacement = smelt_store::OwnedSessionWriter::open(root, &session_id)
-        .expect("ownership loss releases the lifetime lock");
-    drop(replacement);
+    assert!(resumed.app.session_document_has_unflushed_work());
+    assert!(has_sticky_session_save_failure(&resumed, &session_id));
 }
 
 #[test]
@@ -1858,7 +1328,7 @@ fn in_flight_live_save_then_rewind_flushes_without_bad_prefix() {
         .app
         .session_append_history(HistoryItem::user(Content::text("save before rewind")));
     resumed.app.save_session();
-    assert!(resumed.app.session_document.has_pending_save());
+    assert!(resumed.app.session_document_has_unflushed_work());
 
     resumed.app.rewind_to_start();
     resumed.app.save_session_and_flush();

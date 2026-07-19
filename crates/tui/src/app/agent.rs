@@ -255,6 +255,13 @@ impl TuiApp {
                 history: turn.history,
                 session_id: self.core.session.id.clone(),
                 session_dir: self.current_session_dir(),
+                persistence: protocol::PersistenceScope {
+                    epoch: self
+                        .persistence
+                        .as_ref()
+                        .map_or(0, |actor| actor.epoch().get()),
+                    required_generation: self.session_document.generation().get(),
+                },
                 permission_overrides: turn.permission_overrides,
                 system_prompt: Some(system_prompt),
                 tools,
@@ -1336,7 +1343,6 @@ mod tests {
         app.app.restore_screen();
         app.app.ensure_current_context_note();
         app.app.apply_pending_history_appends_for_request();
-        app.app.session_document.mark_session_unpersisted();
         app.app.save_session();
         app.app.flush_persist();
         app
@@ -1439,9 +1445,6 @@ mod tests {
         app.app.agent = Some(turn);
 
         assert_no_full_request_start_reads(&snapshot);
-        assert_perf_value_at_most(&snapshot, "persist:write:history_items", 1);
-        assert_perf_value_at_most(&snapshot, "persist:write:descriptor_records", 1);
-        assert_perf_value_at_most(&snapshot, "store:session:dirty_suffix_history_rows", 1);
         assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 1);
         assert_perf_value_at_most(&snapshot, "store:session:history_rows_inserted", 1);
         assert_perf_value_at_most(

@@ -104,7 +104,6 @@ fn create_published_session(root: &Path) -> PathBuf {
         smelt_store::OwnedSessionWriter::open(root, SESSION_ID).expect("create staged database");
     let command = smelt_store::SessionCommit {
         session_id: SESSION_ID.into(),
-        save_id: smelt_store::SaveId::new(1),
         expected: smelt_store::StoreHead::default(),
         identity: smelt_store::SessionIdentity {
             id: SESSION_ID.into(),

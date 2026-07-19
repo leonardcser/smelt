@@ -415,7 +415,6 @@ impl AppStoryCtx {
             .collect::<Vec<_>>();
         db.apply_session_commit(&smelt_store::SessionCommit {
             session_id: meta.id.clone(),
-            save_id: smelt_store::SaveId::new(1),
             expected: smelt_store::StoreHead::default(),
             identity: smelt_store::SessionIdentity {
                 id: meta.id.clone(),

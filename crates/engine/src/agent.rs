@@ -32,6 +32,7 @@ fn next_request_id() -> u64 {
 fn dispatch_request_audit(
     host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
     session_dir: &Path,
+    persistence: protocol::PersistenceScope,
     ctx: crate::request_log::RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
@@ -42,6 +43,7 @@ fn dispatch_request_audit(
     };
     let _ = host_tx.send(crate::host::HostCall::RequestAudit {
         session_dir: session_dir.to_path_buf(),
+        persistence,
         entry: Box::new(entry),
         payload_mode,
     });
@@ -125,6 +127,7 @@ pub(crate) async fn engine_task(
                             history,
                             session_id,
                             session_dir,
+                            persistence,
                             permission_overrides,
                             system_prompt: tui_system_prompt,
                             tools,
@@ -189,6 +192,7 @@ pub(crate) async fn engine_task(
                             next_history_changed_from: 0,
                             session_id,
                             session_dir,
+                            persistence,
                             started_at,
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
@@ -295,9 +299,9 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
-    /// On-disk directory for this session. Used to write the SQLite request
-    /// audit for introspection.
+    /// On-disk directory for this session. Used to identify request audits.
     pub session_dir: std::path::PathBuf,
+    pub persistence: protocol::PersistenceScope,
     /// Whether text deltas for this auxiliary request should be forwarded
     /// as `EngineAskDelta` events.
     pub stream: bool,
@@ -343,6 +347,7 @@ pub(crate) fn dispatch_background_cmd(
             tools,
             session_id,
             session_dir,
+            persistence,
             stream,
             visible_retries,
         } => {
@@ -362,6 +367,7 @@ pub(crate) fn dispatch_background_cmd(
                     tools,
                     session_id,
                     session_dir,
+                    persistence,
                     stream,
                     visible_retries,
                 },
@@ -396,6 +402,7 @@ fn spawn_engine_ask(
         tools: supplied_tools,
         session_id,
         session_dir,
+        persistence,
         stream,
         visible_retries,
     } = task;
@@ -504,6 +511,7 @@ fn spawn_engine_ask(
                 dispatch_request_audit(
                     &audit_host_tx,
                     &log_session_dir,
+                    persistence,
                     ctx,
                     &info,
                     &resolved,
@@ -815,9 +823,9 @@ struct Turn<'a> {
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
-    /// On-disk directory for this session. Used to write the SQLite request
-    /// audit for introspection.
+    /// On-disk directory for this session. Used to identify request audits.
     session_dir: std::path::PathBuf,
+    persistence: protocol::PersistenceScope,
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
@@ -2512,6 +2520,7 @@ impl<'a> Turn<'a> {
                 &self.model_target.config,
             );
             let session_dir = self.session_dir.clone();
+            let persistence = self.persistence;
             let audit_host_tx = self.host_tx.clone();
             let turn_id = self.turn_id;
             let history_len = self.history.len();
@@ -2534,6 +2543,7 @@ impl<'a> Turn<'a> {
                 dispatch_request_audit(
                     &audit_host_tx,
                     &session_dir,
+                    persistence,
                     ctx,
                     &info,
                     &pricing,
@@ -2934,7 +2944,6 @@ mod tests {
     fn test_store_commit(id: &str, history: Vec<HistoryItem>) -> smelt_store::SessionCommit {
         smelt_store::SessionCommit {
             session_id: id.into(),
-            save_id: smelt_store::SaveId::new(1),
             expected: smelt_store::StoreHead::default(),
             identity: smelt_store::SessionIdentity {
                 id: id.into(),
@@ -3360,6 +3369,7 @@ mod tests {
             next_history_changed_from: 0,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp/s"),
+            persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
             tool_elapsed: HashMap::new(),
@@ -3482,6 +3492,7 @@ mod tests {
             next_history_changed_from: 0,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp/s"),
+            persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
             tool_elapsed: HashMap::new(),
@@ -3589,6 +3600,7 @@ mod tests {
             ),
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp"),
+            persistence: protocol::PersistenceScope::default(),
             permission_overrides: None,
             system_prompt: Some("sys".into()),
             tools: Vec::new(),

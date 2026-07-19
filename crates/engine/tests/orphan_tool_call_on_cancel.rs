@@ -140,6 +140,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         session_dir: PathBuf::from("/tmp"),
+        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),

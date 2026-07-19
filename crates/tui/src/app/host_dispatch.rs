@@ -135,21 +135,37 @@ impl TuiApp {
             }
             HostCall::RequestAudit {
                 session_dir,
+                persistence,
                 entry,
                 payload_mode,
             } => {
                 let current_session_dir = smelt_core::session::dir_for_id(&self.core.session.id);
+                let Some(actor) = self.persistence.as_ref() else {
+                    return;
+                };
+                let epoch = crate::persist::SessionEpoch::new(persistence.epoch);
                 if session_dir == current_session_dir
+                    && epoch == actor.epoch()
                     && !self.ephemeral()
                     && !self.session_access.is_read_only()
                 {
-                    self.persister
-                        .append_request_audit(crate::persist::PersistRequestAudit {
-                            session_id: self.core.session.id.clone(),
+                    if let Err(cause) =
+                        actor.append_request_audit(crate::persist::RequestAuditIntent {
+                            epoch,
+                            required_generation:
+                                crate::app::session_document::PersistenceGeneration::new(
+                                    persistence.required_generation,
+                                ),
                             entry: *entry,
                             payload_mode,
                             payload_capture_skipped_bytes: None,
-                        });
+                        })
+                    {
+                        self.notify_warn(format!(
+                            "request audit was not queued: {}",
+                            cause.message
+                        ));
+                    }
                 }
             }
             HostCall::PrepareRequest {

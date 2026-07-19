@@ -1618,10 +1618,7 @@ struct HotPathCounters {
 impl HotPathCounters {
     fn from(snapshot: &smelt_perf::perf::Snapshot) -> Self {
         Self {
-            history_suffix_rows: perf_value_max(
-                snapshot,
-                "store:session:dirty_suffix_history_rows",
-            ),
+            history_suffix_rows: perf_value_max(snapshot, "store:history:dirty_suffix_rows"),
             history_inserted: perf_value_max(snapshot, "store:session:history_rows_inserted"),
             history_deleted: perf_value_max(snapshot, "store:session:history_rows_deleted"),
             descriptor_suffix_rows: perf_value_max(
@@ -1722,7 +1719,6 @@ fn saved_hot_path_app(
 
     app.app.load_session(session);
     app.app.restore_screen();
-    app.app.session_document.mark_session_unpersisted();
     app.app.save_session();
     app.app.flush_persist();
     app
@@ -1849,13 +1845,13 @@ fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::per
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "persist:write:history_items",
+        "store:history:dirty_suffix_rows",
         0,
     );
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "persist:write:descriptor_records",
+        "store:transcript:dirty_descriptor_suffix_rows",
         0,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
@@ -1880,25 +1876,25 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "persist:write:history_items",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:session:dirty_suffix_history_rows",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
         "store:history:dirty_suffix_rows",
         1,
     );
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
+        "store:session:history_rows_inserted",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
         "store:transcript:dirty_descriptor_suffix_rows",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:transcript:descriptor_db_rows_inserted",
         1,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
@@ -1923,19 +1919,13 @@ fn run_history_appended_hot_path(
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "persist:write:history_items",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:session:dirty_suffix_history_rows",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
         "store:history:dirty_suffix_rows",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:session:history_rows_inserted",
         1,
     );
     assert_hot_path_at_most(
@@ -1971,13 +1961,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "persist:write:history_items",
-        0,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:session:dirty_suffix_history_rows",
+        "store:history:dirty_suffix_rows",
         0,
     );
     assert_hot_path_at_most(
@@ -2005,7 +1989,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         16,
     );
     assert!(
-        app.app.session_document.is_save_queued(),
+        app.app.session_document.has_session_work(),
         "{} did not defer completion metadata for the next save point",
         sample.operation
     );
@@ -2043,13 +2027,7 @@ fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "persist:write:history_items",
-        0,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:session:dirty_suffix_history_rows",
+        "store:history:dirty_suffix_rows",
         0,
     );
     assert_hot_path_at_most(

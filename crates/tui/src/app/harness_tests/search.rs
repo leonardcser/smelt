@@ -19,7 +19,15 @@ fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) ->
     let session_id = app.app.core.session.id.clone();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     std::fs::create_dir_all(&session_dir).unwrap();
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.id = session_id.clone();
+    session.history = (0..200)
+        .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
+        .collect();
+    let commit = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
     let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+    let receipt = db.apply_session_commit(&commit).unwrap();
     let records = (0..200)
         .map(|idx| {
             let content = match idx {
@@ -35,14 +43,13 @@ fn sparse_display_only_search_app(guard: &std::sync::MutexGuard<'static, ()>) ->
 
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 80, 16)
         .expect("display-only transcript tail");
-    let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-    session.id = session_id.clone();
+    session.history.clear();
     app.app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             session,
             loaded,
             crate::app::history::live_session_for_test(session_id, 200, None),
+            receipt.current,
         ),
     );
     app.app.app_focus = AppFocus::Content;

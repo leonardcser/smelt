@@ -1146,6 +1146,10 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     )));
 
     let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+            "persist cwd",
+        )));
     app.app.save_session_and_flush();
     assert_eq!(
         crate::app::history::materialize_full_session(
@@ -1766,6 +1770,7 @@ fn loading_session_restores_persisted_cwd() {
             display_session,
             crate::app::transcript::LoadedTranscript::full(transcript),
             crate::app::history::live_session_for_test(display_session_id.clone(), 0, None),
+            smelt_store::StoreHead::default(),
         ),
     );
     assert!(app.drain_idle_work());

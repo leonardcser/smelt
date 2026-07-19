@@ -113,6 +113,7 @@ fn display_only_resume_sets_resume_hint_state() {
             session,
             crate::app::transcript::LoadedTranscript::full(transcript),
             crate::app::history::live_session_for_test(session_id.clone(), 0, None),
+            smelt_store::StoreHead::default(),
         ),
     );
 

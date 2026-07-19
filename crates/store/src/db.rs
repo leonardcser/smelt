@@ -857,7 +857,6 @@ impl SessionDb {
             })?;
         let command = SessionCommit {
             session_id: identity.id.clone(),
-            save_id: crate::SaveId::new(head.revision.get().saturating_add(1)),
             expected: head,
             identity,
             metadata,
@@ -1462,7 +1461,6 @@ fn estimated_descriptor_rows(records: &[TranscriptDescriptorRecord], width: u16)
 }
 
 pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> SessionCommitFailure {
-    let disposition = err.session_persistence_disposition();
     match err {
         StoreError::OwnershipLost => SessionCommitFailure::OwnershipLost,
         StoreError::Busy {
@@ -1488,15 +1486,12 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
         }
         StoreError::Io(err) => SessionCommitFailure::Io {
             message: err.to_string(),
-            disposition,
         },
         StoreError::Sqlite(err) => SessionCommitFailure::Sqlite {
             message: err.to_string(),
-            disposition,
         },
         StoreError::TransactionCleanup { operation, message } => SessionCommitFailure::Sqlite {
             message: format!("transaction cleanup failed during {operation}: {message}"),
-            disposition,
         },
         StoreError::OperationCleanup {
             operation,
@@ -1511,7 +1506,6 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
-            disposition,
         },
         StoreError::OwnershipConflict { .. } => SessionCommitFailure::OwnershipLost,
     }
@@ -1659,7 +1653,7 @@ fn apply_session_commit_in_transaction(
     if let Some(token) = owner_token {
         meta::verify_writer_owner(conn, token).map_err(session_commit_failure_from_store_error)?;
     }
-    if let Some(mut receipt) = idempotent_session_commit_receipt(conn, &prepared.fingerprint)
+    if let Some(receipt) = idempotent_session_commit_receipt(conn, &prepared.fingerprint)
         .map_err(session_commit_failure_from_store_error)?
     {
         let current = current_store_head(conn).map_err(session_commit_failure_from_store_error)?;
@@ -1668,7 +1662,6 @@ fn apply_session_commit_in_transaction(
                 message: "persisted commit receipt does not match the command or store head".into(),
             });
         }
-        receipt.save_id = command.save_id;
         return Ok(receipt);
     }
 
@@ -1834,7 +1827,6 @@ fn apply_session_commit_in_transaction(
     };
     let receipt = SaveReceipt {
         session_id: command.session_id.clone(),
-        save_id: command.save_id,
         previous: command.expected,
         current,
     };
@@ -1856,11 +1848,10 @@ fn apply_session_commit_in_transaction(
     Ok(receipt)
 }
 
-#[cfg(test)]
-pub(crate) fn session_commit_fingerprint(command: &SessionCommit) -> Result<String> {
-    prepare_session_commit(command)
-        .map(|prepared| prepared.fingerprint)
-        .map_err(|failure| StoreError::Integrity(format!("invalid session commit: {failure:?}")))
+pub fn session_commit_fingerprint(
+    command: &SessionCommit,
+) -> std::result::Result<String, SessionCommitFailure> {
+    prepare_session_commit(command).map(|prepared| prepared.fingerprint)
 }
 
 fn canonical_session_commit_fingerprint(
@@ -2687,7 +2678,7 @@ mod tests {
     use super::*;
     use crate::{
         benchmark_zstd_compression, HistorySuffix, ObjectCodec, RequestAuditOrder,
-        RequestAuditPayloadMode, Revision, SaveId, SideTableSuffixes, TranscriptDescriptorSuffix,
+        RequestAuditPayloadMode, Revision, SideTableSuffixes, TranscriptDescriptorSuffix,
         DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
     };
 
@@ -2950,7 +2941,6 @@ mod tests {
             })?;
         Ok(SessionCommit {
             session_id: fixture.state.id.clone(),
-            save_id: SaveId::new(expected.revision.get().saturating_add(1)),
             expected,
             identity: test_identity_from_model(&fixture.state),
             metadata: test_metadata_from_model(&fixture.state)
@@ -2977,7 +2967,6 @@ mod tests {
         let boundary = full.session.head.history_len.get();
         Ok(SessionCommit {
             session_id: full.session.identity.id.clone(),
-            save_id: SaveId::new(full.session.head.revision.get().saturating_add(1)),
             expected: full.session.head,
             identity: full.session.identity.clone(),
             metadata: full.session.metadata.clone(),
@@ -3008,7 +2997,6 @@ mod tests {
             })?;
         Ok(SessionCommit {
             session_id: identity.id.clone(),
-            save_id: SaveId::new(expected.revision.get().saturating_add(1)),
             expected,
             identity,
             metadata,
@@ -3118,7 +3106,6 @@ mod tests {
     fn test_empty_commit(id: &str, expected: StoreHead) -> SessionCommit {
         SessionCommit {
             session_id: id.into(),
-            save_id: crate::SaveId::new(expected.revision.get().saturating_add(1)),
             expected,
             identity: test_identity(id),
             metadata: test_metadata(),
@@ -3628,7 +3615,6 @@ mod tests {
         let history = protocol::HistoryItem::user(protocol::Content::text("hello"));
         let command = SessionCommit {
             session_id: "typed-commit".into(),
-            save_id: crate::SaveId::new(1),
             expected: StoreHead::default(),
             identity: test_identity("typed-commit"),
             metadata: test_metadata(),
@@ -3656,27 +3642,6 @@ mod tests {
         assert_eq!(receipt.current.descriptor_len, crate::DescriptorLen::new(1));
         assert_eq!(db.history_item_count().unwrap(), 1);
         assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
-    }
-
-    #[test]
-    fn commit_fingerprint_ignores_save_id_but_replay_uses_incoming_correlation() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let command = test_empty_commit("fingerprint-save-id", StoreHead::default());
-        let mut replay = command.clone();
-        replay.save_id = crate::SaveId::new(99);
-
-        assert_eq!(
-            session_commit_fingerprint(&command).unwrap(),
-            session_commit_fingerprint(&replay).unwrap()
-        );
-        let receipt = db.apply_session_commit(&command).unwrap();
-        let replayed = db.apply_session_commit(&replay).unwrap();
-
-        assert_eq!(replayed.save_id, replay.save_id);
-        assert_eq!(replayed.previous, receipt.previous);
-        assert_eq!(replayed.current, receipt.current);
-        assert_eq!(replayed.current.revision, Revision::new(1));
     }
 
     #[test]
@@ -3953,7 +3918,6 @@ mod tests {
         let descriptor = transcript_user_record_with_history(0, 0, "user", "hello");
         let first = SessionCommit {
             session_id: "descriptor-no-op".into(),
-            save_id: crate::SaveId::new(1),
             expected: StoreHead::default(),
             identity: test_identity("descriptor-no-op"),
             metadata: test_metadata(),
@@ -3972,7 +3936,6 @@ mod tests {
         };
         let first_receipt = db.apply_session_commit(&first).unwrap();
         let no_op = SessionCommit {
-            save_id: crate::SaveId::new(2),
             expected: first_receipt.current,
             history: crate::HistorySuffix {
                 start: HistoryIndex::new(1),
@@ -4018,7 +3981,6 @@ mod tests {
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
             session_id: "stale-descriptor".into(),
-            save_id: crate::SaveId::new(2),
             expected: test_store_head(current_revision, 1, 303),
             identity: test_identity("stale-descriptor"),
             metadata: test_metadata(),
@@ -4075,7 +4037,6 @@ mod tests {
         .unwrap();
         let command = SessionCommit {
             session_id: "stale-revision".into(),
-            save_id: crate::SaveId::new(3),
             expected: test_store_head(0, 1, 0),
             identity: test_identity("stale-revision"),
             metadata: test_metadata(),
@@ -4116,7 +4077,6 @@ mod tests {
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
             session_id: "stale-history".into(),
-            save_id: crate::SaveId::new(4),
             expected: test_store_head(current_revision, 2, 0),
             identity: test_identity("stale-history"),
             metadata: test_metadata(),
@@ -4156,7 +4116,6 @@ mod tests {
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = SessionCommit {
             session_id: "bad-history-suffix".into(),
-            save_id: crate::SaveId::new(5),
             expected: StoreHead::default(),
             identity: test_identity("bad-history-suffix"),
             metadata: test_metadata(),
@@ -4201,7 +4160,6 @@ mod tests {
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
             session_id: "truncate-history".into(),
-            save_id: crate::SaveId::new(5),
             expected: test_store_head(current_revision, 3, 0),
             identity: test_identity("truncate-history"),
             metadata: test_metadata(),
@@ -4245,7 +4203,6 @@ mod tests {
         let metadata = serde_json::json!({"model": "test"});
         let command = SessionCommit {
             session_id: "side-table-commit".into(),
-            save_id: crate::SaveId::new(5),
             expected: test_store_head(current_revision, 1, 0),
             identity: test_identity("side-table-commit"),
             metadata: test_metadata(),
@@ -4279,7 +4236,6 @@ mod tests {
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = SessionCommit {
             session_id: "bad-side-table".into(),
-            save_id: crate::SaveId::new(6),
             expected: StoreHead::default(),
             identity: test_identity("bad-side-table"),
             metadata: test_metadata(),
@@ -4319,7 +4275,6 @@ mod tests {
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
         let command = SessionCommit {
             session_id: "bad-side-table-suffix".into(),
-            save_id: crate::SaveId::new(7),
             expected: StoreHead::default(),
             identity: test_identity("bad-side-table-suffix"),
             metadata: test_metadata(),
@@ -4364,7 +4319,6 @@ mod tests {
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
             session_id: "bad-turn-meta".into(),
-            save_id: crate::SaveId::new(6),
             expected: test_store_head(current_revision, 1, 0),
             identity: test_identity("bad-turn-meta"),
             metadata: test_metadata(),
@@ -4434,7 +4388,6 @@ mod tests {
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
             session_id: "missing-object-ref".into(),
-            save_id: crate::SaveId::new(7),
             expected: test_store_head(current_revision, 1, 0),
             identity: test_identity("missing-object-ref"),
             metadata: test_metadata(),
@@ -4482,7 +4435,6 @@ mod tests {
         let current_revision = db.test_session_model().unwrap().unwrap().revision;
         let command = SessionCommit {
             session_id: "rollback-descriptor".into(),
-            save_id: crate::SaveId::new(6),
             expected: test_store_head(current_revision, 1, 0),
             identity: test_identity("rollback-descriptor"),
             metadata: test_metadata(),
@@ -6539,7 +6491,6 @@ mod tests {
             test_metadata_from_model(&state).map_err(session_commit_failure_from_store_error)?;
         db.apply_session_commit(&SessionCommit {
             session_id: state.id,
-            save_id: crate::SaveId::new(expected.revision.get().saturating_add(1)),
             expected,
             identity,
             metadata,

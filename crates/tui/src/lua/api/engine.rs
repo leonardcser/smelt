@@ -519,6 +519,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let request_config = app.core.config.request_runtime_config();
                     let session_id = app.core.session.id.clone();
                     let session_dir = smelt_core::session::dir_for(&app.core.session);
+                    let persistence = protocol::PersistenceScope {
+                        epoch: app.persistence.as_ref().map_or(0, |actor| actor.epoch().get()),
+                        required_generation: app.session_document.generation().get(),
+                    };
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
@@ -531,6 +535,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         tools: Vec::new(),
                         session_id,
                         session_dir,
+                        persistence,
                         stream,
                         visible_retries,
                     });
@@ -604,6 +609,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let request_config = app.core.config.request_runtime_config();
                     let session_id = app.core.session.id.clone();
                     let session_dir = smelt_core::session::dir_for(&app.core.session);
+                    let persistence = protocol::PersistenceScope {
+                        epoch: app.persistence.as_ref().map_or(0, |actor| actor.epoch().get()),
+                        required_generation: app.session_document.generation().get(),
+                    };
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
@@ -619,6 +628,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         ),
                         session_id,
                         session_dir,
+                        persistence,
                         stream,
                         visible_retries,
                     });
