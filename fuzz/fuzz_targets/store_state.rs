@@ -9,14 +9,14 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use protocol::{AssistantStep, Content, HistoryItem};
 use smelt_store::{
-    DescriptorIndex, HistoryIndex, HistoryLen, HistorySuffix, OwnedSessionWriter, Revision, SaveId,
-    SaveReceipt, SessionCommit, SessionCommitFailure, SessionMaintenance, SessionReader,
-    SessionState, SideTableSuffixes, StoreHead, TranscriptDescriptorRecord,
-    TranscriptDescriptorSuffix,
+    DescriptorIndex, FullSession, HistoryIndex, HistoryLen, HistorySuffix, OwnedSessionWriter,
+    Revision, SaveReceipt, SessionCommit, SessionCommitFailure, SessionCostUsd, SessionIdentity,
+    SessionMaintenance, SessionMetadata, SessionReader, SideTableSuffixes, StoreHead, StoredSession,
+    TranscriptDescriptorRecord, TranscriptDescriptorSuffix,
 };
 use std::path::Path;
 
-const SESSION_ID: &str = "fuzz-session";
+const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MAX_OPS: usize = 48;
 const MAX_REPLACEMENT_ITEMS: usize = 8;
 const MAX_TEXT_CHARS: usize = 96;
@@ -69,21 +69,22 @@ struct StateInput {
 #[derive(Clone, Default)]
 struct Model {
     head: StoreHead,
-    state: Option<SessionState>,
+    identity: Option<SessionIdentity>,
+    metadata: Option<SessionMetadata>,
     history: Vec<HistoryItem>,
     turn_metas: Vec<(u64, serde_json::Value)>,
     metadata_snapshots: Vec<(u64, serde_json::Value)>,
     context_snapshots: Vec<(u64, serde_json::Value)>,
     descriptors: Vec<TranscriptDescriptorRecord>,
     last_commit: Option<(SessionCommit, SaveReceipt)>,
-    next_save_id: u64,
+    next_sequence: u64,
     backup_id: u64,
     fork_id: u64,
 }
 
 #[derive(Debug, PartialEq)]
 struct StoreObservation {
-    snapshot: Option<smelt_store::SessionSnapshot>,
+    snapshot: Option<FullSession>,
     descriptors: Vec<TranscriptDescriptorRecord>,
     history_rows: u64,
     descriptor_rows: u64,
@@ -95,9 +96,10 @@ fuzz_target!(|input: Input| run(input));
 
 fn run(input: Input) {
     let temp = tempfile::tempdir().expect("create store fuzz tempdir");
-    let session_dir = temp.path().join("primary");
-    std::fs::create_dir(&session_dir).expect("create primary session directory");
-    let mut writer = Some(open_writer(&session_dir));
+    let session_root = temp.path().join("primary");
+    std::fs::create_dir(&session_root).expect("create primary session root");
+    let session_dir = session_root.join(SESSION_ID);
+    let mut writer = Some(open_writer(&session_root));
     let mut model = Model::default();
     assert_store(&session_dir, &model);
 
@@ -121,33 +123,37 @@ fn run(input: Input) {
             }
             Op::RejectStale => reject_stale(
                 writer.as_mut().expect("writer open"),
-                &mut model,
+                &model,
                 &session_dir,
             ),
             Op::RejectInvalid { kind } => reject_invalid(
                 writer.as_mut().expect("writer open"),
-                &mut model,
+                &model,
                 &session_dir,
                 kind,
             ),
-            Op::Reopen => reopen(&session_dir, &mut writer),
+            Op::Reopen => reopen(&session_root, &mut writer),
             Op::Backup => backup(temp.path(), &session_dir, &mut model),
             Op::ForkPrefix { keep } => fork_prefix(temp.path(), &session_dir, &mut model, keep),
-            Op::Maintain { kind } => maintain(&session_dir, &mut writer, &model, kind),
+            Op::Maintain { kind } => {
+                maintain(&session_root, &session_dir, &mut writer, &model, kind)
+            }
         }
         assert_store(&session_dir, &model);
     }
 
     writer.take().expect("writer open").release().unwrap();
     assert_store(&session_dir, &model);
-    assert!(
-        SessionReader::open_existing(&session_dir)
-            .unwrap()
-            .writer_owner()
-            .unwrap()
-            .is_none(),
-        "clean release left writer ownership behind"
-    );
+    if model.identity.is_some() {
+        assert!(
+            SessionReader::open_existing(&session_dir)
+                .unwrap()
+                .writer_owner()
+                .unwrap()
+                .is_none(),
+            "clean release left writer ownership behind"
+        );
+    }
 }
 
 fn commit(
@@ -168,14 +174,13 @@ fn commit(
     );
     let side_tables = side_tables(history.len(), side_seed);
     let descriptors = descriptors(&history);
-    let state = session_state(&state_input, history.len(), model.next_save_id);
+    let sequence = model.next_sequence;
+    model.next_sequence = model.next_sequence.saturating_add(1);
     let command = SessionCommit {
         session_id: SESSION_ID.to_string(),
-        save_id: SaveId::new(next_save_id(model)),
-        base_revision: model.head.revision,
-        base_history_len: model.head.history_len,
-        base_descriptor_len: model.head.descriptor_len,
-        state,
+        expected: model.head,
+        identity: session_identity(),
+        metadata: session_metadata(&state_input, history.len(), sequence),
         history: HistorySuffix {
             start: HistoryIndex::new(keep as u64),
             final_len: HistoryLen::new(history.len() as u64),
@@ -189,15 +194,19 @@ fn commit(
     };
 
     let receipt = writer.commit_session(&command).unwrap();
-    assert_eq!(receipt.previous_revision, model.head.revision);
-    assert_eq!(receipt.history_len.get(), history.len() as u64);
-    assert_eq!(receipt.descriptor_len.get(), descriptors.len() as u64);
+    assert_eq!(receipt.previous, model.head);
+    assert_eq!(receipt.current.history_len.get(), history.len() as u64);
+    assert_eq!(
+        receipt.current.descriptor_len.get(),
+        descriptors.len() as u64
+    );
+    if writer.is_staged() {
+        writer.publish().unwrap();
+    }
 
-    let mut expected_state = command.state.clone();
-    expected_state.revision = receipt.revision.get();
-    expected_state.history_len = history.len() as u64;
-    model.head = receipt.head();
-    model.state = Some(expected_state);
+    model.head = receipt.current;
+    model.identity = Some(command.identity.clone());
+    model.metadata = Some(command.metadata.clone());
     model.history = history;
     model.turn_metas = side_tables.0;
     model.metadata_snapshots = side_tables.1;
@@ -220,20 +229,15 @@ fn repeat_last(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Pat
     );
 }
 
-fn reject_stale(writer: &mut OwnedSessionWriter, model: &mut Model, session_dir: &Path) {
+fn reject_stale(writer: &mut OwnedSessionWriter, model: &Model, session_dir: &Path) {
     let before = observe_store(session_dir);
     let mut command = current_command(model);
-    command.save_id = SaveId::new(next_save_id(model));
-    command.base_revision = Revision::new(model.head.revision.get().saturating_add(1));
+    command.expected.revision = Revision::new(model.head.revision.get().saturating_add(1));
     let error = writer.commit_session(&command).unwrap_err();
     assert_eq!(
         error,
         SessionCommitFailure::StaleBase {
-            expected: StoreHead {
-                revision: command.base_revision,
-                history_len: command.base_history_len,
-                descriptor_len: command.base_descriptor_len,
-            },
+            expected: command.expected,
             current: model.head,
         }
     );
@@ -246,13 +250,12 @@ fn reject_stale(writer: &mut OwnedSessionWriter, model: &mut Model, session_dir:
 
 fn reject_invalid(
     writer: &mut OwnedSessionWriter,
-    model: &mut Model,
+    model: &Model,
     session_dir: &Path,
     kind: u8,
 ) {
     let before = observe_store(session_dir);
     let mut command = current_command(model);
-    command.save_id = SaveId::new(next_save_id(model));
     let expected = match kind % 4 {
         0 => {
             command
@@ -276,7 +279,7 @@ fn reject_invalid(
             "side_table"
         }
         _ => {
-            command.state.id = "wrong-session".to_string();
+            command.identity.id = "wrong-session".to_string();
             "session"
         }
     };
@@ -295,12 +298,15 @@ fn reject_invalid(
     );
 }
 
-fn reopen(session_dir: &Path, writer: &mut Option<OwnedSessionWriter>) {
+fn reopen(session_root: &Path, writer: &mut Option<OwnedSessionWriter>) {
     writer.take().expect("writer open").release().unwrap();
-    *writer = Some(open_writer(session_dir));
+    *writer = Some(open_writer(session_root));
 }
 
 fn backup(root: &Path, session_dir: &Path, model: &mut Model) {
+    if model.identity.is_none() {
+        return;
+    }
     model.backup_id = model.backup_id.saturating_add(1);
     let path = root.join(format!("backup-{}.db", model.backup_id));
     let reader = SessionReader::open_existing(session_dir).unwrap();
@@ -310,36 +316,36 @@ fn backup(root: &Path, session_dir: &Path, model: &mut Model) {
 }
 
 fn fork_prefix(root: &Path, session_dir: &Path, model: &mut Model, keep: u8) {
-    if model.state.is_none() {
+    let (Some(identity), Some(metadata)) = (&model.identity, &model.metadata) else {
         return;
-    }
+    };
     model.fork_id = model.fork_id.saturating_add(1);
     let prefix = usize::from(keep) % (model.history.len() + 1);
-    let fork_id = format!("fork-{}", model.fork_id);
+    let fork_id = format!("{:064x}", model.fork_id);
     let fork_dir = root.join(&fork_id);
     let source = SessionReader::open_existing(session_dir).unwrap();
-    let mut state = model.state.clone().expect("model state");
-    state.id = fork_id.clone();
-    state.parent_id = Some(SESSION_ID.to_string());
-    state.checkpoint_json = None;
-    state.history_len = prefix as u64;
-    state.revision = 0;
+    let mut fork_identity = identity.clone();
+    fork_identity.id = fork_id.clone();
+    fork_identity.parent_id = Some(SESSION_ID.to_string());
+    let mut fork_metadata = metadata.clone();
+    fork_metadata.checkpoint_json = None;
 
-    let mut maintenance = SessionMaintenance::open(&fork_dir, &fork_id).unwrap();
+    let mut maintenance = SessionMaintenance::open(root, &fork_id).unwrap();
     maintenance
-        .copy_prefix_from(&source, &state, prefix)
+        .import_prefix_from(&source, &fork_identity, &fork_metadata, prefix)
         .unwrap();
+    maintenance.publish().unwrap();
     maintenance.release().unwrap();
 
     let fork = SessionReader::open_existing(&fork_dir).unwrap();
     fork.quick_check().unwrap();
     let report = fork.doctor_report().unwrap();
     assert!(report.healthy, "fork doctor issues: {:?}", report.issues);
-    let snapshot = fork.load_full_session_snapshot().unwrap().unwrap();
+    let snapshot = fork.load_full_session().unwrap().unwrap();
     assert_eq!(snapshot.history, model.history[..prefix]);
-    assert_eq!(snapshot.history_len, prefix);
-    assert_eq!(snapshot.state.id, fork_id);
-    assert_eq!(snapshot.state.parent_id.as_deref(), Some(SESSION_ID));
+    assert_eq!(snapshot.session.head.history_len.get(), prefix as u64);
+    assert_eq!(snapshot.session.identity, fork_identity);
+    assert_eq!(snapshot.session.metadata, fork_metadata);
     assert_eq!(
         snapshot.turn_metas,
         prefix_rows(&model.turn_metas, prefix),
@@ -368,13 +374,22 @@ fn fork_prefix(root: &Path, session_dir: &Path, model: &mut Model, keep: u8) {
     assert!(fork.degraded_warnings().unwrap().is_empty());
     drop(fork);
 
-    SessionMaintenance::delete_session(&fork_dir).unwrap();
+    SessionMaintenance::delete_session(root, &fork_id).unwrap();
     assert!(!fork_dir.exists(), "deleted fork still exists");
 }
 
-fn maintain(session_dir: &Path, writer: &mut Option<OwnedSessionWriter>, model: &Model, kind: u8) {
+fn maintain(
+    session_root: &Path,
+    session_dir: &Path,
+    writer: &mut Option<OwnedSessionWriter>,
+    model: &Model,
+    kind: u8,
+) {
+    if model.identity.is_none() {
+        return;
+    }
     writer.take().expect("writer open").release().unwrap();
-    let mut maintenance = SessionMaintenance::open(session_dir, SESSION_ID).unwrap();
+    let mut maintenance = SessionMaintenance::open(session_root, SESSION_ID).unwrap();
     let garbage_collected = match kind % 4 {
         0 => {
             maintenance.garbage_collect_objects().unwrap();
@@ -406,19 +421,33 @@ fn maintain(session_dir: &Path, writer: &mut Option<OwnedSessionWriter>, model: 
             "garbage collection did not leave exactly the reachable attachments"
         );
     }
-    *writer = Some(open_writer(session_dir));
+    *writer = Some(open_writer(session_root));
 }
 
 fn assert_store(session_dir: &Path, model: &Model) {
+    if model.identity.is_none() {
+        assert!(!session_dir.exists(), "empty model published a session");
+        return;
+    }
     let reader = SessionReader::open_existing(session_dir).unwrap();
     assert_reader(&reader, model);
 }
 
 fn observe_store(session_dir: &Path) -> StoreObservation {
+    if !session_dir.exists() {
+        return StoreObservation {
+            snapshot: None,
+            descriptors: Vec::new(),
+            history_rows: 0,
+            descriptor_rows: 0,
+            object_rows: 0,
+            request_rows: 0,
+        };
+    }
     let reader = SessionReader::open_existing(session_dir).unwrap();
     let stats = reader.storage_stats().unwrap();
     StoreObservation {
-        snapshot: reader.load_full_session_snapshot().unwrap(),
+        snapshot: reader.load_full_session().unwrap(),
         descriptors: reader.read_all_transcript_descriptor_records().unwrap(),
         history_rows: stats.history_rows,
         descriptor_rows: stats.descriptor_rows,
@@ -436,19 +465,30 @@ fn assert_reader(reader: &SessionReader, model: &Model) {
         "store has missing object references"
     );
 
-    let state = reader.session_state().unwrap();
-    assert_eq!(state, model.state, "session state diverged from model");
-    let snapshot = reader.load_full_session_snapshot().unwrap();
-    match (&snapshot, &model.state) {
+    let expected_session = match (&model.identity, &model.metadata) {
+        (Some(identity), Some(metadata)) => Some(StoredSession {
+            identity: identity.clone(),
+            metadata: metadata.clone(),
+            head: model.head,
+        }),
+        (None, None) => None,
+        _ => panic!("modeled session identity and metadata diverged"),
+    };
+    assert_eq!(
+        reader.stored_session().unwrap(),
+        expected_session,
+        "stored session diverged from model"
+    );
+    let snapshot = reader.load_full_session().unwrap();
+    match (&snapshot, &model.identity) {
         (None, None) => {}
         (Some(snapshot), Some(_)) => {
-            assert_eq!(snapshot.state, model.state.clone().unwrap());
+            assert_eq!(snapshot.session, expected_session.unwrap());
             assert_eq!(snapshot.history, model.history);
-            assert_eq!(snapshot.history_start_idx, 0);
-            assert_eq!(snapshot.history_len, model.history.len());
             assert_eq!(snapshot.turn_metas, model.turn_metas);
             assert_eq!(snapshot.metadata_snapshots, model.metadata_snapshots);
             assert_eq!(snapshot.context_snapshots, model.context_snapshots);
+            assert_eq!(snapshot.descriptors, model.descriptors);
         }
         _ => panic!("snapshot presence diverged from model"),
     }
@@ -472,17 +512,16 @@ fn assert_reader(reader: &SessionReader, model: &Model) {
 }
 
 fn current_command(model: &Model) -> SessionCommit {
-    let state = model
-        .state
+    let identity = model.identity.clone().unwrap_or_else(session_identity);
+    let metadata = model
+        .metadata
         .clone()
-        .unwrap_or_else(|| empty_session_state(model.history.len()));
+        .unwrap_or_else(empty_session_metadata);
     SessionCommit {
         session_id: SESSION_ID.to_string(),
-        save_id: SaveId::ZERO,
-        base_revision: model.head.revision,
-        base_history_len: model.head.history_len,
-        base_descriptor_len: model.head.descriptor_len,
-        state,
+        expected: model.head,
+        identity,
+        metadata,
         history: HistorySuffix {
             start: HistoryIndex::new(model.history.len() as u64),
             final_len: HistoryLen::new(model.history.len() as u64),
@@ -496,13 +535,8 @@ fn current_command(model: &Model) -> SessionCommit {
     }
 }
 
-fn next_save_id(model: &mut Model) -> u64 {
-    model.next_save_id = model.next_save_id.saturating_add(1);
-    model.next_save_id
-}
-
-fn open_writer(session_dir: &Path) -> OwnedSessionWriter {
-    OwnedSessionWriter::open(session_dir, SESSION_ID).unwrap()
+fn open_writer(session_root: &Path) -> OwnedSessionWriter {
+    OwnedSessionWriter::open(session_root, SESSION_ID).unwrap()
 }
 
 fn history_item(entry: Entry) -> HistoryItem {
@@ -648,14 +682,25 @@ fn typed_side_tables(side_tables: &SideTables) -> SideTableSuffixes {
     }
 }
 
-fn session_state(input: &StateInput, history_len: usize, sequence: u64) -> SessionState {
+fn session_identity() -> SessionIdentity {
+    SessionIdentity {
+        id: SESSION_ID.to_string(),
+        created_at: 1,
+        parent_id: None,
+    }
+}
+
+fn session_metadata(
+    input: &StateInput,
+    history_len: usize,
+    sequence: u64,
+) -> SessionMetadata {
     let first_live_index = if history_len == 0 {
         0
     } else {
         usize::from(input.checkpoint_at) % (history_len + 1)
     };
-    SessionState {
-        id: SESSION_ID.to_string(),
+    SessionMetadata {
         title: nonempty(small_text(input.title.clone())),
         slug: Some(format!("fuzz-{sequence}")),
         first_user_message: None,
@@ -664,7 +709,6 @@ fn session_state(input: &StateInput, history_len: usize, sequence: u64) -> Sessi
         reasoning_effort: Some("medium".to_string()),
         model: nonempty(small_text(input.model.clone())),
         fast_mode: input.fast_mode,
-        parent_id: None,
         accounting_json: Some(serde_json::json!({"sequence": sequence})),
         checkpoint_json: input.checkpoint.then(|| {
             serde_json::json!({
@@ -677,17 +721,13 @@ fn session_state(input: &StateInput, history_len: usize, sequence: u64) -> Sessi
         context_tokens: Some(history_len as u64 * 10),
         context_tokens_history_len: Some(history_len as u64),
         display_context_tokens: Some(history_len as u64 * 8),
-        session_cost_usd: f64::from(input.cost_cents) / 100.0,
-        revision: 0,
-        history_len: history_len as u64,
-        created_at: 1,
+        session_cost_usd: SessionCostUsd::new(f64::from(input.cost_cents) / 100.0).unwrap(),
         updated_at: sequence as i64,
     }
 }
 
-fn empty_session_state(history_len: usize) -> SessionState {
-    SessionState {
-        id: SESSION_ID.to_string(),
+fn empty_session_metadata() -> SessionMetadata {
+    SessionMetadata {
         title: None,
         slug: None,
         first_user_message: None,
@@ -696,16 +736,12 @@ fn empty_session_state(history_len: usize) -> SessionState {
         reasoning_effort: None,
         model: None,
         fast_mode: None,
-        parent_id: None,
         accounting_json: None,
         checkpoint_json: None,
         context_tokens: None,
         context_tokens_history_len: None,
         display_context_tokens: None,
-        session_cost_usd: 0.0,
-        revision: 0,
-        history_len: history_len as u64,
-        created_at: 1,
+        session_cost_usd: SessionCostUsd::new(0.0).unwrap(),
         updated_at: 1,
     }
 }
