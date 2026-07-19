@@ -307,6 +307,11 @@ impl TuiApp {
         self.lua.retire();
         self.commit_lua_tui_candidate(candidate_tui);
         self.lua = candidate;
+        self.command_catalog
+            .activate(self.lua.command_names_handle());
+        if let Some(prompt) = self.ui.buf_mut(crate::app::PROMPT_EDIT_BUF) {
+            prompt.invalidate_render_cache();
+        }
         self.core.lua_generation = self.lua.id;
         let lua_shared = std::sync::Arc::clone(self.lua.shared());
         if let Err(error) = crate::lua::api::terminal::commit_staged_title(&lua_shared) {

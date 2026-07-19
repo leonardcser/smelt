@@ -232,7 +232,7 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
-        input: protocol::StartTurnInput::user(Content::text("go"), None),
+        input: protocol::StartTurnInput::user(Content::text("go")),
         mode: AgentMode::normal(),
         model_target: target,
         request_config: RequestRuntimeConfig::default(),
@@ -330,7 +330,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
 
             handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
                 turn_id: 1,
-                input: protocol::StartTurnInput::user(Content::text("go"), None),
+                input: protocol::StartTurnInput::user(Content::text("go")),
                 mode: AgentMode::normal(),
                 model_target: target,
                 request_config: RequestRuntimeConfig::default(),

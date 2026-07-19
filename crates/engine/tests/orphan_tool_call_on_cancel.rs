@@ -131,7 +131,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
-        input: protocol::StartTurnInput::user(Content::text("go"), None),
+        input: protocol::StartTurnInput::user(Content::text("go")),
         mode: AgentMode::normal(),
         model_target: target,
         request_config: RequestRuntimeConfig::default(),

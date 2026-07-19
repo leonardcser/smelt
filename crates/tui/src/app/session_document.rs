@@ -2327,6 +2327,7 @@ mod tests {
                 block: Some(Block::User {
                     text: "new".into(),
                     image_labels: Vec::new(),
+                    command: false,
                 }),
                 first_user_message: None,
             },
@@ -2357,6 +2358,7 @@ mod tests {
                 block: Some(Block::User {
                     text: "new".into(),
                     image_labels: Vec::new(),
+                    command: false,
                 }),
                 first_user_message: Some("new".into()),
             },
@@ -2390,6 +2392,7 @@ mod tests {
                 block: Some(Block::User {
                     text: "new".into(),
                     image_labels: Vec::new(),
+                    command: false,
                 }),
                 first_user_message: None,
             },

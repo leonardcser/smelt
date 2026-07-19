@@ -132,7 +132,6 @@ pub(crate) async fn engine_task(
                             system_prompt: tui_system_prompt,
                             tools,
                         } = *payload;
-                        let display = input.display();
                         let loaded_history = match load_model_history(history, &session_dir) {
                             Ok(history) => history,
                             Err(message) => {
@@ -184,7 +183,6 @@ pub(crate) async fn engine_task(
                             model_target,
                             target_revision: 0,
                             request_config,
-                            display,
                             system_prompt,
                             tools,
                             permission_overrides,
@@ -814,7 +812,6 @@ struct Turn<'a> {
     model_target: ModelTarget,
     target_revision: u64,
     request_config: RequestRuntimeConfig,
-    display: Option<String>,
     system_prompt: String,
     tools: Vec<protocol::ToolDef>,
     permission_overrides: Option<protocol::PermissionOverrides>,
@@ -975,20 +972,8 @@ impl<'a> Turn<'a> {
             .as_millis() as u64
     }
 
-    /// Append a user turn, redacting content first when `redact_secrets` is on.
-    fn push_user(&mut self, mut content: Content, display: Option<String>) {
-        let display = if self.request_config.redact_secrets {
-            crate::redact::redact_content(&mut content);
-            display.map(|text| crate::redact::redact(&text))
-        } else {
-            display
-        };
-        self.mark_append_history_changed();
-        self.history.push(HistoryItem::User { content, display });
-    }
-
     /// Append current-turn content that may be a synthetic internal note.
-    fn push_turn_content(&mut self, mut content: Content, display: Option<String>) {
+    fn push_turn_content(&mut self, mut content: Content, display: Option<String>, command: bool) {
         let display = if self.request_config.redact_secrets {
             crate::redact::redact_content(&mut content);
             display.map(|text| crate::redact::redact(&text))
@@ -996,8 +981,14 @@ impl<'a> Turn<'a> {
             display
         };
         let mut item = protocol::history_item_from_user_content(content);
-        if let HistoryItem::User { display: slot, .. } = &mut item {
+        if let HistoryItem::User {
+            display: slot,
+            command: is_command,
+            ..
+        } = &mut item
+        {
             *slot = display;
+            *is_command = command;
         }
         self.mark_append_history_changed();
         self.history.push(item);
@@ -1326,13 +1317,13 @@ impl<'a> Turn<'a> {
 
     fn handle_turn_cmd(&mut self, cmd: UiCommand) -> bool {
         match cmd {
-            UiCommand::Steer { text } => {
+            UiCommand::Steer { input } => {
                 self.emit(EngineEvent::Steered {
-                    text: text.clone(),
+                    text: input.provider_content().text_content().into_owned(),
                     count: 1,
                 });
                 let first_index = self.public_history_len();
-                self.push_user(Content::text(text), None);
+                self.push_current_turn_input(input);
                 self.emit_history_appended_from(first_index);
                 true
             }
@@ -1388,8 +1379,12 @@ impl<'a> Turn<'a> {
 
     fn push_current_turn_input(&mut self, input: protocol::StartTurnInput) {
         match input {
-            protocol::StartTurnInput::User { content, .. } if !content.is_empty() => {
-                self.push_turn_content(content, self.display.clone());
+            protocol::StartTurnInput::User {
+                content,
+                display,
+                command,
+            } if !content.is_empty() => {
+                self.push_turn_content(content, display, command);
             }
             protocol::StartTurnInput::Note { note } => {
                 self.mark_append_history_changed();
@@ -3326,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn current_turn_content_classifies_internal_notes() {
+    fn current_turn_input_classifies_notes_and_preserves_commands() {
         let client = reqwest::Client::new();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -3361,7 +3356,6 @@ mod tests {
             model_target: model_target(),
             target_revision: 0,
             request_config: RequestRuntimeConfig::default(),
-            display: None,
             system_prompt: "sys".into(),
             tools: Vec::new(),
             permission_overrides: None,
@@ -3380,10 +3374,12 @@ mod tests {
                 "Background process 751225 exited with code 1.",
             )),
             None,
+            false,
         );
         turn.push_turn_content(
             Content::text(protocol::mode_change_note("now in apply mode.")),
             None,
+            false,
         );
 
         assert!(matches!(
@@ -3404,6 +3400,19 @@ mod tests {
         assert!(matches!(
             &turn.history[3],
             HistoryItem::Note(note) if note == &typed_note
+        ));
+
+        turn.push_current_turn_input(protocol::StartTurnInput::user_command(
+            Content::text("expanded command body"),
+            "/reflect",
+        ));
+        assert!(matches!(
+            &turn.history[4],
+            HistoryItem::User {
+                content,
+                display: Some(display),
+                command: true,
+            } if content.text_content() == "expanded command body" && display == "/reflect"
         ));
     }
 
@@ -3484,7 +3493,6 @@ mod tests {
             model_target: model_target(),
             target_revision: 0,
             request_config: RequestRuntimeConfig::default(),
-            display: None,
             system_prompt: "old prompt".into(),
             tools: Vec::new(),
             permission_overrides: None,
@@ -3582,6 +3590,7 @@ mod tests {
         let prior = HistoryItem::User {
             content: Content::text("prior"),
             display: None,
+            command: false,
         };
         handle.send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
             turn_id: 1,

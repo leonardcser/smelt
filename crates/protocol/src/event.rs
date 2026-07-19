@@ -534,6 +534,9 @@ pub enum StartTurnInput {
         content: Content,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         display: Option<String>,
+        /// Whether `display` is a slash-command invocation rather than ordinary input.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        command: bool,
     },
     Note {
         note: crate::history::HistoryNote,
@@ -541,8 +544,20 @@ pub enum StartTurnInput {
 }
 
 impl StartTurnInput {
-    pub fn user(content: Content, display: Option<String>) -> Self {
-        Self::User { content, display }
+    pub fn user(content: Content) -> Self {
+        Self::User {
+            content,
+            display: None,
+            command: false,
+        }
+    }
+
+    pub fn user_command(content: Content, display: impl Into<String>) -> Self {
+        Self::User {
+            content,
+            display: Some(display.into()),
+            command: true,
+        }
     }
 
     pub fn note(note: crate::history::HistoryNote) -> Self {
@@ -553,13 +568,6 @@ impl StartTurnInput {
         match self {
             Self::User { content, .. } => content.clone(),
             Self::Note { note } => Content::text(note.to_model_text()),
-        }
-    }
-
-    pub fn display(&self) -> Option<String> {
-        match self {
-            Self::User { display, .. } => display.clone(),
-            Self::Note { .. } => None,
         }
     }
 
@@ -733,7 +741,7 @@ pub enum UiCommand {
     StartTurn(Box<StartTurnPayload>),
 
     /// Inject a message mid-turn (steering / type-ahead).
-    Steer { text: String },
+    Steer { input: StartTurnInput },
 
     /// Remove the last `count` steered messages (user unqueued them).
     Unsteer { count: usize },
@@ -1050,7 +1058,7 @@ mod tests {
         };
         let p = StartTurnPayload {
             turn_id: 1,
-            input: StartTurnInput::user(Content::text("hi"), None),
+            input: StartTurnInput::user(Content::text("hi")),
             mode: AgentMode::normal(),
             model_target: target.clone(),
             request_config,

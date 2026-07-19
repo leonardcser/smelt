@@ -97,6 +97,7 @@ mod tests {
         Block::User {
             text: s.to_string(),
             image_labels: vec![],
+            command: false,
         }
     }
 

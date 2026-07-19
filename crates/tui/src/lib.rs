@@ -5,9 +5,6 @@
 #[global_allocator]
 static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
-#[cfg(test)]
-pub(crate) static COMMAND_RESOLVER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod test_support {
     static PROCESS_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

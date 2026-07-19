@@ -456,6 +456,11 @@ impl AppStoryCtx {
         std::fs::write(dir.join("meta.json"), meta_json).expect("write session meta fixture");
     }
 
+    /// Commit a fresh Lua generation through the production reload pipeline.
+    pub fn reload_lua(&mut self) {
+        self.app.reload_lua();
+    }
+
     /// Type a string into the prompt as individual key events.
     pub fn type_prompt(&mut self, s: &str) {
         self.app.type_text(s);
@@ -575,6 +580,11 @@ impl AppStoryCtx {
     /// any other flow that reads `smelt.session.turns()`).
     pub fn push_user_turn(&mut self, text: &str) {
         self.app.push_user_block(text);
+    }
+
+    /// Seed a command-marked user turn on the transcript.
+    pub fn push_command_turn(&mut self, text: &str) {
+        self.app.push_command_block(text);
     }
 
     /// Seed an assistant message on `session.messages`. Required by

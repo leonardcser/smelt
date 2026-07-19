@@ -116,11 +116,18 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                 entry.set("kind", "system")?;
                 entry.set("content", content.text_content())?;
             }
-            protocol::HistoryItem::User { content, display } => {
+            protocol::HistoryItem::User {
+                content,
+                display,
+                command,
+            } => {
                 entry.set("kind", "user")?;
                 entry.set("content", content.text_content())?;
                 if let Some(display) = display {
                     entry.set("display", display.as_str())?;
+                }
+                if *command {
+                    entry.set("command", true)?;
                 }
             }
             protocol::HistoryItem::Assistant(step) => {

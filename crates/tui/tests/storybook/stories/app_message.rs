@@ -223,13 +223,10 @@ app_story!(user_message_block_multiline_chrome, |ctx| {
 });
 
 app_story!(user_message_block_slash_command_accent, |ctx| {
-    // `/permissions` is a built-in registered slash command, so
-    // `user::render` paints the whole line with `SmeltAccent` fg
-    // instead of the default body color. The styles snapshot
-    // captures the accent color span - drift in the
-    // command-resolver wiring will surface as a styles diff.
+    // Command semantics are stored on the user block, so `user::render`
+    // paints the slash token with `SmeltAccent` instead of the body color.
     ctx.set_viewport(40, 8);
-    ctx.push_user_turn("/permissions");
+    ctx.push_command_turn("/permissions");
     ctx.assert_snapshot();
 });
 

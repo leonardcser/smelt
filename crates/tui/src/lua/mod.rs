@@ -1449,6 +1449,7 @@ mod tests {
         let block = Block::User {
             text: "hello".into(),
             image_labels: Vec::new(),
+            command: false,
         };
         let layout = render_transcript_block(&rt, &block, None);
         let BlockLayout::Gutter { child, spec } = layout else {

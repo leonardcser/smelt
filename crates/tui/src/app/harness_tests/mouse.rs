@@ -320,6 +320,7 @@ fn user_message_padding_click_snaps_cursor_after_left_pad() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "hello".into(),
             image_labels: vec![],
+            command: false,
         });
     app.render_silent();
 
@@ -362,6 +363,7 @@ fn user_message_drag_to_line_end_does_not_select_bottom_padding_row() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "hello".into(),
             image_labels: vec![],
+            command: false,
         });
     app.render_silent();
 

@@ -773,6 +773,7 @@ fn sparse_descriptor_resume_interrupt_save_compacts_and_appends_again() {
             Some(Block::User {
                 text: "sparse descriptor prompt".into(),
                 image_labels: Vec::new(),
+                command: false,
             }),
         );
         app.app.push_block(Block::Text {
@@ -888,6 +889,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
             Some(Block::User {
                 text: "first prompt".into(),
                 image_labels: Vec::new(),
+                command: false,
             }),
         );
         app.app.commit_request_history_item(
@@ -923,6 +925,7 @@ fn interrupted_turn_rewind_save_resume_restores_prior_context_tokens() {
             Some(Block::User {
                 text: "second prompt".into(),
                 image_labels: Vec::new(),
+                command: false,
             }),
         );
         app.start_turn(2);
@@ -1365,6 +1368,7 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         Some(Block::User {
             text: "request after compaction".into(),
             image_labels: Vec::new(),
+            command: false,
         }),
     );
     app.start_turn(42);

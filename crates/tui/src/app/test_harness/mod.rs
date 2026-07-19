@@ -375,18 +375,6 @@ impl TestAppBuilder {
         // target, and has no semantic value. Swap to `NullSink` immediately.
         app.core.clipboard.swap_sink(Box::new(smelt_core::NullSink));
 
-        // Install the command resolver `user::render` consults to paint
-        // registered `/cmd` text with `SmeltAccent`. Production does this
-        // in `TuiApp::run`, which the harness skips - without the hook
-        // every slash command in stories looks unstyled.
-        let command_names = app.lua.command_names_handle();
-        smelt_core::commands::set_command_resolver(move |name| {
-            command_names
-                .lock()
-                .map(|s| s.contains(name))
-                .unwrap_or(false)
-        });
-
         // Turn on per-thread allocation counters so `feed_one` snapshots see
         // real numbers. Idempotent; cheap when re-called.
         smelt_perf::alloc::enable();

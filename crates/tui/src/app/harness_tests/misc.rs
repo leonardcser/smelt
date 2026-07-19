@@ -711,6 +711,7 @@ fn transcript_user_resize_keeps_viewport_top_content_stable() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: format!("{before}\nANCHOR stay at viewport top\nafter"),
             image_labels: vec![],
+            command: false,
         });
     for i in 0..120 {
         app.app
@@ -3443,6 +3444,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
                     "u ".repeat(12)
                 ),
                 image_labels: vec![format!("image-{idx}")],
+                command: false,
             }),
             1 => source.push(Block::Text {
                 content: format!(
@@ -3509,6 +3511,7 @@ fn tail_consecutive_user_records(count: usize) -> Vec<smelt_core::TranscriptBloc
             source.push(Block::User {
                 text: format!("{marker} user prompt {}", "u ".repeat(8)),
                 image_labels: Vec::new(),
+                command: false,
             });
         } else {
             source.push(Block::Text {

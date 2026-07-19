@@ -324,7 +324,8 @@ fn request_queue_bindings_steer_running_turn() {
         let steered = app.actions().iter().any(|action| match action {
             Action::EngineSend(cmd) => matches!(
                 cmd.as_ref(),
-                protocol::UiCommand::Steer { text } if text == "steer this turn"
+                protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "steer this turn"
             ),
             _ => false,
         });

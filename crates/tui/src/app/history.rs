@@ -203,9 +203,18 @@ pub(crate) fn build_transcript_from_session(
             );
         }
         match item {
-            HistoryItem::User { content, display } => {
-                push_user_block(&mut transcript, lua, idx, content, display.as_deref())
-            }
+            HistoryItem::User {
+                content,
+                display,
+                command,
+            } => push_user_block(
+                &mut transcript,
+                lua,
+                idx,
+                content,
+                display.as_deref(),
+                *command,
+            ),
             HistoryItem::Assistant(turn) => {
                 push_assistant_blocks(&mut transcript, &summary_resolver, idx, turn, &tool_elapsed)
             }
@@ -357,6 +366,7 @@ fn push_user_block(
     history_index: usize,
     content: &Content,
     display: Option<&str>,
+    command: bool,
 ) {
     let descriptor = match protocol::classify_user_history_content(content) {
         protocol::UserHistoryContent::CompactionSummary { summary } => {
@@ -385,6 +395,7 @@ fn push_user_block(
             TranscriptBlockDescriptor::User {
                 text: display_text,
                 image_labels,
+                command,
             }
         }
     };
@@ -540,6 +551,7 @@ mod tests {
             Block::User {
                 text: "first".into(),
                 image_labels: vec![],
+                command: false,
             },
             smelt_core::BlockOrigin::History(0),
         );
@@ -2300,6 +2312,7 @@ impl TuiApp {
         self.push_block(Block::User {
             text: input.to_string(),
             image_labels,
+            command: false,
         });
     }
 }
@@ -2649,6 +2662,7 @@ mod checkpoint_tests {
             Some(Block::User {
                 text: "new user".into(),
                 image_labels: vec![],
+                command: false,
             }),
         );
 
@@ -2715,6 +2729,7 @@ mod checkpoint_tests {
             Some(Block::User {
                 text: "new user".into(),
                 image_labels: vec![],
+                command: false,
             }),
         );
 
@@ -2764,6 +2779,7 @@ mod checkpoint_tests {
             Some(Block::User {
                 text: "new user".into(),
                 image_labels: vec![],
+                command: false,
             }),
         );
         smelt_perf::perf::set_enabled(false);
@@ -3010,6 +3026,7 @@ mod checkpoint_tests {
             Some(Block::User {
                 text: "new user".into(),
                 image_labels: vec![],
+                command: false,
             }),
             Some("new user".into()),
         );
@@ -3109,11 +3126,12 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn restore_screen_uses_user_display_when_present() {
+    fn restore_screen_preserves_command_display_and_semantics() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.core.session.history = vec![HistoryItem::User {
             content: Content::text("expanded command body"),
             display: Some("/reflect".into()),
+            command: true,
         }];
 
         app.app.restore_screen();
@@ -3122,7 +3140,11 @@ mod checkpoint_tests {
         let id = history.order[0];
         assert!(matches!(
             history.block(id),
-            Some(Block::User { text, .. }) if text == "/reflect"
+            Some(Block::User {
+                text,
+                command: true,
+                ..
+            }) if text == "/reflect"
         ));
     }
 
@@ -3249,6 +3271,7 @@ mod checkpoint_tests {
             Block::User {
                 text: "old".into(),
                 image_labels: vec![],
+                command: false,
             },
             Block::Text {
                 content: "old reply".into(),
@@ -3256,6 +3279,7 @@ mod checkpoint_tests {
             Block::User {
                 text: "recent".into(),
                 image_labels: vec![],
+                command: false,
             },
             Block::Text {
                 content: "recent reply".into(),
@@ -3323,6 +3347,7 @@ mod checkpoint_tests {
             Block::User {
                 text: "live old".into(),
                 image_labels: vec![],
+                command: false,
             },
             Block::Text {
                 content: "live old reply".into(),
@@ -3330,6 +3355,7 @@ mod checkpoint_tests {
             Block::User {
                 text: "live recent".into(),
                 image_labels: vec![],
+                command: false,
             },
             Block::Text {
                 content: "live recent reply".into(),

@@ -33,6 +33,9 @@ pub enum HistoryItem {
         content: Content,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         display: Option<String>,
+        /// Whether `display` is a slash-command invocation rather than ordinary input.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        command: bool,
     },
     Assistant(AssistantStep),
     Note(HistoryNote),
@@ -455,13 +458,15 @@ impl HistoryItem {
         HistoryItem::User {
             content,
             display: None,
+            command: false,
         }
     }
 
-    pub fn user_with_display(content: Content, display: impl Into<String>) -> Self {
+    pub fn user_command(content: Content, display: impl Into<String>) -> Self {
         HistoryItem::User {
             content,
             display: Some(display.into()),
+            command: true,
         }
     }
 
@@ -784,6 +789,7 @@ pub fn history_item_from_user_content(content: Content) -> HistoryItem {
         None => HistoryItem::User {
             content,
             display: None,
+            command: false,
         },
     }
 }

@@ -336,7 +336,7 @@ impl HeadlessApp {
             return;
         }
 
-        if trimmed.starts_with('/') && crate::transcript_model::is_command_like(trimmed) {
+        if crate::commands::command_name(trimmed).is_some() {
             eprintln!("\"{}\" requires interactive mode", trimmed);
             std::process::exit(1);
         }
@@ -372,7 +372,7 @@ impl HeadlessApp {
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
-                input: protocol::StartTurnInput::user(Content::text(content), None),
+                input: protocol::StartTurnInput::user(Content::text(content)),
                 mode: self.core.config.mode.clone(),
                 model_target,
                 request_config: self.core.config.request_runtime_config(),

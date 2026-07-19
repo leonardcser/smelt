@@ -17,19 +17,29 @@ use std::sync::{Arc, Mutex};
 pub struct PromptBufferParser {
     store: Arc<Mutex<AttachmentStore>>,
     placeholder: Arc<Mutex<Option<String>>>,
+    commands: Arc<smelt_core::commands::CommandCatalog>,
 }
 
 impl PromptBufferParser {
     #[cfg(test)]
     pub fn new(store: Arc<Mutex<AttachmentStore>>) -> Self {
-        Self::with_placeholder(store, Arc::new(Mutex::new(None)))
+        Self::with_placeholder(
+            store,
+            Arc::new(Mutex::new(None)),
+            Arc::new(smelt_core::commands::CommandCatalog::default()),
+        )
     }
 
     pub fn with_placeholder(
         store: Arc<Mutex<AttachmentStore>>,
         placeholder: Arc<Mutex<Option<String>>>,
+        commands: Arc<smelt_core::commands::CommandCatalog>,
     ) -> Self {
-        Self { store, placeholder }
+        Self {
+            store,
+            placeholder,
+            commands,
+        }
     }
 }
 
@@ -247,7 +257,9 @@ impl BufferParser for PromptBufferParser {
         let lines: Vec<String> = visual_lines.iter().map(|(l, _)| l.clone()).collect();
 
         // Determine if we need special command/exec styling on the first line.
-        let command_token_end = smelt_core::commands::registered_command_token(source.trim())
+        let command_token_end = self
+            .commands
+            .command_token(source.trim())
             .map(|token| token.chars().count())
             .unwrap_or(0);
         let single_line = !source.contains('\n');
@@ -361,6 +373,10 @@ mod tests {
         buf
     }
 
+    fn empty_commands() -> Arc<smelt_core::commands::CommandCatalog> {
+        Arc::new(smelt_core::commands::CommandCatalog::default())
+    }
+
     #[test]
     fn parser_keeps_prompt_lines_unwrapped() {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
@@ -401,7 +417,11 @@ mod tests {
     fn parser_renders_empty_prompt_placeholder_as_ghost_display() {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
         let placeholder = Arc::new(Mutex::new(Some("ghost prediction wraps".to_string())));
-        let parser = Arc::new(PromptBufferParser::with_placeholder(store, placeholder));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(
+            store,
+            placeholder,
+            empty_commands(),
+        ));
         let mut buf = make_buf_with_parser(parser);
 
         buf.ensure_rendered_at(10);
@@ -425,6 +445,7 @@ mod tests {
         let parser = Arc::new(PromptBufferParser::with_placeholder(
             store,
             placeholder.clone(),
+            empty_commands(),
         ));
         let mut buf = make_buf_with_parser(parser);
         buf.ensure_rendered_at(10);
@@ -442,7 +463,11 @@ mod tests {
     fn parser_ignores_placeholder_when_source_is_nonempty() {
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
         let placeholder = Arc::new(Mutex::new(Some("ghost".to_string())));
-        let parser = Arc::new(PromptBufferParser::with_placeholder(store, placeholder));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(
+            store,
+            placeholder,
+            empty_commands(),
+        ));
         let mut buf = make_buf_with_parser(parser);
         buf.set_source("real".into());
 
@@ -454,10 +479,15 @@ mod tests {
 
     #[test]
     fn parser_highlights_multiline_command_token_only() {
-        let _g = crate::COMMAND_RESOLVER_GUARD.lock().unwrap();
-        smelt_core::commands::set_command_resolver(|name| name == "simplify");
         let store = Arc::new(Mutex::new(AttachmentStore::new()));
-        let parser = Arc::new(PromptBufferParser::new(store));
+        let names = Arc::new(Mutex::new(std::collections::HashSet::from([
+            "simplify".to_string()
+        ])));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(
+            store,
+            Arc::new(Mutex::new(None)),
+            Arc::new(smelt_core::commands::CommandCatalog::new(names)),
+        ));
         let mut buf = make_buf_with_parser(parser);
         buf.set_source("/simplify first line\nsecond line".into());
         buf.ensure_rendered_at(80);

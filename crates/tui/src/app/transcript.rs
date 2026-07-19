@@ -6133,6 +6133,7 @@ mod document_tests {
                 source.push(Block::User {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
+                    command: false,
                 });
             } else {
                 source.push(Block::Text {
@@ -6196,6 +6197,7 @@ mod document_tests {
                 source.push(Block::User {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
+                    command: false,
                 });
             } else {
                 source.push(Block::Text {
@@ -6316,6 +6318,7 @@ mod document_tests {
                 source.push(Block::User {
                     text: format!("user {idx}"),
                     image_labels: Vec::new(),
+                    command: false,
                 });
             } else {
                 source.push(Block::Text {

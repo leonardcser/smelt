@@ -1628,11 +1628,10 @@ impl LuaRuntime {
             .unwrap_or(false)
     }
 
-    /// Send+Sync handle to the registered `/command` name set. Worker threads
-    /// (parallel block layout, etc.) can clone this to answer "is `foo` a
-    /// known command?" without touching the main-thread `APP` pointer or the
-    /// `!Send` `LuaHandle`s in `commands`.
-    pub fn command_names_handle(&self) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+    /// Send+Sync handle to this generation's registered `/command` names.
+    /// Host code can recognize commands without touching the `!Send` Lua
+    /// handlers stored in `commands`.
+    pub fn command_names_handle(&self) -> crate::commands::CommandNames {
         Arc::clone(&self.shared.command_names)
     }
 
@@ -3086,9 +3085,13 @@ pub fn transcript_block_snapshot_json(
     state: Option<&ToolState>,
 ) -> serde_json::Result<serde_json::Value> {
     let fields = match block {
-        Block::User { text, image_labels } => TranscriptBlockSnapshotFields::User {
+        Block::User {
             text,
-            user_lines: user_styled_lines(text, image_labels),
+            image_labels,
+            command,
+        } => TranscriptBlockSnapshotFields::User {
+            text,
+            user_lines: user_styled_lines(text, image_labels, *command),
             image_labels,
         },
         Block::Mode {
@@ -3217,13 +3220,17 @@ fn args_to_lua_table(
     Ok(t)
 }
 
-fn user_styled_lines(text: &str, image_labels: &[String]) -> protocol::StyledLines {
+fn user_styled_lines(text: &str, image_labels: &[String], command: bool) -> protocol::StyledLines {
     let lines = user_display_lines(text);
-    let command_token_chars = lines
-        .first()
-        .and_then(|line| crate::commands::registered_command_token(line))
-        .map(|token| token.chars().count())
-        .unwrap_or(0);
+    let command_token_chars = if command {
+        lines
+            .first()
+            .and_then(|line| crate::commands::command_token(line))
+            .map(|token| token.chars().count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     protocol::StyledLines(
         lines
             .iter()
@@ -3893,6 +3900,20 @@ fn build_tool_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_command_semantics_accent_only_the_slash_token() {
+        let lines = user_styled_lines("/retired-command argument", &[], true);
+        let spans = &lines.0[0];
+
+        assert_eq!(spans[0].text, "/retired-command");
+        assert_eq!(spans[0].fg.as_deref(), Some("SmeltAccent"));
+        assert_eq!(spans[1].text, " argument");
+        assert_eq!(spans[1].fg, None);
+
+        let normal = user_styled_lines("/retired-command argument", &[], false);
+        assert!(normal.0[0].iter().all(|span| span.fg.is_none()));
+    }
 
     #[test]
     fn title_only_thinking_summary_has_no_empty_line_count() {

@@ -1,19 +1,55 @@
-//! Process-global `/command` resolver. Front-ends install a closure that maps
-//! a command name (no `/` prefix) to whether it's currently registered; every
-//! caller - prompt highlighter, transcript renderer, command dispatch - agrees
-//! by going through `is_command`. Headless front-ends leave the resolver
-//! unset; `is_command` then returns false and structural callers can fall back
-//! to [`crate::transcript_model::is_command_like`].
+//! Slash-command parsing and the active command-name catalog.
 
-use std::sync::RwLock;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, RwLock};
 
-type Resolver = Box<dyn Fn(&str) -> bool + Send + Sync>;
+/// Thread-safe command-name set owned by one Lua generation.
+pub type CommandNames = Arc<Mutex<HashSet<String>>>;
 
-static RESOLVER: RwLock<Option<Resolver>> = RwLock::new(None);
+/// Thread-safe view of the command names owned by the active Lua generation.
+/// Candidate generations keep separate sets until the app activates one.
+pub struct CommandCatalog {
+    active: RwLock<CommandNames>,
+}
 
-/// Install the resolver. Replaces any previous installation.
-pub fn set_command_resolver(f: impl Fn(&str) -> bool + Send + Sync + 'static) {
-    *RESOLVER.write().unwrap() = Some(Box::new(f));
+impl CommandCatalog {
+    pub fn new(names: CommandNames) -> Self {
+        Self {
+            active: RwLock::new(names),
+        }
+    }
+
+    pub fn activate(&self, names: CommandNames) {
+        *self
+            .active
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = names;
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        let names = Arc::clone(
+            &self
+                .active
+                .read()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        let contains = names
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(name);
+        contains
+    }
+
+    pub fn command_token<'a>(&self, text: &'a str) -> Option<&'a str> {
+        let token = command_token(text)?;
+        self.contains(&token[1..]).then_some(token)
+    }
+}
+
+impl Default for CommandCatalog {
+    fn default() -> Self {
+        Self::new(Arc::default())
+    }
 }
 
 /// Leading `/name` token from a slash command invocation.
@@ -32,43 +68,9 @@ pub fn command_name(text: &str) -> Option<&str> {
     command_token(text).map(|token| &token[1..])
 }
 
-/// Registered leading `/name` token from a slash command invocation.
-pub fn registered_command_token(text: &str) -> Option<&str> {
-    let token = command_token(text)?;
-    let name = &token[1..];
-    if resolver_has_command(name) {
-        Some(token)
-    } else {
-        None
-    }
-}
-
-/// Returns true when `text` is `/name [args]` and `name` is a registered command.
-/// Returns false when no resolver is installed or the name is empty.
-pub fn is_command(text: &str) -> bool {
-    command_name(text).is_some_and(resolver_has_command)
-}
-
-fn resolver_has_command(name: &str) -> bool {
-    RESOLVER
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|f| f(name)))
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Tests in this module mutate the process-global resolver, so they must
-    /// run serially. The whole module shares a single mutex.
-    static GUARD: Mutex<()> = Mutex::new(());
-
-    fn clear_resolver() {
-        *RESOLVER.write().unwrap() = None;
-    }
 
     #[test]
     fn command_token_and_name_parse_leading_slash_command() {
@@ -86,60 +88,14 @@ mod tests {
     }
 
     #[test]
-    fn registered_command_token_consults_resolver() {
-        let _g = GUARD.lock().unwrap();
-        set_command_resolver(|name| name == "help");
-        assert_eq!(registered_command_token("/help now"), Some("/help"));
-        assert_eq!(registered_command_token("/nope now"), None);
-        clear_resolver();
-    }
+    fn catalog_tracks_the_active_generation() {
+        let initial = Arc::new(Mutex::new(HashSet::from(["help".into()])));
+        let catalog = CommandCatalog::new(initial);
+        assert_eq!(catalog.command_token("/help now"), Some("/help"));
 
-    #[test]
-    fn is_command_returns_false_without_resolver() {
-        let _g = GUARD.lock().unwrap();
-        clear_resolver();
-        assert!(!is_command("/help"));
-        assert!(!is_command("/anything"));
-    }
-
-    #[test]
-    fn is_command_consults_installed_resolver() {
-        let _g = GUARD.lock().unwrap();
-        set_command_resolver(|name| name == "help" || name == "quit");
-        assert!(is_command("/help"));
-        assert!(is_command("/quit"));
-        assert!(!is_command("/unknown"));
-        clear_resolver();
-    }
-
-    #[test]
-    fn is_command_strips_args_before_resolving() {
-        let _g = GUARD.lock().unwrap();
-        set_command_resolver(|name| name == "pick");
-        assert!(is_command("/pick file.rs"));
-        assert!(is_command("/pick   trailing   args"));
-        clear_resolver();
-    }
-
-    #[test]
-    fn is_command_rejects_missing_slash_or_empty_name() {
-        let _g = GUARD.lock().unwrap();
-        set_command_resolver(|_| true);
-        assert!(!is_command(""));
-        assert!(!is_command("/"));
-        assert!(!is_command("/   "));
-        assert!(!is_command("help"));
-        clear_resolver();
-    }
-
-    #[test]
-    fn set_command_resolver_replaces_previous_installation() {
-        let _g = GUARD.lock().unwrap();
-        set_command_resolver(|_| true);
-        assert!(is_command("/anything"));
-        set_command_resolver(|name| name == "only");
-        assert!(is_command("/only"));
-        assert!(!is_command("/anything"));
-        clear_resolver();
+        let replacement = Arc::new(Mutex::new(HashSet::from(["model".into()])));
+        catalog.activate(replacement);
+        assert_eq!(catalog.command_token("/help now"), None);
+        assert_eq!(catalog.command_token("/model fast"), Some("/model"));
     }
 }

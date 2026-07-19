@@ -83,6 +83,16 @@ app_story!(prompt_modal_picker_overlays_tip, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(slash_command_accent_survives_lua_reload, |ctx| {
+    // A successful reload swaps the live prompt command catalog. Persisted
+    // command semantics keep the transcript accent independent of that catalog.
+    ctx.set_viewport(40, 10);
+    ctx.reload_lua();
+    ctx.push_command_turn("/permissions");
+    ctx.type_prompt("/permissions");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_shell_escape_prefix, |ctx| {
     // `!cmd` switches the prompt into shell-escape rendering: accent
     // `!` prefix, panel chrome shared with the exec block.

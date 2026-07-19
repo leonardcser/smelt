@@ -168,6 +168,7 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
             .push_block(smelt_core::transcript_model::Block::User {
                 text: user,
                 image_labels: vec![],
+                command: false,
             });
 
         let assistant = format!(
@@ -1866,6 +1867,7 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
             Some(smelt_core::Block::User {
                 text: "hot path new user".into(),
                 image_labels: vec![],
+                command: false,
             }),
         );
         assert!(matches!(

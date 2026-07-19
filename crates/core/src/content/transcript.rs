@@ -335,6 +335,7 @@ mod tests {
         t.push(Block::User {
             text: "  question  ".into(),
             image_labels: vec![],
+            command: false,
         });
         match t.history.block_at(0) {
             Block::User { text, .. } => assert_eq!(text, "  question  "),
@@ -395,6 +396,7 @@ mod tests {
         t.push(Block::User {
             text: "first".into(),
             image_labels: vec![],
+            command: false,
         });
         t.push(Block::Text {
             content: "between".into(),
@@ -402,6 +404,7 @@ mod tests {
         t.push(Block::User {
             text: "second".into(),
             image_labels: vec![],
+            command: false,
         });
         let turns = t.user_turns();
         assert_eq!(

@@ -3385,6 +3385,7 @@ mod tests {
         transcript.push(Block::User {
             text: "run the tool".into(),
             image_labels: Vec::new(),
+            command: false,
         });
         transcript.push_tool_call(
             Block::ToolCall {
@@ -3953,6 +3954,7 @@ mod tests {
         transcript.push(Block::User {
             text: "hello".into(),
             image_labels: vec![],
+            command: false,
         });
 
         let rows = project_fresh(&mut transcript.history);
@@ -4022,6 +4024,7 @@ mod tests {
         transcript.push(Block::User {
             text: "show a table".into(),
             image_labels: vec![],
+            command: false,
         });
         let mut parser = StreamParser::new();
         parser.append_streaming_text(
@@ -4062,6 +4065,7 @@ mod tests {
         transcript.push(Block::User {
             text: "run ls".into(),
             image_labels: vec![],
+            command: false,
         });
         let mut parser = StreamParser::new();
         parser.start_tool(
@@ -6058,6 +6062,7 @@ mod tests {
             0 => Block::User {
                 text: randomish_text(seed, 12),
                 image_labels: vec![],
+                command: false,
             },
             1 => Block::Text {
                 content: format!(
@@ -6143,6 +6148,7 @@ mod tests {
             transcript.push(Block::User {
                 text: user,
                 image_labels: vec![],
+                command: false,
             });
 
             let markdown = large_mixed_markdown_payload(i);
@@ -6353,6 +6359,7 @@ mod tests {
                 0 => transcript.push(Block::User {
                     text,
                     image_labels: vec![],
+                    command: false,
                 }),
                 1 => transcript.push(Block::Text { content: text }),
                 2 => transcript.push(Block::CodeLine {

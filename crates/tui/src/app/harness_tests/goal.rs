@@ -314,6 +314,7 @@ fn lua_goal_banner_stays_above_transcript_scroll_pill() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "earlier user message".into(),
             image_labels: Vec::new(),
+            command: false,
         });
     for i in 0..40 {
         app.app

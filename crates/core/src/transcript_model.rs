@@ -152,6 +152,9 @@ pub enum Block {
         text: String,
         /// Accent-highlighted in the rendered message.
         image_labels: Vec<String>,
+        /// Whether the leading slash-command token receives accent styling.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        command: bool,
     },
     Mode {
         text: String,
@@ -491,6 +494,9 @@ pub enum TranscriptBlockDescriptor {
     User {
         text: String,
         image_labels: Vec<String>,
+        /// Whether the leading slash-command token receives accent styling.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        command: bool,
     },
     Mode {
         text: String,
@@ -566,7 +572,15 @@ impl TranscriptBlockDescriptor {
 
     pub fn from_block(block: Block) -> Self {
         match block {
-            Block::User { text, image_labels } => Self::User { text, image_labels },
+            Block::User {
+                text,
+                image_labels,
+                command,
+            } => Self::User {
+                text,
+                image_labels,
+                command,
+            },
             Block::Mode {
                 text,
                 icon,
@@ -626,9 +640,14 @@ impl TranscriptBlockDescriptor {
 
     pub fn to_block(&self) -> Block {
         match self {
-            Self::User { text, image_labels } => Block::User {
+            Self::User {
+                text,
+                image_labels,
+                command,
+            } => Block::User {
                 text: text.clone(),
                 image_labels: image_labels.clone(),
+                command: *command,
             },
             Self::Mode {
                 text,
@@ -2223,15 +2242,6 @@ fn ends_with_heading(block: &Block) -> bool {
     crate::content::markdown_ir::ends_with_heading(content)
 }
 
-/// Heuristic: does this look like a `/command` line?
-pub fn is_command_like(text: &str) -> bool {
-    let name = text
-        .strip_prefix('/')
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or("");
-    !name.is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2544,6 +2554,7 @@ mod tests {
             TranscriptBlockDescriptor::User {
                 text: "hello".into(),
                 image_labels: Vec::new(),
+                command: false,
             },
             BlockOrigin::History(0),
         );
@@ -2746,6 +2757,7 @@ mod tests {
         let block = Block::User {
             text: "Explain **this** in detail.".into(),
             image_labels: vec!["[screenshot.png]".into()],
+            command: false,
         };
         // Image labels are a render-time annotation, not part of the
         // user's typed message.
@@ -3132,6 +3144,7 @@ mod tests {
         history.push(Block::User {
             text: "q".into(),
             image_labels: vec![],
+            command: false,
         });
         // Text -> User: 1
         assert_eq!(history.block_gap(1), 1);
@@ -3211,6 +3224,7 @@ mod tests {
         Block::User {
             text: s.into(),
             image_labels: vec![],
+            command: false,
         }
     }
     fn thinking(s: &str) -> Block {
@@ -3340,22 +3354,5 @@ mod tests {
         assert_eq!(gap_between(&text("a"), &mode()), 1);
         assert_eq!(gap_between(&mode(), &text("b")), 1);
         assert_eq!(gap_between(&mode(), &tool("b")), 1);
-    }
-
-    // ── is_command_like ──────────────────────────────────────────────
-
-    #[test]
-    fn is_command_like_detects_slash_command() {
-        assert!(is_command_like("/help"));
-        assert!(is_command_like("/quit"));
-        assert!(is_command_like("/foo bar baz"));
-    }
-
-    #[test]
-    fn is_command_like_rejects_bare_slash_or_non_slash() {
-        assert!(!is_command_like("/"));
-        assert!(!is_command_like("/   "));
-        assert!(!is_command_like("help"));
-        assert!(!is_command_like(""));
     }
 }

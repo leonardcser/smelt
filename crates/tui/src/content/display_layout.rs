@@ -1023,6 +1023,7 @@ mod tests {
                 text: "Please inspect @crates/tui/src/content/display_layout.rs and this long line that wraps."
                     .into(),
                 image_labels: vec![],
+                command: false,
             },
             Block::ProcessStatus {
                 text: "running a long process status that wraps on narrow terminals".into(),

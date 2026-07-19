@@ -182,6 +182,7 @@ impl TuiApp {
             Some(Block::User {
                 text: display.to_string(),
                 image_labels: content.image_labels(),
+                command: false,
             }),
             first_user_message,
         );
@@ -199,7 +200,7 @@ impl TuiApp {
     ) -> TurnState {
         let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::user(content, None),
+            input: protocol::StartTurnInput::user(content),
             history,
             model_target,
             request_config,
@@ -398,18 +399,23 @@ impl TuiApp {
                 .is_none()
                 .then(|| display.clone());
             self.commit_request_history_item_with_first_user(
-                protocol::HistoryItem::user_with_display(
+                protocol::HistoryItem::user_command(
                     Content::text(evaluated.clone()),
                     display.clone(),
                 ),
                 Some(Block::User {
                     text: display.clone(),
                     image_labels: vec![],
+                    command: true,
                 }),
                 first_user_message,
             )
         } else {
-            self.show_user_message(&display, vec![]);
+            self.push_block(Block::User {
+                text: display.clone(),
+                image_labels: vec![],
+                command: true,
+            });
             self.model_history_source()
         };
         let rewind_block_idx = if !evaluated.is_empty() {
@@ -491,7 +497,7 @@ impl TuiApp {
 
         let request_config = self.core.config.request_runtime_config();
         Some(self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
+            input: protocol::StartTurnInput::user_command(Content::text(evaluated), display),
             history,
             model_target,
             request_config,
@@ -1506,6 +1512,32 @@ mod tests {
                 .map(|(idx, _)| *idx),
             Some(app.app.core.session.history.len())
         );
+        assert!(matches!(
+            app.app.core.session.history.last(),
+            Some(HistoryItem::User {
+                display: Some(display),
+                command: true,
+                ..
+            }) if display == "/fix"
+        ));
+        let transcript = app.app.session_document.transcript.history();
+        assert!(transcript
+            .order
+            .last()
+            .and_then(|id| transcript.block(*id))
+            .is_some_and(|block| matches!(
+                block,
+                Block::User {
+                    text,
+                    command: true,
+                    ..
+                } if text == "/fix"
+            )));
+        assert!(app.drain_engine_sends().into_iter().any(|command| matches!(
+            command,
+            protocol::UiCommand::StartTurn(payload)
+                if matches!(payload.input, protocol::StartTurnInput::User { command: true, .. })
+        )));
     }
 
     #[test]

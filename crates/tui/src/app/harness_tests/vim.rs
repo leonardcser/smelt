@@ -7,9 +7,9 @@ fn user_blocks(app: &TestApp) -> Vec<(String, Vec<String>)> {
         .iter()
         .filter_map(|id| history.block(*id))
         .filter_map(|block| match block {
-            smelt_core::transcript_model::Block::User { text, image_labels } => {
-                Some((text.clone(), image_labels.clone()))
-            }
+            smelt_core::transcript_model::Block::User {
+                text, image_labels, ..
+            } => Some((text.clone(), image_labels.clone())),
             _ => None,
         })
         .collect()
@@ -392,7 +392,8 @@ fn vim_visual_ctrl_q_steers_selection_only() {
     assert_eq!(app.state().prompt_text, "alpha  gamma");
     assert!(app.actions().iter().any(|action| matches!(
         action,
-        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "beta")
+        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "beta")
     )));
 }
 

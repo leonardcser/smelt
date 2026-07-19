@@ -156,11 +156,9 @@ impl TranscriptGroupRegistry {
 /// All shared state between Lua closures and the app loop.
 pub struct LuaShared {
     pub commands: Mutex<HashMap<String, RegisteredCommand>>,
-    /// Send+Sync mirror of `commands`' key set. `commands` itself can't be
-    /// shared off the main thread because `RegisteredCommand` carries a
-    /// `LuaHandle`, but worker threads (e.g. parallel block layout) need
-    /// to ask "is `/foo` a known command?" - this is the answer.
-    pub command_names: Arc<Mutex<HashSet<String>>>,
+    /// Send+Sync mirror of `commands`' key set. Host code can recognize a
+    /// command without touching the `!Send` Lua handler stored with it.
+    pub command_names: crate::commands::CommandNames,
     pub keymaps: Mutex<HashMap<(String, String), RegisteredKeymap>>,
     /// Canonical single-token expansion for `<leader>` in keymap registrations.
     /// Matches nvim's default leader (`\\`) unless user config sets another token.

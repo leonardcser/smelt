@@ -131,6 +131,16 @@ impl TestApp {
         self.app.show_user_message(text, Vec::new());
     }
 
+    /// Append a command-marked user block to the transcript history.
+    pub fn push_command_block(&mut self, text: &str) {
+        self.app
+            .push_block(smelt_core::transcript_model::Block::User {
+                text: text.to_string(),
+                image_labels: Vec::new(),
+                command: true,
+            });
+    }
+
     /// Push a `Block::Compacted` summary block into the transcript -
     /// the same committed marker installed after a successful compaction
     /// checkpoint. Stories use this to snapshot the final compaction chrome

@@ -1,5 +1,15 @@
 use super::*;
 
+fn prompt_has_command_highlight(app: &mut TestApp) -> bool {
+    app.render_silent();
+    !app.app
+        .ui
+        .buf(crate::app::PROMPT_EDIT_BUF)
+        .expect("prompt buffer")
+        .highlights_at(0)
+        .is_empty()
+}
+
 #[test]
 fn lua_config_auto_reload_success_notifies_for_real_edits() {
     let mut app = TestApp::builder().build();
@@ -79,6 +89,8 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     let committed_generation = app.app.lua.id;
     let committed_runtime = app.app.core.config.clone();
     assert!(command_names.lock().unwrap().contains("committed_command"));
+    app.type_text("/committed_command");
+    assert!(prompt_has_command_highlight(&mut app));
 
     std::fs::write(
         &init,
@@ -105,6 +117,10 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
 
     assert_eq!(app.app.lua.id, committed_generation);
     assert_eq!(app.app.core.config, committed_runtime);
+    assert!(
+        prompt_has_command_highlight(&mut app),
+        "a failed candidate must leave prompt recognition on the committed catalog"
+    );
     assert!(!app
         .app
         .core
@@ -149,6 +165,11 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     let replacement_names = replacement_names.lock().unwrap();
     assert!(replacement_names.contains("replacement_command"));
     assert!(!replacement_names.contains("committed_command"));
+    drop(replacement_names);
+    assert!(
+        !prompt_has_command_highlight(&mut app),
+        "a committed candidate must reparse the prompt against its catalog"
+    );
 }
 
 #[test]
@@ -930,6 +951,7 @@ fn lua_context_note_updates_named_history_notes_independently() {
         .push(protocol::HistoryItem::User {
             content: protocol::Content::text("hello"),
             display: None,
+            command: false,
         });
 
     assert!(app.run_lua(

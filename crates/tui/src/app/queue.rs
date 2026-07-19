@@ -278,10 +278,16 @@ impl QueuedInput {
         ) || matches!(self, QueuedInput::Command { .. })
     }
 
-    pub(crate) fn steer_text(&self) -> Option<&str> {
+    pub(crate) fn steer_input(&self) -> Option<protocol::StartTurnInput> {
         match self {
-            QueuedInput::Request(req) => Some(req.content.as_text()),
-            QueuedInput::Command { line, .. } => Some(line.as_str()),
+            QueuedInput::Request(req) if self.is_command() => Some(
+                protocol::StartTurnInput::user_command(req.content.clone(), req.display.clone()),
+            ),
+            QueuedInput::Request(req) => Some(protocol::StartTurnInput::user(req.content.clone())),
+            QueuedInput::Command { display, line } => Some(protocol::StartTurnInput::user_command(
+                Content::text(line.clone()),
+                display.clone(),
+            )),
             QueuedInput::ProcessStatus(_) => None,
         }
     }
@@ -291,6 +297,15 @@ impl QueuedInput {
             QueuedInput::Command { line, .. } => Some(line.as_str()),
             _ => None,
         }
+    }
+
+    pub(crate) fn is_command(&self) -> bool {
+        matches!(self, QueuedInput::Command { .. })
+            || matches!(
+                self,
+                QueuedInput::Request(req)
+                    if matches!(&req.turn_options, QueuedTurnOptions::CustomCommand { .. })
+            )
     }
 
     pub(crate) fn prompt_replay_text(&self) -> String {

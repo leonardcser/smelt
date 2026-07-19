@@ -228,6 +228,7 @@ impl SessionAccess {
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaGeneration,
+    command_catalog: Arc<smelt_core::commands::CommandCatalog>,
     pub(crate) session_document: TuiSessionDocument,
     pub(crate) document_render_cache: crate::app::document::DocumentRenderCache,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
@@ -1013,12 +1014,12 @@ impl TuiApp {
         if !self.turn_input_is_active() {
             return self.queued_inputs.try_push_turn(queued);
         }
-        let text = queued.steer_text().map(str::to_string);
+        let input = queued.steer_input();
         if !self.queued_inputs.try_push_request(queued) {
             return false;
         }
-        if let Some(text) = text.filter(|text| !text.is_empty()) {
-            self.core.engine.send(protocol::UiCommand::Steer { text });
+        if let Some(input) = input.filter(|input| !input.provider_content().is_empty()) {
+            self.core.engine.send(protocol::UiCommand::Steer { input });
         }
         true
     }
@@ -1444,6 +1445,9 @@ impl TuiApp {
                 (tx, Some(rx))
             });
         let managed_models = managed_models.unwrap_or_else(smelt_core::ManagedModels::empty);
+        let command_catalog = Arc::new(smelt_core::commands::CommandCatalog::new(
+            lua.command_names_handle(),
+        ));
         let input = PromptState::new();
         let vim_enabled = config.settings.vim;
 
@@ -1482,6 +1486,7 @@ impl TuiApp {
                 crate::content::prompt_parser::PromptBufferParser::with_placeholder(
                     input.store.clone(),
                     prompt_placeholder_display.clone(),
+                    Arc::clone(&command_catalog),
                 ),
             );
             let copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> = std::sync::Arc::new(
@@ -1618,6 +1623,7 @@ impl TuiApp {
         Self {
             core,
             lua,
+            command_catalog,
             session_document: TuiSessionDocument::new(transcript),
             document_render_cache: crate::app::document::DocumentRenderCache::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
@@ -2824,18 +2830,6 @@ impl TuiApp {
         let is_light = self.ui.theme().is_light();
         let baked = crate::theme::default_baked_with_background(is_light);
         self.install_theme(baked);
-        // Capture the thread-safe Lua command-name set directly. Rendering and
-        // measurement can run outside Lua's main-thread APP context, so slash
-        // command detection must reach the registry without consulting APP.
-        // `commands` itself can't cross those boundaries (the handler holds a
-        // `LuaHandle`), so this uses the name-only mirror.
-        let command_names = self.lua.command_names_handle();
-        smelt_core::commands::set_command_resolver(move |name| {
-            command_names
-                .lock()
-                .map(|s| s.contains(name))
-                .unwrap_or(false)
-        });
         // RAII guard for the terminal envelope: raw mode + alt screen + mouse +
         // bracketed paste + focus + DECAWM-off + hidden cursor. Lives as long
         // as `run()`; `Drop` restores cooked mode and the normal screen, even
@@ -2915,8 +2909,9 @@ impl TuiApp {
                 if let Some(handle) = self.start_shell_escape(cmd) {
                     self.exec = Some(handle);
                 }
-            } else if let Some(token) = smelt_core::commands::registered_command_token(trimmed) {
-                let name = &token[1..];
+            } else if let Some(name) = smelt_core::commands::command_name(trimmed)
+                .filter(|name| self.lua.has_command(name))
+            {
                 if self.lua.command_startup_ok(name) == Some(true) {
                     self.apply_lua_command(trimmed);
                 } else {

@@ -830,11 +830,11 @@ impl TuiApp {
         let Some(queued) = self.queued_inputs.promote_turn_to_request() else {
             return;
         };
-        let Some(text) = queued.steer_text().map(str::to_string) else {
+        let Some(input) = queued.steer_input() else {
             return;
         };
-        if !text.is_empty() {
-            self.core.engine.send(protocol::UiCommand::Steer { text });
+        if !input.provider_content().is_empty() {
+            self.core.engine.send(protocol::UiCommand::Steer { input });
         }
     }
 
@@ -1970,7 +1970,8 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "check this first")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "check this first")
         )));
     }
 
@@ -1999,7 +2000,8 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "check this first")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "check this first")
         )));
         assert!(!app.actions().iter().any(|action| matches!(
             action,
@@ -2072,7 +2074,8 @@ mod tests {
         );
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "right now")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "right now")
         )));
     }
 
@@ -2109,7 +2112,9 @@ mod tests {
         );
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "expanded now")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "expanded now"
+                        && matches!(input, protocol::StartTurnInput::User { command: true, .. }))
         )));
     }
 
@@ -2165,7 +2170,9 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "custom body")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "custom body"
+                        && matches!(input, protocol::StartTurnInput::User { command: true, .. }))
         )));
     }
 
@@ -2198,7 +2205,9 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "expanded arg")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "expanded arg"
+                        && matches!(input, protocol::StartTurnInput::User { command: true, .. }))
         )));
     }
 
@@ -2327,7 +2336,8 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["request".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "next turn")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                    if input.provider_content().text_content() == "next turn")
         )));
     }
 

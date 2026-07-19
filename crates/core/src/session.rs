@@ -1914,7 +1914,11 @@ fn push_history_item_descriptor_rows(
 ) -> Result<(), smelt_store::StoreError> {
     let origin = Some(crate::transcript_model::BlockOrigin::History(history_idx));
     match item {
-        HistoryItem::User { content, display } => {
+        HistoryItem::User {
+            content,
+            display,
+            command,
+        } => {
             let descriptor = match protocol::classify_user_history_content(content) {
                 protocol::UserHistoryContent::CompactionSummary { summary } => {
                     crate::transcript_model::TranscriptBlockDescriptor::Compacted { summary }
@@ -1949,6 +1953,7 @@ fn push_history_item_descriptor_rows(
                     crate::transcript_model::TranscriptBlockDescriptor::User {
                         text: display_text,
                         image_labels,
+                        command: *command,
                     }
                 }
             };
@@ -2561,6 +2566,7 @@ mod tests {
         HistoryItem::User {
             content: Content::Text(text.into()),
             display: None,
+            command: false,
         }
     }
     fn assistant_text_item(text: &str) -> HistoryItem {
@@ -3210,18 +3216,23 @@ mod tests {
         s.history.push(HistoryItem::User {
             content: Content::Text("expanded command body".into()),
             display: Some("/reflect".into()),
+            command: true,
         });
 
         let json = serde_json::to_value(&s).expect("serialize session");
         assert_eq!(json["schema_version"], CURRENT_SESSION_SCHEMA_VERSION);
         assert!(json.get("messages").is_none());
         assert_eq!(json["history"][0]["display"], "/reflect");
+        assert_eq!(json["history"][0]["command"], true);
 
         let loaded: Session = serde_json::from_value(json).expect("deserialize session");
         assert!(matches!(
             &loaded.history[0],
-            HistoryItem::User { content, display: Some(display) }
-                if content.text_content() == "expanded command body" && display == "/reflect"
+            HistoryItem::User {
+                content,
+                display: Some(display),
+                command: true,
+            } if content.text_content() == "expanded command body" && display == "/reflect"
         ));
     }
 
@@ -3677,6 +3688,7 @@ mod tests {
                 label: None,
             }]),
             display: None,
+            command: false,
         }
     }
 

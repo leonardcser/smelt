@@ -175,7 +175,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
-        input: protocol::StartTurnInput::user(Content::text("go"), None),
+        input: protocol::StartTurnInput::user(Content::text("go")),
         mode: AgentMode::normal(),
         model_target: target.clone(),
         request_config: RequestRuntimeConfig::default(),
@@ -378,7 +378,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
-        input: protocol::StartTurnInput::user(Content::text("first"), None),
+        input: protocol::StartTurnInput::user(Content::text("first")),
         mode: AgentMode::normal(),
         model_target: original_target,
         request_config: RequestRuntimeConfig {
@@ -404,7 +404,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         system_prompt: "switched system with Lua fragment".into(),
     });
     handle.send(UiCommand::Steer {
-        text: "use the new target".into(),
+        input: protocol::StartTurnInput::user(Content::text("use the new target")),
     });
     release_first_tx.send(()).unwrap();
 
@@ -458,7 +458,7 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
     while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,
-        input: protocol::StartTurnInput::user(Content::text("go"), None),
+        input: protocol::StartTurnInput::user(Content::text("go")),
         mode: AgentMode::normal(),
         model_target: original_target,
         request_config: RequestRuntimeConfig::default(),

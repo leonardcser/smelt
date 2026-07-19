@@ -330,9 +330,13 @@ impl TuiApp {
                         .collect::<Vec<_>>()
                         .join("\n");
                     let text = if display.is_empty() { text } else { display };
+                    let command = drained
+                        .first()
+                        .is_some_and(crate::app::QueuedInput::is_command);
                     self.push_block(Block::User {
                         text,
                         image_labels: vec![],
+                        command,
                     });
                     for line in drained
                         .iter()
