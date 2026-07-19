@@ -3102,6 +3102,7 @@ mod tests {
         history.push(Block::User {
             text: "user".into(),
             image_labels: Vec::new(),
+            command: false,
         });
         let navigation_generation = history.navigation_generation();
 

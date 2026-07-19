@@ -1397,6 +1397,7 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "older user target".into(),
             image_labels: Vec::new(),
+            command: false,
         });
     app.app
         .push_block(smelt_core::transcript_model::Block::Text {
@@ -1409,6 +1410,7 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
                 .collect::<Vec<_>>()
                 .join("\n"),
             image_labels: Vec::new(),
+            command: false,
         });
     app.app
         .push_block(smelt_core::transcript_model::Block::Text {
@@ -1482,6 +1484,7 @@ fn committed_view_watcher_dispatches_once_per_revision() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "anchored user".into(),
             image_labels: Vec::new(),
+            command: false,
         });
     app.app
         .push_block(smelt_core::transcript_model::Block::Text {
@@ -1544,6 +1547,7 @@ fn stale_committed_views_and_cross_session_targets_are_rejected() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "first user".into(),
             image_labels: Vec::new(),
+            command: false,
         });
     app.app
         .push_block(smelt_core::transcript_model::Block::Text {
@@ -1553,6 +1557,7 @@ fn stale_committed_views_and_cross_session_targets_are_rejected() {
         .push_block(smelt_core::transcript_model::Block::User {
             text: "second user".into(),
             image_labels: Vec::new(),
+            command: false,
         });
     app.app
         .push_block(smelt_core::transcript_model::Block::Text {
