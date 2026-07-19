@@ -175,7 +175,7 @@ mod tests {
         Arc::new(McpManager {
             servers: RwLock::new(HashMap::from([("demo".into(), server)])),
             controller: Mutex::new(Default::default()),
-            worker: tokio::sync::Mutex::new(()),
+            observed: tokio::sync::watch::channel(0).0,
         })
     }
 

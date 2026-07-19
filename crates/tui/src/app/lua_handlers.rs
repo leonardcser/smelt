@@ -515,9 +515,7 @@ impl TuiApp {
         let Some(manager) = self.core.mcp.clone() else {
             return;
         };
-        if let Some(reconcile) = manager.prepare_reconcile(self.core.config.mcp.clone()) {
-            tokio::spawn(reconcile.apply());
-        }
+        manager.reconcile_detached(self.core.config.mcp.clone());
     }
 
     /// Replace live TUI generation projections with isolated candidate copies.

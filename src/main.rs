@@ -1077,8 +1077,9 @@ async fn async_main() {
 
     // Always create the manager (even with no servers) so `/reload` can
     // add servers later through `smelt.mcp.register` and the dispatcher
-    // sees them live without the engine having to restart.
-    let mcp_manager = smelt_core::mcp::McpManager::start(&runtime.mcp).await;
+    // sees them live without the engine having to restart. Desired slots are
+    // published now; process launch and tool discovery continue asynchronously.
+    let mcp_manager = smelt_core::mcp::McpManager::start_detached(&runtime.mcp);
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> =
         Box::new(smelt_core::mcp::dispatcher::McpDispatcher::new(
             Arc::clone(&mcp_manager),
@@ -1146,6 +1147,28 @@ async fn async_main() {
             capabilities,
             headless_lua,
         );
+        let mcp_readiness = mcp_manager
+            .wait_until_ready(smelt_core::mcp::STARTUP_DISCOVERY_WAIT)
+            .await;
+        let unavailable_mcp = mcp_manager
+            .unavailable_servers()
+            .into_iter()
+            .map(|(name, status)| format!("{name} ({})", status.as_str()))
+            .collect::<Vec<_>>();
+        if !unavailable_mcp.is_empty() {
+            let reason = if matches!(
+                mcp_readiness,
+                smelt_core::mcp::McpReadiness::TimedOut { .. }
+            ) {
+                "discovery is still in progress"
+            } else {
+                "discovery failed"
+            };
+            eprintln!(
+                "warning: MCP tool {reason} for {}; continuing without those tools",
+                unavailable_mcp.join(", ")
+            );
+        }
         headless
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;

@@ -416,6 +416,10 @@ pub enum AppEvent {
             Vec<protocol::ModelMetadata>,
         )>,
     },
+    McpStartupReady {
+        busy_token: u64,
+        readiness: smelt_core::mcp::McpReadiness,
+    },
     ShutdownSignal,
 }
 
@@ -2476,6 +2480,37 @@ impl TuiApp {
             AppEvent::ManagedAuthChecked { snapshots } => {
                 self.handle_managed_auth_checked(snapshots)
             }
+            AppEvent::McpStartupReady {
+                busy_token,
+                readiness,
+            } => {
+                let unavailable = self
+                    .core
+                    .mcp
+                    .as_ref()
+                    .map(|manager| {
+                        manager
+                            .unavailable_servers()
+                            .into_iter()
+                            .map(|(name, status)| format!("{name} ({})", status.as_str()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                self.busy_stack.release(busy_token);
+                self.start_next_queued_input_if_idle();
+                if !unavailable.is_empty() {
+                    let reason =
+                        if matches!(readiness, smelt_core::mcp::McpReadiness::TimedOut { .. }) {
+                            "discovery is still in progress"
+                        } else {
+                            "discovery failed"
+                        };
+                    self.notify_warn(format!(
+                        "MCP tool {reason} for {}; continuing without those tools",
+                        unavailable.join(", ")
+                    ));
+                }
+            }
             AppEvent::ShutdownSignal => self.pending_quit = true,
         }
     }
@@ -2922,7 +2957,29 @@ impl TuiApp {
                 }
             } else {
                 let content = Content::text(msg.clone());
-                self.agent = self.begin_agent_turn(&msg, content);
+                let pending_mcp = self
+                    .core
+                    .mcp
+                    .as_ref()
+                    .filter(|manager| !manager.controller_status().is_ready())
+                    .cloned();
+                if let Some(manager) = pending_mcp {
+                    self.queued_inputs
+                        .push_front(QueueStage::Turn, QueuedInput::request(msg, content));
+                    let busy_token = self.busy_stack.push("connecting MCP tools".into());
+                    let app_event_tx = self.app_event_tx.clone();
+                    tokio::spawn(async move {
+                        let readiness = manager
+                            .wait_until_ready(smelt_core::mcp::STARTUP_DISCOVERY_WAIT)
+                            .await;
+                        let _ = app_event_tx.send(AppEvent::McpStartupReady {
+                            busy_token,
+                            readiness,
+                        });
+                    });
+                } else {
+                    self.agent = self.begin_agent_turn(&msg, content);
+                }
             }
         }
 
