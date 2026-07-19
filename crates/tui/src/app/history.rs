@@ -2308,6 +2308,7 @@ impl TuiApp {
         history
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
         self.push_block(Block::User {
             text: input.to_string(),
