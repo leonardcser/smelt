@@ -322,7 +322,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "summary_prefix",
         "Return the canonical compaction-summary prefix used when a checkpoint summary is represented as a user message.",
         &[],
-        |_, ()| Ok(engine::SUMMARY_PREFIX.trim_end().to_string()),
+        |_, ()| Ok(protocol::COMPACTION_SUMMARY_PREFIX.trim_end().to_string()),
     )?;
     {
         let s = shared.clone();

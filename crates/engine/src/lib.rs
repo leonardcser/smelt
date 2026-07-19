@@ -23,13 +23,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Prefix on the user-message slot the compaction plugin uses to carry
-/// the handoff summary. The TUI's transcript renderer matches against
-/// this prefix to render the message as a `Compacted` block instead of
-/// a plain user turn. Source-of-truth for both the bundled Lua plugin
-/// and the renderer; they MUST stay byte-equal.
-pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md");
-
 pub use paths::{config_dir, data_dir, home_dir, state_dir};
 
 /// Re-export so non-engine crates (the TUI) can store an HTTP client

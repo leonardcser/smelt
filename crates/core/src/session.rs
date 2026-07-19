@@ -812,24 +812,22 @@ impl Session {
         })
     }
 
-    pub fn model_history_range(&self, summary_prefix: &str) -> (Vec<HistoryItem>, usize, usize) {
+    pub fn model_history_range(&self) -> (Vec<HistoryItem>, usize, usize) {
         let end_index = self.history.len();
         let Some(cp) = &self.checkpoint else {
             return (Vec::new(), 0, end_index);
         };
         (
-            vec![HistoryItem::user(protocol::Content::text(format!(
-                "{}\n{}",
-                summary_prefix.trim_end(),
-                cp.summary
-            )))],
+            vec![HistoryItem::user(protocol::compaction_summary_content(
+                &cp.summary,
+            ))],
             cp.first_live_index,
             end_index,
         )
     }
 
-    pub fn model_history(&self, summary_prefix: &str) -> Vec<HistoryItem> {
-        let (mut out, first_live_index, _) = self.model_history_range(summary_prefix);
+    pub fn model_history(&self) -> Vec<HistoryItem> {
+        let (mut out, first_live_index, _) = self.model_history_range();
         out.extend(self.history.iter().skip(first_live_index).cloned());
         out
     }
@@ -1002,14 +1000,15 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
     chars.div_ceil(4).min(u32::MAX as usize) as u32
 }
 
-pub fn is_context_checkpoint_summary(item: &HistoryItem, summary_prefix: &str) -> bool {
-    let HistoryItem::User { content, .. } = item else {
-        return false;
-    };
-    content
-        .text_content()
-        .trim_start()
-        .starts_with(summary_prefix.trim_end())
+pub fn is_context_checkpoint_summary(item: &HistoryItem) -> bool {
+    matches!(
+        item,
+        HistoryItem::User { content, .. }
+            if matches!(
+                protocol::classify_user_history_content(content),
+                protocol::UserHistoryContent::CompactionSummary { .. }
+            )
+    )
 }
 
 pub fn now_ms() -> u64 {
@@ -1916,24 +1915,25 @@ fn push_history_item_descriptor_rows(
     let origin = Some(crate::transcript_model::BlockOrigin::History(history_idx));
     match item {
         HistoryItem::User { content, display } => {
-            let text = content.text_content();
-            let descriptor =
-                if let Some(rest) = text.strip_prefix(engine::SUMMARY_PREFIX.trim_end()) {
-                    crate::transcript_model::TranscriptBlockDescriptor::Compacted {
-                        summary: rest.trim_start_matches('\n').to_string(),
-                    }
-                } else if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
+            let descriptor = match protocol::classify_user_history_content(content) {
+                protocol::UserHistoryContent::CompactionSummary { summary } => {
+                    crate::transcript_model::TranscriptBlockDescriptor::Compacted { summary }
+                }
+                protocol::UserHistoryContent::ModeChange { text } => {
                     crate::transcript_model::TranscriptBlockDescriptor::Mode {
-                        text: note.trim().to_string(),
+                        text,
                         icon: String::new(),
                         hl_group: "SmeltAccent".to_string(),
                     }
-                } else if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
+                }
+                protocol::UserHistoryContent::ProcessStatus { text } => {
                     crate::transcript_model::TranscriptBlockDescriptor::ProcessStatus {
-                        text: note.trim().to_string(),
+                        text,
                         event: None,
                     }
-                } else {
+                }
+                protocol::UserHistoryContent::Plain => {
+                    let text = content.text_content();
                     let image_labels = content.image_labels();
                     let display_source = display.as_deref().unwrap_or(&text);
                     let display_text = if image_labels.is_empty() {
@@ -1950,7 +1950,8 @@ fn push_history_item_descriptor_rows(
                         text: display_text,
                         image_labels,
                     }
-                };
+                }
+            };
             records.push(transcript_descriptor_record(
                 records.len(),
                 descriptor,
@@ -2743,7 +2744,7 @@ mod tests {
         );
         let checkpoint = header.meta.checkpoint.clone();
         let live = crate::session_runtime::LiveSession::from_store(header, store_ref);
-        match live.model_history_source("SUMMARY:", checkpoint.as_ref()) {
+        match live.model_history_source(checkpoint.as_ref()) {
             protocol::ModelHistorySource::Store {
                 prefix,
                 first_live_index,
@@ -3473,7 +3474,7 @@ mod tests {
         ];
         s.checkpoint = Some(checkpoint("summary text", 2));
 
-        let model = s.model_history("SUMMARY:");
+        let model = s.model_history();
 
         assert_eq!(model.len(), 3);
         assert!(

@@ -21,6 +21,8 @@ use crate::content::Content;
 use crate::message::{FunctionCall, ReasoningBlock, ToolCall, ToolOutcome};
 use serde::{Deserialize, Serialize};
 
+pub const COMPACTION_SUMMARY_PREFIX: &str = include_str!("compact_summary_prefix.md");
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryItem {
@@ -673,15 +675,103 @@ pub fn effective_mode_at<'a>(
 
 use crate::message::{Message, Role};
 
-pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserHistoryContent {
+    Plain,
+    CompactionSummary { summary: String },
+    ModeChange { text: String },
+    ProcessStatus { text: String },
+}
+
+pub fn classify_user_history_content(content: &Content) -> UserHistoryContent {
     let text = content.text_content();
+    if let Some(summary) = text.strip_prefix(COMPACTION_SUMMARY_PREFIX.trim_end()) {
+        return UserHistoryContent::CompactionSummary {
+            summary: summary.trim_start_matches('\n').to_string(),
+        };
+    }
     if let Some(note) = text.strip_prefix(crate::note::MODE_NOTE_PREFIX) {
-        return Some(HistoryNote::mode_change(note.trim().to_string()));
+        return UserHistoryContent::ModeChange {
+            text: note.trim().to_string(),
+        };
     }
     if let Some(note) = text.strip_prefix(crate::note::PROCESS_STATUS_NOTE_PREFIX) {
-        return Some(HistoryNote::process_status(note.trim().to_string()));
+        return UserHistoryContent::ProcessStatus {
+            text: note.trim().to_string(),
+        };
     }
-    None
+    UserHistoryContent::Plain
+}
+
+pub fn compaction_summary_content(summary: &str) -> Content {
+    Content::text(format!(
+        "{}\n{summary}",
+        COMPACTION_SUMMARY_PREFIX.trim_end()
+    ))
+}
+
+pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
+    match classify_user_history_content(content) {
+        UserHistoryContent::ModeChange { text } => Some(HistoryNote::mode_change(text)),
+        UserHistoryContent::ProcessStatus { text } => Some(HistoryNote::process_status(text)),
+        UserHistoryContent::Plain | UserHistoryContent::CompactionSummary { .. } => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryTranscriptProjection {
+    User,
+    Assistant,
+    Mode,
+    ProcessStatus,
+    Compacted,
+}
+
+impl HistoryTranscriptProjection {
+    fn from_descriptor_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "user" => Some(Self::User),
+            "assistant" | "thinking" | "tool" | "exec" | "code" => Some(Self::Assistant),
+            "mode" => Some(Self::Mode),
+            "process_status" => Some(Self::ProcessStatus),
+            "compacted" => Some(Self::Compacted),
+            _ => None,
+        }
+    }
+}
+
+fn history_item_transcript_projection(item: &HistoryItem) -> Option<HistoryTranscriptProjection> {
+    match item {
+        HistoryItem::User { content, .. } => match classify_user_history_content(content) {
+            UserHistoryContent::Plain => Some(HistoryTranscriptProjection::User),
+            UserHistoryContent::CompactionSummary { .. } => {
+                Some(HistoryTranscriptProjection::Compacted)
+            }
+            UserHistoryContent::ModeChange { .. } => Some(HistoryTranscriptProjection::Mode),
+            UserHistoryContent::ProcessStatus { .. } => {
+                Some(HistoryTranscriptProjection::ProcessStatus)
+            }
+        },
+        HistoryItem::Assistant(_) => Some(HistoryTranscriptProjection::Assistant),
+        HistoryItem::Note(note) => match note.kind() {
+            HistoryNoteKind::ModeChange => Some(HistoryTranscriptProjection::Mode),
+            HistoryNoteKind::ProcessStatus => Some(HistoryTranscriptProjection::ProcessStatus),
+            HistoryNoteKind::Context => None,
+        },
+        HistoryItem::System { .. } => None,
+    }
+}
+
+pub fn transcript_descriptor_kind_matches_history_item(
+    descriptor_kind: &str,
+    item: &HistoryItem,
+) -> bool {
+    let Some(descriptor_projection) =
+        HistoryTranscriptProjection::from_descriptor_kind(descriptor_kind)
+    else {
+        return false;
+    };
+    history_item_transcript_projection(item) == Some(descriptor_projection)
 }
 
 /// Convert user-role wire content into semantic history.
@@ -1022,6 +1112,58 @@ mod tests {
             mode,
             HistoryItem::note(HistoryNote::mode_change("now in apply mode."))
         );
+    }
+
+    #[test]
+    fn compaction_summary_stays_user_history_but_projects_as_compacted() {
+        let content = compaction_summary_content("# Goal\nRetain this");
+        assert_eq!(
+            classify_user_history_content(&content),
+            UserHistoryContent::CompactionSummary {
+                summary: "# Goal\nRetain this".into()
+            }
+        );
+        let item = history_item_from_user_content(content);
+        assert!(matches!(item, HistoryItem::User { .. }));
+        assert!(transcript_descriptor_kind_matches_history_item(
+            "compacted",
+            &item
+        ));
+        assert!(!transcript_descriptor_kind_matches_history_item(
+            "user", &item
+        ));
+    }
+
+    #[test]
+    fn transcript_descriptor_compatibility_uses_semantic_history_projection() {
+        let user = HistoryItem::user(Content::text("follow up"));
+        let legacy_mode =
+            HistoryItem::user(Content::text(crate::note::mode_change_note("apply mode")));
+        let legacy_process = HistoryItem::user(Content::text(crate::note::process_status_note(
+            "process finished",
+        )));
+        let mode = HistoryItem::note(HistoryNote::mode_change("apply mode"));
+        let process = HistoryItem::note(HistoryNote::process_status("process finished"));
+        let context = HistoryItem::note(HistoryNote::context("cwd changed"));
+
+        for (kind, item) in [
+            ("user", &user),
+            ("mode", &legacy_mode),
+            ("process_status", &legacy_process),
+            ("mode", &mode),
+            ("process_status", &process),
+        ] {
+            assert!(transcript_descriptor_kind_matches_history_item(kind, item));
+        }
+        for (kind, item) in [
+            ("user", &legacy_mode),
+            ("mode", &process),
+            ("process_status", &mode),
+            ("user", &context),
+            ("unknown", &context),
+        ] {
+            assert!(!transcript_descriptor_kind_matches_history_item(kind, item));
+        }
     }
 
     #[test]

@@ -228,6 +228,89 @@ fn descriptor_only_save_advances_canonical_revision_once() {
 }
 
 #[test]
+fn descriptor_resave_preserves_semantic_history_links() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app.commit_request_history_item(
+        HistoryItem::user(protocol::compaction_summary_content("retained summary")),
+        Some(Block::Compacted {
+            summary: "retained summary".into(),
+        }),
+    );
+    let note = protocol::HistoryNote::process_status_event(
+        protocol::ProcessStatusEvent::background_process_completed("4242", Some(0)),
+    );
+    app.app.commit_request_history_item(
+        HistoryItem::note(note.clone()),
+        crate::app::history::history_note_to_block(&app.app.lua, &note),
+    );
+    assert!(!has_sticky_session_save_failure(&app, &session_id));
+
+    app.app
+        .session_document
+        .transcript
+        .history_mut()
+        .require_descriptor_resave_from(0);
+    app.app.save_session_and_flush();
+
+    assert!(
+        !has_sticky_session_save_failure(&app, &session_id),
+        "descriptor resave must preserve semantic origins: {:?}",
+        app.app.notification
+    );
+}
+
+#[test]
+fn history_only_process_status_session_accepts_persisted_follow_up() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        app.app.handle_process_completed("4242".into(), Some(0));
+        let turn_id = app.current_turn_id().expect("process-status turn started");
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        }));
+        app.app.save_session_and_flush();
+        assert!(!app.app.session_is_read_only());
+        app.app.core.session.id.clone()
+    };
+
+    let db_path = smelt_core::session::dir_for_id(&session_id).join("session.db");
+    let db = smelt_store::SessionDb::open(db_path).unwrap();
+    db.connection()
+        .execute("DELETE FROM transcript_search", [])
+        .unwrap();
+    db.connection()
+        .execute("DELETE FROM transcript_blocks", [])
+        .unwrap();
+    drop(db);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    assert!(!resumed.app.session_is_read_only());
+
+    resumed.start_submitted_turn("follow up after the agent finished");
+    resumed.app.save_session_and_flush();
+
+    assert!(
+        !has_sticky_session_save_failure(&resumed, &session_id),
+        "follow-up save failed: {:?}",
+        resumed.app.notification
+    );
+    assert!(!resumed.app.session_is_read_only());
+    assert!(loaded_session(&session_id).history.iter().any(|item| {
+        matches!(
+            item,
+            HistoryItem::User { content, .. }
+                if content.text_content() == "follow up after the agent finished"
+        )
+    }));
+}
+
+#[test]
 fn exact_no_op_save_does_not_advance_canonical_revision() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);

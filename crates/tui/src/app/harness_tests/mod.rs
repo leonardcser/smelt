@@ -559,8 +559,11 @@ async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary
         .first()
         .and_then(|m| m.content.as_ref())
         .map(|c| c.text_content());
-    let expected = format!("{}\n# Goal\nok", engine::SUMMARY_PREFIX.trim_end());
-    assert_eq!(replacement_text.as_deref(), Some(expected.as_str()));
+    let expected = protocol::compaction_summary_content("# Goal\nok");
+    assert_eq!(
+        replacement_text.as_deref(),
+        Some(expected.text_content().as_ref())
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -604,8 +607,11 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
         .first()
         .and_then(|m| m.content.as_ref())
         .map(|c| c.text_content());
-    let expected = format!("{}\n# Goal\nok", engine::SUMMARY_PREFIX.trim_end());
-    assert_eq!(replacement_text.as_deref(), Some(expected.as_str()));
+    let expected = protocol::compaction_summary_content("# Goal\nok");
+    assert_eq!(
+        replacement_text.as_deref(),
+        Some(expected.text_content().as_ref())
+    );
     assert_eq!(app.app.working.phase_label(), Some("working"));
     assert!(app.agent_running());
 }

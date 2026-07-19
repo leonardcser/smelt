@@ -27,11 +27,13 @@ pub use event::{
     ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };
 pub use history::{
-    apply_history_append, effective_mode_at, history_from_messages, history_item_from_user_content,
+    apply_history_append, classify_user_history_content, compaction_summary_content,
+    effective_mode_at, history_from_messages, history_item_from_user_content,
     history_item_message_count, history_to_messages, remove_context_note, replace_context_note,
-    replace_last_note_kind, AssistantStep, HistoryAppend, HistoryAppendPolicy, HistoryAppendResult,
-    HistoryItem, HistoryNote, HistoryNoteKind, ProcessStatusEvent, ToolInvocation,
-    DEFAULT_CONTEXT_NOTE_NAME,
+    replace_last_note_kind, transcript_descriptor_kind_matches_history_item, AssistantStep,
+    HistoryAppend, HistoryAppendPolicy, HistoryAppendResult, HistoryItem, HistoryNote,
+    HistoryNoteKind, ProcessStatusEvent, ToolInvocation, UserHistoryContent,
+    COMPACTION_SUMMARY_PREFIX, DEFAULT_CONTEXT_NOTE_NAME,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};

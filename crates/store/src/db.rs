@@ -2,9 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{
-    Connection, DropBehavior, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
-};
+use rusqlite::{Connection, DropBehavior, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -2452,33 +2450,47 @@ fn validate_descriptor_suffix_history_links(
 ) -> Result<()> {
     let start = history.start.get();
     let end = history.final_len.get();
-    for record in &descriptors.records {
-        let Some(history_idx) = record.history_idx else {
-            continue;
-        };
+    for history_idx in descriptors
+        .records
+        .iter()
+        .filter_map(|record| record.history_idx)
+    {
         if history_idx >= end {
             return Err(StoreError::Integrity(format!(
                 "transcript descriptor history link past saved history: history_idx {history_idx}, history_len {end}"
             )));
         }
-        let matches_history = if history_idx < start {
-            let history_kind = persisted_history_kind(conn, history_idx)?;
-            let Some(history_kind) = history_kind else {
-                return Err(StoreError::Integrity(format!(
+    }
+
+    let mut persisted_indices = descriptors
+        .records
+        .iter()
+        .filter_map(|record| record.history_idx)
+        .filter(|history_idx| *history_idx < start)
+        .collect::<Vec<_>>();
+    persisted_indices.sort_unstable();
+    persisted_indices.dedup();
+    let persisted_history = history::read_history_items_at_indices(conn, &persisted_indices)?;
+
+    for record in &descriptors.records {
+        let Some(history_idx) = record.history_idx else {
+            continue;
+        };
+        let item = if history_idx < start {
+            persisted_history.get(&history_idx).ok_or_else(|| {
+                StoreError::Integrity(format!(
                     "transcript descriptor history link missing from stored prefix: history_idx {history_idx}, suffix {start}..{end}"
-                )));
-            };
-            descriptor_kind_matches_history_kind(&record.kind, &history_kind)
+                ))
+            })?
         } else {
             let suffix_offset = (history_idx - start) as usize;
-            let Some(item) = history.items.get(suffix_offset) else {
-                return Err(StoreError::Integrity(format!(
+            history.items.get(suffix_offset).ok_or_else(|| {
+                StoreError::Integrity(format!(
                     "transcript descriptor history link missing from saved suffix: history_idx {history_idx}, suffix {start}..{end}"
-                )));
-            };
-            descriptor_kind_matches_history_item(&record.kind, item)
+                ))
+            })?
         };
-        if !matches_history {
+        if !protocol::transcript_descriptor_kind_matches_history_item(&record.kind, item) {
             return Err(StoreError::Integrity(format!(
                 "transcript descriptor history link kind mismatch: descriptor kind {}, history_idx {history_idx}",
                 record.kind
@@ -2486,39 +2498,6 @@ fn validate_descriptor_suffix_history_links(
         }
     }
     Ok(())
-}
-
-fn persisted_history_kind(conn: &Connection, history_idx: u64) -> Result<Option<String>> {
-    let history_idx = crate::object::checked_i64(history_idx, "history_idx")?;
-    conn.query_row(
-        "SELECT kind FROM history_items WHERE idx = ?1",
-        [history_idx],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn descriptor_kind_matches_history_kind(kind: &str, history_kind: &str) -> bool {
-    matches!(
-        (kind, history_kind),
-        ("user", "user")
-            | (
-                "assistant" | "thinking" | "tool" | "exec" | "code",
-                "assistant"
-            )
-    )
-}
-
-fn descriptor_kind_matches_history_item(kind: &str, item: &protocol::HistoryItem) -> bool {
-    matches!(
-        (kind, item),
-        ("user", protocol::HistoryItem::User { .. })
-            | (
-                "assistant" | "thinking" | "tool" | "exec" | "code",
-                protocol::HistoryItem::Assistant(_),
-            )
-    )
 }
 
 fn prepare_writable_path(path: &Path) -> Result<()> {
@@ -2741,9 +2720,6 @@ mod tests {
             start: usize,
             records: &[TranscriptDescriptorRecord],
         ) -> std::result::Result<SaveReceipt, SessionCommitFailure>;
-        fn repair_test_transcript_history_links(
-            &mut self,
-        ) -> std::result::Result<usize, SessionCommitFailure>;
         fn repair_test_checkpoint(&mut self) -> std::result::Result<usize, SessionCommitFailure>;
         fn apply_test_prefix_to(
             &self,
@@ -2834,50 +2810,6 @@ mod tests {
             self.apply_transcript_descriptor_suffix_fixture(start, records)
         }
 
-        fn repair_test_transcript_history_links(
-            &mut self,
-        ) -> std::result::Result<usize, SessionCommitFailure> {
-            let mut full = self
-                .load_full_session()
-                .map_err(session_commit_failure_from_store_error)?
-                .ok_or_else(|| SessionCommitFailure::Integrity {
-                    message: "session metadata is missing".into(),
-                })?;
-            let mut repaired = 0;
-            for record in &mut full.descriptors {
-                let matches = record
-                    .history_idx
-                    .and_then(|index| usize::try_from(index).ok())
-                    .and_then(|index| full.history.get(index))
-                    .is_some_and(|item| {
-                        matches!(
-                            (record.kind.as_str(), item),
-                            ("user", protocol::HistoryItem::User { .. })
-                                | (
-                                    "assistant" | "thinking" | "tool" | "exec" | "code",
-                                    protocol::HistoryItem::Assistant(_),
-                                )
-                        )
-                    });
-                if record.history_idx.is_some() && !matches {
-                    record.history_idx = None;
-                    record.origin_json = None;
-                    repaired += 1;
-                }
-            }
-            if repaired != 0 {
-                let command = test_full_session_command(
-                    &full,
-                    Some(TranscriptDescriptorSuffix {
-                        start: DescriptorIndex::ZERO,
-                        records: full.descriptors.clone(),
-                    }),
-                )?;
-                self.apply_session_commit(&command)?;
-            }
-            Ok(repaired)
-        }
-
         fn repair_test_checkpoint(&mut self) -> std::result::Result<usize, SessionCommitFailure> {
             let Some((stored, metadata)) = self
                 .repaired_checkpoint_metadata()
@@ -2955,31 +2887,6 @@ mod tests {
                 turn_metas: test_side_table_rows(&fixture.turn_metas),
                 metadata_snapshots: test_side_table_rows(&fixture.metadata_snapshots),
                 context_snapshots: test_side_table_rows(&fixture.context_snapshots),
-            },
-            descriptors,
-        })
-    }
-
-    fn test_full_session_command(
-        full: &FullSession,
-        descriptors: Option<TranscriptDescriptorSuffix>,
-    ) -> std::result::Result<SessionCommit, SessionCommitFailure> {
-        let boundary = full.session.head.history_len.get();
-        Ok(SessionCommit {
-            session_id: full.session.identity.id.clone(),
-            expected: full.session.head,
-            identity: full.session.identity.clone(),
-            metadata: full.session.metadata.clone(),
-            history: HistorySuffix {
-                start: HistoryIndex::new(boundary),
-                final_len: full.session.head.history_len,
-                items: Vec::new(),
-            },
-            side_tables: SideTableSuffixes {
-                start: HistoryIndex::new(boundary),
-                turn_metas: test_side_table_rows_from(&full.turn_metas, boundary),
-                metadata_snapshots: test_side_table_rows_from(&full.metadata_snapshots, boundary),
-                context_snapshots: test_side_table_rows_from(&full.context_snapshots, boundary),
             },
             descriptors,
         })
@@ -4633,53 +4540,37 @@ mod tests {
     }
 
     #[test]
-    fn repair_mismatched_transcript_descriptor_history_links_detaches_bad_links() {
+    fn commit_session_accepts_semantic_descriptor_links_in_saved_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.apply_test_fixture(&TestSessionFixture {
-            state: test_session_state("repair-mismatched-links", 1),
-            history_start_idx: 0,
-            history_len: 1,
-            history: vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
-                "cwd changed",
-            ))],
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            context_snapshots: Vec::new(),
-        })
-        .unwrap();
-        let mut bad = transcript_user_record_with_history(0, 0, "bad-user-link", "continue");
-        bad.history_idx = None;
-        db.apply_test_descriptors(std::slice::from_ref(&bad))
-            .unwrap();
-        db.connection()
-            .execute(
-                "UPDATE transcript_blocks SET history_idx = 0 WHERE block_idx = 0",
-                [],
-            )
-            .unwrap();
-        db.connection()
-            .execute(
-                "UPDATE transcript_search SET history_idx = 0 WHERE block_idx = 0",
-                [],
-            )
-            .unwrap();
+        let descriptors = vec![
+            transcript_record_of_kind_with_history(0, 0, "mode", "apply mode"),
+            transcript_record_of_kind_with_history(1, 1, "process_status", "process finished"),
+            transcript_record_of_kind_with_history(2, 2, "compacted", "retained summary"),
+        ];
 
-        assert_eq!(db.repair_test_transcript_history_links().unwrap(), 1);
-        let rows = db.read_all_transcript_descriptor_records().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].preview_text, "continue");
-        assert_eq!(rows[0].history_idx, None);
-        assert_eq!(rows[0].origin_json, None);
-        let search_history_idx: Option<i64> = db
-            .connection()
-            .query_row(
-                "SELECT history_idx FROM transcript_search WHERE block_idx = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(search_history_idx, None);
+        commit_current_suffix(
+            &mut db,
+            test_session_state("semantic-descriptor-origins", 3),
+            0,
+            vec![
+                protocol::HistoryItem::note(protocol::HistoryNote::mode_change("apply mode")),
+                protocol::HistoryItem::note(protocol::HistoryNote::process_status(
+                    "process finished",
+                )),
+                protocol::HistoryItem::user(protocol::compaction_summary_content(
+                    "retained summary",
+                )),
+            ],
+            None,
+            Some((0, descriptors.clone())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            descriptors
+        );
     }
 
     #[test]
@@ -4825,6 +4716,48 @@ mod tests {
         assert_eq!(
             db.read_all_transcript_descriptor_records().unwrap(),
             vec![updated_descriptor]
+        );
+    }
+
+    #[test]
+    fn commit_session_allows_semantic_links_to_persisted_history_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.apply_test_fixture(&TestSessionFixture {
+            state: test_session_state("prefix-semantic-origins", 2),
+            history_start_idx: 0,
+            history_len: 2,
+            history: vec![
+                protocol::HistoryItem::note(protocol::HistoryNote::process_status(
+                    "process finished",
+                )),
+                protocol::HistoryItem::user(protocol::compaction_summary_content(
+                    "retained summary",
+                )),
+            ],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            context_snapshots: Vec::new(),
+        })
+        .unwrap();
+        let descriptors = vec![
+            transcript_record_of_kind_with_history(0, 0, "process_status", "process finished"),
+            transcript_record_of_kind_with_history(1, 1, "compacted", "retained summary"),
+        ];
+
+        commit_current_suffix(
+            &mut db,
+            test_session_state("prefix-semantic-origins", 2),
+            2,
+            Vec::new(),
+            None,
+            Some((0, descriptors.clone())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            descriptors
         );
     }
 
@@ -6522,6 +6455,22 @@ mod tests {
         record.descriptor_json = serde_json::json!({
             "kind": "user",
             "label": label,
+            "text": indexed_text,
+        })
+        .to_string();
+        record
+    }
+
+    fn transcript_record_of_kind_with_history(
+        block_idx: u64,
+        history_idx: u64,
+        kind: &str,
+        indexed_text: &str,
+    ) -> TranscriptDescriptorRecord {
+        let mut record = transcript_record_with_history(block_idx, history_idx, kind, indexed_text);
+        record.kind = kind.to_string();
+        record.descriptor_json = serde_json::json!({
+            "kind": kind,
             "text": indexed_text,
         })
         .to_string();

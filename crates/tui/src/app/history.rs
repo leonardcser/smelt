@@ -358,54 +358,38 @@ fn push_user_block(
     content: &Content,
     display: Option<&str>,
 ) {
-    let text = content.text_content();
-    let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
-    if let Some(rest) = text.strip_prefix(prefix_marker) {
-        let summary = rest.trim_start_matches('\n');
-        transcript.push_descriptor_with_origin(
-            TranscriptBlockDescriptor::Compacted {
-                summary: summary.to_string(),
-            },
-            smelt_core::BlockOrigin::History(history_index),
-        );
-        return;
-    }
-    if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
-        transcript.push_descriptor_with_origin(
-            TranscriptBlockDescriptor::from_block(lua.mode_block(None, note.trim())),
-            smelt_core::BlockOrigin::History(history_index),
-        );
-        return;
-    }
-    if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
-        transcript.push_descriptor_with_origin(
-            TranscriptBlockDescriptor::ProcessStatus {
-                text: note.trim().to_string(),
-                event: None,
-            },
-            smelt_core::BlockOrigin::History(history_index),
-        );
-        return;
-    }
-    let image_labels = content.image_labels();
-    let display_source = display.unwrap_or(&text);
-    let display_text = if image_labels.is_empty() {
-        display_source.to_string()
-    } else {
-        let suffix = image_labels.join(" ");
-        if display_source.is_empty() {
-            suffix
-        } else {
-            format!("{display_source} {suffix}")
+    let descriptor = match protocol::classify_user_history_content(content) {
+        protocol::UserHistoryContent::CompactionSummary { summary } => {
+            TranscriptBlockDescriptor::Compacted { summary }
+        }
+        protocol::UserHistoryContent::ModeChange { text } => {
+            TranscriptBlockDescriptor::from_block(lua.mode_block(None, &text))
+        }
+        protocol::UserHistoryContent::ProcessStatus { text } => {
+            TranscriptBlockDescriptor::ProcessStatus { text, event: None }
+        }
+        protocol::UserHistoryContent::Plain => {
+            let text = content.text_content();
+            let image_labels = content.image_labels();
+            let display_source = display.unwrap_or(&text);
+            let display_text = if image_labels.is_empty() {
+                display_source.to_string()
+            } else {
+                let suffix = image_labels.join(" ");
+                if display_source.is_empty() {
+                    suffix
+                } else {
+                    format!("{display_source} {suffix}")
+                }
+            };
+            TranscriptBlockDescriptor::User {
+                text: display_text,
+                image_labels,
+            }
         }
     };
-    transcript.push_descriptor_with_origin(
-        TranscriptBlockDescriptor::User {
-            text: display_text,
-            image_labels,
-        },
-        smelt_core::BlockOrigin::History(history_index),
-    );
+    transcript
+        .push_descriptor_with_origin(descriptor, smelt_core::BlockOrigin::History(history_index));
 }
 
 fn push_assistant_blocks(
@@ -1675,15 +1659,9 @@ impl TuiApp {
 
     fn store_session_model_history_source(&self) -> protocol::ModelHistorySource {
         if let Some(live) = &self.session_document.live_session {
-            return live.model_history_source(
-                engine::SUMMARY_PREFIX,
-                self.core.session.checkpoint.as_ref(),
-            );
+            return live.model_history_source(self.core.session.checkpoint.as_ref());
         }
-        let (prefix, first_live_index, end_index) = self
-            .core
-            .session
-            .model_history_range(engine::SUMMARY_PREFIX);
+        let (prefix, first_live_index, end_index) = self.core.session.model_history_range();
         protocol::ModelHistorySource::store(prefix, first_live_index, end_index)
     }
 
@@ -2531,7 +2509,7 @@ mod checkpoint_tests {
     }
 
     fn is_compaction_summary_item(item: &HistoryItem) -> bool {
-        smelt_core::session::is_context_checkpoint_summary(item, engine::SUMMARY_PREFIX)
+        smelt_core::session::is_context_checkpoint_summary(item)
     }
 
     fn add_background_process(app: &mut crate::app::test_harness::TestApp) -> String {
@@ -3380,9 +3358,8 @@ mod checkpoint_tests {
     fn checkpoint_commit_keeps_history_compacted_blocks() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.core.session.history = vec![
-            user(&format!(
-                "{}\nuser-written summary-looking block",
-                engine::SUMMARY_PREFIX.trim_end()
+            HistoryItem::user(protocol::compaction_summary_content(
+                "user-written summary-looking block",
             )),
             assistant("reply"),
             user("recent"),
@@ -3535,7 +3512,7 @@ mod checkpoint_tests {
         let history = vec![user("hello"), assistant("world")];
         let mut s = session;
         s.history = history.clone();
-        assert_eq!(s.model_history("prefix").len(), history.len());
+        assert_eq!(s.model_history().len(), history.len());
     }
 
     #[test]
@@ -3556,7 +3533,7 @@ mod checkpoint_tests {
             tokens_after_estimate: None,
             ..Default::default()
         });
-        let model = session.model_history("SUMMARY:");
+        let model = session.model_history();
         assert_eq!(model.len(), 3); // summary + recent + recent reply
         let first = &model[0];
         assert!(
@@ -3629,12 +3606,7 @@ mod checkpoint_tests {
 
     #[test]
     fn is_compaction_summary_detects_prefix() {
-        let prefix = engine::SUMMARY_PREFIX;
-        assert!(
-            !prefix.is_empty(),
-            "SUMMARY_PREFIX must be non-empty for this test"
-        );
-        let item = HistoryItem::user(Content::text(format!("{}\nhere is the summary", prefix)));
+        let item = HistoryItem::user(protocol::compaction_summary_content("here is the summary"));
         assert!(is_compaction_summary_item(&item));
 
         let normal = HistoryItem::user(Content::text("hello world"));
@@ -3699,7 +3671,7 @@ mod checkpoint_tests {
             tokens_after_estimate: None,
             ..Default::default()
         });
-        let model = session.model_history("PREFIX:");
+        let model = session.model_history();
         assert_eq!(model.len(), 3); // summary + user("2") + assistant("2a")
         assert!(
             matches!(&model[0], HistoryItem::User { content, .. } if content.text_content().contains("s"))
@@ -3730,10 +3702,7 @@ mod checkpoint_tests {
 
         // Engine returns model_history() = [summary, recent, recent_reply, new_assistant]
         let engine_response = vec![
-            HistoryItem::user(Content::text(format!(
-                "{}\nthe summary",
-                engine::SUMMARY_PREFIX.trim_end()
-            ))),
+            HistoryItem::user(protocol::compaction_summary_content("the summary")),
             user("recent"),
             assistant("recent reply"),
             assistant("new reply"),

@@ -1796,21 +1796,12 @@ fn history_suffix_contains_matching_descriptor_origin(
     history
         .items
         .get(history_idx - history_start)
-        .is_some_and(|item| descriptor_origin_matches_history_item(&record.record.descriptor, item))
-}
-
-fn descriptor_origin_matches_history_item(
-    descriptor: &smelt_core::TranscriptBlockDescriptor,
-    item: &HistoryItem,
-) -> bool {
-    matches!(
-        (descriptor.kind(), item),
-        ("user", HistoryItem::User { .. })
-            | (
-                "assistant" | "thinking" | "tool" | "exec" | "code",
-                HistoryItem::Assistant { .. }
+        .is_some_and(|item| {
+            protocol::transcript_descriptor_kind_matches_history_item(
+                record.record.descriptor.kind(),
+                item,
             )
-    )
+        })
 }
 
 fn session_from_meta(meta: SessionMeta, pid: u32, cwd: std::path::PathBuf) -> Session {

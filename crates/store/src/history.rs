@@ -12,6 +12,7 @@ use rusqlite::types::Value as SqlValue;
 pub(crate) const METADATA_OBJECT_MIN_BYTES: usize = 4 * 1024;
 pub(crate) const LARGE_REWIND_GC_MIN_ROWS: usize = 128;
 pub(crate) const OBJECT_REF_KEY: &str = "$smelt_object_ref";
+const HISTORY_INDEX_READ_BATCH_SIZE: usize = 500;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HistoryObjectRole {
@@ -302,6 +303,45 @@ pub(crate) fn read_history_items(conn: &Connection) -> Result<Vec<HistoryItem>> 
     }
     perf::record_value("store:history:rows_read", out.len() as u64);
     perf::record_value("store:history:read_all_rows", out.len() as u64);
+    perf::record_value("store:history:json_bytes_read", json_bytes);
+    Ok(out)
+}
+
+pub(crate) fn read_history_items_at_indices(
+    conn: &Connection,
+    indices: &[u64],
+) -> Result<std::collections::HashMap<u64, HistoryItem>> {
+    let _perf = perf::begin("store:history:read_indices");
+    let mut out = std::collections::HashMap::with_capacity(indices.len());
+    let mut json_bytes = 0u64;
+    for batch in indices.chunks(HISTORY_INDEX_READ_BATCH_SIZE) {
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let sql = format!(
+            "SELECT idx, kind, json, hash FROM history_items WHERE idx IN ({placeholders})"
+        );
+        let sql_indices = batch
+            .iter()
+            .map(|idx| checked_i64(*idx, "history_idx"))
+            .collect::<Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(sql_indices), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (idx, kind, json, hash) = row?;
+            let key = u64::try_from(idx)
+                .map_err(|_| StoreError::Integrity(format!("negative history item index {idx}")))?;
+            json_bytes = json_bytes.saturating_add(json.len() as u64);
+            out.insert(key, decode_history_row(conn, idx, &kind, &json, &hash)?);
+        }
+    }
+    perf::record_value("store:history:rows_read", out.len() as u64);
+    perf::record_value("store:history:read_indices_rows", out.len() as u64);
     perf::record_value("store:history:json_bytes_read", json_bytes);
     Ok(out)
 }
@@ -1733,6 +1773,23 @@ mod tests {
             read_history_items_range(&conn, 0..1),
             Err(StoreError::MissingObject { .. })
         ));
+    }
+
+    #[test]
+    fn indexed_history_reads_batch_large_descriptor_origin_sets() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let items = (0..=HISTORY_INDEX_READ_BATCH_SIZE)
+            .map(|idx| HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
+            .collect::<Vec<_>>();
+        replace_history_suffix(&conn, 0, &items, ObjectCompression::none()).unwrap();
+        let indices = (0..items.len() as u64).collect::<Vec<_>>();
+
+        let loaded = read_history_items_at_indices(&conn, &indices).unwrap();
+
+        assert_eq!(loaded.len(), items.len());
+        assert_eq!(loaded.get(&0), Some(&items[0]));
+        assert_eq!(loaded.get(&(items.len() as u64 - 1)), items.last());
     }
 
     #[test]

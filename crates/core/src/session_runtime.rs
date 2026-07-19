@@ -217,16 +217,13 @@ impl LiveSession {
 
     pub fn model_history_source(
         &self,
-        summary_prefix: &str,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> protocol::ModelHistorySource {
         let (prefix, first_live_index) = if let Some(checkpoint) = checkpoint {
             (
-                vec![HistoryItem::user(protocol::Content::text(format!(
-                    "{}\n{}",
-                    summary_prefix.trim_end(),
-                    checkpoint.summary
-                )))],
+                vec![HistoryItem::user(protocol::compaction_summary_content(
+                    &checkpoint.summary,
+                ))],
                 checkpoint.first_live_index,
             )
         } else {
@@ -418,7 +415,7 @@ mod tests {
         let rows = live.history_range(1..3).expect("range");
         assert_eq!(rows.len(), 2);
         assert_eq!(live.history_len(), 3);
-        let source = live.model_history_source("summary:", None);
+        let source = live.model_history_source(None);
         match source {
             protocol::ModelHistorySource::Store {
                 first_live_index,
@@ -440,7 +437,7 @@ mod tests {
             first_live_index: 3,
             ..Default::default()
         };
-        let source = live.model_history_source("SUMMARY:", Some(&checkpoint));
+        let source = live.model_history_source(Some(&checkpoint));
         assert_eq!(source.coordinates().canonical_start().get(), 3);
         assert_eq!(source.coordinates().model_prefix_len(), 1);
         assert!(matches!(

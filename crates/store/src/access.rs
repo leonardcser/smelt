@@ -1050,7 +1050,9 @@ impl SessionMaintenance {
                 .history_idx
                 .and_then(|index| usize::try_from(index).ok())
                 .and_then(|index| session.history.get(index))
-                .is_some_and(|item| descriptor_kind_matches_history_item(&record.kind, item));
+                .is_some_and(|item| {
+                    protocol::transcript_descriptor_kind_matches_history_item(&record.kind, item)
+                });
             if record.history_idx.is_some() && !matches_history {
                 record.history_idx = None;
                 record.origin_json = None;
@@ -1272,17 +1274,6 @@ fn apply_maintenance_commit(
     writer
         .commit_session(command)
         .map_err(|failure| StoreError::Integrity(format!("session commit failed: {failure:?}")))
-}
-
-fn descriptor_kind_matches_history_item(kind: &str, item: &protocol::HistoryItem) -> bool {
-    matches!(
-        (kind, item),
-        ("user", protocol::HistoryItem::User { .. })
-            | (
-                "assistant" | "thinking" | "tool" | "exec" | "code",
-                protocol::HistoryItem::Assistant(_),
-            )
-    )
 }
 
 fn session_commit_failure_from_blob_error(err: StoreError) -> SessionCommitFailure {
@@ -1840,6 +1831,28 @@ mod tests {
         }
     }
 
+    fn transcript_record(
+        block_idx: u64,
+        history_idx: u64,
+        kind: &str,
+        text: &str,
+    ) -> TranscriptDescriptorRecord {
+        TranscriptDescriptorRecord {
+            block_idx,
+            history_idx: Some(history_idx),
+            kind: kind.into(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: format!("hash-{block_idx}"),
+            estimated_text_bytes: text.len() as u64,
+            preview_text: text.into(),
+            indexed_text: text.into(),
+            descriptor_json: serde_json::json!({ "kind": kind, "text": text }).to_string(),
+            origin_json: Some(serde_json::json!({ "History": history_idx }).to_string()),
+            tool_state_json: None,
+        }
+    }
+
     #[test]
     fn invalid_session_ids_never_reach_the_lock_namespace() {
         let root = tempfile::tempdir().unwrap();
@@ -2183,6 +2196,61 @@ mod tests {
             .join(format!("{SESSION_ID}.lock"))
             .is_file());
         assert!(!root.path().join(TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn maintenance_repair_preserves_semantic_links_and_detaches_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let summary_history = protocol::compaction_summary_content("retained summary");
+        let valid_process = transcript_record(0, 0, "process_status", "process finished");
+        let valid_compacted = transcript_record(1, 1, "compacted", "retained summary");
+        let mut bad = transcript_record(2, 2, "user", "continue");
+        bad.history_idx = None;
+
+        let mut command = empty_commit(SESSION_ID, 0);
+        command.history.final_len = crate::HistoryLen::new(3);
+        command.history.items = vec![
+            protocol::HistoryItem::note(protocol::HistoryNote::process_status("process finished")),
+            protocol::HistoryItem::user(summary_history),
+            protocol::HistoryItem::note(protocol::HistoryNote::context("cwd changed")),
+        ];
+        command.descriptors = Some(TranscriptDescriptorSuffix {
+            start: DescriptorIndex::ZERO,
+            records: vec![valid_process.clone(), valid_compacted.clone(), bad],
+        });
+        let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        writer.commit_session(&command).unwrap();
+        publish_and_release(writer);
+
+        let db_path = root.path().join(SESSION_ID).join("session.db");
+        let db = SessionDb::open(&db_path).unwrap();
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks SET history_idx = 2 WHERE block_idx = 2",
+                [],
+            )
+            .unwrap();
+        db.connection()
+            .execute(
+                "UPDATE transcript_search SET history_idx = 2 WHERE block_idx = 2",
+                [],
+            )
+            .unwrap();
+        drop(db);
+
+        let mut maintenance = SessionMaintenance::open(root.path(), SESSION_ID).unwrap();
+        assert_eq!(maintenance.repair_transcript_history_links().unwrap(), 1);
+        maintenance.release().unwrap();
+
+        let rows = SessionReader::open_existing(root.path().join(SESSION_ID))
+            .unwrap()
+            .read_all_transcript_descriptor_records()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], valid_process);
+        assert_eq!(rows[1], valid_compacted);
+        assert_eq!(rows[2].history_idx, None);
+        assert_eq!(rows[2].origin_json, None);
     }
 
     #[test]
