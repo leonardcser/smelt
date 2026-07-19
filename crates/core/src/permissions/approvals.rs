@@ -13,12 +13,25 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeApprovals {
-    session_tools: HashMap<String, Vec<glob::Pattern>>,
+    session_tools: HashMap<String, ToolApprovals>,
     session_dirs: Vec<PathBuf>,
     session_path_trusts: Vec<SessionPathTrust>,
     session_path_write_exceptions: Vec<SessionPathWriteException>,
-    workspace_tools: HashMap<String, Vec<glob::Pattern>>,
+    workspace_tools: HashMap<String, ToolApprovals>,
     workspace_dirs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ToolApprovals {
+    blanket: bool,
+    patterns: Vec<glob::Pattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionToolApproval {
+    pub tool: String,
+    /// `None` represents blanket approval for the tool.
+    pub pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,14 +62,14 @@ impl RuntimeApprovals {
         Self::default()
     }
 
-    /// Add session-scoped tool approval patterns. Empty `patterns` = blanket approval.
-    /// An existing blanket entry beats incoming patterns (blanket is broader).
+    /// Add session-scoped tool approval patterns. Empty `patterns` means blanket approval.
+    /// Explicit patterns are retained alongside a blanket for opaque-command checks.
     pub fn add_session_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
         add_tool_patterns(&mut self.session_tools, tool, patterns);
     }
 
-    /// Add workspace-scoped tool approval patterns. Empty `patterns` = blanket approval.
-    /// An existing blanket entry beats incoming patterns (blanket is broader).
+    /// Add workspace-scoped tool approval patterns. Empty `patterns` means blanket approval.
+    /// Explicit patterns are retained alongside a blanket for opaque-command checks.
     pub fn add_workspace_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
         add_tool_patterns(&mut self.workspace_tools, tool, patterns);
     }
@@ -160,7 +173,10 @@ impl RuntimeApprovals {
         tools: HashMap<String, Vec<glob::Pattern>>,
         dirs: Vec<PathBuf>,
     ) {
-        self.workspace_tools = tools;
+        self.workspace_tools = tools
+            .into_iter()
+            .map(|(tool, patterns)| (tool, ToolApprovals::from_patterns(patterns)))
+            .collect();
         self.workspace_dirs = dirs
             .into_iter()
             .map(|d| normalize_approval_dir(&d))
@@ -182,10 +198,9 @@ impl RuntimeApprovals {
             return false;
         }
 
-        // Blanket approval (empty pattern list).
-        let blanket =
-            session.is_some_and(|p| p.is_empty()) || workspace.is_some_and(|p| p.is_empty());
-        if blanket {
+        if session.is_some_and(|approval| approval.blanket)
+            || workspace.is_some_and(|approval| approval.blanket)
+        {
             return true;
         }
 
@@ -194,8 +209,11 @@ impl RuntimeApprovals {
             return false;
         }
 
-        let all_pats: Vec<&glob::Pattern> =
-            session.into_iter().chain(workspace).flatten().collect();
+        let all_pats: Vec<&glob::Pattern> = session
+            .into_iter()
+            .chain(workspace)
+            .flat_map(|approval| &approval.patterns)
+            .collect();
 
         subcmds.iter().all(|sc| {
             all_pats.iter().any(|p| matches_rule(p, sc))
@@ -234,16 +252,51 @@ impl RuntimeApprovals {
                 PermissionRequirement::Command { tool, command } => {
                     self.is_approved(tool, command, config_subpatterns)
                 }
+                PermissionRequirement::OpaqueCommand { tool, command, .. } => {
+                    self.explicit_command_approved(tool, command, config_subpatterns)
+                }
                 other => self.requirement_satisfied(other),
             })
     }
 
     /// `true` when `pattern` is already approved for `tool_name`.
     pub fn has_pattern(&self, tool_name: &str, pattern: &str) -> bool {
-        let check = |pats: Option<&Vec<glob::Pattern>>| -> bool {
-            pats.is_some_and(|ps| ps.is_empty() || ps.iter().any(|p| p.as_str() == pattern))
-        };
-        check(self.session_tools.get(tool_name)) || check(self.workspace_tools.get(tool_name))
+        self.session_tools
+            .get(tool_name)
+            .into_iter()
+            .chain(self.workspace_tools.get(tool_name))
+            .any(|approval| {
+                approval.blanket
+                    || approval
+                        .patterns
+                        .iter()
+                        .any(|existing| existing.as_str() == pattern)
+            })
+    }
+
+    pub fn has_explicit_pattern(&self, tool_name: &str, pattern: &str) -> bool {
+        self.session_tools
+            .get(tool_name)
+            .into_iter()
+            .chain(self.workspace_tools.get(tool_name))
+            .flat_map(|approval| &approval.patterns)
+            .any(|existing| existing.as_str() == pattern)
+    }
+
+    fn explicit_command_approved(
+        &self,
+        tool_name: &str,
+        command: &str,
+        config_subpatterns: Option<&RuleSet>,
+    ) -> bool {
+        self.session_tools
+            .get(tool_name)
+            .into_iter()
+            .chain(self.workspace_tools.get(tool_name))
+            .flat_map(|approval| &approval.patterns)
+            .any(|pattern| matches_rule(pattern, command))
+            || config_subpatterns
+                .is_some_and(|rules| check_ruleset(rules, command) == Decision::Allow)
     }
 
     pub fn add_session_grant(&mut self, grant: PermissionGrant) {
@@ -261,30 +314,43 @@ impl RuntimeApprovals {
     pub fn requirement_satisfied(&self, requirement: &PermissionRequirement) -> bool {
         match requirement {
             PermissionRequirement::Tool { tool } => {
-                self.session_tools.get(tool).is_some_and(Vec::is_empty)
-                    || self.workspace_tools.get(tool).is_some_and(Vec::is_empty)
+                self.session_tools
+                    .get(tool)
+                    .is_some_and(|entry| entry.blanket)
+                    || self
+                        .workspace_tools
+                        .get(tool)
+                        .is_some_and(|entry| entry.blanket)
             }
             PermissionRequirement::Command { tool, command } => {
                 self.is_approved(tool, command, None)
+            }
+            PermissionRequirement::OpaqueCommand { tool, command, .. } => {
+                self.explicit_command_approved(tool, command, None)
             }
             PermissionRequirement::PathPrefix { dir } => self.dir_approved_for_path(dir),
         }
     }
 
-    /// Iterate session tool approvals (for display in status UI).
-    pub fn session_tool_entries(&self) -> Vec<(String, Vec<String>)> {
+    /// Return session tool approvals without collapsing blanket and explicit grants.
+    pub fn session_tool_approvals(&self) -> Vec<SessionToolApproval> {
         let mut tools: Vec<_> = self.session_tools.keys().cloned().collect();
         tools.sort();
-        tools
-            .into_iter()
-            .map(|t| {
-                let pats: Vec<String> = self.session_tools[&t]
-                    .iter()
-                    .map(|p| p.as_str().to_string())
-                    .collect();
-                (t, pats)
-            })
-            .collect()
+        let mut out = Vec::new();
+        for tool in tools {
+            let approval = &self.session_tools[&tool];
+            if approval.blanket {
+                out.push(SessionToolApproval {
+                    tool: tool.clone(),
+                    pattern: None,
+                });
+            }
+            out.extend(approval.patterns.iter().map(|pattern| SessionToolApproval {
+                tool: tool.clone(),
+                pattern: Some(pattern.as_str().to_string()),
+            }));
+        }
+        out
     }
 
     /// Session directory approvals (for display in status UI).
@@ -307,11 +373,23 @@ impl RuntimeApprovals {
     /// Rebuild session state from flattened entries (used by permissions sync UI).
     pub fn set_session(
         &mut self,
-        tools: HashMap<String, Vec<glob::Pattern>>,
+        tools: Vec<SessionToolApproval>,
         dirs: Vec<PathBuf>,
         path_grants: Vec<SessionPathGrant>,
     ) {
-        self.session_tools = tools;
+        self.session_tools.clear();
+        for approval in tools {
+            let patterns = match approval.pattern {
+                None => Vec::new(),
+                Some(pattern) => {
+                    let Ok(pattern) = glob::Pattern::new(&pattern) else {
+                        continue;
+                    };
+                    vec![pattern]
+                }
+            };
+            add_tool_patterns(&mut self.session_tools, &approval.tool, patterns);
+        }
         self.session_dirs = dirs
             .into_iter()
             .map(|d| normalize_approval_dir(&d))
@@ -377,19 +455,35 @@ fn normalize_approval_dir(dir: &Path) -> PathBuf {
     workspace::normalize_approval_path(dir)
 }
 
+impl ToolApprovals {
+    fn from_patterns(patterns: Vec<glob::Pattern>) -> Self {
+        Self {
+            blanket: patterns.is_empty(),
+            patterns,
+        }
+    }
+
+    fn add(&mut self, patterns: Vec<glob::Pattern>) {
+        if patterns.is_empty() {
+            self.blanket = true;
+            return;
+        }
+        for pattern in patterns {
+            if !self
+                .patterns
+                .iter()
+                .any(|existing| existing.as_str() == pattern.as_str())
+            {
+                self.patterns.push(pattern);
+            }
+        }
+    }
+}
+
 fn add_tool_patterns(
-    tools: &mut HashMap<String, Vec<glob::Pattern>>,
+    tools: &mut HashMap<String, ToolApprovals>,
     tool: &str,
     patterns: Vec<glob::Pattern>,
 ) {
-    if patterns.is_empty() {
-        tools.insert(tool.to_string(), Vec::new());
-        return;
-    }
-    if let Some(existing) = tools.get(tool) {
-        if existing.is_empty() {
-            return;
-        }
-    }
-    tools.entry(tool.to_string()).or_default().extend(patterns);
+    tools.entry(tool.to_string()).or_default().add(patterns);
 }

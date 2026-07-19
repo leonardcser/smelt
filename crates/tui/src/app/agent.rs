@@ -5,7 +5,6 @@ use crate::app::{
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -830,20 +829,11 @@ impl TuiApp {
         let approvals = self.core.permissions.approvals();
         let rt = approvals.read().unwrap();
         let mut entries = Vec::new();
-        for (tool, patterns) in rt.session_tool_entries() {
-            if patterns.is_empty() {
-                entries.push(PermissionEntry {
-                    tool,
-                    pattern: "*".into(),
-                });
-            } else {
-                for p in patterns {
-                    entries.push(PermissionEntry {
-                        tool: tool.clone(),
-                        pattern: p,
-                    });
-                }
-            }
+        for approval in rt.session_tool_approvals() {
+            entries.push(PermissionEntry {
+                tool: approval.tool,
+                pattern: approval.pattern.unwrap_or_else(|| "*".into()),
+            });
         }
         for dir in rt.session_dirs() {
             entries.push(PermissionEntry {
@@ -885,15 +875,16 @@ impl TuiApp {
         session_path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
         workspace_rules: Vec<smelt_core::permissions::store::Rule>,
     ) {
-        let mut session_tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
+        let mut session_tools = Vec::new();
         let mut session_dirs: Vec<PathBuf> = Vec::new();
         for entry in session_entries {
             if entry.tool == "directory" {
                 session_dirs.push(std::path::PathBuf::from(&entry.pattern));
-            } else if entry.pattern == "*" {
-                session_tools.entry(entry.tool).or_default();
-            } else if let Ok(pat) = glob::Pattern::new(&entry.pattern) {
-                session_tools.entry(entry.tool).or_default().push(pat);
+            } else {
+                session_tools.push(smelt_core::permissions::SessionToolApproval {
+                    tool: entry.tool,
+                    pattern: (entry.pattern != "*").then_some(entry.pattern),
+                });
             }
         }
 

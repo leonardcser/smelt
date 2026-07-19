@@ -2498,6 +2498,112 @@ fn dialog_combines_path_grants_when_multiple_dirs_are_required() {
 }
 
 #[test]
+fn opaque_awk_requires_approval_beyond_blanket_bash() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", empty_ruleset())]);
+    let p = permissions_from_mode(mode, true, PathBuf::from("/home/user/project"));
+    let args = args_with("command", "awk '/cargo\\/fuzz/ {print}'");
+
+    let initial = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(
+        initial.missing_requirements,
+        vec![PermissionRequirement::OpaqueCommand {
+            tool: "bash".to_string(),
+            command: "awk *".to_string(),
+        }]
+    );
+
+    p.approvals
+        .write()
+        .unwrap()
+        .add_session_tool("bash", Vec::new());
+    let after_blanket = p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(after_blanket.decision, Decision::Ask);
+
+    let options = p.approval_options(
+        "bash",
+        &["ps *".to_string(), "awk *".to_string()],
+        &after_blanket,
+    );
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![PermissionGrant::Command {
+            tool: "bash".to_string(),
+            pattern: "awk *".to_string(),
+        }]]
+    );
+    p.approvals
+        .write()
+        .unwrap()
+        .add_session_grant(options.grant_sets[0][0].clone());
+
+    let after_pattern = p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(after_pattern.decision, Decision::Allow);
+    assert!(after_pattern.missing_requirements.is_empty());
+
+    let entries = p.approvals.read().unwrap().session_tool_approvals();
+    assert_eq!(
+        entries,
+        vec![
+            SessionToolApproval {
+                tool: "bash".to_string(),
+                pattern: None,
+            },
+            SessionToolApproval {
+                tool: "bash".to_string(),
+                pattern: Some("awk *".to_string()),
+            },
+        ]
+    );
+    let mut restored = RuntimeApprovals::new();
+    restored.set_session(entries, Vec::new(), Vec::new());
+    assert!(
+        restored.requirement_satisfied(&PermissionRequirement::Tool {
+            tool: "bash".to_string(),
+        })
+    );
+    assert!(restored.requirement_satisfied(&initial.missing_requirements[0]));
+}
+
+#[test]
+fn opaque_awk_approval_combines_with_outside_path_approval() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", empty_ruleset())]);
+    let p = permissions_from_mode(mode, true, PathBuf::from("/home/user/project"));
+    let args = args_with("command", "awk '{print}' /tmp/input");
+
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![
+            PermissionRequirement::PathPrefix {
+                dir: canonical_abs("/tmp"),
+            },
+            PermissionRequirement::OpaqueCommand {
+                tool: "bash".to_string(),
+                command: "awk *".to_string(),
+            },
+        ]
+    );
+    let options = p.approval_options("bash", &["awk *".to_string()], &outcome);
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![
+            PermissionGrant::Command {
+                tool: "bash".to_string(),
+                pattern: "awk *".to_string(),
+            },
+            PermissionGrant::PathPrefix {
+                dir: canonical_abs("/tmp"),
+            },
+        ]]
+    );
+}
+
+#[test]
 fn workspace_yolo_allows_inside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/home/user/project/foo.txt");
@@ -3160,6 +3266,168 @@ fn shell_ignores_sed_script_but_records_file_operand() {
 }
 
 #[test]
+fn shell_ignores_awk_program_text_but_records_input_files() {
+    assert!(extract_paths_from_command(
+        "ps -eo pid=,cmd= | awk '/cargo (xtask fuzz|fuzz)|fuzz\\/target/ && !/awk/ {print}'"
+    )
+    .is_empty());
+    assert_eq!(
+        extract_paths_from_command(
+            "awk -F / -v root=/tmp '/cargo/ {print}' /tmp/processes relative/input"
+        ),
+        vec!["/tmp/processes", "relative/input"]
+    );
+    assert_eq!(
+        extract_paths_from_command("gawk -f /tmp/program.awk -- /tmp/processes root=/tmp -"),
+        vec!["/tmp/program.awk", "/tmp/processes"]
+    );
+}
+
+#[test]
+fn shell_models_awk_cli_paths_without_resolving_search_paths() {
+    let cases: &[(&str, &[(&str, PathAccess)])] = &[
+        (
+            "awk -f script.awk -i library.awk -l extension input",
+            &[("input", PathAccess::Read)],
+        ),
+        (
+            "awk -f=./main.awk -i../library.awk -l/tmp/extension.so /tmp/input",
+            &[
+                ("./main.awk", PathAccess::Read),
+                ("../library.awk", PathAccess::Read),
+                ("/tmp/extension.so", PathAccess::Read),
+                ("/tmp/input", PathAccess::Read),
+            ],
+        ),
+        (
+            "gawk --file=/tmp/main.awk --include ./library.awk --load=plugin --source '{print}' input",
+            &[
+                ("/tmp/main.awk", PathAccess::Read),
+                ("./library.awk", PathAccess::Read),
+                ("input", PathAccess::Read),
+            ],
+        ),
+        (
+            "gawk -d -o/tmp/pretty.awk -p=../profile --debug=./debug.cmd --source '{print}' input",
+            &[
+                ("awkvars.out", PathAccess::Write),
+                ("/tmp/pretty.awk", PathAccess::Write),
+                ("../profile", PathAccess::Write),
+                ("./debug.cmd", PathAccess::Read),
+                ("input", PathAccess::Read),
+            ],
+        ),
+        (
+            "gawk -D -o '{print}' /tmp/input",
+            &[
+                ("awkprof.out", PathAccess::Write),
+                ("/tmp/input", PathAccess::Read),
+            ],
+        ),
+        (
+            "mawk -W exec ./main.awk /tmp/input",
+            &[
+                ("./main.awk", PathAccess::Read),
+                ("/tmp/input", PathAccess::Read),
+            ],
+        ),
+        (
+            "gawk -E./main.awk root=/tmp -",
+            &[
+                ("./main.awk", PathAccess::Read),
+                ("root=/tmp", PathAccess::Read),
+            ],
+        ),
+    ];
+
+    for (command, expected) in cases {
+        let analysis = analyze_shell_command(command, Path::new("/workspace"));
+        let actual: Vec<_> = analysis
+            .paths
+            .iter()
+            .map(|path| (path.raw_path.as_str(), path.access.clone()))
+            .collect();
+        assert_eq!(actual, *expected, "command={command}");
+    }
+}
+
+#[test]
+fn shell_treats_unknown_awk_options_as_opaque_without_guessing_paths() {
+    let command = "awk --future-option '/cargo/foo/' /tmp/input";
+    let analysis = analyze_shell_command(command, Path::new("/workspace"));
+
+    assert!(analysis.paths.is_empty());
+    assert_eq!(
+        analysis.opaque_commands,
+        vec![OpaqueShellCommand {
+            command: "awk *".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn shell_marks_each_awk_implementation_as_opaque() {
+    for command in ["awk", "gawk", "mawk", "nawk"] {
+        let source = format!("{command} '{{print}}'");
+        let analysis = analyze_shell_command(&source, Path::new("/workspace"));
+        assert_eq!(
+            analysis.opaque_commands,
+            vec![OpaqueShellCommand {
+                command: format!("{command} *"),
+            }]
+        );
+    }
+
+    for command in ["awk --help", "gawk --version", "mawk -W help"] {
+        assert!(
+            analyze_shell_command(command, Path::new("/workspace"))
+                .opaque_commands
+                .is_empty(),
+            "command={command}"
+        );
+    }
+}
+
+#[test]
+fn shell_preserves_opaque_awk_effects_through_env() {
+    let analysis = analyze_shell_command(
+        "env --file /tmp/environment -u MODE awk '/cargo\\/fuzz/ {print}'",
+        Path::new("/workspace"),
+    );
+
+    assert_eq!(
+        analysis
+            .paths
+            .iter()
+            .map(|path| path.raw_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/tmp/environment"]
+    );
+    assert_eq!(
+        analysis.opaque_commands,
+        vec![OpaqueShellCommand {
+            command: "awk *".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn shell_treats_env_split_strings_as_opaque() {
+    let analysis = analyze_shell_command(
+        "env -S \"awk 'BEGIN { system(\\\"cat /etc/passwd\\\") }'\"",
+        Path::new("/workspace"),
+    );
+
+    assert!(analysis.paths.is_empty());
+    assert_eq!(
+        analysis.opaque_commands,
+        vec![OpaqueShellCommand {
+            command: "env *".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn shell_reports_find_relative_escape() {
     let paths = extract_paths_from_command("find ../third_party -name '*.rs'");
     assert_eq!(paths, vec!["../third_party"]);
@@ -3483,21 +3751,21 @@ fn approvals_add_session_tool_with_empty_patterns_grants_blanket_approval() {
 }
 
 #[test]
-fn approvals_add_session_tool_empty_patterns_clears_existing_patterns() {
+fn approvals_add_session_tool_blanket_retains_existing_patterns() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![pat("ls *")]);
     rt.add_session_tool("bash", Vec::new());
-    // Blanket now applies; existing patterns dropped.
     assert!(rt.is_approved("bash", "anything", None));
+    assert!(rt.has_explicit_pattern("bash", "ls *"));
 }
 
 #[test]
-fn approvals_add_session_tool_existing_blanket_beats_incoming_patterns() {
+fn approvals_add_session_tool_stores_patterns_alongside_blanket() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", Vec::new());
     rt.add_session_tool("bash", vec![pat("ls *")]);
-    // Stays blanket - narrowing requires explicit clear.
     assert!(rt.is_approved("bash", "anything goes", None));
+    assert!(rt.has_explicit_pattern("bash", "ls *"));
 }
 
 #[test]
@@ -3674,21 +3942,37 @@ fn permission_resolution_reloads_workspace_grants_without_losing_session_grants(
 fn approvals_set_session_replaces_existing_session_entries() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![pat("a *")]);
-    let mut tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
-    tools.insert("bash".into(), vec![pat("z *")]);
+    let tools = vec![SessionToolApproval {
+        tool: "bash".into(),
+        pattern: Some("z *".into()),
+    }];
     rt.set_session(tools, vec![PathBuf::from("/srv")], vec![]);
     assert!(rt.has_pattern("bash", "z *"));
     assert!(!rt.has_pattern("bash", "a *"));
 }
 
 #[test]
-fn approvals_session_tool_entries_returns_sorted_tools_and_patterns() {
+fn approvals_session_tool_approvals_returns_sorted_tools_and_patterns() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("read", vec![pat("**")]);
     rt.add_session_tool("bash", vec![pat("ls *"), pat("cat *")]);
-    let entries = rt.session_tool_entries();
-    let tools: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(tools, vec!["bash", "read"]);
+    assert_eq!(
+        rt.session_tool_approvals(),
+        vec![
+            SessionToolApproval {
+                tool: "bash".into(),
+                pattern: Some("ls *".into()),
+            },
+            SessionToolApproval {
+                tool: "bash".into(),
+                pattern: Some("cat *".into()),
+            },
+            SessionToolApproval {
+                tool: "read".into(),
+                pattern: Some("**".into()),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -3776,10 +4060,14 @@ fn approvals_is_approved_returns_false_when_no_entry_exists() {
 #[test]
 fn approvals_is_approved_requires_all_patterns_match() {
     let mut rt = RuntimeApprovals::new();
-    // Seed via set_session so the patterns actually persist.
-    let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
-    seed.insert("bash".into(), vec![pat("ls *")]);
-    rt.set_session(seed, vec![], vec![]);
+    rt.set_session(
+        vec![SessionToolApproval {
+            tool: "bash".into(),
+            pattern: Some("ls *".into()),
+        }],
+        vec![],
+        vec![],
+    );
     // Only `ls` is approved; chained `rm` should fail.
     assert!(!rt.is_approved("bash", "ls && rm -rf /", None));
 }

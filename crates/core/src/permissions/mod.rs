@@ -10,7 +10,7 @@ pub(crate) mod workspace;
 #[cfg(test)]
 mod tests;
 
-pub use approvals::{RuntimeApprovals, SessionPathGrant};
+pub use approvals::{RuntimeApprovals, SessionPathGrant, SessionToolApproval};
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use protocol::Decision;
 pub use rules::{SubpatternParserFn, ToolDefaults, ToolEffectKind};
@@ -19,8 +19,8 @@ use bash::{has_output_redirection, is_cd_command};
 
 use protocol::AgentMode;
 use rules::{
-    build_mode, check_ruleset_match, compile_patterns, merge_mode, ModePerms, RawConfig, RawPerms,
-    RuleSet, ToolPermDefaults,
+    build_mode, check_ruleset, check_ruleset_match, compile_patterns, merge_mode, ModePerms,
+    RawConfig, RawPerms, RuleSet, ToolPermDefaults,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -164,6 +164,11 @@ pub enum ShellRisk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaqueShellCommand {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolEffect {
     Fs(PathEffect),
     FsAccess(PathAccess),
@@ -171,6 +176,7 @@ pub enum ToolEffect {
         command: String,
         risk: ShellRisk,
         paths: Vec<PathEffect>,
+        opaque_commands: Vec<OpaqueShellCommand>,
     },
     Network,
     Mcp {
@@ -195,6 +201,7 @@ pub struct PermissionRequest<'a> {
 pub enum PermissionRequirement {
     Tool { tool: String },
     Command { tool: String, command: String },
+    OpaqueCommand { tool: String, command: String },
     PathPrefix { dir: PathBuf },
 }
 
@@ -220,7 +227,8 @@ impl PermissionGrant {
                     tool: grant_tool,
                     pattern,
                 },
-                PermissionRequirement::Command { tool, command },
+                PermissionRequirement::Command { tool, command }
+                | PermissionRequirement::OpaqueCommand { tool, command, .. },
             ) => {
                 grant_tool == tool
                     && glob::Pattern::new(pattern).is_ok_and(|p| rules::matches_rule(&p, command))
@@ -673,6 +681,7 @@ impl Permissions {
                     command,
                     risk: analysis.risk,
                     paths: analysis.paths,
+                    opaque_commands: analysis.opaque_commands,
                 }];
                 if args
                     .get("background")
@@ -697,7 +706,11 @@ impl Permissions {
         }
     }
 
-    fn outside_workspace_requirements(&self, effects: &[ToolEffect]) -> Vec<PermissionRequirement> {
+    fn outside_workspace_requirements(
+        &self,
+        mode: &AgentMode,
+        effects: &[ToolEffect],
+    ) -> Vec<PermissionRequirement> {
         if !self.restrict_to_workspace || self.active_root.as_os_str().is_empty() {
             return vec![];
         }
@@ -729,6 +742,30 @@ impl Permissions {
                 .any(|existing| requirements_equivalent(existing, &req))
             {
                 out.push(req);
+            }
+        }
+
+        let rules = self.subcommand_ruleset(mode.clone(), "bash");
+        for effect in effects {
+            let ToolEffect::Shell {
+                opaque_commands, ..
+            } = effect
+            else {
+                continue;
+            };
+            for opaque in opaque_commands {
+                if rules
+                    .is_some_and(|rules| check_ruleset(rules, &opaque.command) == Decision::Allow)
+                {
+                    continue;
+                }
+                let req = PermissionRequirement::OpaqueCommand {
+                    tool: "bash".to_string(),
+                    command: opaque.command.clone(),
+                };
+                if !out.contains(&req) {
+                    out.push(req);
+                }
             }
         }
         out
@@ -887,7 +924,24 @@ impl Permissions {
         }
 
         let approvals = self.approvals.read().unwrap();
-        let command_grants = self.approval_pattern_candidates(&approvals, tool_name, candidates);
+        let mut command_grants =
+            self.approval_pattern_candidates(&approvals, tool_name, candidates);
+        for requirement in &outcome.missing_requirements {
+            let PermissionRequirement::OpaqueCommand { tool, command } = requirement else {
+                continue;
+            };
+            let covered = command_grants.iter().any(|pattern| {
+                glob::Pattern::new(pattern)
+                    .is_ok_and(|pattern| rules::matches_rule(&pattern, command))
+            });
+            if tool == tool_name
+                && !covered
+                && !approvals.has_explicit_pattern(tool_name, command)
+                && glob::Pattern::new(command).is_ok()
+            {
+                command_grants.push(command.clone());
+            }
+        }
         let mut grants = Vec::new();
 
         if !command_grants.is_empty() {
@@ -913,7 +967,8 @@ impl Permissions {
                 PermissionRequirement::PathPrefix { dir } => {
                     grants.push(vec![PermissionGrant::PathPrefix { dir: dir.clone() }]);
                 }
-                PermissionRequirement::Command { .. } => {}
+                PermissionRequirement::Command { .. }
+                | PermissionRequirement::OpaqueCommand { .. } => {}
             }
         }
 
@@ -968,7 +1023,7 @@ impl Permissions {
                 tool: request.tool_name.to_string(),
             });
         }
-        missing.extend(self.outside_workspace_requirements(&request.effects));
+        missing.extend(self.outside_workspace_requirements(&request.mode, &request.effects));
         dedupe_requirements(&mut missing);
         PermissionOutcome {
             decision: if missing.is_empty() {

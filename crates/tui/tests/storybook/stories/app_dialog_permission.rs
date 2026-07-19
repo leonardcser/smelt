@@ -72,6 +72,63 @@ app_story!(bash_lua_doc_validation_permission_targets_tmp, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_awk_program_is_not_offered_as_path_approval, |ctx| {
+    ctx.set_viewport(120, 30);
+    ctx.restrict_permissions_to_cwd();
+    ctx.approve_tool_for_session("bash");
+    let command = concat!(
+        "echo '--- all fuzz managers ---'\n",
+        "ps -eo pid=,ppid=,pgid=,stat=,etime=,cmd= | ",
+        "awk '/cargo (xtask fuzz|fuzz)|libfuzzer|fuzz\\/target\\/.*\\/permissions_rules/ ",
+        "&& !/awk/ {print}'",
+    );
+    ctx.request_permission(
+        "bash",
+        args([
+            ("command", json!(command)),
+            ("description", json!("Inspect fuzz process groups")),
+        ]),
+        vec![],
+    );
+
+    let frame = ctx.frame_text();
+    assert!(
+        frame.contains("allow awk * for this session"),
+        "opaque awk execution needs command-scoped approval: {frame}"
+    );
+    assert!(
+        !frame.contains("allow /cargo") && !frame.contains("allow /awk"),
+        "awk regex was treated as an outside-workspace path: {frame}"
+    );
+});
+
+app_story!(bash_opaque_awk_program_requires_command_approval, |ctx| {
+    ctx.set_viewport(100, 24);
+    ctx.restrict_permissions_to_cwd();
+    ctx.approve_tool_for_session("bash");
+    ctx.request_permission(
+        "bash",
+        args([
+            (
+                "command",
+                json!("awk 'BEGIN { system(\"cat /etc/passwd\") }'"),
+            ),
+            ("description", json!("Run an opaque awk program")),
+        ]),
+        vec!["awk *".into()],
+    );
+
+    let frame = ctx.frame_text();
+    assert!(
+        frame.contains("allow awk * for this session"),
+        "opaque awk execution needs command-scoped approval: {frame}"
+    );
+    assert!(
+        !frame.contains("allow /etc"),
+        "awk source must not become a path grant: {frame}"
+    );
+});
+
 app_story!(bash_permission_preserves_reasoning_context, |ctx| {
     ctx.set_viewport(80, 22);
     ctx.engine(EngineEvent::Reasoning {

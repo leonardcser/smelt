@@ -10,8 +10,11 @@ use brush_parser::ast::{
 };
 use brush_parser::word::{Parameter, ParameterExpr, WordPiece, WordPieceWithSource};
 
+mod awk;
+
 use super::{
-    shell_parse, workspace, PathAccess, PathEffect, PathResolution, PathTargetKind, ShellRisk,
+    shell_parse, workspace, OpaqueShellCommand, PathAccess, PathEffect, PathResolution,
+    PathTargetKind, ShellRisk,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -23,6 +26,7 @@ const MAX_GLOB_ENTRIES: usize = 4096;
 pub(super) struct ShellAnalysis {
     pub risk: ShellRisk,
     pub paths: Vec<PathEffect>,
+    pub opaque_commands: Vec<OpaqueShellCommand>,
 }
 
 struct GlobPathAnalysis {
@@ -243,6 +247,7 @@ pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnal
     let mut analysis = ShellAnalysis {
         risk: ShellRisk::ReadOnly,
         paths: Vec::new(),
+        opaque_commands: Vec::new(),
     };
     let initial_state = ShellState::new(base_dir);
     let initial_states = vec![initial_state.clone()];
@@ -408,9 +413,13 @@ fn eval_simple_command(
                     state.unset_variable(word.raw());
                 }
             }
-            Some(_) => analysis
-                .paths
-                .extend(command_operand_paths(effective_words, &state.cwd)),
+            Some(_) => {
+                let mut command_state = state.clone();
+                apply_assignments(&mut command_state, &command_words.assignments);
+                let effects = command_effects(effective_words, &command_state);
+                analysis.paths.extend(effects.paths);
+                analysis.opaque_commands.extend(effects.opaque_commands);
+            }
             None => {}
         }
         output.push(state);
@@ -928,6 +937,12 @@ struct CommandSpec {
     operands: OperandPolicy,
 }
 
+#[derive(Default)]
+struct CommandEffects {
+    paths: Vec<PathEffect>,
+    opaque_commands: Vec<OpaqueShellCommand>,
+}
+
 enum CommandRisk {
     Fixed(ShellRisk),
     Sed,
@@ -943,6 +958,8 @@ enum OperandPolicy {
     ReadExplicit,
     UnknownExplicit,
     Specialized(fn(&[ShellWord], &PathResolution) -> Vec<PathEffect>),
+    Awk,
+    Env,
 }
 
 impl CommandRisk {
@@ -993,14 +1010,20 @@ impl CommandRisk {
 }
 
 impl OperandPolicy {
-    fn paths(self, words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
-        match self {
+    fn effects(self, words: &[ShellWord], state: &ShellState) -> CommandEffects {
+        let paths = match self {
             Self::None => Vec::new(),
-            Self::ReadOperands => operand_paths(words, cwd, PathAccess::Read),
-            Self::UnknownOperands => operand_paths(words, cwd, PathAccess::Unknown),
-            Self::ReadExplicit => explicit_paths(words, cwd, PathAccess::Read),
-            Self::UnknownExplicit => explicit_paths(words, cwd, PathAccess::Unknown),
-            Self::Specialized(analyze) => analyze(words, cwd),
+            Self::ReadOperands => operand_paths(words, &state.cwd, PathAccess::Read),
+            Self::UnknownOperands => operand_paths(words, &state.cwd, PathAccess::Unknown),
+            Self::ReadExplicit => explicit_paths(words, &state.cwd, PathAccess::Read),
+            Self::UnknownExplicit => explicit_paths(words, &state.cwd, PathAccess::Unknown),
+            Self::Specialized(analyze) => analyze(words, &state.cwd),
+            Self::Awk => return awk::analyze(words, state),
+            Self::Env => return env_effects(words, state),
+        };
+        CommandEffects {
+            paths,
+            opaque_commands: Vec::new(),
         }
     }
 }
@@ -1039,7 +1062,7 @@ fn command_spec(command: &str) -> CommandSpec {
         },
         "env" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::Unknown),
-            operands: Specialized(env_paths),
+            operands: Env,
         },
         "[" | "[[" | "test" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
@@ -1056,6 +1079,10 @@ fn command_spec(command: &str) -> CommandSpec {
         "grep" | "rg" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
             operands: Specialized(grep_paths),
+        },
+        "awk" | "gawk" | "mawk" | "nawk" => CommandSpec {
+            risk: CommandRisk::Fixed(ShellRisk::Unknown),
+            operands: Awk,
         },
         "find" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
@@ -1110,11 +1137,11 @@ fn cargo_subcommand(words: &[ShellWord]) -> Option<&str> {
         .find(|word| !word.starts_with('+') && !word.starts_with('-'))
 }
 
-fn command_operand_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
+fn command_effects(words: &[ShellWord], state: &ShellState) -> CommandEffects {
     let Some(command) = words.first().map(command_name) else {
-        return Vec::new();
+        return CommandEffects::default();
     };
-    command_spec(command).operands.paths(words, cwd)
+    command_spec(command).operands.effects(words, state)
 }
 
 fn test_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
@@ -1173,8 +1200,10 @@ fn cwd_after_chdir(current: &PathResolution, target: &PathResolution) -> PathRes
     }
 }
 
-fn env_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
-    let mut out = Vec::new();
+fn env_effects(words: &[ShellWord], state: &ShellState) -> CommandEffects {
+    let cwd = &state.cwd;
+    let mut paths = Vec::new();
+    let mut command_state = state.clone();
     let mut command_cwd = cwd.clone();
     let mut i = 1;
     while i < words.len() {
@@ -1189,7 +1218,7 @@ fn env_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
                     if let Some(target) = target {
                         command_cwd = cwd_after_chdir(cwd, &target);
                     }
-                    out.extend(effects);
+                    paths.extend(effects);
                 }
                 i += 2;
             }
@@ -1206,21 +1235,103 @@ fn env_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
                         path_effect(&path, cwd, PathAccess::Read, PathTargetKind::Directory)
                     };
                     command_cwd = cwd_after_chdir(cwd, &effect.resolution);
-                    out.push(effect);
+                    paths.push(effect);
                 }
                 i += 1;
             }
-            "-u" | "--unset" | "-S" | "--split-string" => i += 2,
-            option if option.starts_with("--unset=") || option.starts_with("--split-string=") => {
+            "-f" | "--file" => {
+                if let Some(path) = words.get(i + 1) {
+                    push_path(
+                        &mut paths,
+                        path,
+                        cwd,
+                        PathAccess::Read,
+                        PathTargetKind::File,
+                    );
+                }
+                i += 2;
+            }
+            option if option.starts_with("--file=") => {
+                if let Some(path) = words[i].strip_literal_prefix("--file=") {
+                    push_path(
+                        &mut paths,
+                        &path,
+                        cwd,
+                        PathAccess::Read,
+                        PathTargetKind::File,
+                    );
+                }
                 i += 1;
             }
-            option if option.starts_with('-') => i += 1,
-            _ if words[i].assignment().is_some() => i += 1,
-            _ => break,
+            "-u" | "--unset" => {
+                if let Some(name) = words.get(i + 1).and_then(|word| word.expanded.as_deref()) {
+                    command_state.unset_variable(name);
+                }
+                i += 2;
+            }
+            option if option.starts_with("--unset=") => {
+                if let Some(name) = words[i]
+                    .expanded
+                    .as_deref()
+                    .and_then(|word| word.strip_prefix("--unset="))
+                {
+                    command_state.unset_variable(name);
+                }
+                i += 1;
+            }
+            "-a" | "--argv0" => i += 2,
+            option if option.starts_with("--argv0=") => i += 1,
+            "-i"
+            | "--ignore-environment"
+            | "-0"
+            | "--null"
+            | "-v"
+            | "--debug"
+            | "--list-signal-handling"
+            | "-" => i += 1,
+            option
+                if option.starts_with("--ignore-signal")
+                    || option.starts_with("--default-signal")
+                    || option.starts_with("--block-signal") =>
+            {
+                i += 1;
+            }
+            "-h" | "--help" | "-V" | "--version" => {
+                return CommandEffects {
+                    paths,
+                    opaque_commands: Vec::new(),
+                };
+            }
+            "-S" | "--split-string" => return opaque_env_effects(words, paths),
+            option if option.starts_with("--split-string=") => {
+                return opaque_env_effects(words, paths);
+            }
+            option if option.starts_with('-') => return opaque_env_effects(words, paths),
+            _ => {
+                if let Some((name, value)) = words[i].assignment() {
+                    command_state.set_variable(name, value);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
         }
     }
-    out.extend(command_operand_paths(&words[i..], &command_cwd));
-    out
+    command_state.cwd = command_cwd;
+    let mut effects = command_effects(&words[i..], &command_state);
+    paths.append(&mut effects.paths);
+    effects.paths = paths;
+    effects
+}
+
+fn opaque_env_effects(words: &[ShellWord], paths: Vec<PathEffect>) -> CommandEffects {
+    let command = words.first().map(command_name).unwrap_or("env");
+    CommandEffects {
+        paths,
+        opaque_commands: vec![OpaqueShellCommand {
+            command: format!("{command} *"),
+        }],
+    }
 }
 
 fn git_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {
