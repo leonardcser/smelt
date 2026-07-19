@@ -678,6 +678,10 @@
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
 
+--- Visible transcript cursor position relative to the committed viewport.
+---@class smelt.transcript.Cursor
+---@field viewport_row integer Zero-based row inside the transcript viewport.
+
 ---@class smelt.transcript.Group
 ---@field id? integer Stable render-plan group id.
 ---@field name? string Group spec name.
@@ -710,6 +714,13 @@
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
 ---@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
 
+---@class smelt.transcript.NavigationOpts
+---@field role? smelt.transcript.Role Match only blocks with this semantic role. Defaults to `user`.
+
+---@class smelt.transcript.RevealOpts
+---@field align? smelt.transcript.RevealAlign Target alignment within the transcript viewport. Currently only `top`.
+---@field move_cursor? boolean Move the transcript cursor to the target. Defaults to true.
+
 --- Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
 ---@class smelt.transcript.Stream
 ---@field append fun(delta: string): nil Append one assistant text delta and re-render the target buffer.
@@ -720,11 +731,37 @@
 ---@class smelt.transcript.StreamOpts
 ---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
+--- Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse descriptor coordinates are intentionally hidden.
+---@class smelt.transcript.Target
+---@field block_id integer Stable transcript block identity.
+---@field role smelt.transcript.Role Semantic block role.
+---@field first_line string First source line, suitable for navigation labels.
+
 --- Tool output snapshot passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput
 ---@field content string Captured output text.
 ---@field is_error boolean True when the tool result is an error.
 ---@field metadata? table Tool-specific structured metadata.
+
+--- Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.
+---@class smelt.transcript.View
+---@field revision integer Monotonic revision of observable committed transcript state.
+---@field window smelt.win.Win Transcript window handle for overlay anchoring.
+---@field viewport smelt.transcript.Viewport Committed viewport geometry and tail state.
+---@field focused boolean Whether the transcript currently owns the visible cursor.
+---@field cursor? smelt.transcript.Cursor Visible transcript cursor position, or nil when the transcript does not own a visible cursor.
+---@field previous_block fun(opts: smelt.transcript.NavigationOpts?): smelt.transcript.Target? Return the nearest actionable matching block when moving backward from this view. A matching block containing the viewport top is returned; one beginning exactly at the top is skipped.
+---@field next_block fun(opts: smelt.transcript.NavigationOpts?): smelt.transcript.Target? Return the nearest actionable matching block when moving forward from this view.
+
+--- Geometry and tail state from one committed transcript projection.
+---@class smelt.transcript.Viewport
+---@field width integer Outer transcript width in cells.
+---@field height integer Transcript viewport height in rows.
+---@field content_width integer Inner content width after gutters and scrollbar reservation.
+---@field scrollable boolean Whether transcript content exceeds the viewport height.
+---@field following_tail boolean Whether new content keeps the viewport pinned to the tail.
+---@field at_top boolean Whether the committed viewport is at the transcript top.
+---@field at_bottom boolean Whether the committed viewport is at the current transcript bottom.
 
 --- Terminal size in cells.
 ---@class smelt.ui.Size
@@ -773,7 +810,7 @@
 ---@field decorate fun(opts: table): smelt.win.Decoration Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.
 ---@field cursor fun(row: integer?): any Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
----@field reveal fun(row: integer, opts: table?): smelt.win.Win Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should use `smelt.transcript.previous_block`, `smelt.transcript.next_block`, and `smelt.transcript.reveal_block`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
+---@field reveal fun(row: integer, opts: table?): smelt.win.Win Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.
 ---@field on fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.
 ---@field placeholder fun(text: string, opts: table?): smelt.win.Win Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.
@@ -801,13 +838,17 @@
 ---@alias smelt.reasoning.Effort "off"|"low"|"medium"|"high"|"max"
 
 --- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
----@alias smelt.signal.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"transcript_navigation_generation"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 ---@alias smelt.tools.Decision "allow"|"ask"|"deny"
 
 --- Coarse side-effect classification used by permission policy.
 ---@alias smelt.tools.Effect "read"|"write"|"network"|"user"|"process"|"config"|"other"
+
+---@alias smelt.transcript.RevealAlign "top"
+
+---@alias smelt.transcript.Role "user"|"mode"|"process_status"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"|"compaction_preview"
 
 --- Vim mode string literal.
 ---@alias smelt.vim.Mode "insert"|"normal"|"visual"|"visual_line"

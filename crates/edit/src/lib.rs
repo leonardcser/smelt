@@ -2414,6 +2414,51 @@ impl Ui {
         })
     }
 
+    fn prepared_window_matches_split(
+        &self,
+        request: PreparedWindowRequest,
+        win_id: WinId,
+        rect: Rect,
+    ) -> bool {
+        let Some(win) = self.wins.get(&win_id) else {
+            return false;
+        };
+        let gutter_width = self
+            .bufs
+            .get(&win.buf)
+            .map(|buf| win.gutter_width(buf))
+            .unwrap_or(0)
+            .min(rect.width);
+        let content_width = win
+            .config
+            .gutters
+            .content_width_with_gutter(rect.width, gutter_width);
+        request.win == win_id
+            && request.buf == win.buf
+            && request.document_handle == win.document_handle()
+            && request.rect == rect
+            && request.gutter_width == gutter_width
+            && request.content_width == content_width
+    }
+
+    /// Prepare one split window without painting a frame. Hosts with committed
+    /// view observers use this to materialize row-backed documents before
+    /// notifying observers, then pass the returned request to
+    /// `render_with_prepared_splits_and_paints` so the split is not prepared twice.
+    pub fn prepare_split_window_with<P>(
+        &mut self,
+        win: WinId,
+        mut prepare: P,
+    ) -> Option<PreparedWindowRequest>
+    where
+        P: FnMut(&mut Ui, MaterializeRequest),
+    {
+        let rect = self.split_rect(win)?;
+        let request = self.prepare_window_for_render(win, rect, &mut prepare)?;
+        self.resolve_tail_scrolls();
+        Some(request)
+    }
+
     /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
     pub fn render_with_paints<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
@@ -2451,9 +2496,9 @@ impl Ui {
     pub fn render_with_paints_prepared_and_after_layout<W, P, D, F>(
         &mut self,
         w: &mut W,
-        mut prepare: P,
-        mut after_layout: D,
-        mut paint: F,
+        prepare: P,
+        after_layout: D,
+        paint: F,
     ) -> std::io::Result<()>
     where
         W: std::io::Write,
@@ -2461,6 +2506,38 @@ impl Ui {
         D: FnMut(&mut Ui, PreparedWindowRequest),
         F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
     {
+        self.render_with_prepared_splits_and_paints(
+            w,
+            std::iter::empty(),
+            prepare,
+            after_layout,
+            paint,
+        )
+    }
+
+    /// Paint a frame while reusing split windows prepared by an earlier host phase.
+    /// Reused requests are still passed to `after_layout`; overlays, decorations,
+    /// and all remaining splits are prepared from their current state.
+    pub fn render_with_prepared_splits_and_paints<W, I, P, D, F>(
+        &mut self,
+        w: &mut W,
+        prepared_splits: I,
+        mut prepare: P,
+        mut after_layout: D,
+        mut paint: F,
+    ) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+        I: IntoIterator<Item = PreparedWindowRequest>,
+        P: FnMut(&mut Ui, MaterializeRequest),
+        D: FnMut(&mut Ui, PreparedWindowRequest),
+        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
+        let mut prepared_splits: std::collections::HashMap<WinId, PreparedWindowRequest> =
+            prepared_splits
+                .into_iter()
+                .map(|request| (request.win, request))
+                .collect();
         let resolved = self.resolve_overlays(None);
         let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
             .into_iter()
@@ -2489,7 +2566,12 @@ impl Ui {
             self.refresh_decoration_viewports_with_prepare(&resolved_decorations, &mut prepare),
         );
         for (win_id, rect) in &painted_splits {
-            if let Some(request) = self.prepare_window_for_render(*win_id, *rect, &mut prepare) {
+            let prepared = prepared_splits
+                .remove(win_id)
+                .filter(|request| self.prepared_window_matches_split(*request, *win_id, *rect));
+            if let Some(request) =
+                prepared.or_else(|| self.prepare_window_for_render(*win_id, *rect, &mut prepare))
+            {
                 prepared_windows.push(request);
             }
         }
@@ -4128,6 +4210,39 @@ mod tests {
                 .scroll_row_total(ui.buf(buf_id).unwrap()),
             20
         );
+    }
+
+    #[test]
+    fn prepared_split_is_not_prepared_again_during_paint() {
+        let mut ui = make_ui();
+        let win = WinId(42);
+        make_split(&mut ui, win);
+        let mut early_prepare_calls = 0;
+        let prepared = ui
+            .prepare_split_window_with(win, |_, request| {
+                assert_eq!(request.win, win);
+                early_prepare_calls += 1;
+            })
+            .expect("visible split should prepare");
+        let mut late_prepare_calls = 0;
+        let mut after_layout_calls = 0;
+        let mut out = Vec::new();
+
+        ui.render_with_prepared_splits_and_paints(
+            &mut out,
+            Some(prepared),
+            |_, _| late_prepare_calls += 1,
+            |_, request| {
+                assert_eq!(request.win, win);
+                after_layout_calls += 1;
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(early_prepare_calls, 1);
+        assert_eq!(late_prepare_calls, 0);
+        assert_eq!(after_layout_calls, 1);
     }
 
     #[test]

@@ -35,6 +35,11 @@ transcript.fold_kind = nil
 ---@type fun(node_id: table, action: string): boolean
 transcript.fold_node = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Jump the transcript to its semantic tail and enable tail-follow mode.
+---@type fun(): nil
+transcript.follow_tail = nil
+
 --- Return the current composed root transcript renderer, or nil before the
 --- default renderer has been installed.
 ---@type fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?
@@ -58,7 +63,7 @@ transcript.is_empty = nil
 transcript.loaded_block_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` is the stable sparse descriptor index accepted by `reveal_block`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
+--- Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
 ---@type fun(): table
 transcript.loaded_blocks_expensive = nil
 
@@ -68,24 +73,14 @@ transcript.loaded_blocks_expensive = nil
 transcript.loaded_text_expensive = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
----@type fun(opts: table?): table?
-transcript.next_block = nil
-
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 ---@type fun(row: integer): table?
 transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
----@type fun(opts: table?): table?
-transcript.previous_block = nil
-
---- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
----@type fun(descriptor_index: integer, opts: table?): boolean
-transcript.reveal_block = nil
+--- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.move_cursor` defaults to true.
+---@type fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean
+transcript.reveal = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
@@ -108,8 +103,18 @@ transcript.set_renderer = nil
 transcript.stream = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the latest committed transcript view, or nil before the first projection. The returned snapshot remains immutable; use `watch_view` to observe later revisions.
+---@type fun(): smelt.transcript.View?
+transcript.view = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
 ---@type fun(): table
 transcript.visible_blocks = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
+---@type fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
+transcript.watch_view = nil
 
 return transcript

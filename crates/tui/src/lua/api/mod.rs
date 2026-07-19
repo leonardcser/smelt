@@ -28,7 +28,7 @@ mod settings;
 pub(crate) mod terminal;
 mod text;
 pub(crate) mod theme;
-mod transcript;
+pub(crate) mod transcript;
 pub(crate) mod vim;
 pub(crate) mod win;
 mod work;
@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 /// Schema version of the Lua API surface, exposed as `smelt.api_version`.
 /// Increments on breaking changes; additive changes do not bump it.
-pub(crate) const API_VERSION: &str = "1";
+pub(crate) const API_VERSION: &str = "2";
 
 /// Build identity, exposed as `smelt.build`. `version` is sourced from
 /// `CARGO_PKG_VERSION` (for programmatic semver comparison); the rest come

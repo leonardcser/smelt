@@ -561,7 +561,6 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     event("tool_end"),
     event("tool_start"),
     state("tps"),
-    state("transcript_navigation_generation"),
     event("turn_complete"),
     event("turn_end"),
     event("turn_error"),
@@ -872,7 +871,6 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("prompt_resize_chrome", String::new());
     signals.declare("cursor_pos", CursorPos::default());
     signals.declare("viewport_pos", ViewportPos::default());
-    signals.declare("transcript_navigation_generation", 0u64);
 
     signals.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
         let Ok(out) = lua.create_table() else {

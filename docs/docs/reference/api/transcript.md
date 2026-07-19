@@ -66,6 +66,16 @@ fun(node_id: table, action: string): boolean
 
 Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.
 
+## `smelt.transcript.follow_tail`
+
+```lua
+fun(): nil
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Jump the transcript to its semantic tail and enable tail-follow mode.
+
 ## `smelt.transcript.get_renderer`
 
 ```lua
@@ -120,7 +130,7 @@ fun(): table
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` is the stable sparse descriptor index accepted by `reveal_block`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
+Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.
 
 ## `smelt.transcript.loaded_text_expensive`
 
@@ -132,16 +142,6 @@ fun(): string
 
 Return the currently loaded transcript display text as a single newline-joined string. This is an explicit expensive materialization API; sparse sessions may only have the active descriptor window loaded. Prefer `rows(start, count)` for bounded display reads.
 
-## `smelt.transcript.next_block`
-
-```lua
-fun(opts: table?): table?
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
-
 ## `smelt.transcript.node_at_row`
 
 ```lua
@@ -152,25 +152,17 @@ fun(row: integer): table?
 
 Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 
-## `smelt.transcript.previous_block`
+## `smelt.transcript.reveal`
 
 ```lua
-fun(opts: table?): table?
+fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean
 ```
+
+Types: [`smelt.transcript.Target`](types.md#smelttranscripttarget), [`smelt.transcript.RevealOpts`](types.md#smelttranscriptrevealopts)
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.
-
-## `smelt.transcript.reveal_block`
-
-```lua
-fun(descriptor_index: integer, opts: table?): boolean
-```
-
-**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
-
-Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.move_cursor` defaults to true.
 
 ## `smelt.transcript.rows`
 
@@ -211,6 +203,18 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.transcript.StreamOpts`](
 
 Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
 
+## `smelt.transcript.view`
+
+```lua
+fun(): smelt.transcript.View?
+```
+
+Types: [`smelt.transcript.View`](types.md#smelttranscriptview)
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the latest committed transcript view, or nil before the first projection. The returned snapshot remains immutable; use `watch_view` to observe later revisions.
+
 ## `smelt.transcript.visible_blocks`
 
 ```lua
@@ -220,4 +224,16 @@ fun(): table
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
+
+## `smelt.transcript.watch_view`
+
+```lua
+fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
+```
+
+Types: [`smelt.transcript.View`](types.md#smelttranscriptview), [`smelt.Reg`](types.md#smeltreg)
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
 

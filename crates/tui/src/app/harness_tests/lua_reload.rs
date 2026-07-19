@@ -34,6 +34,34 @@ fn manual_lua_reload_success_notifies() {
 }
 
 #[test]
+fn reloaded_transcript_view_watcher_receives_current_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"
+        smelt.transcript.watch_view(function(view)
+          _G.watched_transcript_revision = view.revision
+        end)
+        "#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.render_silent();
+    let revision = app
+        .lua_int_global("watched_transcript_revision")
+        .expect("initial committed transcript view");
+
+    app.reload_lua();
+    assert_eq!(app.lua_int_global("watched_transcript_revision"), None);
+    app.render_silent();
+    assert_eq!(
+        app.lua_int_global("watched_transcript_revision"),
+        Some(revision)
+    );
+}
+
+#[test]
 fn candidate_layout_registration_does_not_invoke_committed_composer() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");

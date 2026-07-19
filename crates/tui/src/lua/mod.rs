@@ -295,11 +295,68 @@ pub(crate) struct PendingInvocation {
     pub(crate) payload: crate::smelt_edit::Payload,
 }
 
+struct TranscriptViewWatcher {
+    id: u64,
+    callback: LuaHandle,
+    last_view_revision: Option<u64>,
+}
+
+#[derive(Default)]
+pub(crate) struct TranscriptViewWatchers {
+    next_id: std::sync::atomic::AtomicU64,
+    entries: Mutex<Vec<TranscriptViewWatcher>>,
+}
+
+impl TranscriptViewWatchers {
+    pub(crate) fn register(&self, lua: &Lua, callback: mlua::Function) -> LuaResult<u64> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let callback = LuaHandle::from_func(lua, callback)?;
+        self.entries
+            .lock()
+            .map_err(|_| mlua::Error::external("transcript view watcher registry poisoned"))?
+            .push(TranscriptViewWatcher {
+                id,
+                callback,
+                last_view_revision: None,
+            });
+        Ok(id)
+    }
+
+    pub(crate) fn remove(&self, id: u64) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let before = entries.len();
+        entries.retain(|entry| entry.id != id);
+        entries.len() != before
+    }
+
+    pub(crate) fn pending_callbacks(&self, lua: &Lua, view_revision: u64) -> Vec<mlua::Function> {
+        let Ok(mut entries) = self.entries.lock() else {
+            return Vec::new();
+        };
+        entries
+            .iter_mut()
+            .filter(|entry| entry.last_view_revision != Some(view_revision))
+            .filter_map(|entry| {
+                let callback = lua
+                    .registry_value::<mlua::Function>(&entry.callback.key)
+                    .ok()?;
+                entry.last_view_revision = Some(view_revision);
+                Some(callback)
+            })
+            .collect()
+    }
+}
+
 /// TUI-specific extension of [`smelt_core::lua::LuaShared`] adding the
 /// `pending_invocations` queue. `Deref`s to the core shared state.
 pub(crate) struct LuaShared {
     pub(crate) core: Arc<smelt_core::lua::LuaShared>,
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
+    pub(crate) transcript_view_watchers: Arc<TranscriptViewWatchers>,
     /// Last terminal title declaration made while this generation was a
     /// candidate. `Some(None)` means clear the title at commit.
     pub(crate) staged_terminal_title: Mutex<Option<Option<String>>>,
@@ -324,6 +381,7 @@ impl LuaShared {
         Self {
             core,
             pending_invocations: Mutex::new(Vec::new()),
+            transcript_view_watchers: Arc::new(TranscriptViewWatchers::default()),
             staged_terminal_title: Mutex::new(None),
             staged_notices: Mutex::new(Vec::new()),
         }

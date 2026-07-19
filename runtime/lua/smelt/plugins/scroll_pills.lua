@@ -1,7 +1,7 @@
 -- Scroll-pill overlays for transcript navigation:
 --   * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail.
---   * Top pill    - first line of the nearest user message above the viewport;
---     click reveals it with one row of gap so repeated clicks walk back.
+--   * Top pill    - first line of the nearest actionable user message;
+--     click aligns it to the viewport top, then the next target walks back.
 -- Disable via `smelt.builtins.disable({ plugins = { "scroll_pills" } })`.
 
 local ns_bottom = smelt.ns("smelt.scroll_pills.bottom")
@@ -19,7 +19,7 @@ local state = {
   top_buf = nil,
   top_win = nil,
   top_width = nil,
-  top_target_descriptor_index = nil,
+  top_target = nil,
 }
 
 -- ── Common lifecycle ───────────────────────────────────────────────────
@@ -37,26 +37,13 @@ local function close_top()
   state.top_buf = nil
   state.top_win = nil
   state.top_width = nil
-  state.top_target_descriptor_index = nil
+  state.top_target = nil
 end
 
-local function close_all()
-  close_bottom()
-  close_top()
-end
-
-local function should_show_bottom(scroll)
-  return scroll
-    and scroll.viewport
-    and scroll.viewport > 0
-    and scroll.needs_tail_repin
-end
-
-local function can_show_top(scroll)
-  return scroll
-    and scroll.viewport
-    and scroll.viewport > 0
-    and scroll.overflow
+local function should_show_bottom(view)
+  return view.viewport.height > 0
+    and view.viewport.scrollable
+    and not view.viewport.at_bottom
 end
 
 -- ── Bottom pill: "jump to bottom" ─────────────────────────────────────
@@ -81,10 +68,7 @@ local function open_bottom()
     scrollbar = false,
   })
   win:on("press", function()
-    if state.transcript_win then
-      state.transcript_win:scroll("tail")
-      close_bottom()
-    end
+    smelt.transcript.follow_tail()
   end)
   state.bottom_buf = buf
   state.bottom_win = win
@@ -101,30 +85,22 @@ local function open_bottom()
   })
 end
 
-local function transcript_cursor_rows(scroll)
-  if smelt.focus() ~= "transcript" or not state.transcript_win then return nil, nil end
-  local row = state.transcript_win:cursor()
-  local rect = state.transcript_win:rect()
-  if row == nil or scroll == nil or rect == nil or not scroll.top or not scroll.viewport then return nil, nil end
-  local screen_row = row - scroll.top
-  if screen_row < 0 or screen_row >= scroll.viewport then return nil, nil end
-  return screen_row, rect.row + screen_row
+local function cursor_viewport_row(view)
+  return view.focused and view.cursor and view.cursor.viewport_row or nil
 end
 
-local function cursor_under_bottom_pill(scroll)
-  local screen_row = transcript_cursor_rows(scroll)
-  return screen_row ~= nil and scroll and scroll.viewport and screen_row == scroll.viewport - 1
+local function cursor_under_bottom_pill(view)
+  local row = cursor_viewport_row(view)
+  return row ~= nil and row == view.viewport.height - 1
 end
 
--- ── Top pill: "jump to last user message" ─────────────────────────────
+-- ── Top pill: "jump to previous user message" ─────────────────────────
 
--- Most-recent user block at-or-above the viewport top. Hidden when that
--- block sits exactly at the viewport top (already visible, click would no-op).
-local function user_block_for_top_pill(scroll)
-  if not can_show_top(scroll) then return nil end
-  local b = smelt.transcript.previous_block({ role = "user" })
-  if not b or b.first_line == "" or b.already_at_top then return nil end
-  return b
+local function user_block_for_top_pill(view)
+  if view.viewport.height <= 0 or not view.viewport.scrollable or view.viewport.at_top then return nil end
+  local block = view:previous_block({ role = "user" })
+  if not block or block.first_line == "" then return nil end
+  return block
 end
 
 local function open_top(width)
@@ -136,8 +112,8 @@ local function open_top(width)
     scrollbar = false,
   })
   win:on("press", function()
-    if state.top_target_descriptor_index then
-      smelt.transcript.reveal_block(state.top_target_descriptor_index, { top_padding = 1, cursor = true })
+    if state.top_target then
+      smelt.transcript.reveal(state.top_target, { align = "top", move_cursor = true })
     end
   end)
   state.top_buf = buf
@@ -170,81 +146,39 @@ local function paint_top_row(width, label)
   })
 end
 
-local function cursor_under_top_pill(scroll)
-  local _, terminal_row = transcript_cursor_rows(scroll)
-  local rect = state.transcript_win and state.transcript_win:rect()
-  return terminal_row ~= nil and rect ~= nil and terminal_row == rect.row
+local function cursor_under_top_pill(view)
+  return cursor_viewport_row(view) == 0
 end
 
-local function refresh_top(scroll)
-  local rect = state.transcript_win:rect()
+local function refresh_top(view)
   -- Leave the transcript's scrollbar column uncovered.
-  local width = rect and math.max(0, rect.width - 1) or 0
+  local width = math.max(0, view.viewport.width - 1)
   if width <= 0 then close_top(); return end
 
-  local target = user_block_for_top_pill(scroll)
-  if not target or cursor_under_top_pill(scroll) then close_top(); return end
+  local target = user_block_for_top_pill(view)
+  if not target or cursor_under_top_pill(view) then close_top(); return end
 
   if state.top_overlay and state.top_width ~= width then close_top() end
   if not state.top_overlay then open_top(width) end
-  state.top_target_descriptor_index = target.descriptor_index
+  state.top_target = target
   paint_top_row(width, target.first_line)
 end
 
--- Reconcile overlays from the current transcript viewport. Every event path
--- funnels through here so reset, resize, scrollbar drag, wheel scroll, and
--- selection autoscroll cannot leave stale pills behind.
-local function refresh()
-  if not state.transcript_win then
-    close_all()
-    return
-  end
-
-  local scroll = state.transcript_win:scroll()
-  if should_show_bottom(scroll) and not cursor_under_bottom_pill(scroll) then
+local function refresh(view)
+  state.transcript_win = view.window
+  if should_show_bottom(view) and not cursor_under_bottom_pill(view) then
     open_bottom()
   else
     close_bottom()
   end
-  refresh_top(scroll)
+  refresh_top(view)
 end
 
--- ── React to view/session changes ──────────────────────────────────────
--- UiHost-bound; re-wires on every `/reload`.
+-- A committed view includes projection, geometry, navigation, focus, and cursor
+-- state, so the plugin never has to join unrelated event streams.
+smelt.transcript.watch_view(refresh)
 
-smelt.lifecycle.on_ready(function()
-  close_all()
-  state.transcript_win = smelt.win.transcript()
-  state.transcript_win:on("scrolled", refresh)
-  state.transcript_win:on("resized", refresh)
-  state.transcript_win:on("focus", refresh)
-  state.transcript_win:on("blur", refresh)
-  refresh()
-end)
-
--- History clears can remove transcript content without changing the previous
--- scroll tuple enough to emit `scrolled`; navigation generation tracks every
--- user-block index change, including store-backed resume and rewind paths.
-smelt.events.on("history", function(payload)
-  if payload and payload.kind == "cleared" then close_all() end
-end)
-smelt.events.on("session_started", close_all)
-
-smelt.signal.subscribe("transcript_navigation_generation", refresh)
-
-local function refresh_if_transcript_focused()
-  if smelt.focus() == "transcript" then refresh() end
-end
-
-smelt.signal.subscribe("cursor_pos", refresh_if_transcript_focused)
-smelt.signal.subscribe("viewport_pos", refresh_if_transcript_focused)
-
--- Jump to bottom when the user submits a message so the new turn is visible.
+-- Submitting starts a new turn at the semantic transcript tail.
 smelt.events.on("input_submit", function()
-  if state.transcript_win then
-    state.transcript_win:scroll("tail")
-    close_bottom()
-  else
-    close_all()
-  end
+  smelt.transcript.follow_tail()
 end)

@@ -1,15 +1,73 @@
-//! `smelt.transcript` bindings - read the rendered transcript display
-//! text. Thin live-state surface over `TuiApp`.
+//! `smelt.transcript` bindings for committed view observation, semantic
+//! navigation, and rendered transcript inspection.
 
-use lua_doc_derive::LuaOpts;
+use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
 use smelt_core::content::stream_parser::StreamParser;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::doc::{record_class, Tier};
-use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
+use smelt_core::lua::reg::LuaReg;
 
 use super::buf::LuaBuf;
+use super::win::LuaWin;
+
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.transcript.Role")]
+pub enum LuaTranscriptRole {
+    User,
+    Mode,
+    #[lua(rename = "process_status")]
+    ProcessStatus,
+    Assistant,
+    Thinking,
+    Tool,
+    Code,
+    Exec,
+    Compacted,
+    #[lua(rename = "compaction_preview")]
+    CompactionPreview,
+}
+
+impl LuaTranscriptRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Mode => "mode",
+            Self::ProcessStatus => "process_status",
+            Self::Assistant => "assistant",
+            Self::Thinking => "thinking",
+            Self::Tool => "tool",
+            Self::Code => "code",
+            Self::Exec => "exec",
+            Self::Compacted => "compacted",
+            Self::CompactionPreview => "compaction_preview",
+        }
+    }
+}
+
+#[derive(Debug, Default, LuaOpts)]
+#[lua(name = "smelt.transcript.NavigationOpts")]
+pub struct LuaTranscriptNavigationOpts {
+    /// Match only blocks with this semantic role. Defaults to `user`.
+    pub role: Option<LuaTranscriptRole>,
+}
+
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.transcript.RevealAlign")]
+pub enum LuaTranscriptRevealAlign {
+    Top,
+}
+
+#[derive(Debug, Default, LuaOpts)]
+#[lua(name = "smelt.transcript.RevealOpts")]
+pub struct LuaTranscriptRevealOpts {
+    /// Target alignment within the transcript viewport. Currently only `top`.
+    pub align: Option<LuaTranscriptRevealAlign>,
+    /// Move the transcript cursor to the target. Defaults to true.
+    pub move_cursor: Option<bool>,
+}
 
 fn block_snapshot_table(
     lua: &Lua,
@@ -25,17 +83,146 @@ fn block_snapshot_table(
     Ok(t)
 }
 
-fn navigation_block_table(
-    lua: &Lua,
-    block: crate::app::transcript::TranscriptNavigationBlock,
-) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
-    t.set("descriptor_index", block.descriptor_index)?;
-    t.set("block_id", block.block_id.get())?;
-    t.set("role", block.role)?;
-    t.set("first_line", block.first_line)?;
-    t.set("already_at_top", block.already_at_anchor)?;
-    Ok(t)
+#[derive(Clone, Debug)]
+pub(crate) struct LuaTranscriptTarget {
+    session_id: String,
+    descriptor_index: usize,
+    block_id: smelt_core::transcript_model::BlockId,
+    role: &'static str,
+    first_line: String,
+}
+
+impl LuaTranscriptTarget {
+    fn from_block(
+        session_id: String,
+        block: crate::app::transcript::TranscriptNavigationBlock,
+    ) -> Self {
+        Self {
+            session_id,
+            descriptor_index: block.descriptor_index,
+            block_id: block.block_id,
+            role: block.role,
+            first_line: block.first_line,
+        }
+    }
+}
+
+impl LuaType for LuaTranscriptTarget {
+    fn lua_type() -> String {
+        "smelt.transcript.Target".into()
+    }
+}
+
+impl mlua::FromLua for LuaTranscriptTarget {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        let target = mlua::AnyUserData::from_lua(value, lua)?;
+        let target = target.borrow::<Self>()?.clone();
+        Ok(target)
+    }
+}
+
+impl mlua::UserData for LuaTranscriptTarget {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("block_id", |_, this| Ok(this.block_id.get()));
+        fields.add_field_method_get("role", |_, this| Ok(this.role));
+        fields.add_field_method_get("first_line", |_, this| Ok(this.first_line.clone()));
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LuaTranscriptView {
+    view: crate::app::CommittedTranscriptView,
+}
+
+impl LuaTranscriptView {
+    pub(crate) fn new(view: crate::app::CommittedTranscriptView) -> Self {
+        Self { view }
+    }
+
+    fn navigation_target(
+        &self,
+        role: Option<LuaTranscriptRole>,
+        previous: bool,
+    ) -> Option<LuaTranscriptTarget> {
+        let anchor = self.view.state.anchor?;
+        let session_id = self.view.state.session_id.clone();
+        let role = role.map(LuaTranscriptRole::as_str);
+        crate::lua::try_with_app(|app| {
+            if app.core.session.id != session_id
+                || app
+                    .session_document
+                    .transcript
+                    .history()
+                    .navigation_generation()
+                    != self.view.state.navigation_generation
+            {
+                return None;
+            }
+            let block = if previous {
+                app.session_document
+                    .transcript
+                    .previous_navigation_block_from(anchor, role)
+            } else {
+                app.session_document
+                    .transcript
+                    .next_navigation_block_from(anchor, role)
+            }?;
+            Some(LuaTranscriptTarget::from_block(session_id, block))
+        })
+        .flatten()
+    }
+}
+
+impl LuaType for LuaTranscriptView {
+    fn lua_type() -> String {
+        "smelt.transcript.View".into()
+    }
+}
+
+impl mlua::UserData for LuaTranscriptView {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("revision", |_, this| Ok(this.view.revision));
+        fields.add_field_method_get("window", |_, _| {
+            Ok(LuaWin {
+                id: crate::app::TRANSCRIPT_WIN,
+            })
+        });
+        fields.add_field_method_get("viewport", |lua, this| {
+            let viewport = lua.create_table()?;
+            viewport.set("width", this.view.state.width)?;
+            viewport.set("height", this.view.state.height)?;
+            viewport.set("content_width", this.view.state.content_width)?;
+            viewport.set("scrollable", this.view.state.scrollable)?;
+            viewport.set("following_tail", this.view.state.following_tail)?;
+            viewport.set("at_top", this.view.state.at_top)?;
+            viewport.set("at_bottom", this.view.state.at_bottom)?;
+            Ok(viewport)
+        });
+        fields.add_field_method_get("focused", |_, this| Ok(this.view.state.focused));
+        fields.add_field_method_get("cursor", |lua, this| {
+            let Some(viewport_row) = this.view.state.cursor_viewport_row else {
+                return Ok(mlua::Value::Nil);
+            };
+            let cursor = lua.create_table()?;
+            cursor.set("viewport_row", viewport_row)?;
+            Ok(mlua::Value::Table(cursor))
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "previous_block",
+            |_, this, opts: Option<LuaTranscriptNavigationOpts>| {
+                Ok(this.navigation_target(opts.and_then(|opts| opts.role), true))
+            },
+        );
+        methods.add_method(
+            "next_block",
+            |_, this, opts: Option<LuaTranscriptNavigationOpts>| {
+                Ok(this.navigation_target(opts.and_then(|opts| opts.role), false))
+            },
+        );
+    }
 }
 
 #[derive(Debug, Default, LuaOpts)]
@@ -246,7 +433,10 @@ fn node_snapshot_table(
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript: mlua::Table = smelt.get("transcript")?;
     let m = LuaMod::extend(lua, transcript, "smelt.transcript", Tier::UiHost);
-    let _ = <LuaTranscriptStreamOpts as smelt_core::lua::lua_type::LuaType>::lua_type();
+    let _ = LuaTranscriptStreamOpts::lua_type();
+    let navigation_opts_type = LuaTranscriptNavigationOpts::lua_type();
+    let _ = LuaTranscriptRevealOpts::lua_type();
+    let role_type = LuaTranscriptRole::lua_type();
     record_class(LuaClassDecl {
         name: "smelt.transcript.Stream",
         doc: "Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.",
@@ -256,6 +446,86 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             "reset" => fn() -> (), "Clear the stream and the target buffer.",
             "width" => fn(width: Option<u16>) -> Option<u16>, "Read or set the render width in terminal cells.",
         },
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.transcript.Target",
+        doc: "Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse descriptor coordinates are intentionally hidden.",
+        fields: vec![
+            LuaClassField { name: "block_id", ty: "integer".into(), optional: false, doc: "Stable transcript block identity." },
+            LuaClassField { name: "role", ty: role_type, optional: false, doc: "Semantic block role." },
+            LuaClassField { name: "first_line", ty: "string".into(), optional: false, doc: "First source line, suitable for navigation labels." },
+        ],
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.transcript.Viewport",
+        doc: "Geometry and tail state from one committed transcript projection.",
+        fields: vec![
+            LuaClassField {
+                name: "width",
+                ty: "integer".into(),
+                optional: false,
+                doc: "Outer transcript width in cells.",
+            },
+            LuaClassField {
+                name: "height",
+                ty: "integer".into(),
+                optional: false,
+                doc: "Transcript viewport height in rows.",
+            },
+            LuaClassField {
+                name: "content_width",
+                ty: "integer".into(),
+                optional: false,
+                doc: "Inner content width after gutters and scrollbar reservation.",
+            },
+            LuaClassField {
+                name: "scrollable",
+                ty: "boolean".into(),
+                optional: false,
+                doc: "Whether transcript content exceeds the viewport height.",
+            },
+            LuaClassField {
+                name: "following_tail",
+                ty: "boolean".into(),
+                optional: false,
+                doc: "Whether new content keeps the viewport pinned to the tail.",
+            },
+            LuaClassField {
+                name: "at_top",
+                ty: "boolean".into(),
+                optional: false,
+                doc: "Whether the committed viewport is at the transcript top.",
+            },
+            LuaClassField {
+                name: "at_bottom",
+                ty: "boolean".into(),
+                optional: false,
+                doc: "Whether the committed viewport is at the current transcript bottom.",
+            },
+        ],
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.transcript.Cursor",
+        doc: "Visible transcript cursor position relative to the committed viewport.",
+        fields: vec![LuaClassField {
+            name: "viewport_row",
+            ty: "integer".into(),
+            optional: false,
+            doc: "Zero-based row inside the transcript viewport.",
+        }],
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.transcript.View",
+        doc: "Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.",
+        fields: vec![
+            LuaClassField { name: "revision", ty: "integer".into(), optional: false, doc: "Monotonic revision of observable committed transcript state." },
+            LuaClassField { name: "window", ty: "smelt.win.Win".into(), optional: false, doc: "Transcript window handle for overlay anchoring." },
+            LuaClassField { name: "viewport", ty: "smelt.transcript.Viewport".into(), optional: false, doc: "Committed viewport geometry and tail state." },
+            LuaClassField { name: "focused", ty: "boolean".into(), optional: false, doc: "Whether the transcript currently owns the visible cursor." },
+            LuaClassField { name: "cursor", ty: "smelt.transcript.Cursor".into(), optional: true, doc: "Visible transcript cursor position, or nil when the transcript does not own a visible cursor." },
+            LuaClassField { name: "previous_block", ty: format!("fun(opts: {navigation_opts_type}?): smelt.transcript.Target?"), optional: false, doc: "Return the nearest actionable matching block when moving backward from this view. A matching block containing the viewport top is returned; one beginning exactly at the top is skipped." },
+            LuaClassField { name: "next_block", ty: format!("fun(opts: {navigation_opts_type}?): smelt.transcript.Target?"), optional: false, doc: "Return the nearest actionable matching block when moving forward from this view." },
+        ],
     });
     m.fn_(
         "stream",
@@ -300,7 +570,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "loaded_blocks_expensive",
-        "Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` is the stable sparse descriptor index accepted by `reveal_block`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.",
+        "Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`. `descriptor_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. This may force layout for the loaded descriptor window; prefer `visible_blocks()` when possible.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let snaps = crate::lua::try_with_app(|app| app.loaded_transcript_block_snapshots())
@@ -350,54 +620,64 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
-        "previous_block",
-        "Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
-        &["opts"],
-        |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
-            let role = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
-            let block = crate::lua::try_with_app(|app| {
-                app.previous_transcript_navigation_block(role.as_deref())
-            })
-            .flatten();
-            block.map(|block| navigation_block_table(lua, block))
-                .transpose()
-        },
-    )?;
-    m.fn_(
-        "next_block",
-        "Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`. This uses descriptor/block identity, not estimated absolute rows.",
-        &["opts"],
-        |lua, opts: Option<mlua::Table>| -> LuaResult<Option<mlua::Table>> {
-            let role = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
-            let block = crate::lua::try_with_app(|app| {
-                app.next_transcript_navigation_block(role.as_deref())
-            })
-            .flatten();
-            block.map(|block| navigation_block_table(lua, block))
-                .transpose()
-        },
-    )?;
-    m.fn_(
-        "reveal_block",
-        "Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.",
-        &["descriptor_index", "opts"],
-        |_, (descriptor_index, opts): (usize, Option<mlua::Table>)| -> LuaResult<bool> {
-            let top_padding = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<crate::smelt_edit::RowIndex>>("top_padding").ok().flatten())
-                .unwrap_or(0);
-            let cursor = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<bool>>("cursor").ok().flatten())
-                .unwrap_or(true);
+        "view",
+        "Return the latest committed transcript view, or nil before the first projection. The returned snapshot remains immutable; use `watch_view` to observe later revisions.",
+        &[],
+        |_, ()| -> LuaResult<Option<LuaTranscriptView>> {
             Ok(crate::lua::try_with_app(|app| {
-                app.reveal_transcript_descriptor_block(descriptor_index, top_padding, cursor)
+                app.committed_transcript_view
+                    .clone()
+                    .map(LuaTranscriptView::new)
+            })
+            .flatten())
+        },
+    )?;
+    m.fn_(
+        "watch_view",
+        "Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.",
+        &["callback"],
+        |lua, callback: LuaCallback<(LuaTranscriptView,), ()>| -> LuaResult<LuaReg> {
+            let shared = super::win::current_shared(lua)?;
+            let id = shared
+                .transcript_view_watchers
+                .register(lua, callback.into_inner())?;
+            let watchers = std::sync::Arc::clone(&shared.transcript_view_watchers);
+            Ok(LuaReg::new(move || watchers.remove(id)))
+        },
+    )?;
+    m.fn_(
+        "reveal",
+        "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.move_cursor` defaults to true.",
+        &["target", "opts"],
+        |_, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
+            let opts = opts.unwrap_or_default();
+            let _align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
+            let move_cursor = opts.move_cursor.unwrap_or(true);
+            Ok(crate::lua::try_with_app(|app| {
+                if app.core.session.id != target.session_id {
+                    return false;
+                }
+                app.reveal_transcript_target(
+                    target.descriptor_index,
+                    target.block_id,
+                    move_cursor,
+                )
             })
             .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
+        "follow_tail",
+        "Jump the transcript to its semantic tail and enable tail-follow mode.",
+        &[],
+        |_, ()| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                app.scroll_window(
+                    crate::app::TRANSCRIPT_WIN,
+                    crate::app::transcript_scroll::WindowScrollCommand::Tail,
+                );
+            });
+            Ok(())
         },
     )?;
     m.fn_(

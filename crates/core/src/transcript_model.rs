@@ -479,6 +479,45 @@ pub enum BlockText<'a> {
     },
 }
 
+impl BlockText<'_> {
+    pub fn first_source_line(self) -> String {
+        fn first_nonempty_line(text: &str) -> String {
+            text.lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        match self {
+            Self::Plain(text) => first_nonempty_line(text),
+            Self::Prefixed { prefix, text } => {
+                let first_text_line = text.lines().next().unwrap_or_default();
+                let first_line = format!("{prefix}{first_text_line}");
+                if first_line.trim().is_empty() {
+                    text.lines()
+                        .skip(1)
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    first_line
+                }
+            }
+            Self::Thinking {
+                title,
+                summary_titles,
+                content,
+            } => {
+                let title = summary_titles.first().map(String::as_str).or(title);
+                title
+                    .map(|title| format!("**{title}**"))
+                    .unwrap_or_else(|| first_nonempty_line(content))
+            }
+            Self::Exec { command, .. } => format!("$ {command}"),
+        }
+    }
+}
+
 /// Cache key for a block's per-frame layout. When content changes, the new
 /// `content_hash` misses the old entry - invalidation by keying, not eviction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1404,6 +1443,15 @@ impl BlockEntry {
         }
     }
 
+    fn navigation_signature(&self) -> (&'static str, String) {
+        (
+            self.kind(),
+            self.row_estimate_text()
+                .map(BlockText::first_source_line)
+                .unwrap_or_default(),
+        )
+    }
+
     fn raw_text(&self) -> Option<String> {
         match self {
             Self::Materialized(block) => block.raw_text(),
@@ -1439,7 +1487,7 @@ pub struct BlockHistory {
     /// Bumped only when transcript order changes, so projections can reuse
     /// block-to-node structure across content and sidecar updates.
     order_generation: u64,
-    /// Bumped when user-message navigation targets may have changed.
+    /// Bumped when semantic navigation coordinates, roles, or labels may change.
     navigation_generation: u64,
     /// Earliest transcript order index whose persisted descriptor may be stale.
     descriptor_dirty_from: Option<usize>,
@@ -1487,6 +1535,7 @@ impl BlockHistory {
     pub(crate) fn bump_order_generation(&mut self) {
         self.bump_generation();
         self.order_generation = self.order_generation.wrapping_add(1);
+        self.bump_navigation_generation();
     }
 
     fn bump_navigation_generation(&mut self) {
@@ -1496,7 +1545,6 @@ impl BlockHistory {
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
         self.bump_order_generation();
-        self.bump_navigation_generation();
         self.mark_descriptor_dirty_from(0);
     }
 
@@ -1531,10 +1579,6 @@ impl BlockHistory {
         if let Some(idx) = self.order.iter().position(|candidate| *candidate == id) {
             self.mark_descriptor_dirty_from(idx);
         }
-    }
-
-    fn entry_affects_navigation(&self, id: BlockId) -> bool {
-        self.block_kind(id) == Some("user")
     }
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -1774,7 +1818,6 @@ impl BlockHistory {
         origin: Option<BlockOrigin>,
     ) -> BlockId {
         let block = block.normalize_content();
-        let navigation_changed = block.kind() == "user";
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
         self.next_id += 1;
@@ -1786,9 +1829,6 @@ impl BlockHistory {
             self.origins.insert(id, origin);
         }
         self.bump_order_generation();
-        if navigation_changed {
-            self.bump_navigation_generation();
-        }
         self.mark_descriptor_dirty_from(order_index);
         id
     }
@@ -1819,7 +1859,6 @@ impl BlockHistory {
             .filter(|hash| *hash == normalized_hash)
             .unwrap_or(normalized_hash);
         let descriptor = normalized;
-        let navigation_changed = descriptor.kind() == "user";
         self.next_id = self.next_id.max(id.0.saturating_add(1));
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
         self.order.insert(order_index, id);
@@ -1830,9 +1869,6 @@ impl BlockHistory {
             self.origins.insert(id, origin);
         }
         self.bump_order_generation();
-        if navigation_changed {
-            self.bump_navigation_generation();
-        }
         self.mark_descriptor_dirty_from(order_index);
         id
     }
@@ -1896,7 +1932,6 @@ impl BlockHistory {
         if self.origins.contains_key(&id) {
             return None;
         }
-        let navigation_changed = self.entry_affects_navigation(id);
         self.order.remove(idx);
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
@@ -1906,9 +1941,6 @@ impl BlockHistory {
         }
         let block = self.entries.remove(&id).map(BlockEntry::into_materialized);
         self.bump_order_generation();
-        if navigation_changed {
-            self.bump_navigation_generation();
-        }
         self.mark_descriptor_dirty_from(idx);
         block
     }
@@ -1928,7 +1960,6 @@ impl BlockHistory {
             .iter()
             .position(|id| removed.contains(id))
             .unwrap_or(self.order.len());
-        let navigation_changed = removed.iter().any(|id| self.entry_affects_navigation(*id));
         self.order.retain(|id| !removed.contains(id));
         for id in removed {
             self.entries.remove(&id);
@@ -1937,9 +1968,6 @@ impl BlockHistory {
             self.origins.remove(&id);
         }
         self.bump_order_generation();
-        if navigation_changed {
-            self.bump_navigation_generation();
-        }
         self.mark_descriptor_dirty_from(first_removed);
     }
 
@@ -2007,12 +2035,18 @@ impl BlockHistory {
     /// `ViewState`. No-ops when the block doesn't exist (e.g. truncated during
     /// a stream). Same content hash skips the generation bump.
     pub fn rewrite(&mut self, id: BlockId, block: Block) {
-        if !self.entries.contains_key(&id) {
+        let Some(previous_navigation) = self.entries.get(&id).map(BlockEntry::navigation_signature)
+        else {
             return;
-        }
-        let old_kind = self.block_kind(id);
+        };
         let block = block.normalize_content();
-        let navigation_changed = old_kind == Some("user") || block.kind() == "user";
+        let navigation = (
+            block.kind(),
+            block
+                .row_estimate_text()
+                .map(BlockText::first_source_line)
+                .unwrap_or_default(),
+        );
         let hash = block.content_hash();
         if self.content_hashes.get(&id) == Some(&hash) {
             self.entries.insert(id, BlockEntry::Materialized(block));
@@ -2021,7 +2055,7 @@ impl BlockHistory {
         self.entries.insert(id, BlockEntry::Materialized(block));
         self.content_hashes.insert(id, hash);
         self.bump_generation();
-        if navigation_changed {
+        if navigation != previous_navigation {
             self.bump_navigation_generation();
         }
         self.mark_descriptor_dirty_for_id(id);
@@ -2046,7 +2080,6 @@ impl BlockHistory {
         if !self.entries.contains_key(&id) {
             return;
         }
-        let navigation_changed = self.entry_affects_navigation(id);
         let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
         self.order.retain(|candidate| *candidate != id);
         self.entries.remove(&id);
@@ -2054,9 +2087,6 @@ impl BlockHistory {
         self.statuses.remove(&id);
         self.origins.remove(&id);
         self.bump_order_generation();
-        if navigation_changed {
-            self.bump_navigation_generation();
-        }
         if let Some(idx) = dirty_idx {
             self.mark_descriptor_dirty_from(idx);
         }
@@ -2074,10 +2104,6 @@ impl BlockHistory {
             self.origins.clear();
             return;
         }
-        let navigation_changed = self
-            .order
-            .iter()
-            .any(|id| self.entry_affects_navigation(*id));
         self.order.clear();
         self.entries.clear();
         self.content_hashes.clear();
@@ -2087,9 +2113,6 @@ impl BlockHistory {
         self.statuses.clear();
         self.origins.clear();
         self.bump_order_generation();
-        if navigation_changed {
-            self.bump_navigation_generation();
-        }
         self.mark_descriptor_dirty_from(0);
     }
 
@@ -3068,6 +3091,59 @@ mod tests {
         history.truncate(1);
         assert_eq!(history.len(), 1);
         assert!(!history.tool_states.contains_key("tc1"));
+    }
+
+    #[test]
+    fn truncate_user_tail_invalidates_navigation() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "assistant".into(),
+        });
+        history.push(Block::User {
+            text: "user".into(),
+            image_labels: Vec::new(),
+        });
+        let navigation_generation = history.navigation_generation();
+
+        history.truncate(1);
+
+        assert_ne!(history.navigation_generation(), navigation_generation);
+    }
+
+    #[test]
+    fn non_user_navigation_changes_invalidate_snapshots() {
+        let mut history = BlockHistory::new();
+        let first = history.push(Block::Text {
+            content: "first assistant".into(),
+        });
+        let navigation_generation = history.navigation_generation();
+
+        history.push(Block::Text {
+            content: "second assistant".into(),
+        });
+        assert_ne!(history.navigation_generation(), navigation_generation);
+
+        let navigation_generation = history.navigation_generation();
+        history.rewrite(
+            first,
+            Block::Text {
+                content: "rewritten assistant".into(),
+            },
+        );
+        assert_ne!(history.navigation_generation(), navigation_generation);
+
+        let navigation_generation = history.navigation_generation();
+        history.rewrite(
+            first,
+            Block::Text {
+                content: "rewritten assistant\ncontinued output".into(),
+            },
+        );
+        assert_eq!(history.navigation_generation(), navigation_generation);
+
+        let navigation_generation = history.navigation_generation();
+        history.truncate(1);
+        assert_ne!(history.navigation_generation(), navigation_generation);
     }
 
     #[test]

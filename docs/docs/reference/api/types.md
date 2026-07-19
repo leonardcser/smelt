@@ -964,6 +964,14 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 | `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |
 | `limits` | `table` | yes | Numeric product row budgets such as `tool_output_rows`. |
 
+### `smelt.transcript.Cursor`
+
+Visible transcript cursor position relative to the committed viewport.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `viewport_row` | `integer` | yes | Zero-based row inside the transcript viewport. |
+
 ### `smelt.transcript.Group`
 
 | Field | Type | Required | Description |
@@ -1007,6 +1015,19 @@ the selector metadata and the virtual-node renderer.
 | `bucket` | `string|string[]` |  | Stable field names used to split adjacent matching runs. |
 | `render` | `fun(group: table, ctx: smelt.transcript.Context):` | yes | table Virtual group renderer. |
 
+### `smelt.transcript.NavigationOpts`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `role` | [smelt.transcript.Role](types.md#smelttranscriptrole) |  | Match only blocks with this semantic role. Defaults to `user`. |
+
+### `smelt.transcript.RevealOpts`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `align` | [smelt.transcript.RevealAlign](types.md#smelttranscriptrevealalign) |  | Target alignment within the transcript viewport. Currently only `top`. |
+| `move_cursor` | `boolean` |  | Move the transcript cursor to the target. Defaults to true. |
+
 ### `smelt.transcript.Stream`
 
 Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
@@ -1024,6 +1045,16 @@ Transcript-shaped streaming renderer for plugin-owned buffers. Append model text
 | --- | --- | --- | --- |
 | `width` | `integer` |  | Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters. |
 
+### `smelt.transcript.Target`
+
+Stable semantic transcript navigation target. Pass the target directly to `smelt.transcript.reveal`; internal sparse descriptor coordinates are intentionally hidden.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `block_id` | `integer` | yes | Stable transcript block identity. |
+| `role` | [smelt.transcript.Role](types.md#smelttranscriptrole) | yes | Semantic block role. |
+| `first_line` | `string` | yes | First source line, suitable for navigation labels. |
+
 ### `smelt.transcript.ToolOutput`
 
 Tool output snapshot passed to transcript renderers.
@@ -1033,6 +1064,34 @@ Tool output snapshot passed to transcript renderers.
 | `content` | `string` | yes | Captured output text. |
 | `is_error` | `boolean` | yes | True when the tool result is an error. |
 | `metadata` | `table` |  | Tool-specific structured metadata. |
+
+### `smelt.transcript.View`
+
+Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `revision` | `integer` | yes | Monotonic revision of observable committed transcript state. |
+| `window` | [smelt.win.Win](types.md#smeltwinwin) | yes | Transcript window handle for overlay anchoring. |
+| `viewport` | [smelt.transcript.Viewport](types.md#smelttranscriptviewport) | yes | Committed viewport geometry and tail state. |
+| `focused` | `boolean` | yes | Whether the transcript currently owns the visible cursor. |
+| `cursor` | [smelt.transcript.Cursor](types.md#smelttranscriptcursor) |  | Visible transcript cursor position, or nil when the transcript does not own a visible cursor. |
+| `previous_block` | `fun(opts: smelt.transcript.NavigationOpts?): smelt.transcript.Target?` | yes | Return the nearest actionable matching block when moving backward from this view. A matching block containing the viewport top is returned; one beginning exactly at the top is skipped. |
+| `next_block` | `fun(opts: smelt.transcript.NavigationOpts?): smelt.transcript.Target?` | yes | Return the nearest actionable matching block when moving forward from this view. |
+
+### `smelt.transcript.Viewport`
+
+Geometry and tail state from one committed transcript projection.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `width` | `integer` | yes | Outer transcript width in cells. |
+| `height` | `integer` | yes | Transcript viewport height in rows. |
+| `content_width` | `integer` | yes | Inner content width after gutters and scrollbar reservation. |
+| `scrollable` | `boolean` | yes | Whether transcript content exceeds the viewport height. |
+| `following_tail` | `boolean` | yes | Whether new content keeps the viewport pinned to the tail. |
+| `at_top` | `boolean` | yes | Whether the committed viewport is at the transcript top. |
+| `at_bottom` | `boolean` | yes | Whether the committed viewport is at the current transcript bottom. |
 
 ### `smelt.ui.Size`
 
@@ -1105,7 +1164,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `decorate` | `fun(opts: table): smelt.win.Decoration` | yes | Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays. |
 | `cursor` | `fun(row: integer?): any` | yes | Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
-| `reveal` | `fun(row: integer, opts: table?): smelt.win.Win` | yes | Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should use `smelt.transcript.previous_block`, `smelt.transcript.next_block`, and `smelt.transcript.reveal_block`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
+| `reveal` | `fun(row: integer, opts: table?): smelt.win.Win` | yes | Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.bottom_padding` reserves rows below it; `opts.cursor = false` scrolls without moving the cursor. This is a generic row reveal for ordinary windows and explicit row debugging; transcript message navigation should resolve a target from a committed `smelt.transcript.View` and pass it to `smelt.transcript.reveal`. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords. |
 | `on` | `fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription. |
 | `placeholder` | `fun(text: string, opts: table?): smelt.win.Win` | yes | Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining. |
@@ -1155,7 +1214,7 @@ Variants: `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"max"`
 
 Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 
-Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_slug"` \| `"session_title"` \| `"settings_terminal_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"stream_phase"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"transcript_navigation_generation"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_slug"` \| `"session_title"` \| `"settings_terminal_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"stream_phase"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.tools.Decision`
 
@@ -1168,6 +1227,14 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 Coarse side-effect classification used by permission policy.
 
 Variants: `"read"` \| `"write"` \| `"network"` \| `"user"` \| `"process"` \| `"config"` \| `"other"`
+
+### `smelt.transcript.RevealAlign`
+
+Variants: `"top"`
+
+### `smelt.transcript.Role`
+
+Variants: `"user"` \| `"mode"` \| `"process_status"` \| `"assistant"` \| `"thinking"` \| `"tool"` \| `"code"` \| `"exec"` \| `"compacted"` \| `"compaction_preview"`
 
 ### `smelt.vim.Mode`
 

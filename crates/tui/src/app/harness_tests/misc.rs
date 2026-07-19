@@ -1321,7 +1321,7 @@ fn resumed_sparse_jump_to_bottom_after_scroll_up_renders_tail() {
     app.render_silent();
     let before_tail_command = app.app.transcript_win().scroll_top();
     assert!(
-        app.run_lua(r#"assert(smelt.win.transcript()):scroll("tail")"#),
+        app.run_lua("smelt.transcript.follow_tail()"),
         "jump-to-bottom lua command should succeed"
     );
     assert_eq!(
@@ -1389,6 +1389,208 @@ fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
     );
 }
 
+#[test]
+fn committed_view_previous_user_includes_block_containing_viewport_top() {
+    let mut app = TestApp::builder().with_ephemeral(true).build();
+    app.app.handle_resize(80, 16);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::User {
+            text: "older user target".into(),
+            image_labels: Vec::new(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "older assistant response".into(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::User {
+            text: (0..24)
+                .map(|line| format!("CURRENT USER line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            image_labels: Vec::new(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: (0..40)
+                .map(|line| format!("tail assistant line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+    app.render_silent();
+    app.app.app_focus = AppFocus::Prompt;
+    app.app.ui.set_focus(crate::app::PROMPT_WIN);
+    app.reload_lua();
+    app.render_silent();
+
+    assert!(app.app.reveal_transcript_descriptor_block(2, 0, false));
+    app.render_silent();
+    wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
+    app.render_silent();
+
+    let visible = transcript_viewport_lines(&app);
+    assert!(
+        visible
+            .iter()
+            .take(6)
+            .any(|line| line.contains("CURRENT USER line 03")),
+        "viewport top should be inside the current user block: {visible:?}"
+    );
+    assert!(
+        visible
+            .iter()
+            .all(|line| !line.contains("CURRENT USER line 00")),
+        "current user first line should be above the viewport: {visible:?}"
+    );
+    assert!(app.run_lua(
+        r#"
+        local view = assert(smelt.transcript.view())
+        local target = assert(view:previous_block({ role = "user" }))
+        _G.committed_previous_user = target.first_line
+        "#
+    ));
+    assert_eq!(
+        app.app
+            .lua
+            .lua
+            .globals()
+            .get::<String>("committed_previous_user")
+            .expect("committed previous-user label"),
+        "CURRENT USER line 00"
+    );
+
+    let pill_buf = app
+        .app
+        .ui
+        .named_buf("smelt.scroll_pills.top.buf")
+        .expect("visible top pill buffer");
+    let label = app
+        .app
+        .ui
+        .buf(pill_buf)
+        .and_then(|buf| buf.get_line(0))
+        .expect("top pill label");
+    assert!(label.contains("CURRENT USER line 00"));
+    assert!(!label.contains("older user target"));
+}
+
+#[test]
+fn committed_view_watcher_dispatches_once_per_revision() {
+    let mut app = TestApp::builder().with_ephemeral(true).build();
+    app.app.handle_resize(80, 16);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::User {
+            text: "anchored user".into(),
+            image_labels: Vec::new(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: (0..40)
+                .map(|line| format!("assistant line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+    app.render_silent();
+    assert!(app.app.reveal_transcript_descriptor_block(0, 0, false));
+    app.render_silent();
+    let scroll_top = app.app.transcript_win().scroll_top();
+
+    assert!(app.run_lua(
+        r#"
+        _G.committed_view_calls = 0
+        _G.committed_view_reg = smelt.transcript.watch_view(function(view)
+          assert(smelt.transcript.view().revision == view.revision)
+          _G.committed_view_calls = _G.committed_view_calls + 1
+          _G.committed_view_revision = view.revision
+        end)
+        "#
+    ));
+    app.render_silent();
+    assert_eq!(app.lua_int_global("committed_view_calls"), Some(1));
+    let revision = app.lua_int_global("committed_view_revision");
+
+    app.render_silent();
+    assert_eq!(app.lua_int_global("committed_view_calls"), Some(1));
+    assert_eq!(app.lua_int_global("committed_view_revision"), revision);
+
+    assert!(app.run_lua(
+        r#"
+        _G.second_committed_view_calls = 0
+        _G.second_committed_view_reg = smelt.transcript.watch_view(function()
+          _G.second_committed_view_calls = _G.second_committed_view_calls + 1
+        end)
+        "#
+    ));
+    app.render_silent();
+    assert_eq!(app.lua_int_global("committed_view_calls"), Some(1));
+    assert_eq!(app.lua_int_global("second_committed_view_calls"), Some(1));
+
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "new assistant navigation target".into(),
+        });
+    app.render_silent();
+    assert_eq!(app.app.transcript_win().scroll_top(), scroll_top);
+    assert_eq!(app.lua_int_global("committed_view_calls"), Some(2));
+    assert_eq!(app.lua_int_global("second_committed_view_calls"), Some(2));
+    assert_ne!(app.lua_int_global("committed_view_revision"), revision);
+}
+
+#[test]
+fn stale_committed_views_and_cross_session_targets_are_rejected() {
+    let mut app = TestApp::builder().with_ephemeral(true).build();
+    app.app.handle_resize(80, 16);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::User {
+            text: "first user".into(),
+            image_labels: Vec::new(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "first response".into(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::User {
+            text: "second user".into(),
+            image_labels: Vec::new(),
+        });
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: (0..30)
+                .map(|line| format!("second response {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+    app.render_silent();
+    assert!(app.run_lua(
+        r#"
+        _G.stale_transcript_view = assert(smelt.transcript.view())
+        _G.cross_session_target = assert(
+          _G.stale_transcript_view:previous_block({ role = "user" })
+        )
+        assert(not pcall(function()
+          _G.stale_transcript_view:previous_block({ role = "unknown" })
+        end))
+        assert(not pcall(function()
+          smelt.transcript.reveal(_G.cross_session_target, { align = "center" })
+        end))
+        "#
+    ));
+
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "third assistant response".into(),
+        });
+    assert!(app.run_lua(
+        r#"assert(_G.stale_transcript_view:previous_block({ role = "assistant" }) == nil)"#
+    ));
+
+    let session_id = app.app.core.session.id.clone();
+    app.app.core.session.id = "different-session".into();
+    assert!(app.run_lua("assert(smelt.transcript.reveal(_G.cross_session_target) == false)"));
+    app.app.core.session.id = session_id;
+}
+
 fn previous_user_descriptor_index(app: &TestApp) -> usize {
     app.app
         .session_document
@@ -1445,7 +1647,7 @@ fn resumed_sparse_jump_to_bottom_anchors_previous_user_to_visible_tail() {
     );
 
     assert!(
-        app.run_lua(r#"assert(smelt.win.transcript()):scroll("tail")"#),
+        app.run_lua("smelt.transcript.follow_tail()"),
         "jump-to-bottom lua command should succeed"
     );
     app.render_silent();
@@ -2018,41 +2220,63 @@ struct RevealedUserBlock {
 }
 
 fn reveal_user_block_via_lua(app: &mut TestApp, direction: &str) -> RevealedUserBlock {
+    let view = app
+        .app
+        .committed_transcript_view
+        .as_ref()
+        .expect("committed transcript view");
+    let anchor = view.state.anchor.expect("committed navigation anchor");
+    let expected = match direction {
+        "previous" => app
+            .app
+            .session_document
+            .transcript
+            .previous_navigation_block_from(anchor, Some("user")),
+        "next" => app
+            .app
+            .session_document
+            .transcript
+            .next_navigation_block_from(anchor, Some("user")),
+        other => panic!("unsupported transcript reveal direction {other}"),
+    }
+    .expect("semantic user navigation target");
     let snippet = match direction {
         "previous" => {
             r#"
-            local block = assert(smelt.transcript.previous_block({ role = "user" }))
+            local view = assert(smelt.transcript.view())
+            local block = assert(view:previous_block({ role = "user" }))
             assert(block.role == "user")
-            assert(smelt.transcript.reveal_block(block.descriptor_index, { top_padding = 1, cursor = true }))
-            _G.transcript_revealed_descriptor_index = block.descriptor_index
+            assert(smelt.transcript.reveal(block, { align = "top", move_cursor = true }))
             _G.transcript_revealed_block_id = block.block_id
             _G.transcript_revealed_first_line = block.first_line
             "#
         }
         "next" => {
             r#"
-            local block = assert(smelt.transcript.next_block({ role = "user" }))
+            local view = assert(smelt.transcript.view())
+            local block = assert(view:next_block({ role = "user" }))
             assert(block.role == "user")
-            assert(smelt.transcript.reveal_block(block.descriptor_index, { top_padding = 1, cursor = true }))
-            _G.transcript_revealed_descriptor_index = block.descriptor_index
+            assert(smelt.transcript.reveal(block, { align = "top", move_cursor = true }))
             _G.transcript_revealed_block_id = block.block_id
             _G.transcript_revealed_first_line = block.first_line
             "#
         }
-        other => panic!("unsupported transcript reveal direction {other}"),
+        _ => unreachable!(),
     };
     assert!(app.run_lua(snippet));
     let globals = app.app.lua.lua.globals();
+    let block_id = globals
+        .get::<u64>("transcript_revealed_block_id")
+        .expect("revealed block id");
+    let first_line = globals
+        .get::<String>("transcript_revealed_first_line")
+        .expect("revealed first line");
+    assert_eq!(block_id, expected.block_id.get());
+    assert_eq!(first_line, expected.first_line);
     RevealedUserBlock {
-        descriptor_index: globals
-            .get::<usize>("transcript_revealed_descriptor_index")
-            .expect("revealed descriptor index"),
-        block_id: globals
-            .get::<u64>("transcript_revealed_block_id")
-            .expect("revealed block id"),
-        first_line: globals
-            .get::<String>("transcript_revealed_first_line")
-            .expect("revealed first line"),
+        descriptor_index: expected.descriptor_index,
+        block_id,
+        first_line,
     }
 }
 
@@ -2079,7 +2303,7 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
                 smelt_core::transcript_model::BlockId::new(block.block_id)
             );
             assert_eq!(row_offset, 0);
-            assert_eq!(screen_padding_top, 1);
+            assert_eq!(screen_padding_top, 0);
         }
         ref intent => panic!("semantic user navigation collapsed to wrong intent: {intent:?}"),
     }
@@ -2752,9 +2976,7 @@ fn transcript_drag_autoscroll_top_crosses_sparse_windows_without_teleport() {
 #[test]
 fn transcript_drag_autoscroll_bottom_crosses_sparse_windows_without_locking() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
-    assert!(app.run_lua(
-        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
-    ));
+    assert!(app.app.reveal_transcript_descriptor_block(120, 1, true));
     app.render_silent();
     app.app
         .session_document
@@ -2857,9 +3079,7 @@ fn transcript_drag_autoscroll_bottom_stops_at_real_bottom() {
 #[test]
 fn transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
-    assert!(app.run_lua(
-        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
-    ));
+    assert!(app.app.reveal_transcript_descriptor_block(120, 1, true));
     app.render_silent();
     app.app
         .session_document
@@ -2915,9 +3135,7 @@ fn transcript_drag_autoscroll_bottom_no_input_renders_do_not_undo_ticks() {
 #[test]
 fn transcript_cursor_down_inside_viewport_moves_one_row_without_scrolling() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
-    assert!(app.run_lua(
-        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
-    ));
+    assert!(app.app.reveal_transcript_descriptor_block(120, 1, true));
     app.render_silent();
     app.app.transcript_win_mut().set_vim_enabled(true);
     app.app
@@ -2984,9 +3202,7 @@ fn transcript_cursor_down_inside_viewport_moves_one_row_without_scrolling() {
 #[test]
 fn transcript_cursor_down_at_lower_edge_moves_one_visible_row_per_step() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
-    assert!(app.run_lua(
-        r#"assert(smelt.transcript.reveal_block(120, { top_padding = 1, cursor = true }))"#
-    ));
+    assert!(app.app.reveal_transcript_descriptor_block(120, 1, true));
     app.render_silent();
     app.app.transcript_win_mut().set_vim_enabled(true);
     app.app

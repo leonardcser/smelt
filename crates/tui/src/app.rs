@@ -225,11 +225,34 @@ impl SessionAccess {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptViewState {
+    pub(crate) session_id: String,
+    pub(crate) navigation_generation: u64,
+    pub(crate) anchor: Option<crate::app::transcript::TranscriptSemanticAnchor>,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) content_width: u16,
+    pub(crate) scrollable: bool,
+    pub(crate) following_tail: bool,
+    pub(crate) at_top: bool,
+    pub(crate) at_bottom: bool,
+    pub(crate) focused: bool,
+    pub(crate) cursor_viewport_row: Option<u16>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CommittedTranscriptView {
+    pub(crate) revision: u64,
+    pub(crate) state: TranscriptViewState,
+}
+
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaGeneration,
     command_catalog: Arc<smelt_core::commands::CommandCatalog>,
     pub(crate) session_document: TuiSessionDocument,
+    pub(crate) committed_transcript_view: Option<CommittedTranscriptView>,
     pub(crate) document_render_cache: crate::app::document::DocumentRenderCache,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
     pub(crate) draft_tools: crate::app::drafts::ToolDraftController,
@@ -1629,6 +1652,7 @@ impl TuiApp {
             lua,
             command_catalog,
             session_document: TuiSessionDocument::new(transcript),
+            committed_transcript_view: None,
             document_render_cache: crate::app::document::DocumentRenderCache::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
             draft_tools: crate::app::drafts::ToolDraftController::default(),
@@ -1899,13 +1923,6 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("viewport_pos", viewport);
-        self.core.signals.publish_if_changed(
-            "transcript_navigation_generation",
-            self.session_document
-                .transcript
-                .history()
-                .navigation_generation(),
-        );
 
         self.publish_work_signals();
     }

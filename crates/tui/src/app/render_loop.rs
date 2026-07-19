@@ -1,11 +1,244 @@
-//! Per-frame render loop: drives the Lua-registered main-layout composer,
-//! dispatches per-window Lua renderers, then projects the transcript and
-//! prompt input into their backing buffers.
+//! Per-frame render loop: resolves the Lua-composed layout, commits transcript
+//! projection and observers, dispatches per-window Lua renderers, synchronizes
+//! prompt input, then paints the prepared frame.
 
 use crate::app::TuiApp;
 use crate::content::{layout, prompt_buf};
 
+fn prepare_transcript_window(
+    transcript: &mut crate::app::transcript::TranscriptDocument,
+    lua: &crate::lua::LuaGeneration,
+    theme: &std::sync::Arc<crate::smelt_edit::Theme>,
+    ui: &mut crate::smelt_edit::Ui,
+    request: crate::smelt_edit::MaterializeRequest,
+    render_now: std::time::Instant,
+    transcript_search_range_after_projection: &mut Option<crate::smelt_edit::DocRange>,
+) {
+    if crate::app::document::DocumentRegistry::resolve_optional(request.document_handle)
+        != Some(crate::app::document::RegisteredDocument::Transcript)
+    {
+        return;
+    }
+    let viewport_rows = request.rect.height;
+    let pending_restore = transcript.take_pending_projection_restore();
+    let fallback_cursor_screen_row = ui
+        .win(request.win)
+        .and_then(|win| win.cursor_screen_row(viewport_rows));
+    let transcript_scroll_state;
+    let transcript_cursor_range;
+    {
+        let _p = smelt_perf::perf::begin("compositor:project_transcript");
+        let width = request.content_width.max(1);
+        let previous_content_width = ui
+            .win(request.win)
+            .and_then(|win| win.viewport.map(|viewport| viewport.content_width));
+        let width_changed = previous_content_width.is_some_and(|previous| previous != width);
+        let plan = transcript.plan_viewport_projection_measured(
+            lua,
+            width,
+            theme,
+            crate::app::transcript::TranscriptViewportProjectionInput {
+                fallback_scroll_top: request.scroll_top,
+                follow_tail: request.follow_tail,
+                width_changed,
+                previous_width: previous_content_width,
+            },
+            viewport_rows,
+        );
+        let Some(buf) = ui.buf_mut(request.buf) else {
+            return;
+        };
+        let applied = transcript.project_applied_viewport(lua, buf, theme, plan);
+        let desired_scroll_state = applied.scroll_state;
+        transcript_cursor_range = applied.cursor_range;
+        let tdata = applied.materialized_rows;
+        debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
+        debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
+        debug_assert!(
+            applied.exact_visible_range.end <= tdata.total_rows,
+            "applied transcript viewport reports an out-of-bounds visible range"
+        );
+        if applied.placeholder_rows_visible {
+            debug_assert!(applied.top_anchor.is_some());
+        }
+        if let Some(win) = ui.win_mut(request.win) {
+            debug_assert!(tdata.total_rows >= tdata.row_base);
+            debug_assert!(
+                tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
+            );
+            win.apply_materialized_rows(tdata);
+            transcript_scroll_state =
+                win.apply_projected_scroll(tdata.clamped_scroll, desired_scroll_state);
+        } else {
+            transcript_scroll_state = desired_scroll_state;
+        }
+    }
+    let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
+    if let (Some(win), Some(buf)) = (win, buf) {
+        let mut restore = crate::smelt_edit::DocumentViewScreenRowRestore {
+            cursor: pending_restore.cursor_screen_row,
+            cursor_selection: crate::smelt_edit::CursorScreenRowSelection::RestoreActiveSelection,
+            drag_endpoint: pending_restore.drag_endpoint_screen_row,
+        };
+        if restore.cursor.is_none() {
+            restore.cursor = fallback_cursor_screen_row;
+            restore.cursor_selection =
+                crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
+        }
+        win.restore_document_view_screen_rows(buf, restore);
+        if let Some(range) = transcript_cursor_range {
+            if win.set_row_cursor(buf, range.start) {
+                *transcript_search_range_after_projection = Some(range);
+            }
+        }
+        if win.has_materialized_rows() {
+            win.sync_yank_flash_layer(buf, viewport_rows, render_now);
+            if matches!(
+                transcript_scroll_state,
+                crate::smelt_edit::VerticalScroll::Tail
+            ) {
+                win.reveal_row_cursor(buf, viewport_rows);
+            }
+            win.scroll_left = 0;
+        } else {
+            let text = buf.text();
+            win.clamp_anchors_to_source(&text);
+            buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
+            win.sync_yank_flash_layer(buf, viewport_rows, render_now);
+            win.scroll_left = 0;
+        }
+    }
+}
+
 impl TuiApp {
+    fn prepare_committed_transcript_view(
+        &mut self,
+        focused: bool,
+    ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
+        let theme = self.ui.theme().clone();
+        let render_now = self.core.clock.instant_now();
+        let mut transcript_search_range_after_projection = None;
+        let prepared_transcript = {
+            let transcript = &mut self.session_document.transcript;
+            let lua = &self.lua;
+            let ui = &mut self.ui;
+            ui.prepare_split_window_with(crate::app::TRANSCRIPT_WIN, |ui, request| {
+                prepare_transcript_window(
+                    transcript,
+                    lua,
+                    &theme,
+                    ui,
+                    request,
+                    render_now,
+                    &mut transcript_search_range_after_projection,
+                );
+            })
+        };
+        let transcript_visible = prepared_transcript.is_some();
+        if let Some(range) = transcript_search_range_after_projection {
+            self.update_current_transcript_search_range(crate::app::TRANSCRIPT_WIN, range);
+        }
+        self.capture_committed_transcript_view(focused && transcript_visible, transcript_visible);
+        self.dispatch_committed_transcript_view();
+        prepared_transcript
+    }
+
+    fn capture_committed_transcript_view(&mut self, focused: bool, visible: bool) {
+        let (width, height, content_width, scrollable, following_tail, at_top, at_bottom, cursor) = {
+            let win = self.transcript_win();
+            let viewport = visible.then_some(win.viewport).flatten();
+            let width = viewport.map(|viewport| viewport.rect.width).unwrap_or(0);
+            let height = viewport.map(|viewport| viewport.rect.height).unwrap_or(0);
+            let content_width = viewport.map(|viewport| viewport.content_width).unwrap_or(0);
+            let total = self
+                .ui
+                .buf(win.buf)
+                .map(|buf| win.scroll_row_total(buf))
+                .unwrap_or(0);
+            let max = total.saturating_sub(height as u64);
+            let top = win.scroll_top().min(max);
+            let cursor = if focused {
+                win.cursor_screen_row(height)
+            } else {
+                None
+            };
+            (
+                width,
+                height,
+                content_width,
+                viewport.is_some() && total > height as u64,
+                win.is_following_tail(),
+                viewport.is_some() && top == 0,
+                viewport.is_some() && top >= max,
+                cursor,
+            )
+        };
+        let state = crate::app::TranscriptViewState {
+            session_id: self.core.session.id.clone(),
+            navigation_generation: self
+                .session_document
+                .transcript
+                .history()
+                .navigation_generation(),
+            anchor: self.session_document.transcript.current_navigation_anchor(),
+            width,
+            height,
+            content_width,
+            scrollable,
+            following_tail,
+            at_top,
+            at_bottom,
+            focused,
+            cursor_viewport_row: cursor,
+        };
+        if self
+            .committed_transcript_view
+            .as_ref()
+            .is_some_and(|view| view.state == state)
+        {
+            return;
+        }
+        let revision = self
+            .committed_transcript_view
+            .as_ref()
+            .map(|view| view.revision.wrapping_add(1))
+            .unwrap_or(1);
+        self.committed_transcript_view =
+            Some(crate::app::CommittedTranscriptView { revision, state });
+    }
+
+    fn dispatch_committed_transcript_view(&mut self) {
+        let Some(view) = self.committed_transcript_view.clone() else {
+            return;
+        };
+        let callbacks = self
+            .lua
+            .shared()
+            .transcript_view_watchers
+            .pending_callbacks(self.lua.lua(), view.revision);
+        let prepared: Vec<(mlua::Function, mlua::AnyUserData)> = callbacks
+            .into_iter()
+            .filter_map(|callback| {
+                self.lua
+                    .lua()
+                    .create_userdata(crate::lua::api::transcript::LuaTranscriptView::new(
+                        view.clone(),
+                    ))
+                    .ok()
+                    .map(|payload| (callback, payload))
+            })
+            .collect();
+        let _guard = crate::lua::install_app_ptr(self);
+        for (callback, payload) in prepared {
+            if let Err(error) = callback.call::<()>(payload) {
+                crate::lua::try_with_app(|app| {
+                    app.lua
+                        .record_error(format!("transcript view watcher: {error}"));
+                });
+            }
+        }
+    }
+
     pub(crate) fn render_normal(&mut self) {
         let mut stdout = std::io::stdout();
         self.render_normal_to(&mut stdout);
@@ -137,6 +370,15 @@ impl TuiApp {
         // Lua renderers run so the prompt top-bar indicator they paint
         // this frame already reflects the pause.
         self.set_agent_blocked_paused(self.ui.active_modal_blocks_agent());
+        let now = self.core.clock.instant_now();
+        self.apply_session_document_mutation(
+            crate::app::session_document::SessionMutation::SyncActiveToolElapsed { now },
+        );
+        self.sync_transcript_renderer_generation();
+
+        // Commit transcript projection before Lua observers run. Plugins receive
+        // one coherent view snapshot and can update overlays for this same frame.
+        let prepared_transcript = self.prepare_committed_transcript_view(has_transcript_cursor);
 
         {
             let _p = smelt_perf::perf::begin("compositor:lua_renderers");
@@ -144,10 +386,8 @@ impl TuiApp {
         }
         // Suppress unused-variable warning when queued is only forwarded into Lua state.
         let _ = queued;
-        // Transcript projection is materialized by the render-prep hook below,
-        // after split geometry is resolved. Row-backed drag state uses absolute
-        // document rows, so the backing slice can keep following scroll during
-        // edge autoscroll without moving the selection anchor.
+        // Row-backed drag state uses absolute document rows, so the committed
+        // backing slice can follow edge autoscroll without moving its anchor.
         {
             let _p = smelt_perf::perf::begin("compositor:input");
             self.sync_input_layer(prompt_rect, has_prompt_cursor);
@@ -182,30 +422,22 @@ impl TuiApp {
         }
 
         let _p = smelt_perf::perf::begin("compositor:render_flush");
-        let now = self.core.clock.instant_now();
-        self.apply_session_document_mutation(
-            crate::app::session_document::SessionMutation::SyncActiveToolElapsed { now },
-        );
-        self.sync_transcript_renderer_generation();
 
-        // Split-borrow app fields so the render-prep hook can materialize the
-        // transcript through the generic `Ui` path while paint callbacks still
-        // invoke Lua without borrowing all of `self`.
-        let transcript = &mut self.session_document.transcript;
+        // Transcript content was materialized by the committed-view phase. The
+        // paint pass still prepares other row-backed windows and applies search.
         let notification = &mut self.notification;
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;
-        let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();
         let search_session = self
             .search
             .session
             .as_ref()
             .map(crate::app::search::SearchRenderSession::from);
-        let mut transcript_search_range_after_projection = None;
         let ui = &mut self.ui;
-        let _ = ui.render_with_paints_prepared_and_after_layout(
+        let _ = ui.render_with_prepared_splits_and_paints(
             out,
+            prepared_transcript,
             |ui, request| {
                 if let Some(notification) = notification
                     .as_mut()
@@ -221,103 +453,6 @@ impl TuiApp {
                             width,
                         );
                         notification.rendered_width = width;
-                    }
-                }
-                if crate::app::document::DocumentRegistry::resolve_optional(request.document_handle)
-                    != Some(crate::app::document::RegisteredDocument::Transcript)
-                {
-                    return;
-                }
-                let viewport_rows = request.rect.height;
-                let pending_restore = transcript.take_pending_projection_restore();
-                let fallback_cursor_screen_row = ui
-                    .win(request.win)
-                    .and_then(|win| win.cursor_screen_row(viewport_rows));
-                let transcript_scroll_state;
-                let transcript_cursor_range;
-                {
-                    let _p = smelt_perf::perf::begin("compositor:project_transcript");
-                    let width = request.content_width.max(1);
-                    let previous_content_width = ui
-                        .win(request.win)
-                        .and_then(|win| win.viewport.map(|viewport| viewport.content_width));
-                    let width_changed =
-                        previous_content_width.is_some_and(|previous| previous != width);
-                    let plan = transcript.plan_viewport_projection_measured(
-                        lua,
-                        width,
-                        &theme,
-                        crate::app::transcript::TranscriptViewportProjectionInput {
-                            fallback_scroll_top: request.scroll_top,
-                            follow_tail: request.follow_tail,
-                            width_changed,
-                            previous_width: previous_content_width,
-                        },
-                        viewport_rows,
-                    );
-                    let Some(buf) = ui.buf_mut(request.buf) else {
-                        return;
-                    };
-                    let applied = transcript.project_applied_viewport(lua, buf, &theme, plan);
-                    let desired_scroll_state = applied.scroll_state;
-                    transcript_cursor_range = applied.cursor_range;
-                    let tdata = applied.materialized_rows;
-                    debug_assert_eq!(applied.scrollbar_total_rows, tdata.total_rows);
-                    debug_assert_eq!(applied.exact_visible_range.start, tdata.clamped_scroll);
-                    debug_assert!(
-                        applied.exact_visible_range.end <= tdata.total_rows,
-                        "applied transcript viewport reports an out-of-bounds visible range"
-                    );
-                    if applied.placeholder_rows_visible {
-                        debug_assert!(applied.top_anchor.is_some());
-                    }
-                    if let Some(win) = ui.win_mut(request.win) {
-                        debug_assert!(tdata.total_rows >= tdata.row_base);
-                        debug_assert!(
-                            tdata.clamped_scroll
-                                <= tdata.total_rows.saturating_sub(viewport_rows as _)
-                        );
-                        win.apply_materialized_rows(tdata);
-                        transcript_scroll_state =
-                            win.apply_projected_scroll(tdata.clamped_scroll, desired_scroll_state);
-                    } else {
-                        transcript_scroll_state = desired_scroll_state;
-                    }
-                }
-                let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
-                if let (Some(win), Some(buf)) = (win, buf) {
-                    let mut restore = crate::smelt_edit::DocumentViewScreenRowRestore {
-                        cursor: pending_restore.cursor_screen_row,
-                        cursor_selection:
-                            crate::smelt_edit::CursorScreenRowSelection::RestoreActiveSelection,
-                        drag_endpoint: pending_restore.drag_endpoint_screen_row,
-                    };
-                    if restore.cursor.is_none() {
-                        restore.cursor = fallback_cursor_screen_row;
-                        restore.cursor_selection =
-                            crate::smelt_edit::CursorScreenRowSelection::SkipActiveSelection;
-                    }
-                    win.restore_document_view_screen_rows(buf, restore);
-                    if let Some(range) = transcript_cursor_range {
-                        if win.set_row_cursor(buf, range.start) {
-                            transcript_search_range_after_projection = Some(range);
-                        }
-                    }
-                    if win.has_materialized_rows() {
-                        win.sync_yank_flash_layer(buf, viewport_rows, render_now);
-                        if matches!(
-                            transcript_scroll_state,
-                            crate::smelt_edit::VerticalScroll::Tail
-                        ) {
-                            win.reveal_row_cursor(buf, viewport_rows);
-                        }
-                        win.scroll_left = 0;
-                    } else {
-                        let text = buf.text();
-                        win.clamp_anchors_to_source(&text);
-                        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
-                        win.sync_yank_flash_layer(buf, viewport_rows, render_now);
-                        win.scroll_left = 0;
                     }
                 }
             },
@@ -340,9 +475,6 @@ impl TuiApp {
                 }
             },
         );
-        if let Some(range) = transcript_search_range_after_projection {
-            self.update_current_transcript_search_range(crate::app::TRANSCRIPT_WIN, range);
-        }
     }
 
     /// Compute which pane owns the cursor this frame.

@@ -22,8 +22,8 @@ use smelt_core::content::highlight::InlineOptions;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::transcript_model::{
-    Block, BlockHistory, BlockId, LayoutKey, ToolOutputRef, ToolStatus, TranscriptBlockDescriptor,
-    TranscriptBlockRecordWithId,
+    Block, BlockHistory, BlockId, BlockText, LayoutKey, ToolOutputRef, ToolStatus,
+    TranscriptBlockDescriptor, TranscriptBlockRecordWithId,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
@@ -1027,10 +1027,10 @@ struct TranscriptContentAnchor {
 // to the target block; normal viewport projection falls back to the top visible
 // content anchor; far-seek gaps clear it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TranscriptSemanticAnchor {
-    descriptor_index: usize,
-    block_id: BlockId,
-    row_offset: RowIndex,
+pub(crate) struct TranscriptSemanticAnchor {
+    pub(crate) descriptor_index: usize,
+    pub(crate) block_id: BlockId,
+    pub(crate) row_offset: RowIndex,
 }
 
 impl From<TranscriptContentAnchor> for TranscriptSemanticAnchor {
@@ -2166,8 +2166,6 @@ impl TranscriptDocument {
     fn navigation_block_from_record(
         index: usize,
         record: &TranscriptBlockRecordWithId,
-        current_block_id: BlockId,
-        current_row_offset: RowIndex,
     ) -> Option<TranscriptNavigationBlock> {
         let first_line = descriptor_first_line(&record.record.descriptor);
         if first_line.is_empty() {
@@ -2178,7 +2176,6 @@ impl TranscriptDocument {
             block_id: record.block_id,
             role: descriptor_role(&record.record.descriptor),
             first_line,
-            already_at_anchor: record.block_id == current_block_id && current_row_offset == 0,
         })
     }
 
@@ -2194,6 +2191,26 @@ impl TranscriptDocument {
             return self.history().order.iter().position(|id| *id == block_id);
         }
         None
+    }
+
+    pub(crate) fn descriptor_matches_block_id(
+        &self,
+        descriptor_index: usize,
+        block_id: BlockId,
+    ) -> bool {
+        if self.descriptors.total_count().is_none() {
+            return self.history().order.get(descriptor_index).copied() == Some(block_id);
+        }
+        if let Some(record) =
+            self.descriptors
+                .sparse
+                .record(smelt_store::TranscriptDescriptorIndex::new(
+                    descriptor_index,
+                ))
+        {
+            return record.block_id == block_id;
+        }
+        self.stored_descriptor_index_for_block_idx(block_id.get()) == Some(descriptor_index)
     }
 
     fn stored_descriptor_index_for_block_idx(&self, block_idx: u64) -> Option<usize> {
@@ -2359,27 +2376,33 @@ impl TranscriptDocument {
         ))
     }
 
-    fn current_viewport_descriptor_anchor(&self) -> Option<(usize, BlockId, RowIndex)> {
+    pub(crate) fn current_navigation_anchor(&self) -> Option<TranscriptSemanticAnchor> {
         if let Some(anchor) = self.viewport.state.semantic_anchor {
-            return Some((anchor.descriptor_index, anchor.block_id, anchor.row_offset));
+            return Some(anchor);
         }
 
         if let Some(TranscriptScrollAnchor::Content(anchor)) = self.viewport.state.top_anchor {
-            return Some((
-                anchor.descriptor_index,
-                anchor.block_id,
-                anchor.intra_block_row,
-            ));
+            return Some(TranscriptSemanticAnchor {
+                descriptor_index: anchor.descriptor_index,
+                block_id: anchor.block_id,
+                row_offset: anchor.intra_block_row,
+            });
         }
 
         if let Some(active) = self.descriptors.active_range() {
-            let index = active.start.get();
-            if let Some(record) = self
-                .descriptors
-                .sparse
-                .record(smelt_store::TranscriptDescriptorIndex::new(index))
+            let descriptor_index = active.start.get();
+            if let Some(record) =
+                self.descriptors
+                    .sparse
+                    .record(smelt_store::TranscriptDescriptorIndex::new(
+                        descriptor_index,
+                    ))
             {
-                return Some((index, record.block_id, 0));
+                return Some(TranscriptSemanticAnchor {
+                    descriptor_index,
+                    block_id: record.block_id,
+                    row_offset: 0,
+                });
             }
         }
 
@@ -2387,7 +2410,11 @@ impl TranscriptDocument {
             .order
             .first()
             .copied()
-            .map(|block_id| (0, block_id, 0))
+            .map(|block_id| TranscriptSemanticAnchor {
+                descriptor_index: 0,
+                block_id,
+                row_offset: 0,
+            })
     }
 
     fn navigation_record_from_store(
@@ -2441,29 +2468,69 @@ impl TranscriptDocument {
         }
     }
 
-    fn navigation_block(
+    fn containing_navigation_block(
         &self,
+        anchor: TranscriptSemanticAnchor,
+        role: &str,
+    ) -> Option<TranscriptNavigationBlock> {
+        if anchor.row_offset == 0 {
+            return None;
+        }
+
+        if self.descriptors.total_count().is_some() {
+            let record =
+                self.descriptors
+                    .sparse
+                    .record(smelt_store::TranscriptDescriptorIndex::new(
+                        anchor.descriptor_index,
+                    ))?;
+            if record.block_id != anchor.block_id
+                || descriptor_role(&record.record.descriptor) != role
+            {
+                return None;
+            }
+            return Self::navigation_block_from_record(anchor.descriptor_index, record);
+        }
+
+        let history = self.history();
+        if history.order.get(anchor.descriptor_index).copied() != Some(anchor.block_id)
+            || transcript_history_role(history, anchor.block_id) != role
+        {
+            return None;
+        }
+        let first_line = transcript_raw_first_line(history, anchor.block_id);
+        (!first_line.is_empty()).then_some(TranscriptNavigationBlock {
+            descriptor_index: anchor.descriptor_index,
+            block_id: anchor.block_id,
+            role: transcript_history_role(history, anchor.block_id),
+            first_line,
+        })
+    }
+
+    fn navigation_block_from_anchor(
+        &self,
+        anchor: TranscriptSemanticAnchor,
         role: Option<&str>,
         direction: TranscriptNavigationDirection,
     ) -> Option<TranscriptNavigationBlock> {
-        let (anchor_index, current_block_id, current_row_offset) =
-            self.current_viewport_descriptor_anchor()?;
         let role = role.unwrap_or("user");
+        if direction == TranscriptNavigationDirection::Previous {
+            if let Some(block) = self.containing_navigation_block(anchor, role) {
+                return Some(block);
+            }
+        }
 
         if self.descriptors.total_count().is_some() {
-            let anchor = smelt_store::TranscriptDescriptorIndex::new(anchor_index);
-            let loaded = self
-                .descriptors
-                .sparse
-                .navigation_record(role, anchor, direction);
-            let stored = self.navigation_record_from_store(role, anchor_index, direction);
+            let descriptor_anchor =
+                smelt_store::TranscriptDescriptorIndex::new(anchor.descriptor_index);
+            let loaded =
+                self.descriptors
+                    .sparse
+                    .navigation_record(role, descriptor_anchor, direction);
+            let stored =
+                self.navigation_record_from_store(role, anchor.descriptor_index, direction);
             let (index, record) = Self::choose_navigation_record(loaded, stored, direction)?;
-            return Self::navigation_block_from_record(
-                index,
-                &record,
-                current_block_id,
-                current_row_offset,
-            );
+            return Self::navigation_block_from_record(index, &record);
         }
 
         let history = self.history();
@@ -2474,7 +2541,7 @@ impl TranscriptDocument {
                     .iter()
                     .copied()
                     .enumerate()
-                    .take(anchor_index)
+                    .take(anchor.descriptor_index)
                     .rev(),
             ),
             TranscriptNavigationDirection::Next => Box::new(
@@ -2483,7 +2550,7 @@ impl TranscriptDocument {
                     .iter()
                     .copied()
                     .enumerate()
-                    .skip(anchor_index.saturating_add(1)),
+                    .skip(anchor.descriptor_index.saturating_add(1)),
             ),
         };
         for (index, block_id) in iter {
@@ -2499,24 +2566,41 @@ impl TranscriptDocument {
                 block_id,
                 role: transcript_history_role(history, block_id),
                 first_line,
-                already_at_anchor: block_id == current_block_id && current_row_offset == 0,
             });
         }
         None
     }
 
+    pub(crate) fn previous_navigation_block_from(
+        &self,
+        anchor: TranscriptSemanticAnchor,
+        role: Option<&str>,
+    ) -> Option<TranscriptNavigationBlock> {
+        self.navigation_block_from_anchor(anchor, role, TranscriptNavigationDirection::Previous)
+    }
+
+    pub(crate) fn next_navigation_block_from(
+        &self,
+        anchor: TranscriptSemanticAnchor,
+        role: Option<&str>,
+    ) -> Option<TranscriptNavigationBlock> {
+        self.navigation_block_from_anchor(anchor, role, TranscriptNavigationDirection::Next)
+    }
+
+    #[cfg(test)]
     pub(crate) fn previous_navigation_block(
         &self,
         role: Option<&str>,
     ) -> Option<TranscriptNavigationBlock> {
-        self.navigation_block(role, TranscriptNavigationDirection::Previous)
+        self.previous_navigation_block_from(self.current_navigation_anchor()?, role)
     }
 
+    #[cfg(test)]
     pub(crate) fn next_navigation_block(
         &self,
         role: Option<&str>,
     ) -> Option<TranscriptNavigationBlock> {
-        self.navigation_block(role, TranscriptNavigationDirection::Next)
+        self.next_navigation_block_from(self.current_navigation_anchor()?, role)
     }
 
     fn descriptor_block_target_row(
@@ -6166,7 +6250,6 @@ mod document_tests {
         assert_eq!(previous.block_id, BlockId::new(50));
         assert_eq!(previous.role, "user");
         assert_eq!(previous.first_line, "user 50");
-        assert!(!previous.already_at_anchor);
 
         let next = document
             .next_navigation_block(Some("user"))
@@ -6176,7 +6259,6 @@ mod document_tests {
         assert_eq!(next.block_id, BlockId::new(80));
         assert_eq!(next.role, "user");
         assert_eq!(next.first_line, "user 80");
-        assert!(!next.already_at_anchor);
         assert_eq!(document.descriptors.active_range, active_before);
         assert!(!active_history_contains(&document, "user 0"));
         assert!(!active_history_contains(&document, "user 50"));
@@ -6756,7 +6838,6 @@ pub(crate) struct TranscriptNavigationBlock {
     pub(crate) block_id: BlockId,
     pub(crate) role: &'static str,
     pub(crate) first_line: String,
-    pub(crate) already_at_anchor: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6767,54 +6848,31 @@ pub(crate) struct TranscriptBlockRevealPosition {
 }
 
 fn transcript_block_role(block: &Block) -> &'static str {
-    match block {
-        Block::User { .. } => "user",
-        Block::Mode { .. } => "mode",
-        Block::ProcessStatus { .. } => "process_status",
-        Block::Text { .. } => "assistant",
-        Block::Thinking { .. } => "thinking",
-        Block::ToolDraft { .. } | Block::ToolCall { .. } => "tool",
-        Block::CodeLine { .. } => "code",
-        Block::Exec { .. } => "exec",
-        Block::Compacted { .. } => "compacted",
-        Block::CompactionPreview { .. } => "compaction_preview",
-    }
+    block.kind()
 }
 
 fn descriptor_role(descriptor: &TranscriptBlockDescriptor) -> &'static str {
-    match descriptor {
-        TranscriptBlockDescriptor::User { .. } => "user",
-        TranscriptBlockDescriptor::Mode { .. } => "mode",
-        TranscriptBlockDescriptor::ProcessStatus { .. } => "process_status",
-        TranscriptBlockDescriptor::Text { .. } => "assistant",
-        TranscriptBlockDescriptor::Thinking { .. } => "thinking",
-        TranscriptBlockDescriptor::ToolDraft { .. }
-        | TranscriptBlockDescriptor::ToolCall { .. } => "tool",
-        TranscriptBlockDescriptor::CodeLine { .. } => "code",
-        TranscriptBlockDescriptor::Exec { .. } => "exec",
-        TranscriptBlockDescriptor::Compacted { .. } => "compacted",
-        TranscriptBlockDescriptor::CompactionPreview { .. } => "compaction_preview",
-    }
+    descriptor.kind()
 }
 
 fn descriptor_first_line(descriptor: &TranscriptBlockDescriptor) -> String {
     descriptor
-        .raw_text()
-        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .row_estimate_text()
+        .map(BlockText::first_source_line)
         .unwrap_or_default()
 }
 
 fn transcript_block_first_line(block: &Block) -> String {
     block
-        .raw_text()
-        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .row_estimate_text()
+        .map(BlockText::first_source_line)
         .unwrap_or_default()
 }
 
 fn transcript_raw_first_line(history: &BlockHistory, id: BlockId) -> String {
     history
-        .raw_text(id)
-        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .row_estimate_text(id)
+        .map(BlockText::first_source_line)
         .unwrap_or_default()
 }
 
@@ -7309,27 +7367,36 @@ impl TuiApp {
             })
     }
 
-    pub(crate) fn previous_transcript_navigation_block(
-        &mut self,
-        role: Option<&str>,
-    ) -> Option<TranscriptNavigationBlock> {
-        self.sync_transcript_renderer_generation();
-        self.session_document
-            .transcript
-            .previous_navigation_block(role)
-    }
-
-    pub(crate) fn next_transcript_navigation_block(
-        &mut self,
-        role: Option<&str>,
-    ) -> Option<TranscriptNavigationBlock> {
-        self.sync_transcript_renderer_generation();
-        self.session_document.transcript.next_navigation_block(role)
-    }
-
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn reveal_transcript_descriptor_block(
         &mut self,
         descriptor_index: usize,
+        top_padding: crate::smelt_edit::RowIndex,
+        cursor: bool,
+    ) -> bool {
+        self.reveal_transcript_block(descriptor_index, None, top_padding, cursor)
+    }
+
+    pub(crate) fn reveal_transcript_target(
+        &mut self,
+        descriptor_index: usize,
+        block_id: BlockId,
+        move_cursor: bool,
+    ) -> bool {
+        if !self
+            .session_document
+            .transcript
+            .descriptor_matches_block_id(descriptor_index, block_id)
+        {
+            return false;
+        }
+        self.reveal_transcript_block(descriptor_index, Some(block_id), 0, move_cursor)
+    }
+
+    fn reveal_transcript_block(
+        &mut self,
+        descriptor_index: usize,
+        expected_block_id: Option<BlockId>,
         top_padding: crate::smelt_edit::RowIndex,
         cursor: bool,
     ) -> bool {
@@ -7355,6 +7422,9 @@ impl TuiApp {
         else {
             return false;
         };
+        if expected_block_id.is_some_and(|expected| expected != reveal.block_id) {
+            return false;
+        }
         let window_scroll_before = self.transcript_scroll_top();
         self.reveal_position(
             crate::app::TRANSCRIPT_WIN,

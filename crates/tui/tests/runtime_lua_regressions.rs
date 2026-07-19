@@ -1010,27 +1010,26 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
 }
 
 #[test]
-fn scroll_pills_source_uses_only_semantic_transcript_navigation() {
+fn scroll_pills_use_committed_transcript_views() {
     assert!(
-        SCROLL_PILLS_LUA.contains("smelt.transcript.previous_block({ role = \"user\" })"),
-        "top scroll pill should use semantic previous-block lookup"
+        SCROLL_PILLS_LUA.contains("smelt.transcript.watch_view(refresh)"),
+        "scroll pills should observe one committed transcript view"
     );
     assert!(
-        SCROLL_PILLS_LUA.contains("smelt.transcript.reveal_block("),
-        "top scroll pill should reveal descriptor blocks semantically"
+        SCROLL_PILLS_LUA.contains("view:previous_block({ role = \"user\" })"),
+        "top scroll pill should navigate from the committed view"
     );
     assert!(
-        !SCROLL_PILLS_LUA.contains("block_before_or_at_row"),
-        "top scroll pill must not use row-based transcript lookup"
+        SCROLL_PILLS_LUA.contains("smelt.transcript.reveal(state.top_target"),
+        "top scroll pill should reveal an opaque semantic target"
     );
     assert!(
-        !SCROLL_PILLS_LUA.contains(":reveal("),
-        "top scroll pill must not use generic row reveal for transcript navigation"
+        SCROLL_PILLS_LUA.contains("smelt.transcript.follow_tail()"),
+        "bottom scroll pill should use the semantic tail command"
     );
-    assert!(
-        SCROLL_PILLS_LUA.contains("transcript_navigation_generation"),
-        "scroll pills should refresh from transcript navigation generation"
-    );
+    assert!(!SCROLL_PILLS_LUA.contains("signal.subscribe"));
+    assert!(!SCROLL_PILLS_LUA.contains("transcript_navigation_generation"));
+    assert!(!SCROLL_PILLS_LUA.contains(":scroll("));
 }
 
 fn install_scroll_pills_fixture(lua: &mlua::Lua) {
@@ -1038,55 +1037,42 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
     lua.load(
         r#"
         local active = {}
-        local cells = {}
+        local event_handlers = {}
         local handlers = {}
         local win_handlers = {}
-        local focus = "transcript"
-        local cursor = 14
         local blocks = {}
         local previous_block_calls = 0
         local previous_block_role = nil
         local row_lookup_calls = 0
         local revealed_block = nil
-        local scroll = {
-          top = 10,
-          viewport = 5,
-          total = 30,
-          max = 25,
-          overflow = true,
-          follow = false,
-          at_top = false,
-          at_bottom = false,
-          needs_tail_repin = true,
-        }
-        local rect = { row = 0, col = 0, width = 30, height = 5 }
+        local view_handler = nil
         local transcript_win = {}
-        function transcript_win:cursor() return cursor end
-        function transcript_win:rect() return rect end
-        function transcript_win:scroll(arg)
-          if arg == "tail" then
-            scroll = {
-              top = scroll.max,
-              viewport = scroll.viewport,
-              total = scroll.total,
-              max = scroll.max,
-              overflow = scroll.overflow,
-              follow = true,
-              at_top = scroll.max == 0,
-              at_bottom = true,
-              needs_tail_repin = false,
-            }
-            return transcript_win
+        local view = {
+          window = transcript_win,
+          viewport = {
+            width = 30,
+            height = 5,
+            content_width = 29,
+            scrollable = true,
+            following_tail = false,
+            at_top = false,
+            at_bottom = false,
+          },
+          focused = true,
+          cursor = { viewport_row = 4 },
+        }
+        function view:previous_block(opts)
+          previous_block_calls = previous_block_calls + 1
+          local role = opts and opts.role or nil
+          previous_block_role = role
+          for i = #blocks, 1, -1 do
+            local block = blocks[i]
+            if role == nil or block.role == role then return block end
           end
-          return scroll
-        end
-        function transcript_win:on(event, fn) handlers[event] = fn end
-        function transcript_win:reveal()
-          error("scroll pill should reveal transcript blocks semantically")
+          return nil
         end
 
         smelt = {
-          focus = function() return focus end,
           ns = function(name) return name end,
           text = {
             width = function(text) return #text end,
@@ -1112,7 +1098,6 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
                 end
               }
             end,
-            transcript = function() return transcript_win end,
           },
           overlay = {
             new = function(opts)
@@ -1127,20 +1112,23 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
           },
           ui = { layout = { leaf = function() return {} end } },
           transcript = {
-            blocks = function() return blocks end,
-            previous_block = function(opts)
-              previous_block_calls = previous_block_calls + 1
-              local role = opts and opts.role or nil
-              previous_block_role = role
-              for i = #blocks, 1, -1 do
-                local b = blocks[i]
-                if role == nil or b.role == role then return b end
-              end
-              return nil
+            watch_view = function(fn)
+              view_handler = fn
+              fn(view)
+              return { remove = function() end }
             end,
-            reveal_block = function(descriptor_index, opts)
-              revealed_block = { descriptor_index = descriptor_index, top_padding = opts and opts.top_padding or nil, cursor = opts and opts.cursor or nil }
+            reveal = function(target, opts)
+              revealed_block = {
+                block_id = target.block_id,
+                align = opts and opts.align or nil,
+                move_cursor = opts and opts.move_cursor or nil,
+              }
               return true
+            end,
+            follow_tail = function()
+              view.viewport.following_tail = true
+              view.viewport.at_bottom = true
+              if view_handler then view_handler(view) end
             end,
             block_before_or_at_row = function()
               row_lookup_calls = row_lookup_calls + 1
@@ -1148,26 +1136,34 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
             end,
           },
           events = {
-            on = function(name, fn) cells[name] = fn end,
-          },
-          signal = __smelt_signal_stub(cells, {}),
-          lifecycle = {
-            on_ready = function(fn) fn() end,
+            on = function(name, fn) event_handlers[name] = fn end,
           },
         }
 
         function __active(name) return (active[name] or 0) > 0 end
-        function __set_cursor(row) cursor = row end
-        function __set_focus(value) focus = value end
+        function __set_cursor(row) view.cursor = { viewport_row = row - 10 } end
+        function __set_focus(value) view.focused = value == "transcript" end
         function __set_blocks(value) blocks = value end
-        function __set_scroll(value) scroll = value end
+        function __set_scroll(value)
+          view.viewport.height = value.viewport
+          view.viewport.scrollable = value.overflow
+          view.viewport.following_tail = value.follow
+          view.viewport.at_top = value.at_top
+          view.viewport.at_bottom = value.at_bottom
+        end
         function __previous_block_calls() return previous_block_calls end
         function __previous_block_role() return previous_block_role end
         function __row_lookup_calls() return row_lookup_calls end
         function __revealed_block() return revealed_block end
-        function __event(name) assert(handlers[name], name)() end
+        function __event(name)
+          if name == "scrolled" or name == "focus" or name == "blur" then
+            assert(view_handler, "view_handler")(view)
+          else
+            assert(handlers[name], name)()
+          end
+        end
         function __win_event(win, event) assert(win_handlers[win] and win_handlers[win][event], win .. ":" .. event)() end
-        function __publish(name) assert(cells[name], name)() end
+        function __publish() assert(view_handler, "view_handler")(view) end
         "#,
     )
     .exec()
@@ -1195,13 +1191,13 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         previous_block_calls,
         previous_block_role,
         row_lookup_calls,
-        revealed_idx,
-        reveal_top_padding,
-        reveal_cursor,
-    ): (bool, bool, i64, String, i64, i64, i64, bool) = lua
+        revealed_block_id,
+        reveal_align,
+        reveal_moves_cursor,
+    ): (bool, bool, i64, String, i64, i64, String, bool) = lua
         .load(
             r#"
-            __set_blocks({ { descriptor_index = 1, role = "user", first_line = "previous message", already_at_top = false } })
+            __set_blocks({ { block_id = 1, role = "user", first_line = "previous message" } })
             __set_cursor(10)
             __event("scrolled")
             local under = __active("smelt.scroll_pills.top")
@@ -1214,9 +1210,9 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
               __previous_block_calls(),
               __previous_block_role(),
               __row_lookup_calls(),
-              revealed.descriptor_index,
-              revealed.top_padding,
-              revealed.cursor
+              revealed.block_id,
+              revealed.align,
+              revealed.move_cursor
             "#,
         )
         .eval()
@@ -1226,9 +1222,9 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert!(previous_block_calls > 0);
     assert_eq!(previous_block_role, "user");
     assert_eq!(row_lookup_calls, 0);
-    assert_eq!(revealed_idx, 1);
-    assert_eq!(reveal_top_padding, 1);
-    assert!(reveal_cursor);
+    assert_eq!(revealed_block_id, 1);
+    assert_eq!(reveal_align, "top");
+    assert!(reveal_moves_cursor);
 
     let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua
         .load(
@@ -1270,7 +1266,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
 }
 
 #[test]
-fn scroll_pills_refresh_top_on_navigation_generation_change() {
+fn scroll_pills_refresh_top_on_committed_view_change() {
     let lua = mlua::Lua::new();
     install_scroll_pills_fixture(&lua);
 
@@ -1278,14 +1274,39 @@ fn scroll_pills_refresh_top_on_navigation_generation_change() {
         .load(
             r#"
             __set_cursor(11)
-            __set_blocks({ { descriptor_index = 2, role = "user", first_line = "new previous", already_at_top = false } })
-            __publish("transcript_navigation_generation")
+            __set_blocks({ { block_id = 2, role = "user", first_line = "new previous" } })
+            __publish()
             return __active("smelt.scroll_pills.top")
             "#,
         )
         .eval()
-        .expect("drive navigation-generation top pill");
+        .expect("drive committed-view top pill");
     assert!(top_after_history_append);
+}
+
+#[test]
+fn scroll_pills_hide_top_at_document_start() {
+    let lua = mlua::Lua::new();
+    install_scroll_pills_fixture(&lua);
+
+    let top_at_document_start: bool = lua
+        .load(
+            r#"
+            __set_blocks({ { block_id = 1, role = "user", first_line = "first message" } })
+            __set_scroll({
+              viewport = 5,
+              overflow = true,
+              follow = false,
+              at_top = true,
+              at_bottom = false,
+            })
+            __publish()
+            return __active("smelt.scroll_pills.top")
+            "#,
+        )
+        .eval()
+        .expect("drive document-start top pill refresh");
+    assert!(!top_at_document_start);
 }
 
 #[test]

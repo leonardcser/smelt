@@ -446,7 +446,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.process_control` | Ctrl-G: move a foreground bash command to the background registry. |
-| `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click reveals it with one row of gap so repeated clicks walk back. |
+| `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest actionable user message; click aligns it to the viewport top, then the next target walks back. |
 | `smelt.plugins.terminal_title` | Static terminal window/tab title. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.turn_notifications` | Optional terminal desktop notification when an agent turn ends. |
@@ -1857,6 +1857,8 @@ Transcript display policy and rendered transcript inspection.
   Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current block node with the given kind, e.g.
 - `smelt.transcript.fold_node` (UiHost) :: `fun(node_id: table, action: string): boolean`
   Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.
+- `smelt.transcript.follow_tail` (UiHost) :: `fun(): nil`
+  Jump the transcript to its semantic tail and enable tail-follow mode.
 - `smelt.transcript.get_renderer` (Host) :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
   Return the current composed root transcript renderer, or nil before the default renderer has been installed.
 - `smelt.transcript.invalidate_renderer` (Host) :: `fun(): integer`
@@ -1869,21 +1871,21 @@ Transcript display policy and rendered transcript inspection.
   Return loaded transcript blocks as `{ descriptor_index, block_id, role, first_row, rows, first_line }`.
 - `smelt.transcript.loaded_text_expensive` (UiHost) :: `fun(): string`
   Return the currently loaded transcript display text as a single newline-joined string.
-- `smelt.transcript.next_block` (UiHost) :: `fun(opts: table?): table?`
-  Return the nearest transcript block after the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`.
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
   Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
-- `smelt.transcript.previous_block` (UiHost) :: `fun(opts: table?): table?`
-  Return the nearest transcript block before the current viewport anchor, optionally filtered by `opts.role`, as `{ descriptor_index, block_id, role, first_line, already_at_top }`.
-- `smelt.transcript.reveal_block` (UiHost) :: `fun(descriptor_index: integer, opts: table?): boolean`
-  Reveal transcript descriptor block `descriptor_index` exactly, loading the sparse descriptor window around it if needed, with optional `opts.top_padding` and `opts.cursor`.
+- `smelt.transcript.reveal` (UiHost) :: `fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean`
+  Reveal a semantic transcript `target` returned by a committed view.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
   Return rendered transcript display rows in `[start, start + count)`.
 - `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`
   Replace the base transcript renderer used when the host asks Lua for a transcript block layout.
 - `smelt.transcript.stream` (UiHost) :: `fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream`
   Create a transcript-shaped streaming renderer for `buf`.
+- `smelt.transcript.view` (UiHost) :: `fun(): smelt.transcript.View?`
+  Return the latest committed transcript view, or nil before the first projection.
 - `smelt.transcript.visible_blocks` (UiHost) :: `fun(): table`
   Return transcript blocks materialized in the current visible projection as `{ descriptor_index, block_id, role, first_row, rows, first_line }` entries.
+- `smelt.transcript.watch_view` (UiHost) :: `fun(callback: fun(value: smelt.transcript.View)): smelt.Reg`
+  Observe committed transcript views.
 
 <!-- API_INDEX_END -->
