@@ -1579,6 +1579,64 @@ Exit gate:
   suffix.
 - Performance has no unexplained regression from the Phase 0 baseline.
 
+#### Phase 5 validation record
+
+Recorded on 2026-07-19. The fault matrix uses real temporary SQLite databases,
+subprocesses for operating-system lock ownership, and test-only failpoints at the
+actor/store boundary. Each row names the deterministic regression that proves the
+required terminal state.
+
+| Boundary | Deterministic evidence | Result |
+| --- | --- | --- |
+| Before transaction, process crash during transaction, and commit before actor receipt | `environmental_commit_failure_uses_one_structural_repeat`, `process_crash_rolls_back_an_open_canonical_transaction`, `publication_failure_blocks_until_explicit_retry` | Uncommitted state rolls back; an ambiguous committed command is recovered by fingerprint and exact replay. |
+| Publication before rename, after rename, after root fsync, and before verified reopen | `prepared_publication_is_preserved_if_the_rename_never_starts`, `unexpected_publication_destination_preserves_both_paths`, `token_mismatch_after_rename_preserves_the_published_database`, `publication_retries_after_rename_and_reopen_failure` | One staged or final database remains recoverable and unexpected data is never replaced. |
+| Latest replacement before and during commit | `latest_slot_replaces_an_intent_before_consumption`, `truncation_supersedes_an_append_in_flight`, `acknowledgement_does_not_release_a_newer_latest_intent` | The latest cumulative generation becomes durable and an older acknowledgement cannot clear it. |
+| Append followed by rewind, truncation, or descriptor replacement | `in_flight_live_save_then_rewind_flushes_without_bad_prefix`, `rewind_to_start_persists_empty_history_and_descriptor_delete`, `descriptor_append_replacement_and_truncation_each_advance_once` | The final history and descriptor suffix is exact, with one intended revision per mutation. |
+| Connection invalidation under process contention | `root_lease_remains_exclusive_while_sqlite_is_closed`, `release_reopens_an_invalidated_connection_and_clears_ownership` | The stable lease excludes a second owner while SQLite is closed and reopen verifies the token. |
+| Disk-full, permission, and missing-root retry | `environmental_failures_remain_dirty_until_explicit_retry` | Each failure is visible and dirty after both the initial attempt and single structural repeat; only explicit Lua retry makes it durable. |
+| Ownership loss, dirty local state, then fork/save-as | `ownership_loss_with_dirty_state_can_fork_to_a_writable_session` | The source remains unchanged and read-only; the fork imports the durable prefix, applies the cumulative history/descriptor suffix without full materialization, and becomes durable under a new ID. |
+| Unsupported or initially read-only edits | `blocked_save_requires_explicit_retry`, `resuming_session_with_active_writer_is_read_only`, `repeated_read_only_resumes_do_not_modify_writer_session` | Unsupported saves stay visibly blocked; initially read-only mutation is rejected without changing SQLite. |
+| Stale, saturated, and failed audits | `stale_request_audit_after_session_switch_is_rejected`, `full_control_lane_cannot_lose_the_latest_intent`, `audit_failure_after_canonical_save_preserves_durability` | Stale and excess audits are rejected within fixed bounds; audit failure is a warning and cannot undo canonical durability. |
+| Sidecar failure after canonical commit | `sidecar_rebuild_failure_does_not_undo_canonical_commit` | The canonical receipt is acknowledged and the derived-cache failure remains a visible warning. |
+| Session switch, delete, fork, actor exit, and shutdown deadline | `stale_request_audit_after_session_switch_is_rejected`, `delete_refuses_session_owned_by_another_process`, `sparse_fork_publishes_a_complete_destination`, `actor_panic_stops_submission_without_advancing_durability`, `control_disconnect_stops_submission_without_advancing_durability`, `close_deadline_reports_exact_progress_without_a_delayed_close`, `shutdown_flushes_latest_generation_after_in_flight_save` | Every boundary either closes the exact epoch, refuses under active ownership, reports unsaved progress, or completes durably. An expired close cannot stop the actor later. |
+| Generation and SQLite revision overflow | `persistence_generation_is_checked`, `revision_overflow_fails_without_partial_mutation` | Overflow is rejected before partial mutation. |
+
+The exact Phase 0 benchmark command completed successfully after the descriptor
+fixture was corrected to store its generated canonical session identity. The
+10,000-row hot path compared with the Phase 0 baseline as follows:
+
+| Operation | Phase 0 mean | Phase 5 mean | Change |
+| --- | ---: | ---: | ---: |
+| No-op save | 0.019 ms | 0.017 ms | -0.002 ms |
+| Request append | 6.400 ms | 6.439 ms | +0.6% |
+| History append | 3.600 ms | 4.279 ms | +18.9% |
+| Turn complete | 0.142 ms | 0.150 ms | +0.008 ms |
+| Rewind/delete suffix | 7.307 ms | 7.830 ms | +7.2% |
+| Provider history read | 0.701 ms | 0.664 ms | -5.3% |
+
+Request and history intents occupied 1,170 and 792 bytes, down from 1,415 and
+1,037 bytes. The latest slot remained bounded to one intent. Request and history
+SQLite commits took 77-87 us and 89-110 us; all remained at or below 0.110 ms.
+The history-append wall time increased by 0.679 ms, but its store metrics still
+show one dirty row, one inserted row, no deletion, and one cached writer
+connection. The sub-millisecond change therefore has no scaling or full-history
+write regression.
+
+The valid 10 MiB fixture again contained 2,560 descriptors and 108,877 rows.
+Tail load fell from 7.548 ms to 1.544 ms and tail render fell from 2.799 ms to
+1.939 ms. The combined layout/hot-path process peaked at 98,612 KiB versus
+97,788 KiB in Phase 0. The resume-only process peaked at 48,024 KiB versus
+32,760 KiB; that setup peak is not directly comparable because the corrected
+benchmark now performs canonical fixture initialization and cleanup under the
+generated identity. The increase does not appear in the tail timing or the
+combined process peak.
+
+The `COMPAT(storage-root-lease)` guard remains required. Writable migration from
+schemas older than v6 is still supported, so its documented removal condition in
+`docs/compat.md` has not expired. Searches also confirm that the deleted retry
+scheduler, global save worker, snapshot protocol, semantic object kind, and
+parallel persistence variants remain absent.
+
 ## Testing strategy
 
 Use real temporary SQLite databases, deterministic failpoints, and subprocess

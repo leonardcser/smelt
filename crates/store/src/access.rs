@@ -1140,6 +1140,10 @@ impl SessionMaintenance {
         apply_maintenance_commit(&mut self.writer, &command)
     }
 
+    pub fn commit_session(&mut self, command: &SessionCommit) -> Result<SaveReceipt> {
+        apply_maintenance_commit(&mut self.writer, command)
+    }
+
     pub fn import_legacy_attachments(&mut self) -> Result<usize> {
         let mut session = self
             .writer

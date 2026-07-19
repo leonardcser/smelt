@@ -6780,15 +6780,19 @@ mod tests {
     }
 
     fn write_descriptor_backed_resume_fixture(
-        session_id: &str,
+        session: &smelt_core::session::Session,
         target_bytes: usize,
     ) -> (usize, usize, f64) {
         let setup_start = std::time::Instant::now();
-        let session_dir = smelt_core::session::dir_for_id(session_id);
+        let session_dir = smelt_core::session::dir_for(session);
         let _ = std::fs::remove_dir_all(&session_dir);
         std::fs::create_dir_all(&session_dir).expect("create descriptor resume fixture dir");
         let mut db = smelt_store::SessionDb::open(session_dir.join("session.db"))
             .expect("open descriptor resume fixture db");
+        let command = smelt_core::session::initial_store_commit_from_session(session)
+            .expect("prepare descriptor resume fixture state");
+        db.apply_session_commit(&command)
+            .expect("initialize descriptor resume fixture state");
         let target_bytes = target_bytes.max(RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES);
         let mut generated_bytes = 0usize;
         let mut descriptor_count = 0usize;
@@ -6813,13 +6817,13 @@ mod tests {
         smelt_perf::perf::set_enabled(true);
         let lua = crate::lua::LuaRuntime::new();
         let theme = Theme::default();
-        let session_id = smelt_core::session::Session::new(
+        let session = smelt_core::session::Session::new(
             std::process::id(),
             std::env::current_dir().unwrap_or_default(),
-        )
-        .id;
+        );
+        let session_id = session.id.clone();
         let (descriptor_count, generated_bytes, setup_ms) =
-            write_descriptor_backed_resume_fixture(&session_id, target_bytes);
+            write_descriptor_backed_resume_fixture(&session, target_bytes);
 
         smelt_perf::perf::clear();
         let tail_load_start = std::time::Instant::now();

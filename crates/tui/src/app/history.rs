@@ -1014,7 +1014,6 @@ impl TuiApp {
             self.fork_live_session();
             return;
         }
-        self.ensure_live_session_materialized();
         if self.session_is_empty() {
             self.notify_error("nothing to fork".into());
             return;
@@ -1022,7 +1021,13 @@ impl TuiApp {
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
         self.cancel_session_bound_work();
         self.save_session_and_flush();
-        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+        let close_policy =
+            if self.session_is_read_only() && self.session_document_has_unflushed_work() {
+                crate::persist::ClosePolicy::AllowUnsaved
+            } else {
+                crate::persist::ClosePolicy::RequireDurable
+            };
+        if !self.close_session_persistence(close_policy) {
             return;
         }
         self.stop_background_processes();
@@ -1053,16 +1058,54 @@ impl TuiApp {
             return;
         }
         self.cancel_session_bound_work();
-        self.save_session_and_flush();
-        if !self.close_session_persistence(crate::persist::ClosePolicy::RequireDurable) {
+        let preserve_unsaved =
+            self.session_is_read_only() && self.session_document_has_unflushed_work();
+        let acknowledged_head = self.session_document.acknowledged_head();
+        let preserved = if preserve_unsaved {
+            let mut forked = self.core.session.fork(self.core.env.pid());
+            forked.history.clear();
+            let runtime_metadata = self.runtime_session_metadata();
+            let intent = match self
+                .session_document
+                .prepare_save(&mut forked, runtime_metadata)
+            {
+                Ok(Some(intent)) => intent,
+                Ok(None) => {
+                    self.notify_error_sticky(
+                        "failed to prepare fork: dirty session produced no save intent".into(),
+                    );
+                    return;
+                }
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to prepare fork: {err}"));
+                    return;
+                }
+            };
+            Some((forked, intent))
+        } else {
+            None
+        };
+
+        if !preserve_unsaved {
+            self.save_session_and_flush();
+        }
+        let close_policy = if preserve_unsaved {
+            crate::persist::ClosePolicy::AllowUnsaved
+        } else {
+            crate::persist::ClosePolicy::RequireDurable
+        };
+        if !self.close_session_persistence(close_policy) {
             return;
         }
         self.stop_background_processes();
 
-        if let Some(live) = self.session_document.live_session.as_mut() {
-            if let Some((header, _)) = session::load_store_header_for_dir(live.dir().to_path_buf())
-            {
-                live.replace_header(header);
+        if !preserve_unsaved {
+            if let Some(live) = self.session_document.live_session.as_mut() {
+                if let Some((header, _)) =
+                    session::load_store_header_for_dir(live.dir().to_path_buf())
+                {
+                    live.replace_header(header);
+                }
             }
         }
 
@@ -1071,8 +1114,14 @@ impl TuiApp {
         };
         let original_id = self.core.session.id.clone();
         let history_len = live.history_len();
-        let mut forked = self.core.session.fork(self.core.env.pid());
-        forked.history.clear();
+        let (forked, preserved_intent) = preserved.map_or_else(
+            || {
+                let mut forked = self.core.session.fork(self.core.env.pid());
+                forked.history.clear();
+                (forked, None)
+            },
+            |(forked, intent)| (forked, Some(intent)),
+        );
         let fork_id = match smelt_core::session_id::SessionId::parse(&forked.id) {
             Ok(id) => id,
             Err(err) => {
@@ -1082,18 +1131,36 @@ impl TuiApp {
         };
         let fork_dir = session::session_dir(&fork_id);
         let fork_root = fork_dir.parent().expect("fork session root");
-        let identity = match session::store_identity_from_session(&forked) {
-            Ok(identity) => identity,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare fork: {err}"));
-                return;
+        let (identity, metadata, import_history_len) = match &preserved_intent {
+            Some(intent) => {
+                let Some(history_start) = intent.history.start.as_usize() else {
+                    self.notify_error_sticky(
+                        "failed to prepare fork: history boundary exceeds platform limits".into(),
+                    );
+                    return;
+                };
+                (
+                    intent.identity.clone(),
+                    intent.metadata.clone(),
+                    history_start,
+                )
             }
-        };
-        let metadata = match session::store_metadata_from_session(&forked, history_len) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare fork: {err}"));
-                return;
+            None => {
+                let identity = match session::store_identity_from_session(&forked) {
+                    Ok(identity) => identity,
+                    Err(err) => {
+                        self.notify_error_sticky(format!("failed to prepare fork: {err}"));
+                        return;
+                    }
+                };
+                let metadata = match session::store_metadata_from_session(&forked, history_len) {
+                    Ok(metadata) => metadata,
+                    Err(err) => {
+                        self.notify_error_sticky(format!("failed to prepare fork: {err}"));
+                        return;
+                    }
+                };
+                (identity, metadata, history_len)
             }
         };
         let source = match smelt_store::SessionReader::open_existing(live.dir()) {
@@ -1103,7 +1170,24 @@ impl TuiApp {
                 return;
             }
         };
-        let legacy_attachments = match source.legacy_attachment_references(history_len) {
+        if preserve_unsaved {
+            match source.store_head() {
+                Ok(source_head) if source_head == acknowledged_head => {}
+                Ok(source_head) => {
+                    self.notify_error_sticky(format!(
+                        "failed to fork unsaved session: source head changed from {acknowledged_head:?} to {source_head:?}"
+                    ));
+                    return;
+                }
+                Err(err) => {
+                    self.notify_error_sticky(format!(
+                        "failed to inspect unsaved session source head: {err}"
+                    ));
+                    return;
+                }
+            }
+        }
+        let legacy_attachments = match source.legacy_attachment_references(import_history_len) {
             Ok(references) => references,
             Err(err) => {
                 self.notify_error_sticky(format!(
@@ -1120,10 +1204,29 @@ impl TuiApp {
             }
         };
         let fork_work_dir = maintenance.session_dir().to_path_buf();
-        if let Err(err) = maintenance.import_prefix_from(&source, &identity, &metadata, history_len)
-        {
-            self.notify_error_sticky(format!("failed to fork session store: {err}"));
-            return;
+        let imported =
+            match maintenance.import_prefix_from(&source, &identity, &metadata, import_history_len)
+            {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to fork session store: {err}"));
+                    return;
+                }
+            };
+        if let Some(intent) = preserved_intent {
+            let command = smelt_store::SessionCommit {
+                session_id: forked.id.clone(),
+                expected: imported.current,
+                identity: intent.identity,
+                metadata: intent.metadata,
+                history: intent.history,
+                side_tables: intent.side_tables,
+                descriptors: intent.descriptors,
+            };
+            if let Err(err) = maintenance.commit_session(&command) {
+                self.notify_error_sticky(format!("failed to preserve unsaved fork state: {err}"));
+                return;
+            }
         }
         if let Err(err) =
             copy_legacy_attachment_blobs(&source, &fork_work_dir.join("blobs"), &legacy_attachments)
@@ -3397,9 +3500,10 @@ mod checkpoint_tests {
 
         app.app.fork_session();
 
-        let outputs = app.app.lua.drive_tasks(
-            app.app.core.clock.instant_now() + std::time::Duration::from_secs(20),
-        );
+        let outputs = app
+            .app
+            .lua
+            .drive_tasks(app.app.core.clock.instant_now() + std::time::Duration::from_secs(20));
         assert!(outputs.is_empty(), "cancelled task produced output");
         let completed: bool = app
             .app

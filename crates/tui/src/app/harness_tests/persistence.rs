@@ -33,6 +33,16 @@ fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
     })
 }
 
+fn retry_persistence_via_lua(app: &mut TestApp) -> bool {
+    let _app_guard = crate::lua::install_app_ptr(&mut app.app);
+    app.app
+        .lua
+        .lua
+        .load("return smelt.session.retry_persistence()")
+        .eval::<bool>()
+        .unwrap()
+}
+
 fn request_audit_entry(request_id: u64) -> protocol::request_log::RequestLogEntry {
     protocol::request_log::RequestLogEntry {
         request_id,
@@ -280,16 +290,7 @@ fn blocked_save_requires_explicit_retry() {
     assert!(app.app.session_document_has_unflushed_work());
     assert!(has_sticky_session_save_failure(&app, &session_id));
 
-    let retry_accepted = {
-        let _app_guard = crate::lua::install_app_ptr(&mut app.app);
-        app.app
-            .lua
-            .lua
-            .load("return smelt.session.retry_persistence()")
-            .eval::<bool>()
-            .unwrap()
-    };
-    assert!(retry_accepted);
+    assert!(retry_persistence_via_lua(&mut app));
     let outcome = app.app.flush_persist();
     assert!(
         !app.app.session_document_has_unflushed_work(),
@@ -298,6 +299,62 @@ fn blocked_save_requires_explicit_retry() {
     );
     let loaded = loaded_session(&session_id);
     assert_eq!(loaded.history.len(), 2);
+}
+
+#[test]
+fn environmental_failures_remain_dirty_until_explicit_retry() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.app.save_session_and_flush();
+
+    for (index, failure) in [
+        smelt_store::SessionCommitFailure::Sqlite {
+            message: "disk full while extending session database".into(),
+        },
+        smelt_store::SessionCommitFailure::Io {
+            message: "permission denied while writing session database".into(),
+        },
+        smelt_store::SessionCommitFailure::Io {
+            message: "session storage root is missing".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let message = match &failure {
+            smelt_store::SessionCommitFailure::Sqlite { message }
+            | smelt_store::SessionCommitFailure::Io { message } => message,
+            _ => unreachable!("environmental fault fixture"),
+        };
+        for _ in 0..2 {
+            app.app
+                .persistence
+                .as_ref()
+                .expect("persistence actor")
+                .inject_commit_failure(failure.clone());
+        }
+        app.app
+            .session_append_history(HistoryItem::user(Content::text(message.as_str())));
+
+        app.app.save_session_and_flush();
+
+        assert!(app.app.session_document_has_unflushed_work());
+        assert!(has_sticky_session_save_failure(&app, &session_id));
+        assert!(app
+            .app
+            .notification
+            .as_ref()
+            .is_some_and(|notification| notification.summary.contains(message.as_str())));
+        assert_eq!(loaded_session(&session_id).history.len(), index + 1);
+
+        assert!(retry_persistence_via_lua(&mut app));
+        app.app.flush_persist();
+        assert!(!app.app.session_document_has_unflushed_work());
+        assert_eq!(loaded_session(&session_id).history.len(), index + 2);
+    }
 }
 
 #[test]
@@ -346,6 +403,34 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     assert!(app.app.session_document_has_unflushed_work());
     assert!(app.app.notification.is_some());
     assert!(!session_dir.join("session.db").exists());
+}
+
+#[test]
+fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    let session_id = app.app.core.session.id.clone();
+    app.app
+        .session_append_history(HistoryItem::user(Content::text("baseline")));
+    app.app.save_session_and_flush();
+    let session_dir = smelt_core::session::dir_for_id(&session_id);
+    let meta_path = session_dir.join("meta.json");
+    std::fs::remove_file(&meta_path).unwrap();
+    std::fs::create_dir(&meta_path).unwrap();
+
+    app.app
+        .session_append_history(HistoryItem::user(Content::text(
+            "canonical despite sidecar",
+        )));
+    app.app.save_session_and_flush();
+
+    assert!(!app.app.session_document_has_unflushed_work());
+    assert_eq!(loaded_session(&session_id).history.len(), 2);
+    assert!(app.app.notification.as_ref().is_some_and(|notification| {
+        notification
+            .summary
+            .contains("durable, but derived cache refresh failed")
+    }));
 }
 
 #[test]
@@ -1057,6 +1142,65 @@ fn ownership_loss_moves_session_to_read_only_and_keeps_document_dirty() {
     assert!(resumed.app.session_is_read_only());
     assert!(resumed.app.session_document_has_unflushed_work());
     assert!(has_sticky_session_save_failure(&resumed, &session_id));
+}
+
+#[test]
+fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
+    let guard = test_home_guard();
+    let session_id = saved_one_row_session(&guard);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    resumed.start_turn(42);
+    resumed.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "stream finalized by fork cancellation".into(),
+    }));
+    assert!(resumed.streaming_state().text);
+    resumed
+        .app
+        .persistence
+        .as_ref()
+        .expect("persistence actor")
+        .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    resumed
+        .app
+        .session_append_history(HistoryItem::user(Content::text(
+            "preserved in ownership-loss fork",
+        )));
+    resumed.app.push_block(Block::Text {
+        content: "unsaved ownership-loss descriptor".into(),
+    });
+    resumed.app.save_session_and_flush();
+    assert!(resumed.app.session_is_read_only());
+    assert!(resumed.app.session_document_has_unflushed_work());
+
+    resumed.app.fork_session();
+
+    let fork_id = resumed.app.core.session.id.clone();
+    assert_ne!(fork_id, session_id);
+    assert!(!resumed.app.session_is_read_only());
+    assert!(!resumed.app.session_document_has_unflushed_work());
+    assert!(resumed.app.core.session.history.is_empty());
+    assert!(resumed.app.session_document.live_session.is_some());
+    let reader =
+        smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&fork_id))
+            .unwrap();
+    let descriptor_rows = reader.read_all_transcript_descriptor_records().unwrap();
+    assert!(descriptor_rows.iter().any(|row| row
+        .preview_text
+        .contains("unsaved ownership-loss descriptor")));
+    let full = reader.load_full_session().unwrap().unwrap();
+    assert!(full.turn_metas.iter().any(|(history_len, meta)| {
+        *history_len == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
+    }));
+    let forked = loaded_session(&fork_id);
+    assert_eq!(forked.parent_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(forked.history.len(), 2);
+    assert!(matches!(
+        forked.history.last(),
+        Some(HistoryItem::User { content, .. })
+            if content.text_content() == "preserved in ownership-loss fork"
+    ));
+    assert_eq!(loaded_session(&session_id).history.len(), 1);
 }
 
 #[test]

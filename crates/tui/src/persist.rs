@@ -219,6 +219,11 @@ pub(crate) struct PersistenceCloseOutcome {
     pub(crate) cause: Option<PersistenceCause>,
 }
 
+struct PreparedClose {
+    outcome: PersistenceCloseOutcome,
+    finalize: Option<mpsc::Sender<mpsc::Sender<PersistenceCloseOutcome>>>,
+}
+
 pub(crate) struct RequestAuditIntent {
     pub(crate) epoch: SessionEpoch,
     pub(crate) required_generation: PersistenceGeneration,
@@ -240,10 +245,12 @@ enum PersistenceControl {
         target: PersistenceGeneration,
         deadline: Instant,
         policy: ClosePolicy,
-        reply: mpsc::Sender<PersistenceCloseOutcome>,
+        reply: mpsc::Sender<PreparedClose>,
     },
     #[cfg(test)]
     InjectCommitFailure(smelt_store::SessionCommitFailure, mpsc::Sender<()>),
+    #[cfg(test)]
+    InjectAuditFailure(mpsc::Sender<()>),
     #[cfg(test)]
     InjectPublishFailure(mpsc::Sender<()>),
     #[cfg(test)]
@@ -816,7 +823,7 @@ impl SessionPersistence {
         let Some(control) = &self.control else {
             return self.disconnected_close(effective_target);
         };
-        let (reply, outcome) = mpsc::channel();
+        let (reply, prepared) = mpsc::channel();
         let send = send_control_until(
             control,
             PersistenceControl::Close {
@@ -839,11 +846,29 @@ impl SessionPersistence {
                 ControlSendError::Disconnected => self.disconnected_close(effective_target),
             };
         }
-        let result = outcome
-            .recv()
-            .unwrap_or_else(|_| self.disconnected_close(effective_target));
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return self.deadline_close(effective_target);
+        };
+        let prepared = match prepared.recv_timeout(remaining) {
+            Ok(prepared) => prepared,
+            Err(mpsc::RecvTimeoutError::Timeout) => return self.deadline_close(effective_target),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return self.disconnected_close(effective_target);
+            }
+        };
+        let result = prepared.outcome;
         let stopped = result.durable >= result.target || result.omitted.is_some();
         if stopped {
+            let Some(finalize) = prepared.finalize else {
+                return self.disconnected_close(effective_target);
+            };
+            let (completed, completion) = mpsc::channel();
+            if finalize.send(completed).is_err() {
+                return self.disconnected_close(effective_target);
+            }
+            let result = completion
+                .recv()
+                .unwrap_or_else(|_| self.disconnected_close(effective_target));
             self.control = None;
             if self
                 .thread
@@ -858,7 +883,9 @@ impl SessionPersistence {
                     ..result
                 };
             }
-        } else if policy == ClosePolicy::RequireDurable {
+            return result;
+        }
+        if policy == ClosePolicy::RequireDurable {
             self.latest
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -909,7 +936,7 @@ impl SessionPersistence {
             omitted: None,
             receipt: None,
             cause: Some(PersistenceCause::unavailable(
-                "persistence actor close was not admitted before the deadline",
+                "persistence actor close did not complete before the deadline",
             )),
         }
     }
@@ -937,6 +964,18 @@ impl SessionPersistence {
             .expect("persistence actor accepts commit failure injection");
         done.recv()
             .expect("persistence actor acknowledges commit failure injection");
+    }
+
+    #[cfg(test)]
+    fn inject_audit_failure(&self) {
+        let (reply, done) = mpsc::channel();
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::InjectAuditFailure(reply))
+            .expect("persistence actor accepts audit failure injection");
+        done.recv()
+            .expect("persistence actor acknowledges audit failure injection");
     }
 
     #[cfg(test)]
@@ -1111,7 +1150,9 @@ struct PersistenceActor {
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
     #[cfg(test)]
-    fail_next_commit: Option<smelt_store::SessionCommitFailure>,
+    commit_failures: VecDeque<smelt_store::SessionCommitFailure>,
+    #[cfg(test)]
+    fail_next_audit: bool,
     #[cfg(test)]
     fail_next_publish: bool,
     #[cfg(test)]
@@ -1201,7 +1242,9 @@ fn persistence_actor(
         pending_audits,
         pending_full_audit_bytes,
         #[cfg(test)]
-        fail_next_commit: None,
+        commit_failures: VecDeque::new(),
+        #[cfg(test)]
+        fail_next_audit: false,
         #[cfg(test)]
         fail_next_publish: false,
         #[cfg(test)]
@@ -1272,61 +1315,78 @@ impl PersistenceActor {
                 } => {
                     self.drive_latest();
                     self.drive_audits();
-                    if self.durable >= target {
-                        let receipt = self.last_receipt.clone();
-                        let cause = self.finish(None, None);
-                        let _ = reply.send(PersistenceCloseOutcome {
-                            epoch: self.epoch,
-                            target,
-                            durable: self.durable,
-                            omitted: None,
-                            receipt,
-                            cause,
-                        });
-                        return;
-                    }
-                    if policy == ClosePolicy::AllowUnsaved {
-                        let receipt = self.last_receipt.clone();
-                        let cause = self.finish(Some(target), None);
-                        let _ = reply.send(PersistenceCloseOutcome {
-                            epoch: self.epoch,
-                            target,
-                            durable: self.durable,
-                            omitted: Some(target),
-                            receipt,
-                            cause,
-                        });
-                        return;
-                    }
-                    let cause = if Instant::now() >= deadline {
-                        smelt_perf::perf::record_value("persist:close:deadline", 1);
-                        PersistenceCause::unavailable(format!(
-                            "close deadline reached before generation {} became durable",
-                            target.get()
-                        ))
-                    } else {
-                        self.blocked.as_ref().map_or_else(
-                            || {
-                                PersistenceCause::unavailable(format!(
-                                    "generation {} is not available to the persistence actor",
-                                    target.get()
-                                ))
-                            },
-                            |(_, cause)| cause.clone(),
-                        )
-                    };
-                    let _ = reply.send(PersistenceCloseOutcome {
+                    let omitted = (self.durable < target && policy == ClosePolicy::AllowUnsaved)
+                        .then_some(target);
+                    let can_close = self.durable >= target || omitted.is_some();
+                    let cause = (!can_close).then(|| {
+                        if Instant::now() >= deadline {
+                            smelt_perf::perf::record_value("persist:close:deadline", 1);
+                            PersistenceCause::unavailable(format!(
+                                "close deadline reached before generation {} became durable",
+                                target.get()
+                            ))
+                        } else {
+                            self.blocked.as_ref().map_or_else(
+                                || {
+                                    PersistenceCause::unavailable(format!(
+                                        "generation {} is not available to the persistence actor",
+                                        target.get()
+                                    ))
+                                },
+                                |(_, cause)| cause.clone(),
+                            )
+                        }
+                    });
+                    let prepared = PersistenceCloseOutcome {
                         epoch: self.epoch,
                         target,
                         durable: self.durable,
-                        omitted: None,
+                        omitted,
                         receipt: self.last_receipt.clone(),
-                        cause: Some(cause),
+                        cause,
+                    };
+                    if !can_close {
+                        if reply
+                            .send(PreparedClose {
+                                outcome: prepared,
+                                finalize: None,
+                            })
+                            .is_err()
+                        {
+                            self.resume_after_cancelled_close();
+                        }
+                        continue;
+                    }
+                    let (finalize, finalization) = mpsc::channel();
+                    if reply
+                        .send(PreparedClose {
+                            outcome: prepared.clone(),
+                            finalize: Some(finalize),
+                        })
+                        .is_err()
+                    {
+                        self.resume_after_cancelled_close();
+                        continue;
+                    }
+                    let Ok(completed) = finalization.recv() else {
+                        self.resume_after_cancelled_close();
+                        continue;
+                    };
+                    let release_cause = self.finish(omitted, None);
+                    let _ = completed.send(PersistenceCloseOutcome {
+                        cause: release_cause,
+                        ..prepared
                     });
+                    return;
                 }
                 #[cfg(test)]
                 PersistenceControl::InjectCommitFailure(failure, reply) => {
-                    self.fail_next_commit = Some(failure);
+                    self.commit_failures.push_back(failure);
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
+                PersistenceControl::InjectAuditFailure(reply) => {
+                    self.fail_next_audit = true;
                     let _ = reply.send(());
                 }
                 #[cfg(test)]
@@ -1348,6 +1408,13 @@ impl PersistenceActor {
                 PersistenceControl::InjectPanic => panic!("injected persistence actor panic"),
             }
         }
+    }
+
+    fn resume_after_cancelled_close(&self) {
+        self.latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .accepting = true;
     }
 
     fn latest_generation(&self) -> Option<PersistenceGeneration> {
@@ -1409,25 +1476,33 @@ impl PersistenceActor {
         }
     }
 
+    fn append_audit(&mut self, index: usize) -> smelt_store::Result<i64> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_audit) {
+            return Err(smelt_store::StoreError::Io(std::io::Error::other(
+                "injected request audit failure",
+            )));
+        }
+        let audit = &self.audits.get(index).expect("ready audit").intent;
+        self.writer
+            .as_mut()
+            .expect("actor writer")
+            .reopen_connection()
+            .and_then(|()| {
+                self.writer
+                    .as_mut()
+                    .expect("actor writer")
+                    .append_request_attempt(&audit.entry, audit.payload_mode)
+            })
+    }
+
     fn drive_audits(&mut self) {
         while let Some(index) = self
             .audits
             .iter()
             .position(|audit| audit.intent.required_generation <= self.durable)
         {
-            let result = {
-                let audit = &self.audits.get(index).expect("ready audit").intent;
-                self.writer
-                    .as_mut()
-                    .expect("actor writer")
-                    .reopen_connection()
-                    .and_then(|()| {
-                        self.writer
-                            .as_mut()
-                            .expect("actor writer")
-                            .append_request_attempt(&audit.entry, audit.payload_mode)
-                    })
-            };
+            let result = self.append_audit(index);
             match result {
                 Ok(_) => {
                     let audit = self.audits.remove(index).expect("completed audit");
@@ -1554,6 +1629,20 @@ impl PersistenceActor {
 }
 
 impl PersistenceActor {
+    fn commit_session(
+        &mut self,
+        command: &smelt_store::SessionCommit,
+    ) -> Result<smelt_store::SaveReceipt, smelt_store::SessionCommitFailure> {
+        #[cfg(test)]
+        if let Some(failure) = self.commit_failures.pop_front() {
+            return Err(failure);
+        }
+        self.writer
+            .as_mut()
+            .expect("actor writer")
+            .commit_session(command)
+    }
+
     fn converge(
         &mut self,
         intent: &SessionSaveIntent,
@@ -1597,22 +1686,7 @@ impl PersistenceActor {
         }
 
         let commit_perf = smelt_perf::perf::begin("persist:canonical_commit");
-        #[cfg(test)]
-        let result = self.fail_next_commit.take().map_or_else(
-            || {
-                self.writer
-                    .as_mut()
-                    .expect("actor writer")
-                    .commit_session(&command)
-            },
-            Err,
-        );
-        #[cfg(not(test))]
-        let result = self
-            .writer
-            .as_mut()
-            .expect("actor writer")
-            .commit_session(&command);
+        let result = self.commit_session(&command);
         drop(commit_perf);
 
         let receipt = match result {
@@ -1680,21 +1754,16 @@ impl PersistenceActor {
         }
         smelt_perf::perf::record_value("persist:recovery:exact_repeats", 1);
         let repeat_perf = smelt_perf::perf::begin("persist:canonical_commit_repeat");
-        let repeated = self
-            .writer
-            .as_mut()
-            .expect("actor writer")
-            .commit_session(command)
-            .map_err(|failure| {
-                let repeated = PersistenceCause::from_commit(&failure);
-                PersistenceCause::new(
-                    repeated.class,
-                    format!(
-                        "ambiguous commit failed ({}) and its single exact repeat failed ({})",
-                        original.message, repeated.message
-                    ),
-                )
-            })?;
+        let repeated = self.commit_session(command).map_err(|failure| {
+            let repeated = PersistenceCause::from_commit(&failure);
+            PersistenceCause::new(
+                repeated.class,
+                format!(
+                    "ambiguous commit failed ({}) and its single exact repeat failed ({})",
+                    original.message, repeated.message
+                ),
+            )
+        })?;
         drop(repeat_perf);
         validate_receipt(command, repeated)
     }
@@ -2070,6 +2139,46 @@ mod tests {
     }
 
     #[test]
+    fn close_deadline_reports_exact_progress_without_a_delayed_close() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+        actor.submit(intent(1, &["first"])).unwrap();
+
+        let expired = actor.close(
+            PersistenceGeneration::new(1),
+            Instant::now(),
+            ClosePolicy::RequireDurable,
+        );
+        assert_eq!(expired.target, PersistenceGeneration::new(1));
+        assert_eq!(expired.durable, PersistenceGeneration::ZERO);
+        assert!(expired.omitted.is_none());
+        assert!(expired
+            .cause
+            .as_ref()
+            .is_some_and(|cause| cause.message.contains("deadline")));
+
+        release.send(()).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        actor.submit(intent(2, &["first", "second"])).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(2)
+        ));
+        let closed = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(closed.cause.is_none());
+    }
+
+    #[test]
     fn latest_slot_replaces_an_intent_before_consumption() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
@@ -2190,6 +2299,13 @@ mod tests {
             actor.pending_audits.load(Ordering::Acquire),
             MAX_PENDING_AUDITS
         );
+        let saturated = actor
+            .append_request_audit(audit(1, 99, MAX_PENDING_AUDITS as u64))
+            .unwrap_err();
+        assert_eq!(saturated.class, PersistenceFailureClass::Unavailable);
+        assert!(saturated
+            .message
+            .contains("queue reached its 64-entry limit"));
         actor.submit(intent(1, &["saved"])).unwrap();
         release.send(()).unwrap();
 
@@ -2381,6 +2497,46 @@ mod tests {
             .unwrap();
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].request_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn audit_failure_after_canonical_save_preserves_durability() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_audit_failure();
+        actor.append_request_audit(audit(1, 1, 42)).unwrap();
+        actor.submit(intent(1, &["saved"])).unwrap();
+
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let status = actor.take_status();
+        assert!(matches!(
+            status.state,
+            PersistenceState::Durable { generation, .. }
+                if generation == PersistenceGeneration::new(1)
+        ));
+        assert!(status
+            .latest_audit_warning
+            .as_ref()
+            .is_some_and(|warning| warning.message.contains("injected request audit failure")));
+
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        assert_eq!(reader.store_head().unwrap().history_len.get(), 1);
+        assert!(reader
+            .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+            .unwrap()
+            .is_empty());
+        let closed = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+        assert!(closed.cause.is_none());
     }
 
     #[test]
