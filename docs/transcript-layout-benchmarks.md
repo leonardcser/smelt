@@ -159,6 +159,25 @@ the optimized implementation. Each hot-path size ran in an isolated process with
 | 50K short rows | 98.958 ms | 45.579 ms | 14.059 ms | 1.804 ms | 59.810 ms | 51.180 ms | 263.2 MiB | 287.6 MiB |
 | 2K rows x 8 KiB | 80.901 ms | 36.840 ms | 1.131 ms | 0.461 ms | 27.800 ms | 23.620 ms | 334.1 MiB | 337.2 MiB |
 
+### Canonical architecture Phase 0 smoke
+
+Before changing Enter behavior, a 2026-07-20 release-mode smoke reran the 1K
+submission and `tiny_blocks_1mib` workload with:
+
+```bash
+TMPDIR=~/tmp cargo xtask bench-transcript-layout --runs 1 --skip-nav \
+  --workloads tiny_blocks_1mib --save-request-history 1000
+```
+
+Enter completed in 24.691 ms versus the retained 25.694 ms baseline. The layout
+workload completed first projection in 11.036 ms and peaked at 83.6 MiB RSS. The
+submission recorded exactly one canonical session-commit attempt and completion,
+one synchronous metadata export, and the commit timestamp before provider
+dispatch. The rewind sample also recorded 23,390 descriptor payload bytes as both
+hydrated and pinned, with zero evicted bytes, matching the permanent `OnceLock`
+cache baseline. The full command output was retained during implementation as
+`~/tmp/smelt-phase0-release-smoke.log`.
+
 At 50K rows, Enter is 54% faster and first redraw is 87% faster. At
 2K x 8 KiB, Enter is 54% faster and its allocation churn falls from 80.77 MiB
 to 12.96 MiB. Engine materialization allocation churn falls from 103.33 MiB to

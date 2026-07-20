@@ -195,6 +195,7 @@ enum SessionCommand {
     /// Copy a transactionally consistent session database to a new file
     Backup(SessionBackupArgs),
     /// Rebuild disposable meta.json and content.txt caches under exclusive ownership
+    // COMPAT(session-derived-sidecar-exports): explicit alpha export rebuild command.
     RebuildDerived(SessionTargetArgs),
     /// Delete objects unreachable from history and request audits
     Gc(SessionTargetArgs),
@@ -690,6 +691,7 @@ fn run_session_command(args: SessionArgs) {
             }
             result
         }
+        // COMPAT(session-derived-sidecar-exports): explicitly rebuild alpha exports.
         SessionCommand::RebuildDerived(args) => {
             with_session_maintenance(&args.session, |maintenance, dir| {
                 maintenance

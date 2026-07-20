@@ -3,14 +3,32 @@
 Compatibility code we intend to remove while Smelt is alpha. Mark matching code
 with `COMPAT(<id>)`.
 
-## session-search-sidecar-missing
+## session-derived-sidecar-exports
 
-- Remove after: old session dirs without `meta.json` / `content.txt` no longer
-  matter
-- Why: rebuild list metadata and search text from canonical SQLite when derived
-  cache files are missing
+- Remove after: all supported smelt versions and bundled Lua/UI consumers read
+  session lists from `catalog.db` and session content/search from canonical
+  SQLite, at least two alpha releases have shipped with revision-stamped exports
+  deprecated, and no supported external import/export contract requires
+  `meta.json` or `content.txt`
+- Why: keep revision-stamped `meta.json` and `content.txt` as best-effort exports
+  for alpha-era external tooling while canonical state lives only in
+  `session.db`
 - Code:
-  - `crates/core/src/session.rs`: session listing/search blob fallbacks
+  - `crates/core/src/session.rs`: list-cache reader, export format, atomic writers,
+    offline-save export, and stale temporary-file cleanup
+  - `crates/tui/src/persist.rs`: synchronous metadata export and coalesced content
+    export worker
+  - `crates/tui/src/app/history.rs`: fork publication exports
+  - `src/main.rs`: explicit `session rebuild-derived` export command
+  - `crates/store/src/db.rs` and `crates/store/src/meta.rs`: test-only metadata
+    export primitive
+  - `crates/tui/tests/storybook/app_ctx.rs`: list-cache fixture
+- Tests:
+  - compatibility exports are revision-stamped and rebuilt from canonical SQLite
+  - stale or failed compatibility exports never affect list, search, resume, or
+    model dispatch
+  - CLI rebuild, fork publication, storybook, and benchmark fixtures exercise only
+    explicitly tagged compatibility behavior
 
 ## legacy-attachment-blobs
 

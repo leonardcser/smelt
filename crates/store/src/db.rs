@@ -649,6 +649,7 @@ impl SessionDb {
         }))
     }
 
+    // COMPAT(session-derived-sidecar-exports): test-only alpha sidecar writer.
     #[cfg(any(test, feature = "test-util"))]
     pub fn write_meta_sidecar(&self, path: impl AsRef<Path>) -> Result<Option<SessionMeta>> {
         meta::write_meta_sidecar(&self.conn, path)
@@ -887,7 +888,8 @@ impl SessionDb {
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
         let prepared = prepare_session_commit(command)?;
         let compression = self.object_compression;
-        self.run_immediate_transaction(
+        smelt_perf::perf::record_value("store:transaction:session_commit:attempts", 1);
+        let result = self.run_immediate_transaction(
             "apply session commit",
             |conn| {
                 apply_session_commit_in_transaction(
@@ -899,7 +901,15 @@ impl SessionDb {
                 )
             },
             session_commit_failure_from_store_error,
-        )
+        );
+        if result.is_ok() {
+            smelt_perf::perf::record_value("store:transaction:session_commit:committed", 1);
+            smelt_perf::perf::record_value(
+                "store:transaction:session_commit:committed_at_us",
+                smelt_perf::perf::timestamp_us(),
+            );
+        }
+        result
     }
 
     pub fn load_full_session(&self) -> Result<Option<FullSession>> {
@@ -6328,6 +6338,7 @@ mod tests {
         assert_eq!(second_manifest["item_hashes"].as_array().unwrap().len(), 1);
     }
     #[test]
+    // COMPAT(session-derived-sidecar-exports): test the alpha metadata export primitive.
     fn writes_session_meta_sidecar_from_state() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();

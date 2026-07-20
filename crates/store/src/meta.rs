@@ -449,6 +449,7 @@ fn checkpoint_first_live_index(value: &serde_json::Value) -> Option<u64> {
         .and_then(serde_json::Value::as_u64)
 }
 
+// COMPAT(session-derived-sidecar-exports): test-only alpha sidecar writer.
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn write_meta_sidecar(
     conn: &Connection,

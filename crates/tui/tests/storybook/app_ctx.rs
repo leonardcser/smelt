@@ -453,6 +453,7 @@ impl AppStoryCtx {
         })
         .expect("write canonical session fixture");
         let meta_json = serde_json::to_string(meta).expect("serialize session fixture metadata");
+        // COMPAT(session-derived-sidecar-exports): fixture for the alpha list cache reader.
         std::fs::write(dir.join("meta.json"), meta_json).expect("write session meta fixture");
     }
 

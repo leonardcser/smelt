@@ -531,6 +531,7 @@ fn save_bench_fixture(app: &mut TestApp, label: &str) {
             other => panic!("{label} fixture persistence failed: {other:?}"),
         }
     };
+    // COMPAT(session-derived-sidecar-exports): wait for the alpha export projection.
     let content_path = smelt_core::session::dir_for(&app.app.core.session).join("content.txt");
     let expected_header = format!("# smelt-revision:{revision}");
     loop {
@@ -1304,6 +1305,7 @@ fn resume_bench_preview_bytes() -> usize {
     env_positive_usize("SMELT_RESUME_BENCH_PREVIEW_BYTES", 5 * 1024 * 1024)
 }
 
+// COMPAT(session-derived-sidecar-exports): benchmark the alpha list cache reader.
 fn stale_resume_meta(id: &str) {
     let meta_path = smelt_core::session::dir_for_id(id).join("meta.json");
     let mut meta_json: serde_json::Value =
@@ -1320,6 +1322,7 @@ fn stale_resume_meta(id: &str) {
     .expect("write stale resume bench meta");
 }
 
+// COMPAT(session-derived-sidecar-exports): benchmark the canonical fallback without the export.
 fn remove_resume_meta(id: &str) {
     std::fs::remove_file(smelt_core::session::dir_for_id(id).join("meta.json"))
         .expect("remove resume bench meta");

@@ -70,6 +70,7 @@ fn session_storage_commands_doctor_backup_rebuild_gc_and_vacuum() {
         session.id
     );
 
+    // COMPAT(session-derived-sidecar-exports): exercise the explicit alpha export rebuild.
     std::fs::remove_file(session_dir.join("meta.json")).unwrap();
     std::fs::remove_file(session_dir.join("content.txt")).unwrap();
     for args in [

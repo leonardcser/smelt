@@ -1036,6 +1036,7 @@ pub fn session_dir(id: &crate::session_id::SessionId) -> PathBuf {
     sessions_dir().join(id.as_str())
 }
 
+// COMPAT(session-derived-sidecar-exports): format and cleanup for deprecated exports.
 const DERIVED_CACHE_FORMAT_VERSION: u32 = 1;
 const ARTIFACT_CLEANUP_BATCH: usize = 64;
 
@@ -1045,6 +1046,7 @@ pub fn cleanup_abandoned_session_artifacts() {
     cleanup_stale_derived_temps(&root);
 }
 
+// COMPAT(session-derived-sidecar-exports): remove abandoned export temp files.
 fn cleanup_stale_derived_temps(root: &Path) {
     let stale_after = std::time::Duration::from_secs(24 * 60 * 60);
     let Ok(sessions) = fs::read_dir(root) else {
@@ -1133,6 +1135,7 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
     let receipt = writer
         .commit_session(&command)
         .map_err(session_commit_failure_to_store_error)?;
+    // COMPAT(session-derived-sidecar-exports): offline saves still publish alpha exports.
     if let Err(err) = refresh_derived_files(writer.session_dir()) {
         eprintln!(
             "smelt: failed to refresh derived files for session {}: {err}",
@@ -2240,6 +2243,7 @@ fn load_meta_for_dir_result(
     if !db_path.is_file() {
         return Ok(None);
     }
+    // COMPAT(session-derived-sidecar-exports): catalog cutover removes this sidecar read.
     if mode == MetaLoadMode::List {
         let sidecar_path = path.join("meta.json");
         let sidecar_is_regular = fs::symlink_metadata(&sidecar_path)
@@ -2273,6 +2277,7 @@ fn derived_meta_json(meta: &smelt_store::SessionMeta) -> Result<Vec<u8>, String>
     serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())
 }
 
+// COMPAT(session-derived-sidecar-exports): best-effort alpha metadata export.
 pub fn refresh_derived_meta_file(dir_path: &Path) -> Result<bool, String> {
     let _perf = smelt_perf::perf::begin("session:refresh_derived_meta_file");
     let db_path = dir_path.join("session.db");
@@ -2286,9 +2291,16 @@ pub fn refresh_derived_meta_file(dir_path: &Path) -> Result<bool, String> {
     let meta_json = derived_meta_json(&meta)?;
     atomic_write(&dir_path.join("meta.json"), &meta_json, now_ms())
         .map_err(|err| err.to_string())?;
+    smelt_perf::perf::record_value("session:compat_export:meta:writes", 1);
+    smelt_perf::perf::record_value("session:compat_export:meta:source_revision", meta.revision);
+    smelt_perf::perf::record_value(
+        "session:compat_export:meta:completed_at_us",
+        smelt_perf::perf::timestamp_us(),
+    );
     Ok(true)
 }
 
+// COMPAT(session-derived-sidecar-exports): best-effort alpha content export.
 pub fn refresh_derived_content_file(dir_path: &Path) -> Result<bool, String> {
     let _perf = smelt_perf::perf::begin("session:refresh_derived_content_file");
     let db_path = dir_path.join("session.db");
@@ -2311,9 +2323,19 @@ pub fn refresh_derived_content_file(dir_path: &Path) -> Result<bool, String> {
         },
     )
     .map_err(|err| err.to_string())?;
+    smelt_perf::perf::record_value("session:compat_export:content:writes", 1);
+    smelt_perf::perf::record_value(
+        "session:compat_export:content:source_revision",
+        meta.revision,
+    );
+    smelt_perf::perf::record_value(
+        "session:compat_export:content:completed_at_us",
+        smelt_perf::perf::timestamp_us(),
+    );
     Ok(true)
 }
 
+// COMPAT(session-derived-sidecar-exports): combined explicit alpha export rebuild.
 pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
     let _perf = smelt_perf::perf::begin("session:refresh_derived_files");
     let meta_refreshed = refresh_derived_meta_file(dir_path)?;
@@ -2321,6 +2343,7 @@ pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
     Ok(meta_refreshed || content_refreshed)
 }
 
+// COMPAT(session-derived-sidecar-exports): legacy public alias for export rebuild.
 pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
     refresh_derived_files(dir_path)
 }
@@ -2824,6 +2847,7 @@ mod tests {
     }
 
     #[test]
+    // COMPAT(session-derived-sidecar-exports): exercise the alpha list cache and fallback.
     fn list_sessions_falls_back_to_sqlite_without_regenerating_cache() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
@@ -2921,6 +2945,7 @@ mod tests {
     }
 
     #[test]
+    // COMPAT(session-derived-sidecar-exports): missing exports must not mutate canonical state.
     fn ordinary_reads_do_not_regenerate_sidecars_or_modify_database() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
@@ -2948,6 +2973,7 @@ mod tests {
     }
 
     #[test]
+    // COMPAT(session-derived-sidecar-exports): exports identify their canonical revision.
     fn derived_files_identify_the_canonical_revision() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
@@ -2981,6 +3007,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // COMPAT(session-derived-sidecar-exports): exported files remain private while supported.
     fn saved_session_state_and_derived_files_are_private() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3114,6 +3141,7 @@ mod tests {
                 )
         }));
 
+        // COMPAT(session-derived-sidecar-exports): corrupt alpha list-cache fixture.
         fs::write(
             dir.join("meta.json"),
             serde_json::json!({ "id": directory_id }).to_string(),
@@ -3217,6 +3245,7 @@ mod tests {
 
         let id = numbered_session_id(104);
         let dir = stale_session_dir_without_db(&id);
+        // COMPAT(session-derived-sidecar-exports): untrusted alpha export fixture.
         fs::write(dir.join("content.txt"), "cached search text").expect("write search sidecar");
 
         assert!(load_search_blob(&id).is_none());

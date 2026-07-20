@@ -1349,7 +1349,17 @@ impl LazyBlock {
     }
 
     fn block(&self) -> &Block {
-        self.block.get_or_init(|| self.descriptor.to_block())
+        self.block.get_or_init(|| {
+            let payload_bytes = self
+                .descriptor
+                .raw_text()
+                .map_or(0, |text| text.len() as u64);
+            smelt_perf::perf::record_value("transcript:block_cache:hydrated_bytes", payload_bytes);
+            // The current OnceLock cache pins every hydrated block and never evicts it.
+            smelt_perf::perf::record_value("transcript:block_cache:pinned_bytes", payload_bytes);
+            smelt_perf::perf::record_value("transcript:block_cache:evicted_bytes", 0);
+            self.descriptor.to_block()
+        })
     }
 }
 
@@ -2633,6 +2643,43 @@ mod tests {
 
         assert!(matches!(history.block(id), Some(Block::ToolCall { .. })));
         assert_eq!(history.materialized_lazy_blocks(), 1);
+    }
+
+    #[test]
+    fn descriptor_hydration_reports_permanent_cache_bytes() {
+        let text = "hydrated payload";
+        let mut history = BlockHistory::new();
+        let id = history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::User {
+                text: text.into(),
+                image_labels: Vec::new(),
+            },
+            BlockOrigin::History(0),
+        );
+
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+        assert!(matches!(history.block(id), Some(Block::User { .. })));
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        smelt_perf::perf::clear();
+
+        let metric = |label| {
+            snapshot
+                .values
+                .iter()
+                .find(|row| row.label == label)
+                .map(|row| (row.count, row.total))
+        };
+        assert_eq!(
+            metric("transcript:block_cache:hydrated_bytes"),
+            Some((1, text.len() as u64))
+        );
+        assert_eq!(
+            metric("transcript:block_cache:pinned_bytes"),
+            Some((1, text.len() as u64))
+        );
+        assert_eq!(metric("transcript:block_cache:evicted_bytes"), Some((1, 0)));
     }
 
     #[test]

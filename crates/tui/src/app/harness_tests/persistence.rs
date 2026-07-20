@@ -489,6 +489,7 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
 }
 
 #[test]
+// COMPAT(session-derived-sidecar-exports): preserve alpha export failure semantics.
 fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
@@ -619,6 +620,7 @@ fn stale_request_audit_after_session_switch_is_rejected() {
 }
 
 #[test]
+// COMPAT(session-derived-sidecar-exports): fork publication currently includes alpha exports.
 fn sparse_fork_publishes_a_complete_destination() {
     let guard = test_home_guard();
     let session_id = {

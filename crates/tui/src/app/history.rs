@@ -1230,6 +1230,7 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to fork legacy session attachments: {err}"));
             return;
         }
+        // COMPAT(session-derived-sidecar-exports): publish alpha exports with a fork.
         if let Err(err) = session::refresh_derived_files(&fork_work_dir) {
             self.notify_error_sticky(format!("failed to refresh fork metadata: {err}"));
             return;

@@ -242,6 +242,11 @@ impl TuiApp {
         let permissions = turn.permissions.clone();
         self.applied_agent_mode = self.core.config.mode.clone();
         self.applied_reasoning_effort = turn.reasoning_effort;
+        smelt_perf::perf::record_value("agent:dispatch:start_turn:turn_id", turn_id);
+        smelt_perf::perf::record_value(
+            "agent:dispatch:start_turn:at_us",
+            smelt_perf::perf::timestamp_us(),
+        );
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
@@ -1288,6 +1293,32 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn perf_value_count(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> usize {
+        snapshot
+            .values
+            .iter()
+            .find(|row| row.label == label)
+            .map(|row| row.count)
+            .unwrap_or(0)
+    }
+
+    fn perf_value_total(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+        snapshot
+            .values
+            .iter()
+            .find(|row| row.label == label)
+            .map(|row| row.total)
+            .unwrap_or(0)
+    }
+
+    fn perf_value_last(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> Option<u64> {
+        snapshot
+            .values
+            .iter()
+            .find(|row| row.label == label)
+            .map(|row| row.last)
+    }
+
     fn assert_perf_value_absent(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
         let value = perf_value_max(snapshot, label);
         assert_eq!(value, 0, "{label} recorded {value}, expected no samples");
@@ -1421,6 +1452,105 @@ mod tests {
         assert!(matches!(
             loaded.history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"
+        ));
+    }
+
+    #[test]
+    // COMPAT(session-derived-sidecar-exports): lock the Phase 0 synchronous export barrier.
+    fn enter_persists_through_sqlite_and_sidecar_before_engine_dispatch() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.type_text("phase zero submit");
+        app.clear_actions();
+
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+        app.press(crossterm::event::KeyCode::Enter);
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+
+        let mut dispatched_turns = app.actions().iter().filter_map(|action| match action {
+            crate::app::test_harness::Action::EngineSend(command) => match command.as_ref() {
+                protocol::UiCommand::StartTurn(payload) => Some(payload.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let payload = dispatched_turns.next().expect("Enter dispatched StartTurn");
+        assert!(
+            dispatched_turns.next().is_none(),
+            "Enter must dispatch exactly one StartTurn"
+        );
+        assert_eq!(
+            perf_value_count(&snapshot, "agent:dispatch:start_turn:at_us"),
+            1,
+            "dispatch instrumentation should observe exactly one StartTurn"
+        );
+        assert_eq!(
+            perf_value_total(&snapshot, "store:transaction:session_commit:attempts"),
+            1,
+            "Enter should currently issue one canonical session commit"
+        );
+        assert_eq!(
+            perf_value_total(&snapshot, "store:transaction:session_commit:committed"),
+            1,
+            "Enter should commit exactly once before dispatch"
+        );
+        assert_eq!(
+            perf_value_total(&snapshot, "session:compat_export:meta:writes"),
+            1,
+            "the Phase 0 baseline keeps metadata export in the Enter barrier"
+        );
+        assert_eq!(
+            perf_value_last(&snapshot, "agent:dispatch:start_turn:turn_id"),
+            Some(payload.turn_id)
+        );
+
+        let committed_at = perf_value_last(
+            &snapshot,
+            "store:transaction:session_commit:committed_at_us",
+        )
+        .expect("canonical commit timestamp");
+        let meta_written_at =
+            perf_value_last(&snapshot, "session:compat_export:meta:completed_at_us")
+                .expect("metadata export timestamp");
+        let dispatched_at = perf_value_last(&snapshot, "agent:dispatch:start_turn:at_us")
+            .expect("dispatch timestamp");
+        assert!(
+            committed_at <= meta_written_at && meta_written_at <= dispatched_at,
+            "expected commit ({committed_at}) <= metadata export ({meta_written_at}) <= dispatch ({dispatched_at})"
+        );
+
+        let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+        let reader = smelt_store::SessionReader::open_database(session_dir.join("session.db"))
+            .expect("open committed session");
+        let head = reader.store_head().expect("read committed head");
+        assert_eq!(
+            perf_value_last(
+                &snapshot,
+                "persist:projection:compat_content:requested_revision",
+            ),
+            Some(head.revision.get())
+        );
+        assert_eq!(
+            perf_value_last(&snapshot, "persist:projection:compat_content:queue_depth",),
+            Some(1),
+            "the baseline compatibility worker has a capacity-1 wake queue"
+        );
+        let meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(session_dir.join("meta.json")).expect("read metadata export"),
+        )
+        .expect("parse metadata export");
+        assert_eq!(
+            meta.get("source_revision")
+                .and_then(serde_json::Value::as_u64),
+            Some(head.revision.get())
+        );
+        let history = reader
+            .read_history_items_range(0..head.history_len.get() as usize)
+            .expect("read committed history");
+        assert!(matches!(
+            history.last(),
+            Some(HistoryItem::User { content, .. }) if content.text_content() == "phase zero submit"
         ));
     }
 

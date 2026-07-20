@@ -1139,6 +1139,7 @@ impl StatusPublisher {
     }
 }
 
+// COMPAT(session-derived-sidecar-exports): per-session alpha content exporter.
 struct DerivedContentRefresh {
     wake: Option<SyncSender<()>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -1195,12 +1196,22 @@ impl DerivedContentRefresh {
         }
     }
 
-    fn request(&self) {
+    fn request(&self, revision: smelt_store::Revision) {
+        smelt_perf::perf::record_value(
+            "persist:projection:compat_content:requested_revision",
+            revision.get(),
+        );
         let Some(wake) = &self.wake else {
             return;
         };
         match wake.try_send(()) {
-            Ok(()) | Err(TrySendError::Full(())) => {}
+            Ok(()) => {
+                smelt_perf::perf::record_value("persist:projection:compat_content:queue_depth", 1);
+            }
+            Err(TrySendError::Full(())) => {
+                smelt_perf::perf::record_value("persist:projection:compat_content:queue_depth", 1);
+                smelt_perf::perf::record_value("persist:projection:compat_content:coalesced", 1);
+            }
             Err(TrySendError::Disconnected(())) => {
                 smelt_perf::perf::record_value("persist:sidecar:worker_disconnected", 1);
             }
@@ -1882,6 +1893,7 @@ impl PersistenceActor {
             drop(publication_perf);
         }
         record_save_receipt(&receipt);
+        // COMPAT(session-derived-sidecar-exports): synchronous alpha metadata export.
         let meta_result = smelt_core::session::refresh_derived_meta_file(writer.session_dir());
         let warning = meta_result.as_ref().err().map(|error| {
             PersistenceCause::new(
@@ -1894,7 +1906,8 @@ impl PersistenceActor {
         });
         self.publisher.publish_sidecar_warning(warning);
         if meta_result.is_ok() {
-            self.derived_content_refresh.request();
+            self.derived_content_refresh
+                .request(receipt.current.revision);
         }
         Ok(receipt)
     }

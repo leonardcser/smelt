@@ -53,6 +53,17 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
+/// Process-local monotonic timestamp for ordering instrumentation events.
+pub fn timestamp_us() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// Record a raw numeric sample (byte count, cache size, etc.) under `label`.
 pub fn record_value(label: &'static str, value: u64) {
     if !enabled() {
