@@ -5,7 +5,7 @@ use super::display_layout::{
 use crate::content::estimate_text_rows;
 use crate::content::render_plan::{
     NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
-    TranscriptPresentationState,
+    TranscriptPresentationState, TRANSCRIPT_APPEND_HEADROOM,
 };
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
@@ -219,7 +219,8 @@ impl TranscriptHeightIndex {
             Vec::new()
         };
         self.nodes.clear();
-        self.nodes.reserve(plan.len());
+        self.nodes
+            .reserve(plan.len().saturating_add(TRANSCRIPT_APPEND_HEADROOM));
         for index in 0..plan.len() {
             let Some(id) = plan.node_id(index) else {
                 continue;
@@ -605,7 +606,12 @@ impl TranscriptHeightIndex {
 
     fn rebuild_prefix_rows(&mut self) {
         self.prefix_rows.clear();
-        self.prefix_rows.reserve(self.nodes.len() + 1);
+        self.prefix_rows.reserve(
+            self.nodes
+                .len()
+                .saturating_add(1)
+                .saturating_add(TRANSCRIPT_APPEND_HEADROOM),
+        );
         self.prefix_rows.push(0);
         let mut total: RowIndex = 0;
         for node in &self.nodes {
@@ -6833,6 +6839,7 @@ mod tests {
             write_descriptor_backed_resume_fixture(&session, target_bytes);
 
         smelt_perf::perf::clear();
+        let tail_alloc_before = smelt_perf::alloc::snapshot();
         let tail_load_start = std::time::Instant::now();
         let tail_resumed =
             crate::app::history::load_transcript_tail_from_sqlite_id(&session_id, 100, 40)
@@ -6851,6 +6858,10 @@ mod tests {
         );
         let tail_rows = tail_document.project_planned(&lua, &mut tail_buf, &theme, tail_plan);
         let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
+        let tail_alloc_after = smelt_perf::alloc::snapshot();
+        let tail_alloc = smelt_perf::alloc::delta(tail_alloc_before, tail_alloc_after);
+        let tail_retained_bytes =
+            tail_alloc_after.current_bytes as i64 - tail_alloc_before.current_bytes as i64;
         assert!(tail_rows.total_rows > 0);
         let tail_snapshot = smelt_perf::perf::snapshot();
         print_resume_perf_snapshot(&tail_snapshot);
@@ -6864,7 +6875,7 @@ mod tests {
         smelt_core::session::delete(&session_id).expect("delete resume benchmark session");
         smelt_perf::perf::set_enabled(false);
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes={} generated_bytes={} descriptors={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3}",
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes={} generated_bytes={} descriptors={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} tail_bytes_allocated={} tail_bytes_deallocated={} tail_current_bytes_before={} tail_current_bytes_after={} tail_retained_bytes={}",
             target_bytes,
             generated_bytes,
             descriptor_count,
@@ -6872,9 +6883,14 @@ mod tests {
             setup_ms,
             tail_load_ms,
             tail_render_ms,
+            tail_alloc.bytes_allocated,
+            tail_alloc.bytes_deallocated,
+            tail_alloc_before.current_bytes,
+            tail_alloc_after.current_bytes,
+            tail_retained_bytes,
         );
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"mode\":\"descriptor_backed\",\"target_bytes\":{},\"generated_bytes\":{},\"descriptors\":{},\"rows\":{},\"setup_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3}}}",
+            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"mode\":\"descriptor_backed\",\"target_bytes\":{},\"generated_bytes\":{},\"descriptors\":{},\"rows\":{},\"setup_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"tail_bytes_allocated\":{},\"tail_bytes_deallocated\":{},\"tail_current_bytes_before\":{},\"tail_current_bytes_after\":{},\"tail_retained_bytes\":{}}}",
             target_bytes,
             generated_bytes,
             descriptor_count,
@@ -6882,6 +6898,11 @@ mod tests {
             setup_ms,
             tail_load_ms,
             tail_render_ms,
+            tail_alloc.bytes_allocated,
+            tail_alloc.bytes_deallocated,
+            tail_alloc_before.current_bytes,
+            tail_alloc_after.current_bytes,
+            tail_retained_bytes,
         );
     }
     fn assert_projection_bench_gates(counters: TranscriptProjectionCounters, label: &str) {

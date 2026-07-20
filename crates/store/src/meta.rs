@@ -197,6 +197,7 @@ pub(crate) fn write_session(
     metadata: &SessionMetadata,
     revision: u64,
     history_len: u64,
+    descriptor_len: u64,
 ) -> Result<()> {
     validate_session_checkpoint(metadata, history_len)?;
     let accounting_json = optional_json_string(&metadata.accounting_json)?;
@@ -206,8 +207,8 @@ pub(crate) fn write_session(
             singleton, id, title, slug, first_user_message, cwd, mode, reasoning_effort,
             model, fast_mode, parent_id, accounting_json, checkpoint_json, context_tokens,
             context_tokens_history_len, display_context_tokens, session_cost_usd,
-            revision, history_len, created_at, updated_at
-         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            revision, history_len, descriptor_len, created_at, updated_at
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(singleton) DO UPDATE SET
             title = excluded.title,
             slug = excluded.slug,
@@ -225,6 +226,7 @@ pub(crate) fn write_session(
             session_cost_usd = excluded.session_cost_usd,
             revision = excluded.revision,
             history_len = excluded.history_len,
+            descriptor_len = excluded.descriptor_len,
             updated_at = excluded.updated_at",
         params![
             &identity.id,
@@ -254,6 +256,7 @@ pub(crate) fn write_session(
             metadata.session_cost_usd.get(),
             checked_i64(revision, "revision")?,
             checked_i64(history_len, "history_len")?,
+            checked_i64(descriptor_len, "descriptor_len")?,
             identity.created_at,
             metadata.updated_at,
         ],

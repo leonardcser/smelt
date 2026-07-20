@@ -528,7 +528,7 @@ async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary
         let _g = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages: full_history.clone(),
+                messages: engine::PreparedRequestMessages::model_only(full_history.clone()),
                 estimated_tokens: 200,
                 reply: tx,
             });
@@ -589,7 +589,7 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
         let _g = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages: full_history,
+                messages: engine::PreparedRequestMessages::model_only(full_history),
                 estimated_tokens: 200,
                 reply: tx,
             });

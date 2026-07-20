@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
@@ -81,6 +81,9 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if (2..=4).contains(&current) {
         migrate_to_v5(conn, current < 4)?;
+    }
+    if (1..=6).contains(&current) {
+        migrate_to_v7(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -258,6 +261,10 @@ fn normalized_sql(sql: &str) -> String {
     sql.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+        .replace("( ", "(")
+        .replace(" )", ")")
+        .replace(" ,", ",")
+        .replace(", ", ",")
         .to_ascii_lowercase()
 }
 
@@ -377,6 +384,46 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
         DROP TABLE transcript_blocks_old;
         "#,
     )?;
+    Ok(())
+}
+
+fn migrate_to_v7(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "session_state", "descriptor_len")? {
+        conn.execute_batch(
+            "ALTER TABLE session_state
+             ADD COLUMN descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0)",
+        )?;
+    }
+    conn.execute(
+        "UPDATE session_state
+         SET descriptor_len = (
+             SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL
+         )
+         WHERE singleton = 1",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS transcript_search_chars (
+             block_idx INTEGER PRIMARY KEY REFERENCES transcript_search(block_idx) ON DELETE CASCADE CHECK (block_idx >= 0),
+             mask_0 INTEGER NOT NULL CHECK (mask_0 >= 0),
+             mask_1 INTEGER NOT NULL CHECK (mask_1 >= 0),
+             mask_2 INTEGER NOT NULL CHECK (mask_2 >= 0),
+             mask_3 INTEGER NOT NULL CHECK (mask_3 >= 0)
+         )",
+    )?;
+    let mut select = conn.prepare("SELECT block_idx, indexed_text FROM transcript_search")?;
+    let mut insert = conn.prepare(
+        "INSERT OR REPLACE INTO transcript_search_chars (
+             block_idx, mask_0, mask_1, mask_2, mask_3
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    let mut rows = select.query([])?;
+    while let Some(row) = rows.next()? {
+        let block_idx = row.get::<_, i64>(0)?;
+        let indexed_text = row.get::<_, String>(1)?;
+        let masks = crate::history::transcript_search_char_masks(&indexed_text);
+        insert.execute((block_idx, masks[0], masks[1], masks[2], masks[3]))?;
+    }
     Ok(())
 }
 
@@ -653,7 +700,8 @@ CREATE TABLE IF NOT EXISTS session_state (
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     history_len INTEGER NOT NULL DEFAULT 0 CHECK (history_len >= 0),
     created_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (created_at >= 0),
-    updated_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (updated_at >= 0)
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (updated_at >= 0),
+    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS history_items (
@@ -800,6 +848,14 @@ CREATE TABLE IF NOT EXISTS transcript_search (
 );
 CREATE INDEX IF NOT EXISTS transcript_search_history_idx ON transcript_search(history_idx, block_idx);
 
+CREATE TABLE IF NOT EXISTS transcript_search_chars (
+    block_idx INTEGER PRIMARY KEY REFERENCES transcript_search(block_idx) ON DELETE CASCADE CHECK (block_idx >= 0),
+    mask_0 INTEGER NOT NULL CHECK (mask_0 >= 0),
+    mask_1 INTEGER NOT NULL CHECK (mask_1 >= 0),
+    mask_2 INTEGER NOT NULL CHECK (mask_2 >= 0),
+    mask_3 INTEGER NOT NULL CHECK (mask_3 >= 0)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS transcript_search_fts USING fts5(
     indexed_text,
     content='transcript_search',
@@ -893,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v6_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v7_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -975,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v6_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_to_v7_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "ignore_check_constraints", true)
@@ -1101,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v6_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v7_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1171,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v6_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v7_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1211,17 +1267,52 @@ mod tests {
     }
 
     #[test]
-    fn v5_to_v6_migration_preserves_the_current_schema_without_rebuilding() {
+    fn v6_to_v7_migration_caches_descriptor_count_without_rebuilding() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        let v6_schema = SCHEMA
+            .replace(
+                ",\n    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0)",
+                "",
+            )
+            .replace(
+                r#"
+CREATE TABLE IF NOT EXISTS transcript_search_chars (
+    block_idx INTEGER PRIMARY KEY REFERENCES transcript_search(block_idx) ON DELETE CASCADE CHECK (block_idx >= 0),
+    mask_0 INTEGER NOT NULL CHECK (mask_0 >= 0),
+    mask_1 INTEGER NOT NULL CHECK (mask_1 >= 0),
+    mask_2 INTEGER NOT NULL CHECK (mask_2 >= 0),
+    mask_3 INTEGER NOT NULL CHECK (mask_3 >= 0)
+);
+"#,
+                "",
+            );
+        conn.execute_batch(&v6_schema).unwrap();
         conn.execute(
             "INSERT INTO store_meta (key, value) VALUES ('sentinel', 'kept')",
             [],
         )
         .unwrap();
-        set_user_version(&conn, 5).unwrap();
+        conn.execute(
+            "INSERT INTO session_state (singleton, id) VALUES (1, 'session')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_blocks (
+                 block_idx, descriptor_idx, kind, descriptor_json
+             ) VALUES (0, 0, 'text', '{}'), (1, 1, 'text', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_search (block_idx, indexed_text)
+             VALUES (0, 'contains §')",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 6).unwrap();
 
-        migrate(&mut conn, "test-v6").unwrap();
+        migrate(&mut conn, "test-v7").unwrap();
 
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
@@ -1232,6 +1323,29 @@ mod tests {
             )
             .unwrap(),
             "kept"
+        );
+        assert_eq!(
+            conn.query_row("SELECT descriptor_len FROM session_state", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            2
+        );
+        let masks = crate::history::transcript_search_char_masks("contains §");
+        assert_eq!(
+            conn.query_row(
+                "SELECT mask_0, mask_1, mask_2, mask_3
+                 FROM transcript_search_chars WHERE block_idx = 0",
+                [],
+                |row| Ok([
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ])
+            )
+            .unwrap(),
+            masks
         );
         validate_read_only_schema(&conn).unwrap();
     }

@@ -2587,13 +2587,15 @@ mod checkpoint_tests {
         let session_dir = session::dir_for_id(&id);
         let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         db.connection()
-            .execute(
-                "UPDATE transcript_blocks
+            .execute_batch(
+                "BEGIN;
+                 UPDATE transcript_blocks
                  SET descriptor_idx = NULL,
                      descriptor_json = NULL,
                      origin_json = NULL,
-                     tool_state_json = NULL",
-                [],
+                     tool_state_json = NULL;
+                 UPDATE session_state SET descriptor_len = 0 WHERE singleton = 1;
+                 COMMIT;",
             )
             .unwrap();
         assert_eq!(db.transcript_descriptor_count().unwrap(), 0);

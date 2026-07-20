@@ -47,6 +47,8 @@ impl RenderNode {
     }
 }
 
+pub(crate) const TRANSCRIPT_APPEND_HEADROOM: usize = 64;
+
 #[derive(Clone, Debug, Default)]
 struct RenderNodeIndex {
     blocks: Vec<(BlockId, usize)>,
@@ -56,7 +58,7 @@ struct RenderNodeIndex {
 impl RenderNodeIndex {
     fn for_nodes(nodes: &[RenderNode]) -> Self {
         let mut index = Self {
-            blocks: Vec::with_capacity(nodes.len()),
+            blocks: Vec::with_capacity(nodes.len().saturating_add(TRANSCRIPT_APPEND_HEADROOM)),
             groups: HashMap::new(),
         };
         for (node_index, node) in nodes.iter().enumerate() {
@@ -396,6 +398,7 @@ struct RenderPlanPrefix {
 pub(crate) struct RenderPlan {
     pub(crate) history_generation: u64,
     pub(crate) history_order_generation: u64,
+    history_descriptor_generation: u64,
     history_order_len: usize,
     pub(crate) group_generation: u64,
     pub(crate) group_cache_key: Option<u64>,
@@ -411,6 +414,7 @@ impl RenderPlan {
         Self {
             history_generation: 0,
             history_order_generation: 0,
+            history_descriptor_generation: 0,
             history_order_len: 0,
             group_generation: 0,
             group_cache_key: None,
@@ -485,6 +489,7 @@ impl RenderPlan {
         Self {
             history_generation: history.generation(),
             history_order_generation: history.order_generation(),
+            history_descriptor_generation: history.descriptor_dirty_generation(),
             history_order_len: history.order.len(),
             group_generation,
             group_cache_key,
@@ -516,6 +521,7 @@ impl RenderPlan {
                 return None;
             }
             self.history_generation = history.generation();
+            self.history_descriptor_generation = history.descriptor_dirty_generation();
             self.group_generation = group_generation;
             self.group_cache_key = group_cache_key;
             self.append_prefix = None;
@@ -530,9 +536,8 @@ impl RenderPlan {
         }
         let old_order_len = self.history_order_len;
         if old_order_len > history.order.len()
-            || history
-                .descriptor_dirty_from()
-                .is_none_or(|idx| idx < old_order_len)
+            || history.descriptor_changed_from_since(self.history_descriptor_generation)?
+                < old_order_len
         {
             return None;
         }
@@ -560,11 +565,12 @@ impl RenderPlan {
         }
         self.history_generation = history.generation();
         self.history_order_generation = history.order_generation();
+        self.history_descriptor_generation = history.descriptor_dirty_generation();
         self.history_order_len = history.order.len();
         self.group_generation = group_generation;
         self.group_cache_key = group_cache_key;
         if pure_append {
-            self.extend_fingerprint(history, old_fingerprint, old_order_len, old_node_len);
+            self.extend_fingerprint(history);
             self.append_prefix = Some(RenderPlanPrefix {
                 len: old_node_len,
                 fingerprint: old_fingerprint,
@@ -604,20 +610,11 @@ impl RenderPlan {
         );
     }
 
-    fn extend_fingerprint(
-        &mut self,
-        history: &BlockHistory,
-        old_fingerprint: u64,
-        old_order_len: usize,
-        old_node_len: usize,
-    ) {
+    fn extend_fingerprint(&mut self, history: &BlockHistory) {
         let _perf = smelt_perf::perf::begin("transcript:render_plan:fingerprint_append");
-        self.fingerprint = append_render_plan_fingerprint(
+        self.fingerprint = render_plan_fingerprint(
             history,
-            old_fingerprint,
-            old_order_len,
-            self.history_order_len,
-            &self.nodes[old_node_len..],
+            &self.nodes,
             self.group_generation,
             self.group_cache_key,
         );
@@ -780,36 +777,11 @@ fn render_plan_fingerprint(
     group_cache_key: Option<u64>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
+    history.order_generation().hash(&mut hasher);
+    history.descriptor_dirty_generation().hash(&mut hasher);
     group_generation.hash(&mut hasher);
     group_cache_key.hash(&mut hasher);
     nodes.len().hash(&mut hasher);
-    for node in nodes {
-        node.id().hash(&mut hasher);
-        node_fingerprint(history, node).hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn append_render_plan_fingerprint(
-    history: &BlockHistory,
-    previous_fingerprint: u64,
-    previous_order_len: usize,
-    order_len: usize,
-    appended_nodes: &[RenderNode],
-    group_generation: u64,
-    group_cache_key: Option<u64>,
-) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    previous_fingerprint.hash(&mut hasher);
-    previous_order_len.hash(&mut hasher);
-    order_len.hash(&mut hasher);
-    group_generation.hash(&mut hasher);
-    group_cache_key.hash(&mut hasher);
-    appended_nodes.len().hash(&mut hasher);
-    for node in appended_nodes {
-        node.id().hash(&mut hasher);
-        node_fingerprint(history, node).hash(&mut hasher);
-    }
     hasher.finish()
 }
 
@@ -843,14 +815,23 @@ fn build_nodes_from(
     start: usize,
 ) -> Vec<RenderNode> {
     if groups.is_empty() {
-        return history
-            .order
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(start)
-            .map(|(block_index, id)| RenderNode::Block { id, block_index })
-            .collect();
+        let remaining = history.order.len().saturating_sub(start);
+        let headroom = if start == 0 {
+            TRANSCRIPT_APPEND_HEADROOM
+        } else {
+            0
+        };
+        let mut nodes = Vec::with_capacity(remaining.saturating_add(headroom));
+        nodes.extend(
+            history
+                .order
+                .iter()
+                .copied()
+                .enumerate()
+                .skip(start)
+                .map(|(block_index, id)| RenderNode::Block { id, block_index }),
+        );
+        return nodes;
     }
 
     let mut nodes = Vec::new();
@@ -1022,15 +1003,6 @@ fn json_bucket_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
-    }
-}
-
-fn node_fingerprint(history: &BlockHistory, node: &RenderNode) -> u64 {
-    match node {
-        RenderNode::Block { id, .. } => {
-            hash_values([history.content_hash(*id), block_sidecar_hash(history, *id)])
-        }
-        RenderNode::Group(group) => group_sidecar_hash(history, group.child_range.clone()),
     }
 }
 
@@ -1327,6 +1299,7 @@ mod tests {
             content: "third".into(),
         });
         let appended = *transcript.history.order.last().unwrap();
+        transcript.history.clear_descriptor_dirty();
         let prune_required =
             plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
 

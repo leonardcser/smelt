@@ -1477,12 +1477,26 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 /// Write `contents` to `path` atomically via a private temporary file + rename.
 pub fn atomic_write(path: &Path, contents: &[u8], ts: u64) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("storage file has no parent: {}", path.display()),
-        )
-    })?;
+    atomic_write_with(path, ts, |file| std::io::Write::write_all(file, contents))
+}
+
+fn atomic_write_with<E>(
+    path: &Path,
+    ts: u64,
+    write_contents: impl FnOnce(&mut fs::File) -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<std::io::Error>,
+{
+    let dir = path
+        .parent()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("storage file has no parent: {}", path.display()),
+            )
+        })
+        .map_err(E::from)?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1491,9 +1505,10 @@ pub fn atomic_write(path: &Path, contents: &[u8], ts: u64) -> std::io::Result<()
                 std::io::ErrorKind::InvalidInput,
                 format!("storage file has no valid name: {}", path.display()),
             )
-        })?;
-    reject_filesystem_symlink(dir)?;
-    reject_filesystem_symlink(path)?;
+        })
+        .map_err(E::from)?;
+    reject_filesystem_symlink(dir).map_err(E::from)?;
+    reject_filesystem_symlink(path).map_err(E::from)?;
     let nonce = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".{name}.{ts}.{nonce}.tmp"));
     let result = (|| {
@@ -1504,11 +1519,11 @@ pub fn atomic_write(path: &Path, contents: &[u8], ts: u64) -> std::io::Result<()
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        let mut file = options.open(&tmp)?;
-        std::io::Write::write_all(&mut file, contents)?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)?;
-        sync_directory(dir)
+        let mut file = options.open(&tmp).map_err(E::from)?;
+        write_contents(&mut file)?;
+        file.sync_all().map_err(E::from)?;
+        fs::rename(&tmp, path).map_err(E::from)?;
+        sync_directory(dir).map_err(E::from)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -2258,7 +2273,8 @@ fn derived_meta_json(meta: &smelt_store::SessionMeta) -> Result<Vec<u8>, String>
     serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())
 }
 
-pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
+pub fn refresh_derived_meta_file(dir_path: &Path) -> Result<bool, String> {
+    let _perf = smelt_perf::perf::begin("session:refresh_derived_meta_file");
     let db_path = dir_path.join("session.db");
     if !db_path.is_file() {
         return Ok(false);
@@ -2267,14 +2283,42 @@ pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
     let Some(meta) = db.session_meta().map_err(|err| err.to_string())? else {
         return Ok(false);
     };
-    let blob = db.search_blob().map_err(|err| err.to_string())?;
     let meta_json = derived_meta_json(&meta)?;
-    let content = format!("# smelt-revision:{}\n{blob}", meta.revision);
-    let ts = now_ms();
-    atomic_write(&dir_path.join("meta.json"), &meta_json, ts).map_err(|err| err.to_string())?;
-    atomic_write(&dir_path.join("content.txt"), content.as_bytes(), ts)
+    atomic_write(&dir_path.join("meta.json"), &meta_json, now_ms())
         .map_err(|err| err.to_string())?;
     Ok(true)
+}
+
+pub fn refresh_derived_content_file(dir_path: &Path) -> Result<bool, String> {
+    let _perf = smelt_perf::perf::begin("session:refresh_derived_content_file");
+    let db_path = dir_path.join("session.db");
+    if !db_path.is_file() {
+        return Ok(false);
+    }
+    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
+    let Some(meta) = db.session_meta().map_err(|err| err.to_string())? else {
+        return Ok(false);
+    };
+    atomic_write_with(
+        &dir_path.join("content.txt"),
+        now_ms(),
+        |file| -> smelt_store::Result<()> {
+            std::io::Write::write_all(
+                file,
+                format!("# smelt-revision:{}\n", meta.revision).as_bytes(),
+            )?;
+            db.write_search_blob(file)
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(true)
+}
+
+pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
+    let _perf = smelt_perf::perf::begin("session:refresh_derived_files");
+    let meta_refreshed = refresh_derived_meta_file(dir_path)?;
+    let content_refreshed = refresh_derived_content_file(dir_path)?;
+    Ok(meta_refreshed || content_refreshed)
 }
 
 pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {

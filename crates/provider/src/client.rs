@@ -72,72 +72,75 @@ impl ProviderClient {
     ) -> Result<ChatResponse, ProviderError> {
         let provider_kind = request.provider.kind();
         let mut wire_api = provider_kind.wire_api();
-        let (url, mut body) = match provider_kind {
-            ProviderKind::OpenAiCompatible => {
-                let url = endpoint_url(request.api_base, "chat/completions");
-                let body = chat_completions::build_body(
-                    request.messages,
-                    request.tools,
-                    request.model,
-                    request.effort,
-                    request.config,
-                );
-                (url, body)
-            }
-            ProviderKind::OpenAi => {
-                let url = endpoint_url(request.api_base, "responses");
-                let body = openai::build_body(
-                    request.messages,
-                    request.tools,
-                    request.model,
-                    request.effort,
-                    request.config,
-                );
-                (url, body)
-            }
-            ProviderKind::AnthropicCompatible
-            | ProviderKind::Anthropic
-            | ProviderKind::KimiCode => {
-                let url = endpoint_url(request.api_base, "messages");
-                let body = anthropic::build_body(
-                    request.messages,
-                    request.tools,
-                    request.model,
-                    request.effort,
-                    request.config,
-                    &request.cache,
-                );
-                (url, body)
-            }
-            ProviderKind::Codex => {
-                let url = endpoint_url(request.api_base, "responses");
-                let body = openai::build_codex_body(
-                    request.messages,
-                    request.tools,
-                    request.model,
-                    request.effort,
-                    request.config,
-                );
-                (url, body)
-            }
-            ProviderKind::Copilot => {
-                let Some((tokens, wire)) = request.provider.copilot_transport() else {
-                    return Err(ProviderError::InvalidResponse(
-                        "copilot chat requires Copilot credentials".to_string(),
-                    ));
-                };
-                wire_api = wire;
-                let url = wire.copilot_url(&tokens.api_base);
-                let body = copilot_body(
-                    wire,
-                    request.messages,
-                    request.tools,
-                    request.model,
-                    request.effort,
-                    request.config,
-                    &request.cache,
-                );
-                (url, body)
+        let (url, mut body) = {
+            let _perf = smelt_perf::perf::begin("provider:request:build_body");
+            match provider_kind {
+                ProviderKind::OpenAiCompatible => {
+                    let url = endpoint_url(request.api_base, "chat/completions");
+                    let body = chat_completions::build_body(
+                        request.messages,
+                        request.tools,
+                        request.model,
+                        request.effort,
+                        request.config,
+                    );
+                    (url, body)
+                }
+                ProviderKind::OpenAi => {
+                    let url = endpoint_url(request.api_base, "responses");
+                    let body = openai::build_body(
+                        request.messages,
+                        request.tools,
+                        request.model,
+                        request.effort,
+                        request.config,
+                    );
+                    (url, body)
+                }
+                ProviderKind::AnthropicCompatible
+                | ProviderKind::Anthropic
+                | ProviderKind::KimiCode => {
+                    let url = endpoint_url(request.api_base, "messages");
+                    let body = anthropic::build_body(
+                        request.messages,
+                        request.tools,
+                        request.model,
+                        request.effort,
+                        request.config,
+                        &request.cache,
+                    );
+                    (url, body)
+                }
+                ProviderKind::Codex => {
+                    let url = endpoint_url(request.api_base, "responses");
+                    let body = openai::build_codex_body(
+                        request.messages,
+                        request.tools,
+                        request.model,
+                        request.effort,
+                        request.config,
+                    );
+                    (url, body)
+                }
+                ProviderKind::Copilot => {
+                    let Some((tokens, wire)) = request.provider.copilot_transport() else {
+                        return Err(ProviderError::InvalidResponse(
+                            "copilot chat requires Copilot credentials".to_string(),
+                        ));
+                    };
+                    wire_api = wire;
+                    let url = wire.copilot_url(&tokens.api_base);
+                    let body = copilot_body(
+                        wire,
+                        request.messages,
+                        request.tools,
+                        request.model,
+                        request.effort,
+                        request.config,
+                        &request.cache,
+                    );
+                    (url, body)
+                }
             }
         };
 
@@ -268,7 +271,10 @@ impl ProviderClient {
 
         for attempt in 0..=max_retries {
             let request_start = std::time::Instant::now();
-            let mut req = self.client.post(&request.url).json(&request.body);
+            let mut req = {
+                let _perf = smelt_perf::perf::begin("provider:request:serialize_json");
+                self.client.post(&request.url).json(&request.body)
+            };
             if let Some(headers) = request.kimi_headers {
                 req = kimi_code::apply_default_headers(req, headers);
             }

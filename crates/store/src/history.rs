@@ -2,6 +2,7 @@ use protocol::HistoryItem;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Statement};
 use serde_json::{json, Value};
 use smelt_perf::perf;
+use std::io::Write;
 use std::ops::Range;
 
 use crate::compression::ObjectCompression;
@@ -581,26 +582,36 @@ pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {
 
 pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     let _perf = perf::begin("store:transcript:search_blob_full");
+    let mut out = Vec::new();
+    write_search_blob_rows(conn, &mut out)?;
+    Ok(String::from_utf8(out).expect("transcript search text is valid UTF-8"))
+}
+
+pub(crate) fn write_search_blob(conn: &Connection, writer: &mut impl Write) -> Result<()> {
+    let _perf = perf::begin("store:transcript:search_blob_full");
+    write_search_blob_rows(conn, writer)
+}
+
+fn write_search_blob_rows(conn: &Connection, writer: &mut impl Write) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT indexed_text FROM transcript_search WHERE indexed_text != '' ORDER BY block_idx",
     )?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut out = String::new();
     let mut row_count = 0u64;
+    let mut byte_count = 0u64;
     for row in rows {
         let text = row?;
-        if text.is_empty() {
-            continue;
-        }
         row_count = row_count.saturating_add(1);
-        out.push_str(&text);
-        if !out.ends_with('\n') {
-            out.push('\n');
+        writer.write_all(text.as_bytes())?;
+        byte_count = byte_count.saturating_add(text.len() as u64);
+        if !text.ends_with('\n') {
+            writer.write_all(b"\n")?;
+            byte_count = byte_count.saturating_add(1);
         }
     }
     perf::record_value("store:transcript:search_blob_rows_read", row_count);
-    perf::record_value("store:transcript:search_blob_bytes_read", out.len() as u64);
-    Ok(out)
+    perf::record_value("store:transcript:search_blob_bytes_read", byte_count);
+    Ok(())
 }
 
 pub(crate) fn transcript_descriptor_suffix_matches(
@@ -655,8 +666,10 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     compression: ObjectCompression,
 ) -> Result<()> {
     let _perf = perf::begin("store:transcript:replace_descriptor_suffix");
-    compact_transcript_descriptor_indices(conn)?;
     let current_descriptor_count = transcript_descriptor_count(conn)?;
+    if transcript_descriptor_dense_extent(conn)? != current_descriptor_count {
+        compact_transcript_descriptor_indices(conn)?;
+    }
     if start_descriptor_idx > current_descriptor_count {
         return Err(StoreError::Integrity(format!(
             "transcript descriptor suffix starts past dense end: start {start_descriptor_idx}, count {current_descriptor_count}",
@@ -735,73 +748,29 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
-struct TranscriptDescriptorIndexStats {
-    count: i64,
-    indexed_count: i64,
-    distinct_index_count: i64,
-    min_descriptor_idx: i64,
-    max_descriptor_idx: i64,
-}
-
-impl TranscriptDescriptorIndexStats {
-    fn is_dense(self) -> bool {
-        self.count == self.indexed_count
-            && self.count == self.distinct_index_count
-            && self.min_descriptor_idx == 0
-            && self.max_descriptor_idx == self.count.saturating_sub(1)
-    }
-}
-
-fn transcript_descriptor_index_stats(conn: &Connection) -> Result<TranscriptDescriptorIndexStats> {
-    conn.query_row(
-        "SELECT COUNT(*), COUNT(descriptor_idx), COUNT(DISTINCT descriptor_idx),
-                COALESCE(MIN(descriptor_idx), 0), COALESCE(MAX(descriptor_idx), -1)
-         FROM transcript_blocks
-         WHERE descriptor_json IS NOT NULL",
-        [],
-        |row| {
-            Ok(TranscriptDescriptorIndexStats {
-                count: row.get::<_, i64>(0)?,
-                indexed_count: row.get::<_, i64>(1)?,
-                distinct_index_count: row.get::<_, i64>(2)?,
-                min_descriptor_idx: row.get::<_, i64>(3)?,
-                max_descriptor_idx: row.get::<_, i64>(4)?,
-            })
-        },
-    )
-    .map_err(Into::into)
-}
-
-fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<bool> {
-    let stats = transcript_descriptor_index_stats(conn)?;
-    if stats.is_dense() {
-        return Ok(false);
-    }
-
+fn compact_transcript_descriptor_indices(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT block_idx, descriptor_idx
+        "SELECT block_idx
          FROM transcript_blocks
          WHERE descriptor_json IS NOT NULL
          ORDER BY descriptor_idx",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
-    })?;
-    let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     conn.execute(
         "UPDATE transcript_blocks SET descriptor_idx = NULL
          WHERE descriptor_json IS NOT NULL",
         [],
     )?;
-    for (idx, (block_idx, _)) in rows.iter().enumerate() {
+    for (idx, block_idx) in rows.into_iter().enumerate() {
         conn.execute(
             "UPDATE transcript_blocks SET descriptor_idx = ?1 WHERE block_idx = ?2",
             params![idx as i64, block_idx],
         )?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn insert_transcript_descriptor_record(
@@ -843,11 +812,21 @@ fn insert_transcript_descriptor_record(
 
 pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
     let _perf = perf::begin("store:transcript:descriptor_count");
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
-        [],
-        |row| row.get(0),
-    )?;
+    let cached = conn
+        .query_row(
+            "SELECT descriptor_len FROM session_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let count = match cached {
+        Some(count) => count,
+        None => conn.query_row(
+            "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+    };
     perf::record_value("store:transcript:descriptor_count_total", count as u64);
     Ok(count as usize)
 }
@@ -1213,6 +1192,36 @@ where
     Ok(records)
 }
 
+const TRANSCRIPT_SEARCH_CHAR_MASK_BITS: u32 = 63;
+const TRANSCRIPT_SEARCH_CHAR_MASK_COUNT: usize = 4;
+const TRANSCRIPT_SEARCH_CHAR_LIMIT: u32 =
+    TRANSCRIPT_SEARCH_CHAR_MASK_BITS * TRANSCRIPT_SEARCH_CHAR_MASK_COUNT as u32;
+
+pub(crate) fn transcript_search_char_masks(text: &str) -> [i64; TRANSCRIPT_SEARCH_CHAR_MASK_COUNT] {
+    let mut masks = [0i64; TRANSCRIPT_SEARCH_CHAR_MASK_COUNT];
+    for ch in text.chars() {
+        let codepoint = ch as u32;
+        if codepoint >= TRANSCRIPT_SEARCH_CHAR_LIMIT {
+            continue;
+        }
+        let bucket = (codepoint / TRANSCRIPT_SEARCH_CHAR_MASK_BITS) as usize;
+        let bit = codepoint % TRANSCRIPT_SEARCH_CHAR_MASK_BITS;
+        masks[bucket] |= 1i64 << bit;
+    }
+    masks
+}
+
+fn transcript_search_char_mask(query: &str) -> Option<(usize, i64)> {
+    let mut chars = query.chars();
+    let codepoint = chars.next()? as u32;
+    if chars.next().is_some() || codepoint >= TRANSCRIPT_SEARCH_CHAR_LIMIT {
+        return None;
+    }
+    let bucket = (codepoint / TRANSCRIPT_SEARCH_CHAR_MASK_BITS) as usize;
+    let bit = codepoint % TRANSCRIPT_SEARCH_CHAR_MASK_BITS;
+    Some((bucket, 1i64 << bit))
+}
+
 pub(crate) fn search_transcript_candidates(
     conn: &Connection,
     query: &str,
@@ -1251,7 +1260,14 @@ pub(crate) fn search_transcript_candidate_page(
     let mut scanned = 0usize;
     let mut batches = 0usize;
     let use_fts = query.chars().count() >= 3;
+    let char_mask = (!use_fts)
+        .then(|| transcript_search_char_mask(query))
+        .flatten();
     perf::record_value("store:transcript:search_fts", u64::from(use_fts));
+    perf::record_value(
+        "store:transcript:search_char_mask",
+        u64::from(char_mask.is_some()),
+    );
 
     loop {
         let batch = search_transcript_candidate_batch(
@@ -1263,6 +1279,7 @@ pub(crate) fn search_transcript_candidate_page(
                 direction,
                 page_size,
                 use_fts,
+                char_mask,
             },
         )?;
         batches = batches.saturating_add(1);
@@ -1315,6 +1332,7 @@ struct TranscriptCandidateBatchQuery<'a> {
     direction: TranscriptSearchDirection,
     page_size: usize,
     use_fts: bool,
+    char_mask: Option<(usize, i64)>,
 }
 
 fn search_transcript_candidate_batch(
@@ -1325,21 +1343,46 @@ fn search_transcript_candidate_batch(
         TranscriptSearchDirection::Forward => "ASC",
         TranscriptSearchDirection::Backward => "DESC",
     };
+    let bound_column = if query.use_fts {
+        "f.rowid"
+    } else if query.char_mask.is_some() {
+        "c.block_idx"
+    } else {
+        "s.block_idx"
+    };
     let bound_filter = match (query.bound, query.inclusive, query.direction) {
-        (Some(_), true, TranscriptSearchDirection::Forward) => "AND s.block_idx >= ?",
-        (Some(_), false, TranscriptSearchDirection::Forward) => "AND s.block_idx > ?",
-        (Some(_), true, TranscriptSearchDirection::Backward) => "AND s.block_idx <= ?",
-        (Some(_), false, TranscriptSearchDirection::Backward) => "AND s.block_idx < ?",
-        (None, _, _) => "",
+        (Some(_), true, TranscriptSearchDirection::Forward) => {
+            format!("AND {bound_column} >= ?")
+        }
+        (Some(_), false, TranscriptSearchDirection::Forward) => {
+            format!("AND {bound_column} > ?")
+        }
+        (Some(_), true, TranscriptSearchDirection::Backward) => {
+            format!("AND {bound_column} <= ?")
+        }
+        (Some(_), false, TranscriptSearchDirection::Backward) => {
+            format!("AND {bound_column} < ?")
+        }
+        (None, _, _) => String::new(),
     };
     let sql = if query.use_fts {
         format!(
-            "SELECT s.block_idx, s.history_idx
+            "SELECT f.rowid, s.history_idx
              FROM transcript_search_fts f
              JOIN transcript_search s ON s.block_idx = f.rowid
              WHERE f.indexed_text MATCH ?
                AND instr(s.indexed_text, ?) > 0 {bound_filter}
-             ORDER BY s.block_idx {order}
+             ORDER BY f.rowid {order}
+             LIMIT ?"
+        )
+    } else if let Some((bucket, _)) = query.char_mask {
+        format!(
+            "SELECT c.block_idx, s.history_idx
+             FROM transcript_search_chars c
+             CROSS JOIN transcript_search s ON s.block_idx = c.block_idx
+             WHERE (c.mask_{bucket} & ?) != 0
+               AND instr(s.indexed_text, ?) > 0 {bound_filter}
+             ORDER BY c.block_idx {order}
              LIMIT ?"
         )
     } else {
@@ -1354,6 +1397,8 @@ fn search_transcript_candidate_batch(
     let mut values = Vec::with_capacity(3 + usize::from(query.bound.is_some()));
     if query.use_fts {
         values.push(SqlValue::from(fts5_phrase_query(query.query)));
+    } else if let Some((_, mask)) = query.char_mask {
+        values.push(SqlValue::from(mask));
     }
     values.push(SqlValue::from(query.query.to_string()));
     if let Some(bound) = query.bound {
@@ -1405,6 +1450,12 @@ fn insert_transcript_search(
         "INSERT INTO transcript_search (block_idx, history_idx, indexed_text)
          VALUES (?1, ?2, ?3)",
         params![block_idx, history_idx, indexed_text],
+    )?;
+    let masks = transcript_search_char_masks(indexed_text);
+    conn.execute(
+        "INSERT INTO transcript_search_chars (block_idx, mask_0, mask_1, mask_2, mask_3)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![block_idx, masks[0], masks[1], masks[2], masks[3]],
     )?;
     Ok(())
 }
@@ -1798,12 +1849,12 @@ mod tests {
         crate::schema::migrate(&mut conn, "test").unwrap();
         let details = query_plan_details(
             &conn,
-            "SELECT s.block_idx, s.history_idx
+            "SELECT f.rowid, s.history_idx
              FROM transcript_search_fts f
              JOIN transcript_search s ON s.block_idx = f.rowid
              WHERE f.indexed_text MATCH ?1
                AND instr(s.indexed_text, ?2) > 0
-             ORDER BY s.block_idx ASC
+             ORDER BY f.rowid ASC
              LIMIT ?3",
             rusqlite::params!["\"abcdef\"", "abcdef", 64_i64],
         );
@@ -1818,6 +1869,46 @@ mod tests {
             details
                 .iter()
                 .any(|detail| detail.contains("SEARCH s USING INTEGER PRIMARY KEY")),
+            "{details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "{details:#?}"
+        );
+    }
+
+    #[test]
+    fn transcript_single_character_plan_scans_compact_masks_before_text() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate(&mut conn, "test").unwrap();
+        let details = query_plan_details(
+            &conn,
+            "SELECT c.block_idx, s.history_idx
+             FROM transcript_search_chars c
+             CROSS JOIN transcript_search s ON s.block_idx = c.block_idx
+             WHERE (c.mask_2 & ?1) != 0
+               AND instr(s.indexed_text, ?2) > 0
+             ORDER BY c.block_idx ASC
+             LIMIT ?3",
+            rusqlite::params![1_i64 << 41, "§", 64_i64],
+        );
+
+        assert!(
+            details.iter().any(|detail| detail.contains("SCAN c")),
+            "{details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH s USING INTEGER PRIMARY KEY")),
+            "{details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
             "{details:#?}"
         );
     }

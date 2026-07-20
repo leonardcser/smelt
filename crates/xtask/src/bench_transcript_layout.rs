@@ -52,6 +52,7 @@ pub fn run(args: Vec<String>) {
     let mut resumed_wheel_ticks: Option<String> = None;
     let mut hot_path = false;
     let mut hot_path_history: Option<String> = None;
+    let mut hot_path_item_bytes: Option<String> = None;
     let mut no_warmup = false;
 
     let mut iter = args.into_iter();
@@ -107,6 +108,13 @@ pub fn run(args: Vec<String>) {
                 hot_path = true;
                 hot_path_history = Some(value);
             }
+            "--save-request-item-bytes" => {
+                hot_path = true;
+                hot_path_item_bytes = Some(take_positive_usize_arg(
+                    &mut iter,
+                    "--save-request-item-bytes",
+                ));
+            }
             "--debug" => release = false,
             "-h" | "--help" => {
                 print_usage();
@@ -141,6 +149,9 @@ pub fn run(args: Vec<String>) {
     }
     if let Some(history_len) = hot_path_history {
         env.push(("SMELT_TRANSCRIPT_HOT_PATH_HISTORY", history_len));
+    }
+    if let Some(item_bytes) = hot_path_item_bytes {
+        env.push(("SMELT_TRANSCRIPT_HOT_PATH_ITEM_BYTES", item_bytes));
     }
 
     eprintln!(
@@ -197,7 +208,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--save-request] [--save-request-history N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--save-request] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -213,10 +224,11 @@ fn print_usage() {
     eprintln!(
         "--resumed-wheel-ticks N sets wheel events queued per rendered frame; default is 24."
     );
-    eprintln!("--save-request enables no-op save, append, HistoryUpdated, rewind, and provider-history wall-time samples.");
+    eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
     eprintln!(
         "--save-request-history N sets its generated hot-path history length; default is 1024."
     );
+    eprintln!("--save-request-item-bytes N pads each generated history item to at least N bytes for byte-heavy latency and memory tests.");
     eprintln!("--scale-500mb enables 500 MiB search/resume benchmark targets and disables warmup.");
     eprintln!("--no-warmup skips benchmark warmup samples for large-session runs.");
 }

@@ -188,6 +188,7 @@ pub(crate) async fn engine_task(
                             permission_overrides,
                             pending_history_items: Vec::new(),
                             next_history_changed_from: 0,
+                            history_revision: 0,
                             session_id,
                             session_dir,
                             persistence,
@@ -235,6 +236,7 @@ fn load_model_history(
     source: protocol::ModelHistorySource,
     session_dir: &std::path::Path,
 ) -> Result<LoadedModelHistory, String> {
+    let _perf = smelt_perf::perf::begin("engine:model_history:load");
     let coordinates = source.coordinates();
     let items = match source {
         protocol::ModelHistorySource::Items { items, .. } => {
@@ -768,13 +770,11 @@ fn estimate_prompt_tokens(
     messages: &[Message],
     tool_defs: &[ToolDefinition],
 ) -> u32 {
-    let message_bytes = serde_json::to_vec(messages)
-        .map(|v| v.len())
-        .unwrap_or_default();
-    let tool_bytes = serde_json::to_vec(tool_defs)
-        .map(|v| v.len())
-        .unwrap_or_default();
-    let bytes = system_prompt.len() + message_bytes + tool_bytes;
+    let _perf = smelt_perf::perf::begin("engine:request:estimate_prompt_tokens");
+    let bytes = system_prompt
+        .len()
+        .saturating_add(crate::request_log::serialized_json_len(&messages))
+        .saturating_add(crate::request_log::serialized_json_len(&tool_defs));
     let tokens = bytes.div_ceil(4);
     tokens.min(u32::MAX as usize) as u32
 }
@@ -817,6 +817,7 @@ struct Turn<'a> {
     permission_overrides: Option<protocol::PermissionOverrides>,
     pending_history_items: Vec<HistoryItem>,
     next_history_changed_from: usize,
+    history_revision: u64,
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
@@ -834,8 +835,13 @@ enum HostCallResult<T> {
     Dropped,
 }
 
+struct PreparedRequest {
+    messages: crate::host::PreparedRequestMessages,
+    history_revision: u64,
+}
+
 enum PrepareRequestOutcome {
-    Continue,
+    Continue(PreparedRequest),
     Restart,
     Abort(String),
     Cancelled,
@@ -864,6 +870,7 @@ impl<'a> Turn<'a> {
 
     fn mark_history_changed_from(&mut self, public_idx: usize) {
         self.next_history_changed_from = self.next_history_changed_from.min(public_idx);
+        self.history_revision = self.history_revision.wrapping_add(1);
     }
 
     fn mark_append_history_changed(&mut self) {
@@ -1013,10 +1020,17 @@ impl<'a> Turn<'a> {
 
     fn install_system_prompt(&mut self, system_prompt: String) {
         self.system_prompt = system_prompt;
-        if let Some(first) = self.history.first_mut() {
-            if matches!(first, HistoryItem::System { .. }) {
-                *first = HistoryItem::system(&self.system_prompt);
+        let replacement = HistoryItem::system(&self.system_prompt);
+        let changed = self.history.first_mut().is_some_and(|first| {
+            if matches!(first, HistoryItem::System { .. }) && first != &replacement {
+                *first = replacement;
+                true
+            } else {
+                false
             }
+        });
+        if changed {
+            self.history_revision = self.history_revision.wrapping_add(1);
         }
     }
 
@@ -1059,19 +1073,32 @@ impl<'a> Turn<'a> {
     /// Emit the canonical suffix affected by model-visible history changes.
     /// Synthetic checkpoint items are omitted from the payload.
     fn emit_messages_snapshot(&mut self) {
-        let items: Vec<HistoryItem> = self
+        let _perf = smelt_perf::perf::begin("engine:history:emit_snapshot");
+        let public_len = self
             .history
             .iter()
-            .filter(|i| !matches!(i, HistoryItem::System { .. }))
+            .filter(|item| !matches!(item, HistoryItem::System { .. }))
+            .count();
+        let first_changed_index = self
+            .next_history_changed_from
+            .max(self.history_coordinates.model_prefix_len())
+            .min(public_len);
+        let items = self
+            .history
+            .iter()
+            .filter(|item| !matches!(item, HistoryItem::System { .. }))
+            .skip(first_changed_index)
             .cloned()
             .collect();
-        let first_changed_index = self.next_history_changed_from.min(items.len());
-        self.next_history_changed_from = items.len();
+        self.next_history_changed_from = public_len;
         self.emit(EngineEvent::HistoryUpdated {
             turn_id: self.turn_id,
-            update: self
-                .history_coordinates
-                .canonical_delta(protocol::ModelHistoryIndex::new(first_changed_index), items),
+            update: protocol::CanonicalHistoryDelta {
+                first_index: self
+                    .history_coordinates
+                    .canonical_index(protocol::ModelHistoryIndex::new(first_changed_index)),
+                items,
+            },
         });
     }
 
@@ -1238,27 +1265,40 @@ impl<'a> Turn<'a> {
         &mut self,
         tool_defs: &[ToolDefinition],
     ) -> PrepareRequestOutcome {
-        let history_without_system: Vec<HistoryItem> =
-            self.history.iter().skip(1).cloned().collect();
-        let request_view = protocol::history_to_messages(&history_without_system);
+        let _perf = smelt_perf::perf::begin("engine:request:prepare_with_host");
+        let messages = {
+            let _perf = smelt_perf::perf::begin("engine:request:prepare_messages");
+            crate::host::PreparedRequestMessages::new(
+                protocol::history_to_messages(&self.history),
+                self.system_history_offset(),
+            )
+        };
+        let history_revision = self.history_revision;
         let estimated_tokens =
-            estimate_prompt_tokens(&self.system_prompt, &request_view, tool_defs);
+            estimate_prompt_tokens(&self.system_prompt, messages.model(), tool_defs);
         let apply_deferred = |this: &mut Self, deferred: Vec<UiCommand>| {
             this.apply_deferred_turn_cmds(deferred);
         };
+        let host_messages = messages.clone();
         let decision = self
             .host_call(
                 |reply| crate::host::HostCall::PrepareRequest {
-                    messages: request_view,
+                    messages: host_messages,
                     estimated_tokens,
                     reply,
                 },
                 apply_deferred,
             )
             .await;
+        let continue_request = || {
+            PrepareRequestOutcome::Continue(PreparedRequest {
+                messages,
+                history_revision,
+            })
+        };
         let (replacement, coordinates) = match decision {
             HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
-            | HostCallResult::Dropped => return PrepareRequestOutcome::Continue,
+            | HostCallResult::Dropped => return continue_request(),
             HostCallResult::Cancelled => return PrepareRequestOutcome::Cancelled,
             HostCallResult::Replied(crate::host::HostRequestDecision::Abort(message)) => {
                 return PrepareRequestOutcome::Abort(message);
@@ -1274,7 +1314,7 @@ impl<'a> Turn<'a> {
                 "prepare_request_empty_replacement",
                 &serde_json::json!({}),
             );
-            return PrepareRequestOutcome::Continue;
+            return continue_request();
         }
         warn_if_replacement_has_orphans(&replacement, "prepare_request");
         let new = protocol::history_from_messages(replacement);
@@ -1396,11 +1436,14 @@ impl<'a> Turn<'a> {
 
     async fn run(&mut self, input: protocol::StartTurnInput, history: Vec<HistoryItem>) {
         self.provider.reset_turn_state();
-        self.history = Vec::with_capacity(history.len() + 2);
-        self.history.push(HistoryItem::system(&self.system_prompt));
-        self.history.extend(history);
-        self.next_history_changed_from = self.public_history_len();
-        self.push_current_turn_input(input);
+        {
+            let _perf = smelt_perf::perf::begin("engine:turn:install_history");
+            self.history = Vec::with_capacity(history.len() + 2);
+            self.history.push(HistoryItem::system(&self.system_prompt));
+            self.history.extend(history);
+            self.next_history_changed_from = self.public_history_len();
+            self.push_current_turn_input(input);
+        }
         self.emit_messages_snapshot();
 
         let mut first = true;
@@ -1465,9 +1508,9 @@ impl<'a> Turn<'a> {
 
             self.apply_pending_history_items_for_request();
 
-            match self.prepare_request_with_host(&tool_defs).await {
+            let prepared = match self.prepare_request_with_host(&tool_defs).await {
                 PrepareRequestOutcome::Restart => continue,
-                PrepareRequestOutcome::Continue => {}
+                PrepareRequestOutcome::Continue(prepared) => prepared,
                 PrepareRequestOutcome::Cancelled => {
                     self.emit_turn_complete(true);
                     return;
@@ -1481,7 +1524,7 @@ impl<'a> Turn<'a> {
                     self.emit_turn_complete(false);
                     return;
                 }
-            }
+            };
             self.drain_commands();
             if self.target_revision != request_target_revision {
                 continue;
@@ -1490,8 +1533,11 @@ impl<'a> Turn<'a> {
                 self.emit_turn_complete(true);
                 return;
             }
+            let prepared_messages =
+                (self.history_revision == prepared.history_revision).then_some(prepared.messages);
 
-            let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
+            let (result, partial_text, partial_reasoning) =
+                self.call_llm(&tool_defs, prepared_messages).await;
             let (resp, had_injected) = match result {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
@@ -2482,6 +2528,7 @@ impl<'a> Turn<'a> {
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
+        prepared_messages: Option<crate::host::PreparedRequestMessages>,
     ) -> (Result<(ChatResponse, bool), ProviderError>, String, String) {
         // Config updates received while the provider is borrowed are replayed
         // in channel order after the request resolves.
@@ -2520,12 +2567,16 @@ impl<'a> Turn<'a> {
             let turn_id = self.turn_id;
             let history_len = self.history.len();
             let audit_mode = self.request_config.request_audit;
-            // Convert the engine's `Vec<HistoryItem>` to the wire-format
-            // `Vec<Message>` the provider speaks. Pairing is invariant-safe
-            // by construction (every `AssistantStep` carries its
-            // `ToolInvocation`s inline), so the resulting Message slice
-            // satisfies "assistant tool_calls followed by tool_results".
-            let wire_messages = protocol::history_to_messages(&self.history);
+            // Commands may mutate history after the prepare hook. Reuse the
+            // shared conversion in the common unchanged case and rebuild only
+            // when its history revision is stale.
+            let wire_messages = prepared_messages.unwrap_or_else(|| {
+                let _perf = smelt_perf::perf::begin("engine:request:provider_messages");
+                crate::host::PreparedRequestMessages::new(
+                    protocol::history_to_messages(&self.history),
+                    self.system_history_offset(),
+                )
+            });
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
                 let ctx = crate::request_log::RequestContext {
                     request_id: turn_id,
@@ -2560,7 +2611,7 @@ impl<'a> Turn<'a> {
                 on_attempt: Some(&on_attempt),
             };
             let chat_future = self.provider.chat(
-                &wire_messages,
+                wire_messages.wire(),
                 tool_defs,
                 &self.model_target.model,
                 self.reasoning_effort,
@@ -3378,6 +3429,7 @@ mod tests {
             permission_overrides: None,
             pending_history_items: Vec::new(),
             next_history_changed_from: 0,
+            history_revision: 0,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp/s"),
             persistence: protocol::PersistenceScope::default(),
@@ -3514,6 +3566,7 @@ mod tests {
             permission_overrides: None,
             pending_history_items: Vec::new(),
             next_history_changed_from: 0,
+            history_revision: 0,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp/s"),
             persistence: protocol::PersistenceScope::default(),

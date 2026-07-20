@@ -219,16 +219,49 @@ impl Transcript {
         self.history.truncate(block_idx);
     }
 
+    pub fn last_user_block_index(&self) -> Option<usize> {
+        let _perf = smelt_perf::perf::begin("transcript:last_user_block_index");
+        let mut blocks_scanned = 0u64;
+        let index = self
+            .history
+            .order
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, id)| {
+                blocks_scanned = blocks_scanned.saturating_add(1);
+                matches!(self.history.block(*id), Some(Block::User { .. })).then_some(index)
+            });
+        smelt_perf::perf::record_value(
+            "transcript:last_user_block_index:blocks_scanned",
+            blocks_scanned,
+        );
+        index
+    }
+
     pub fn user_turns(&self) -> Vec<(usize, String)> {
-        self.history
+        let _perf = smelt_perf::perf::begin("transcript:user_turns");
+        smelt_perf::perf::record_value(
+            "transcript:user_turns:blocks_scanned",
+            self.history.order.len() as u64,
+        );
+        let mut text_bytes = 0u64;
+        let turns = self
+            .history
             .order
             .iter()
             .enumerate()
             .filter_map(|(i, id)| match self.history.block(*id) {
-                Some(Block::User { text, .. }) => Some((i, text.clone())),
+                Some(Block::User { text, .. }) => {
+                    text_bytes = text_bytes.saturating_add(text.len() as u64);
+                    Some((i, text.clone()))
+                }
                 _ => None,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        smelt_perf::perf::record_value("transcript:user_turns:users_cloned", turns.len() as u64);
+        smelt_perf::perf::record_value("transcript:user_turns:text_bytes_cloned", text_bytes);
+        turns
     }
 }
 
@@ -411,6 +444,30 @@ mod tests {
             turns,
             vec![(1usize, "first".into()), (3usize, "second".into())]
         );
+    }
+
+    #[test]
+    fn last_user_block_index_searches_from_the_tail_without_cloning_text() {
+        let mut t = Transcript::new();
+        t.push(Block::User {
+            text: "first".into(),
+            image_labels: vec![],
+        });
+        t.push(Block::Text {
+            content: "assistant".into(),
+        });
+        t.push(Block::User {
+            text: "second".into(),
+            image_labels: vec![],
+        });
+        t.push(Block::Text {
+            content: "tail".into(),
+        });
+
+        assert_eq!(t.last_user_block_index(), Some(2));
+
+        t.truncate_to(2);
+        assert_eq!(t.last_user_block_index(), Some(0));
     }
 
     #[test]

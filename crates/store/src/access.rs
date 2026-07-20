@@ -330,6 +330,10 @@ impl SessionReader {
         self.db.search_blob()
     }
 
+    pub fn write_search_blob(&self, writer: &mut impl std::io::Write) -> Result<()> {
+        self.db.write_search_blob(writer)
+    }
+
     fn hydrate_legacy_attachments(&self, items: &mut [protocol::HistoryItem]) -> Result<()> {
         let session_dir = self
             .db

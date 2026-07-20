@@ -17,7 +17,7 @@ pub(crate) mod skills;
 pub mod tools;
 pub(crate) mod trim;
 
-pub use host::{HostCall, HostRequestDecision};
+pub use host::{HostCall, HostRequestDecision, PreparedRequestMessages};
 use protocol::{EngineEvent, UiCommand};
 use std::path::PathBuf;
 use std::sync::Arc;

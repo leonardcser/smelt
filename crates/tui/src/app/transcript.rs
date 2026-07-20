@@ -38,7 +38,7 @@ const TRANSCRIPT_DESCRIPTOR_WINDOW_MIN_DESCRIPTORS: usize = 512;
 const TRANSCRIPT_DESCRIPTOR_PAGE_SIZE: usize = 128;
 const TRANSCRIPT_DESCRIPTOR_CACHE_GUARD_PAGES: usize = 2;
 const TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS: RowIndex = 2;
-const TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE: usize = 1024;
+const TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE: usize = 4096;
 
 pub(crate) struct LoadedDescriptorWindow {
     pub(crate) start: smelt_store::TranscriptDescriptorIndex,
@@ -704,15 +704,53 @@ impl TranscriptExtentIndex {
         if range.start >= range.end {
             return Some(0);
         }
+        let width = width.max(1);
+        let stride = TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE;
+        let mut cursor = range.start;
+        let mut rows: RowIndex = 0;
+        let first_boundary = cursor
+            .saturating_add(stride - 1)
+            .saturating_div(stride)
+            .saturating_mul(stride)
+            .min(range.end);
+        if cursor < first_boundary {
+            rows = rows.saturating_add(self.cached_descriptor_rows(
+                store,
+                width,
+                cursor..first_boundary,
+            )?);
+            cursor = first_boundary;
+        }
+        while cursor.saturating_add(stride) <= range.end {
+            let end = cursor + stride;
+            rows = rows.saturating_add(self.cached_descriptor_rows(store, width, cursor..end)?);
+            cursor = end;
+        }
+        if cursor < range.end {
+            rows = rows.saturating_add(self.cached_descriptor_rows(
+                store,
+                width,
+                cursor..range.end,
+            )?);
+        }
+        Some(rows)
+    }
+
+    fn cached_descriptor_rows(
+        &mut self,
+        store: Option<&SqliteTranscriptStore>,
+        width: u16,
+        range: Range<usize>,
+    ) -> Option<RowIndex> {
         let key = DescriptorRowsEstimateKey {
-            width: width.max(1),
+            width,
             start: range.start,
             end: range.end,
         };
         if let Some(rows) = self.descriptor_rows_estimate_cache.get(&key).copied() {
             return Some(rows);
         }
-        let rows = store?.estimated_descriptor_rows(key.width, range).ok()? as RowIndex;
+        let rows = store?.estimated_descriptor_rows(width, range).ok()? as RowIndex;
         self.descriptor_rows_estimate_cache.insert(key, rows);
         Some(rows)
     }
@@ -4470,6 +4508,10 @@ impl TranscriptDocument {
         drained
     }
 
+    pub(crate) fn last_user_block_index(&self) -> Option<usize> {
+        self.content.transcript.last_user_block_index()
+    }
+
     pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
         self.content.transcript.user_turns()
     }
@@ -7629,6 +7671,10 @@ impl TuiApp {
             crate::app::session_document::SessionMutation::ClearTranscript,
         );
         self.parser.clear();
+    }
+
+    pub(crate) fn last_user_block_index(&self) -> Option<usize> {
+        self.session_document.transcript.last_user_block_index()
     }
 
     pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {

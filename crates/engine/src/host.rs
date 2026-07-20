@@ -11,6 +11,7 @@
 
 use protocol::Message;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
@@ -39,6 +40,34 @@ impl HostRequestDecision {
             messages,
             coordinates,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedRequestMessages {
+    messages: Arc<Vec<Message>>,
+    model_start: usize,
+}
+
+impl PreparedRequestMessages {
+    pub fn new(messages: Vec<Message>, model_start: usize) -> Self {
+        let model_start = model_start.min(messages.len());
+        Self {
+            messages: Arc::new(messages),
+            model_start,
+        }
+    }
+
+    pub fn model_only(messages: Vec<Message>) -> Self {
+        Self::new(messages, 0)
+    }
+
+    pub fn wire(&self) -> &[Message] {
+        self.messages.as_slice()
+    }
+
+    pub fn model(&self) -> &[Message] {
+        &self.messages[self.model_start..]
     }
 }
 
@@ -76,14 +105,38 @@ pub enum HostCall {
     },
 
     /// Engine is about to send a model request. The host may replace
-    /// the conversation before the request is
-    /// sent. `messages` excludes the system prompt; `estimated_tokens`
-    /// is a conservative estimate for the exact message slice the
-    /// engine is about to sample with, used to catch drift since the
-    /// provider's last reported prompt-token count.
+    /// the conversation before the request is sent. `messages.model()`
+    /// excludes the system prompt, while `messages.wire()` is shared with
+    /// the provider call when the hook leaves history unchanged.
     PrepareRequest {
-        messages: Vec<Message>,
+        messages: PreparedRequestMessages,
         estimated_tokens: u32,
         reply: oneshot::Sender<HostRequestDecision>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_request_exposes_wire_and_model_views() {
+        let wire = vec![
+            Message::system("system"),
+            Message::user(protocol::Content::text("hello")),
+        ];
+        let messages = PreparedRequestMessages::new(wire.clone(), 1);
+
+        assert_eq!(messages.wire(), wire.as_slice());
+        assert_eq!(messages.model(), &wire[1..]);
+    }
+
+    #[test]
+    fn prepared_request_clamps_model_start() {
+        let wire = vec![Message::system("system")];
+        let messages = PreparedRequestMessages::new(wire.clone(), usize::MAX);
+
+        assert_eq!(messages.wire(), wire.as_slice());
+        assert!(messages.model().is_empty());
+    }
 }

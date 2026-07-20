@@ -1170,6 +1170,10 @@ impl SessionDb {
     pub fn search_blob(&self) -> Result<String> {
         history::search_blob(&self.conn)
     }
+
+    pub fn write_search_blob(&self, writer: &mut impl std::io::Write) -> Result<()> {
+        history::write_search_blob(&self.conn, writer)
+    }
 }
 
 fn load_full_session_from(conn: &Connection) -> Result<Option<FullSession>> {
@@ -1798,30 +1802,39 @@ fn apply_session_commit_in_transaction(
         )
         .map_err(session_commit_failure_from_store_error)?;
     }
+    let descriptor_len = match &command.descriptors {
+        Some(descriptors) => descriptors
+            .start
+            .get()
+            .checked_add(descriptors.records.len() as u64)
+            .map(DescriptorLen::new)
+            .ok_or_else(|| SessionCommitFailure::Integrity {
+                message: "descriptor length exceeds u64".into(),
+            })?,
+        None => current.descriptor_len,
+    };
     meta::write_session(
         conn,
         &command.identity,
         &command.metadata,
         revision.get(),
         command.history.final_len.get(),
+        descriptor_len.get(),
     )
     .map_err(session_commit_failure_from_store_error)?;
 
-    validate_session_commit_invariants(conn).map_err(session_commit_failure_from_store_error)?;
     #[cfg(debug_assertions)]
-    validate_object_payload_hashes(conn, &changed_object_hashes)
-        .map_err(session_commit_failure_from_store_error)?;
+    {
+        validate_session_commit_invariants(conn)
+            .map_err(session_commit_failure_from_store_error)?;
+        validate_object_payload_hashes(conn, &changed_object_hashes)
+            .map_err(session_commit_failure_from_store_error)?;
+    }
 
-    let descriptor_len = history::transcript_descriptor_count(conn)
-        .map_err(session_commit_failure_from_store_error)?;
-    let descriptor_len =
-        u64::try_from(descriptor_len).map_err(|_| SessionCommitFailure::Integrity {
-            message: "descriptor length exceeds u64".into(),
-        })?;
     let current = StoreHead {
         revision,
         history_len: command.history.final_len,
-        descriptor_len: DescriptorLen::new(descriptor_len),
+        descriptor_len,
     };
     let receipt = SaveReceipt {
         session_id: command.session_id.clone(),
@@ -2287,11 +2300,14 @@ fn descriptor_index_usize(
         })
 }
 
+#[cfg(debug_assertions)]
 fn validate_session_commit_invariants(conn: &Connection) -> Result<()> {
+    let _perf = smelt_perf::perf::begin("store:session:validate_commit_invariants");
     let Some(session) = meta::stored_session(conn)? else {
         return Ok(());
     };
     let history_count = history::history_item_count(conn)? as u64;
+    smelt_perf::perf::record_value("store:session:invariant_history_rows", history_count);
     if session.history_len != history_count {
         return Err(StoreError::Integrity(format!(
             "session metadata history_len {} does not match history item count {}",
@@ -2307,6 +2323,7 @@ fn validate_session_commit_invariants(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn validate_history_indices_dense(conn: &Connection, history_count: u64) -> Result<()> {
     let max_idx = conn
         .query_row("SELECT MAX(idx) FROM history_items", [], |row| {
@@ -2322,6 +2339,7 @@ fn validate_history_indices_dense(conn: &Connection, history_count: u64) -> Resu
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn validate_transcript_descriptor_indices_dense(conn: &Connection) -> Result<()> {
     let (count, max_idx): (i64, Option<i64>) = conn
         .query_row(
@@ -2341,6 +2359,7 @@ fn validate_transcript_descriptor_indices_dense(conn: &Connection) -> Result<()>
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn validate_transcript_descriptor_history_bounds(
     conn: &Connection,
     history_count: u64,
@@ -2364,6 +2383,7 @@ fn validate_transcript_descriptor_history_bounds(
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn validate_side_table_history_bounds(conn: &Connection, history_count: u64) -> Result<()> {
     let turn_meta_invalid: i64 = conn
         .query_row(
@@ -2395,6 +2415,7 @@ fn validate_side_table_history_bounds(conn: &Connection, history_count: u64) -> 
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn validate_history_object_refs(conn: &Connection, history_count: u64) -> Result<()> {
     let missing_history: i64 = conn
         .query_row(
@@ -5222,6 +5243,7 @@ mod tests {
             transcript_record(1, "one", "beta needle"),
             transcript_record(2, "two", "gamma café needle"),
             transcript_record(3, "three", "delta"),
+            transcript_record(4, "four", "symbol § and Ā"),
         ];
         db.apply_test_descriptors(&records).unwrap();
 
@@ -5237,6 +5259,43 @@ mod tests {
                     history_idx: None,
                 },
             ]
+        );
+        assert_eq!(
+            db.search_transcript_candidates("§").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 4,
+                history_idx: None,
+            }]
+        );
+        assert_eq!(db.search_transcript_candidates("x").unwrap(), vec![]);
+        assert_eq!(
+            db.search_transcript_candidates("a").unwrap(),
+            (0..=4)
+                .map(|block_idx| TranscriptSearchCandidate {
+                    block_idx,
+                    history_idx: None,
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            db.search_transcript_candidates("fé").unwrap(),
+            vec![
+                TranscriptSearchCandidate {
+                    block_idx: 0,
+                    history_idx: None,
+                },
+                TranscriptSearchCandidate {
+                    block_idx: 2,
+                    history_idx: None,
+                },
+            ]
+        );
+        assert_eq!(
+            db.search_transcript_candidates("Ā").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 4,
+                history_idx: None,
+            }]
         );
         assert_eq!(
             db.search_transcript_candidate_page(
@@ -5977,6 +6036,9 @@ mod tests {
         assert_eq!(rows[1].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(rows[1].estimated_text_bytes, 13);
         assert_eq!(db.search_blob().unwrap(), "alpha\nneedle output\n");
+        let mut streamed_search_blob = Vec::new();
+        db.write_search_blob(&mut streamed_search_blob).unwrap();
+        assert_eq!(streamed_search_blob, b"alpha\nneedle output\n");
         assert_eq!(
             db.search_transcript_candidates("needle").unwrap(),
             vec![TranscriptSearchCandidate {

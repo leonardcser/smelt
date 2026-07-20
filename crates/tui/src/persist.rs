@@ -1,6 +1,7 @@
 //! Fixed-session persistence convergence actor.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -768,6 +769,7 @@ impl SessionPersistence {
         target: PersistenceGeneration,
         deadline: Instant,
     ) -> PersistenceFlushOutcome {
+        let _perf = smelt_perf::perf::begin("persist:flush_wait");
         smelt_perf::perf::record_value(
             "persist:flush:target_lag",
             target.get().saturating_sub(self.durable_generation().get()),
@@ -1057,6 +1059,7 @@ impl Drop for SessionPersistence {
     }
 }
 
+#[derive(Clone)]
 struct StatusPublisher {
     status: Arc<Mutex<SessionPersistenceStatus>>,
     wake: SyncSender<()>,
@@ -1136,6 +1139,84 @@ impl StatusPublisher {
     }
 }
 
+struct DerivedContentRefresh {
+    wake: Option<SyncSender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl DerivedContentRefresh {
+    fn spawn(session_dir: PathBuf, session_id: String, publisher: StatusPublisher) -> Self {
+        let (wake, wakes) = mpsc::sync_channel(1);
+        let worker_session_id = session_id.clone();
+        let worker_publisher = publisher.clone();
+        let thread = thread::Builder::new()
+            .name("smelt-derived-content".into())
+            .spawn(move || {
+                while wakes.recv().is_ok() {
+                    loop {
+                        while wakes.try_recv().is_ok() {}
+                        let warning = smelt_core::session::refresh_derived_content_file(&session_dir)
+                            .err()
+                            .map(|error| {
+                                PersistenceCause::new(
+                                    PersistenceFailureClass::Environment,
+                                    format!(
+                                        "session {worker_session_id} is durable, but derived content cache refresh failed: {error}"
+                                    ),
+                                )
+                            });
+                        worker_publisher.publish_sidecar_warning(warning);
+                        match wakes.try_recv() {
+                            Ok(()) => continue,
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                }
+            });
+        match thread {
+            Ok(handle) => Self {
+                wake: Some(wake),
+                thread: Some(handle),
+            },
+            Err(error) => {
+                let cause = PersistenceCause::new(
+                    PersistenceFailureClass::Environment,
+                    format!(
+                        "session {session_id} is durable, but its derived content worker could not start: {error}"
+                    ),
+                );
+                publisher.publish_sidecar_warning(Some(cause));
+                Self {
+                    wake: None,
+                    thread: None,
+                }
+            }
+        }
+    }
+
+    fn request(&self) {
+        let Some(wake) = &self.wake else {
+            return;
+        };
+        match wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => {}
+            Err(TrySendError::Disconnected(())) => {
+                smelt_perf::perf::record_value("persist:sidecar:worker_disconnected", 1);
+            }
+        }
+    }
+}
+
+impl Drop for DerivedContentRefresh {
+    fn drop(&mut self) {
+        self.wake = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct PersistenceActor {
     session_id: smelt_core::session_id::SessionId,
     epoch: SessionEpoch,
@@ -1149,6 +1230,7 @@ struct PersistenceActor {
     audits: VecDeque<QueuedAudit>,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
+    derived_content_refresh: DerivedContentRefresh,
     #[cfg(test)]
     commit_failures: VecDeque<smelt_store::SessionCommitFailure>,
     #[cfg(test)]
@@ -1228,6 +1310,11 @@ fn persistence_actor(
         let _ = writer.release();
         return;
     }
+    let derived_content_refresh = DerivedContentRefresh::spawn(
+        session_dir,
+        session_id.as_str().to_string(),
+        publisher.clone(),
+    );
     let mut actor = PersistenceActor {
         session_id,
         epoch,
@@ -1241,6 +1328,7 @@ fn persistence_actor(
         audits: VecDeque::new(),
         pending_audits,
         pending_full_audit_bytes,
+        derived_content_refresh,
         #[cfg(test)]
         commit_failures: VecDeque::new(),
         #[cfg(test)]
@@ -1794,18 +1882,20 @@ impl PersistenceActor {
             drop(publication_perf);
         }
         record_save_receipt(&receipt);
-        let warning = smelt_core::session::refresh_derived_files(writer.session_dir())
-            .err()
-            .map(|error| {
-                PersistenceCause::new(
-                    PersistenceFailureClass::Environment,
-                    format!(
-                        "session {} is durable, but derived cache refresh failed: {error}",
-                        receipt.session_id
-                    ),
-                )
-            });
+        let meta_result = smelt_core::session::refresh_derived_meta_file(writer.session_dir());
+        let warning = meta_result.as_ref().err().map(|error| {
+            PersistenceCause::new(
+                PersistenceFailureClass::Environment,
+                format!(
+                    "session {} is durable, but derived cache refresh failed: {error}",
+                    receipt.session_id
+                ),
+            )
+        });
         self.publisher.publish_sidecar_warning(warning);
+        if meta_result.is_ok() {
+            self.derived_content_refresh.request();
+        }
         Ok(receipt)
     }
 }

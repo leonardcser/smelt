@@ -3,11 +3,10 @@
 //! `oneshot::Sender` for the reply; we send back at most once.
 
 use crate::app::TuiApp;
-use engine::{HostCall, HostRequestDecision};
+use engine::{HostCall, HostRequestDecision, PreparedRequestMessages};
 use protocol::Message;
 use smelt_core::lua::{HookRegistry, LuaShared};
 use smelt_core::working::TurnPhase;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -78,7 +77,7 @@ fn create_message_reply_fn(
 
 fn prepare_request_to_lua(
     lua: &mlua::Lua,
-    messages: Vec<Message>,
+    messages: PreparedRequestMessages,
     estimated_tokens: u32,
     context_estimate: PrepareContextEstimate,
 ) -> mlua::Result<mlua::Table> {
@@ -90,14 +89,13 @@ fn prepare_request_to_lua(
     )?;
     request.set("context_estimate", context_estimate.into_lua_table(lua)?)?;
 
-    let messages = Rc::new(messages);
     let mt = lua.create_table()?;
     mt.set(
         "__index",
         lua.create_function(move |lua, (table, key): (mlua::Table, mlua::Value)| {
             if let mlua::Value::String(s) = key {
                 if s.to_str()?.as_ref() == "messages" {
-                    let value = smelt_core::lua::serde_to_lua(lua, messages.as_ref())?;
+                    let value = smelt_core::lua::serde_to_lua(lua, &messages.model())?;
                     table.raw_set("messages", value.clone())?;
                     return Ok(value);
                 }
@@ -192,7 +190,7 @@ impl TuiApp {
     /// serialize large histories into Lua.
     fn dispatch_prepare_request(
         &mut self,
-        messages: Vec<Message>,
+        messages: PreparedRequestMessages,
         estimated_tokens: u32,
         reply: MessageReply,
     ) {
@@ -240,7 +238,7 @@ impl TuiApp {
                 checkpoint_context_tokens,
                 current_history_len,
                 &history_delta,
-                &messages,
+                messages.model(),
                 estimated_tokens,
             )
         };
@@ -804,7 +802,7 @@ mod tests {
         let messages = vec![Message::user(Content::text("hello"))];
         let request = prepare_request_to_lua(
             &lua,
-            messages,
+            PreparedRequestMessages::model_only(messages),
             42,
             PrepareContextEstimate::full_request(42, 1),
         )

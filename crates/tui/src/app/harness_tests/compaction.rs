@@ -56,7 +56,7 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages,
+                messages: engine::PreparedRequestMessages::model_only(messages),
                 estimated_tokens: 200,
                 reply: tx,
             });
@@ -225,7 +225,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages,
+                messages: engine::PreparedRequestMessages::model_only(messages),
                 estimated_tokens: 200,
                 reply: tx,
             });
@@ -276,7 +276,7 @@ fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups(
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages,
+                messages: engine::PreparedRequestMessages::model_only(messages),
                 estimated_tokens: 200,
                 reply: tx,
             });

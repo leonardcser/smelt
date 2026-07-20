@@ -313,6 +313,11 @@ fn assert_search_uses_candidate_index(
     label: &str,
     max_index_entries: u64,
 ) {
+    let sqlite_available = perf_value_max(snapshot, "search:transcript:sqlite_available");
+    assert_eq!(
+        sqlite_available, 1,
+        "{label} did not use the persisted transcript search index"
+    );
     let trigram_build = perf_value_max(snapshot, "search:transcript:index_trigram_build_enabled");
     assert_eq!(
         trigram_build, 0,
@@ -354,6 +359,8 @@ struct SearchBenchSample {
     burst_mid_ctrl_u80_ms: f64,
     burst_mid_up80_ms: f64,
     rare_ms: f64,
+    short_common_ms: f64,
+    short_absent_ms: f64,
     common_submit_ms: f64,
     next100_ms: f64,
     sparse_rare_ms: f64,
@@ -362,7 +369,7 @@ struct SearchBenchSample {
     after_append_ms: f64,
 }
 
-fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 31] {
+fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 33] {
     [
         ("width_resize", sample.width_resize_ms),
         ("height_resize", sample.height_resize_ms),
@@ -392,6 +399,8 @@ fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64
         ("burst_mid_ctrl_u80", sample.burst_mid_ctrl_u80_ms),
         ("burst_mid_up80", sample.burst_mid_up80_ms),
         ("rare", sample.rare_ms),
+        ("short_common", sample.short_common_ms),
+        ("short_absent", sample.short_absent_ms),
         ("common_submit", sample.common_submit_ms),
         ("next100", sample.next100_ms),
         ("sparse_rare", sample.sparse_rare_ms),
@@ -505,6 +514,42 @@ enum BurstBenchPosition {
     Top,
     Middle,
     Bottom,
+}
+
+fn save_bench_fixture(app: &mut TestApp, label: &str) {
+    app.app.save_session();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let revision = loop {
+        let outcome = app.app.flush_persist();
+        match outcome {
+            crate::persist::PersistenceFlushOutcome::Durable {
+                receipt: Some(receipt),
+                ..
+            } => break receipt.current.revision.get(),
+            crate::persist::PersistenceFlushOutcome::Deadline { .. }
+                if std::time::Instant::now() < deadline => {}
+            other => panic!("{label} fixture persistence failed: {other:?}"),
+        }
+    };
+    let content_path = smelt_core::session::dir_for(&app.app.core.session).join("content.txt");
+    let expected_header = format!("# smelt-revision:{revision}");
+    loop {
+        let mut header = String::new();
+        let refreshed = std::fs::File::open(&content_path)
+            .map(std::io::BufReader::new)
+            .and_then(|mut reader| {
+                std::io::BufRead::read_line(&mut reader, &mut header).map(|_| ())
+            })
+            .is_ok_and(|()| header.trim_end() == expected_header);
+        if refreshed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{label} derived content did not reach revision {revision}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 fn install_sparse_resume_bench_transcript(app: &mut TestApp) {
@@ -810,8 +855,7 @@ fn run_resumed_wheel_scroll_bench_sample(
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    app.app.save_session();
-    app.app.flush_persist();
+    save_bench_fixture(&mut app, "resumed wheel");
 
     install_sparse_resume_bench_transcript(&mut app);
     app.type_char('G');
@@ -890,8 +934,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    app.app.save_session();
-    app.app.flush_persist();
+    save_bench_fixture(&mut app, "search");
     smelt_perf::perf::clear();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -993,6 +1036,49 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     }
     assert_search_refinement_gates(&rare_snapshot, "rare_cold", 80, 1024);
     assert_search_uses_candidate_index(&rare_snapshot, "rare_cold", 1024);
+
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    smelt_perf::perf::clear();
+    let short_common_start = std::time::Instant::now();
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        crate::app::search::SearchDirection::Forward,
+        "e".into(),
+    );
+    app.render_silent();
+    let short_common_ms = elapsed_ms(short_common_start.elapsed());
+    let short_common_snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot("short_common", &short_common_snapshot);
+    }
+    assert_search_uses_candidate_index(&short_common_snapshot, "short_common", 512);
+    assert_eq!(
+        perf_value_max(&short_common_snapshot, "store:transcript:search_fts"),
+        0,
+        "short_common unexpectedly used FTS"
+    );
+
+    smelt_perf::perf::clear();
+    let short_absent_start = std::time::Instant::now();
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        crate::app::search::SearchDirection::Forward,
+        "§".into(),
+    );
+    app.render_silent();
+    let short_absent_ms = elapsed_ms(short_absent_start.elapsed());
+    let short_absent_snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot("short_absent", &short_absent_snapshot);
+    }
+    assert_search_uses_candidate_index(&short_absent_snapshot, "short_absent", 0);
+    assert_eq!(
+        perf_value_max(&short_absent_snapshot, "store:transcript:search_fts"),
+        0,
+        "short_absent unexpectedly used FTS"
+    );
 
     smelt_perf::perf::clear();
     let common_start = std::time::Instant::now();
@@ -1199,6 +1285,8 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         burst_mid_ctrl_u80_ms,
         burst_mid_up80_ms,
         rare_ms,
+        short_common_ms,
+        short_absent_ms,
         common_submit_ms,
         next100_ms,
         sparse_rare_ms,
@@ -1290,8 +1378,7 @@ fn seed_resume_bench_preview_session(
     app.app.handle_resize(120, 32);
     let bytes = push_search_bench_transcript(&mut app, preview_bytes);
     app.render_silent();
-    app.app.save_session();
-    app.app.flush_persist();
+    save_bench_fixture(&mut app, "resume preview");
     let id = app.app.core.session.id.clone();
     assert!(
         crate::app::history::load_transcript_tail_from_sqlite_id(&id, 80, 12).is_some(),
@@ -1614,6 +1701,12 @@ struct HotPathCounters {
     descriptor_deleted: u64,
     read_range_rows: u64,
     cached_read_write_db: u64,
+    invariant_history_rows: u64,
+    search_blob_rows: u64,
+    search_blob_bytes: u64,
+    user_turn_blocks_scanned: u64,
+    user_turns_cloned: u64,
+    user_turn_text_bytes_cloned: u64,
 }
 
 impl HotPathCounters {
@@ -1636,6 +1729,25 @@ impl HotPathCounters {
             ),
             read_range_rows: perf_value_max(snapshot, "store:history:read_range_rows"),
             cached_read_write_db: perf_value_max(snapshot, "store:db:cached_read_write"),
+            invariant_history_rows: perf_value_max(
+                snapshot,
+                "store:session:invariant_history_rows",
+            ),
+            search_blob_rows: perf_value_max(snapshot, "store:transcript:search_blob_rows_read"),
+            search_blob_bytes: perf_value_max(snapshot, "store:transcript:search_blob_bytes_read"),
+            user_turn_blocks_scanned: perf_value_max(
+                snapshot,
+                "transcript:last_user_block_index:blocks_scanned",
+            )
+            .max(perf_value_max(
+                snapshot,
+                "transcript:user_turns:blocks_scanned",
+            )),
+            user_turns_cloned: perf_value_max(snapshot, "transcript:user_turns:users_cloned"),
+            user_turn_text_bytes_cloned: perf_value_max(
+                snapshot,
+                "transcript:user_turns:text_bytes_cloned",
+            ),
         }
     }
 }
@@ -1644,7 +1756,15 @@ impl HotPathCounters {
 struct HotPathSample {
     operation: &'static str,
     history_len: usize,
+    history_item_bytes: usize,
     ms: f64,
+    thread_allocs: u64,
+    thread_bytes_allocated: u64,
+    process_bytes_allocated: u64,
+    process_bytes_deallocated: u64,
+    process_current_bytes_before: usize,
+    process_current_bytes_after: usize,
+    process_retained_bytes: i64,
     counters: HotPathCounters,
 }
 
@@ -1661,6 +1781,13 @@ fn hot_path_history_len() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|rows| *rows >= 4)
         .unwrap_or(1024)
+}
+
+fn hot_path_history_item_bytes() -> usize {
+    std::env::var("SMELT_TRANSCRIPT_HOT_PATH_ITEM_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 fn hot_path_session_id(_label: &str) -> String {
@@ -1685,11 +1812,22 @@ fn hot_path_assistant(text: &str) -> protocol::HistoryItem {
     ))
 }
 
-fn hot_path_history_item(idx: usize) -> protocol::HistoryItem {
-    if idx.is_multiple_of(2) {
-        hot_path_user(&format!("hot path old user {idx}"))
+fn hot_path_history_item(idx: usize, target_bytes: usize) -> protocol::HistoryItem {
+    let prefix = if idx.is_multiple_of(2) {
+        format!("hot path old user {idx}")
     } else {
-        hot_path_assistant(&format!("hot path old assistant {idx}"))
+        format!("hot path old assistant {idx}")
+    };
+    let mut text = String::with_capacity(prefix.len().max(target_bytes));
+    text.push_str(&prefix);
+    text.extend(std::iter::repeat_n(
+        'x',
+        target_bytes.saturating_sub(prefix.len()),
+    ));
+    if idx.is_multiple_of(2) {
+        hot_path_user(&text)
+    } else {
+        hot_path_assistant(&text)
     }
 }
 
@@ -1703,7 +1841,10 @@ fn saved_hot_path_app(
         smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
     session.id = hot_path_session_id(label);
     session.first_user_message = Some("hot path old user 0".into());
-    session.history = (0..history_len).map(hot_path_history_item).collect();
+    let item_bytes = hot_path_history_item_bytes();
+    session.history = (0..history_len)
+        .map(|idx| hot_path_history_item(idx, item_bytes))
+        .collect();
     if let Some(first_live_index) = checkpoint_first_live {
         session.checkpoint = Some(smelt_core::ContextCheckpoint {
             kind: "benchmark".into(),
@@ -1720,29 +1861,43 @@ fn saved_hot_path_app(
 
     app.app.load_session(session);
     app.app.restore_screen();
-    app.app.save_session();
-    app.app.flush_persist();
+    save_bench_fixture(&mut app, "hot path");
     app
 }
 
-fn assert_no_full_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
+fn assert_no_full_store_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
     for metric in [
         "store:history:read_all",
-        "store:history:read_all_rows",
         "store:session:load_full_snapshot",
-        "store:session:full_snapshot_rows_read",
-        "store:transcript:search_blob_full",
         "store:transcript:read_descriptors_full",
+    ] {
+        let count = perf_duration_count(snapshot, metric);
+        assert_eq!(
+            count, 0,
+            "{operation} recorded {metric} {count} times, expected no full-store hot-path work"
+        );
+    }
+    for metric in [
+        "store:history:read_all_rows",
+        "store:session:full_snapshot_rows_read",
         "store:transcript:descriptors_full_loaded",
         "transcript:build_from_session:history_items",
-        "transcript:render_plan:fingerprint",
     ] {
         let value = perf_value_max(snapshot, metric);
         assert_eq!(
             value, 0,
-            "{operation} recorded {metric}={value}, expected no full-session hot-path work"
+            "{operation} recorded {metric}={value}, expected no full-store hot-path work"
         );
     }
+}
+
+fn assert_no_full_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
+    assert_no_full_store_hot_path_reads(snapshot, operation);
+    let fingerprint_count = perf_duration_count(snapshot, "transcript:render_plan:fingerprint");
+    assert_eq!(
+        fingerprint_count, 0,
+        "{operation} rebuilt {fingerprint_count} full transcript render-plan fingerprints"
+    );
 }
 
 fn assert_hot_path_at_most(
@@ -1778,15 +1933,29 @@ fn capture_hot_path_sample(
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
+    let process_before = smelt_perf::alloc::snapshot();
+    let (allocs_before, bytes_before) = smelt_perf::alloc::thread_snapshot();
     let start = std::time::Instant::now();
     body();
     let ms = elapsed_ms(start.elapsed());
+    let (allocs_after, bytes_after) = smelt_perf::alloc::thread_snapshot();
+    let process_after = smelt_perf::alloc::snapshot();
+    let process_delta = smelt_perf::alloc::delta(process_before, process_after);
     let snapshot = smelt_perf::perf::snapshot();
     smelt_perf::perf::set_enabled(false);
     let sample = HotPathSample {
         operation,
         history_len,
+        history_item_bytes: hot_path_history_item_bytes(),
         ms,
+        thread_allocs: allocs_after.saturating_sub(allocs_before),
+        thread_bytes_allocated: bytes_after.saturating_sub(bytes_before),
+        process_bytes_allocated: process_delta.bytes_allocated,
+        process_bytes_deallocated: process_delta.bytes_deallocated,
+        process_current_bytes_before: process_before.current_bytes,
+        process_current_bytes_after: process_after.current_bytes,
+        process_retained_bytes: process_after.current_bytes as i64
+            - process_before.current_bytes as i64,
         counters: HotPathCounters::from(&snapshot),
     };
     (sample, snapshot)
@@ -2070,29 +2239,173 @@ fn run_provider_history_hot_path(
     (sample, snapshot)
 }
 
+fn run_uncheckpointed_provider_history_hot_path(
+    history_len: usize,
+) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let app = saved_hot_path_app("provider-history-uncheckpointed", history_len, None);
+    let source = app.app.model_history_source();
+    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let (sample, snapshot) =
+        capture_hot_path_sample("provider_history_uncheckpointed_read", history_len, || {
+            let history = read_provider_history_source(source, &session_dir);
+            assert_eq!(history.len(), history_len);
+        });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:history:read_range_rows",
+        history_len as u64,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "engine:model_history:rows_read",
+        history_len as u64,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn run_engine_request_materialization_hot_path(
+    history_len: usize,
+) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let app = saved_hot_path_app("engine-request-materialization", history_len, None);
+    let source = app.app.model_history_source();
+    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let (sample, snapshot) =
+        capture_hot_path_sample("engine_request_materialization", history_len, || {
+            let history = read_provider_history_source(source, &session_dir);
+            let mut engine_history = {
+                let _perf = smelt_perf::perf::begin("bench:engine_request:install_history");
+                let mut installed = Vec::with_capacity(history.len() + 1);
+                installed.push(protocol::HistoryItem::system("benchmark system prompt"));
+                installed.extend(history);
+                installed
+            };
+            assert_eq!(engine_history.len(), history_len + 1);
+
+            let prepared = {
+                let _perf = smelt_perf::perf::begin("bench:engine_request:prepare_messages");
+                engine::PreparedRequestMessages::new(
+                    protocol::history_to_messages(&engine_history),
+                    1,
+                )
+            };
+            {
+                let _perf =
+                    smelt_perf::perf::begin("bench:engine_request:estimate_tokens_serialize");
+                serde_json::to_writer(std::io::sink(), prepared.model())
+                    .expect("measure serialized request view");
+            }
+            smelt_perf::perf::record_value(
+                "bench:engine_request:prepare_message_count",
+                prepared.model().len() as u64,
+            );
+            smelt_perf::perf::record_value(
+                "bench:engine_request:provider_message_count",
+                prepared.wire().len() as u64,
+            );
+            std::hint::black_box((&mut engine_history, prepared));
+        });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:history:read_range_rows",
+        history_len as u64,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn run_submit_hot_paths(history_len: usize) -> Vec<(HotPathSample, smelt_perf::perf::Snapshot)> {
+    let mut app = saved_hot_path_app("submit", history_len, None);
+    app.app.handle_resize(100, 32);
+    app.render_silent();
+    app.type_text("hot path submitted user message");
+    app.clear_actions();
+
+    let (submit, submit_snapshot) = capture_hot_path_sample("submit_enter", history_len, || {
+        app.press(KeyCode::Enter);
+    });
+    let started = app.actions().iter().find_map(|action| match action {
+        Action::EngineSend(command) => match command.as_ref() {
+            protocol::UiCommand::StartTurn(payload) => Some(payload),
+            _ => None,
+        },
+        _ => None,
+    });
+    let Some(started) = started else {
+        panic!("submit_enter did not dispatch StartTurn");
+    };
+    assert!(matches!(
+        &started.history,
+        protocol::ModelHistorySource::Store { .. }
+    ));
+    assert_hot_path_at_most(
+        &submit_snapshot,
+        submit.operation,
+        "store:history:dirty_suffix_rows",
+        2,
+    );
+    assert_hot_path_at_most(
+        &submit_snapshot,
+        submit.operation,
+        "store:transcript:dirty_descriptor_suffix_rows",
+        1,
+    );
+    assert_cached_persist_db(&submit_snapshot, submit.operation);
+
+    let (render, render_snapshot) =
+        capture_hot_path_sample("submit_first_render", history_len, || {
+            app.render_silent();
+        });
+    assert_no_full_store_hot_path_reads(&render_snapshot, render.operation);
+
+    vec![(submit, submit_snapshot), (render, render_snapshot)]
+}
+
 fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
-    for row in snapshot.durations.iter().filter(|row| {
+    let included = |label: &str| {
         [
-            "session:", "persist:", "store:", "engine:", "tui:", "lua:", "bench:",
+            "agent:",
+            "app:",
+            "session:",
+            "persist:",
+            "store:",
+            "engine:",
+            "provider:",
+            "transcript:",
+            "tui:",
+            "lua:",
+            "bench:",
         ]
         .iter()
-        .any(|prefix| row.label.starts_with(prefix))
-    }) {
+        .any(|prefix| label.starts_with(prefix))
+    };
+    for row in snapshot.durations.iter().filter(|row| included(row.label)) {
         eprintln!(
             "TRANSCRIPT_HOT_PATH_PERF_DURATION operation={} metric={} count={} last_us={} total_us={} p95_us={} max_us={}",
             operation, row.label, row.count, row.last_us, row.total_us, row.p95_us, row.max_us
         );
     }
-    for row in snapshot.values.iter().filter(|row| {
-        [
-            "session:", "persist:", "store:", "engine:", "tui:", "lua:", "bench:",
-        ]
-        .iter()
-        .any(|prefix| row.label.starts_with(prefix))
-    }) {
+    for row in snapshot.values.iter().filter(|row| included(row.label)) {
         eprintln!(
             "TRANSCRIPT_HOT_PATH_PERF_VALUE operation={} metric={} count={} last={} total={} p95={} max={}",
             operation, row.label, row.count, row.last, row.total, row.p95, row.max
+        );
+    }
+    for row in snapshot.allocs.iter().filter(|row| included(row.label)) {
+        eprintln!(
+            "TRANSCRIPT_HOT_PATH_PERF_ALLOC operation={} metric={} count={} allocs_last={} allocs_total={} bytes_last={} bytes_total={} bytes_p95={} bytes_max={}",
+            operation,
+            row.label,
+            row.count,
+            row.allocs_last,
+            row.allocs_total,
+            row.bytes_last,
+            row.bytes_total,
+            row.bytes_p95,
+            row.bytes_max
         );
     }
 }
@@ -2100,11 +2413,19 @@ fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
 fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
     let c = sample.counters;
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} ms={:.3} history_suffix_rows={} history_inserted={} history_deleted={} descriptor_suffix_rows={} descriptor_inserted={} descriptor_deleted={} read_range_rows={} cached_read_write_db={}",
+        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} history_item_bytes={} ms={:.3} thread_allocs={} thread_bytes_allocated={} process_bytes_allocated={} process_bytes_deallocated={} process_current_bytes_before={} process_current_bytes_after={} process_retained_bytes={} history_suffix_rows={} history_inserted={} history_deleted={} descriptor_suffix_rows={} descriptor_inserted={} descriptor_deleted={} read_range_rows={} cached_read_write_db={} invariant_history_rows={} search_blob_rows={} search_blob_bytes={} user_turn_blocks_scanned={} user_turns_cloned={} user_turn_text_bytes_cloned={}",
         run,
         sample.operation,
         sample.history_len,
+        sample.history_item_bytes,
         sample.ms,
+        sample.thread_allocs,
+        sample.thread_bytes_allocated,
+        sample.process_bytes_allocated,
+        sample.process_bytes_deallocated,
+        sample.process_current_bytes_before,
+        sample.process_current_bytes_after,
+        sample.process_retained_bytes,
         c.history_suffix_rows,
         c.history_inserted,
         c.history_deleted,
@@ -2113,13 +2434,27 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.descriptor_deleted,
         c.read_range_rows,
         c.cached_read_write_db,
+        c.invariant_history_rows,
+        c.search_blob_rows,
+        c.search_blob_bytes,
+        c.user_turn_blocks_scanned,
+        c.user_turns_cloned,
+        c.user_turn_text_bytes_cloned,
     );
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"ms\":{:.3},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"descriptor_suffix_rows\":{},\"descriptor_inserted\":{},\"descriptor_deleted\":{},\"read_range_rows\":{},\"cached_read_write_db\":{}}}",
+        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"history_item_bytes\":{},\"ms\":{:.3},\"thread_allocs\":{},\"thread_bytes_allocated\":{},\"process_bytes_allocated\":{},\"process_bytes_deallocated\":{},\"process_current_bytes_before\":{},\"process_current_bytes_after\":{},\"process_retained_bytes\":{},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"descriptor_suffix_rows\":{},\"descriptor_inserted\":{},\"descriptor_deleted\":{},\"read_range_rows\":{},\"cached_read_write_db\":{},\"invariant_history_rows\":{},\"search_blob_rows\":{},\"search_blob_bytes\":{},\"user_turn_blocks_scanned\":{},\"user_turns_cloned\":{},\"user_turn_text_bytes_cloned\":{}}}",
         run,
         sample.operation,
         sample.history_len,
+        sample.history_item_bytes,
         sample.ms,
+        sample.thread_allocs,
+        sample.thread_bytes_allocated,
+        sample.process_bytes_allocated,
+        sample.process_bytes_deallocated,
+        sample.process_current_bytes_before,
+        sample.process_current_bytes_after,
+        sample.process_retained_bytes,
         c.history_suffix_rows,
         c.history_inserted,
         c.history_deleted,
@@ -2128,11 +2463,17 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.descriptor_deleted,
         c.read_range_rows,
         c.cached_read_write_db,
+        c.invariant_history_rows,
+        c.search_blob_rows,
+        c.search_blob_bytes,
+        c.user_turn_blocks_scanned,
+        c.user_turns_cloned,
+        c.user_turn_text_bytes_cloned,
     );
 }
 
 #[test]
-#[ignore = "manual transcript save/request hot-path benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
+#[ignore = "manual transcript submit/save/request hot-path benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
 fn transcript_layout_hot_path_benchmark_suite() {
     if !hot_path_enabled() {
         eprintln!("TRANSCRIPT_HOT_PATH_BENCH_SKIPPED set SMELT_TRANSCRIPT_HOT_PATH=1 to run");
@@ -2143,14 +2484,18 @@ fn transcript_layout_hot_path_benchmark_suite() {
     let history_len = hot_path_history_len();
     let mut samples = Vec::new();
     for run in 1..=runs {
-        for (sample, snapshot) in [
+        let mut run_samples = vec![
             run_noop_save_hot_path(history_len),
             run_request_append_hot_path(history_len),
             run_history_appended_hot_path(history_len),
             run_turn_complete_hot_path(history_len),
             run_rewind_delete_hot_path(history_len),
             run_provider_history_hot_path(history_len),
-        ] {
+            run_uncheckpointed_provider_history_hot_path(history_len),
+            run_engine_request_materialization_hot_path(history_len),
+        ];
+        run_samples.extend(run_submit_hot_paths(history_len));
+        for (sample, snapshot) in run_samples {
             print_hot_path_perf(sample.operation, &snapshot);
             print_hot_path_sample(run, &sample);
             samples.push(sample);
@@ -2164,6 +2509,10 @@ fn transcript_layout_hot_path_benchmark_suite() {
         "turn_complete",
         "rewind_delete_suffix",
         "provider_history_read",
+        "provider_history_uncheckpointed_read",
+        "engine_request_materialization",
+        "submit_enter",
+        "submit_first_render",
     ] {
         let operation_samples = samples
             .iter()
@@ -2172,18 +2521,20 @@ fn transcript_layout_hot_path_benchmark_suite() {
             .collect::<Vec<_>>();
         let stats = NavStats::from(&operation_samples);
         eprintln!(
-            "TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation={} runs={} history_len={} mean_ms={:.3} stddev_ms={:.3}",
+            "TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation={} runs={} history_len={} history_item_bytes={} mean_ms={:.3} stddev_ms={:.3}",
             operation,
             operation_samples.len(),
             history_len,
+            hot_path_history_item_bytes(),
             stats.mean,
             stats.stddev,
         );
         eprintln!(
-            "TRANSCRIPT_HOT_PATH_BENCH_SUMMARY_JSON {{\"type\":\"hot_path_summary\",\"operation\":\"{}\",\"runs\":{},\"history_len\":{},\"mean_ms\":{:.3},\"stddev_ms\":{:.3}}}",
+            "TRANSCRIPT_HOT_PATH_BENCH_SUMMARY_JSON {{\"type\":\"hot_path_summary\",\"operation\":\"{}\",\"runs\":{},\"history_len\":{},\"history_item_bytes\":{},\"mean_ms\":{:.3},\"stddev_ms\":{:.3}}}",
             operation,
             operation_samples.len(),
             history_len,
+            hot_path_history_item_bytes(),
             stats.mean,
             stats.stddev,
         );

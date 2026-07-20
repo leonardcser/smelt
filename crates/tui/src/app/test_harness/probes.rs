@@ -428,7 +428,7 @@ impl TestApp {
             let _g = crate::lua::install_app_ptr(&mut self.app);
             self.app
                 .dispatch_host_call(engine::HostCall::PrepareRequest {
-                    messages: full_history,
+                    messages: engine::PreparedRequestMessages::model_only(full_history),
                     estimated_tokens: 200,
                     reply: tx,
                 });

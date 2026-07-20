@@ -4,7 +4,7 @@
 
 use crate::paused_timer::PausedTimer;
 use crate::permissions::PermissionGrant;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -1467,6 +1467,8 @@ impl BlockEntry {
     }
 }
 
+const DESCRIPTOR_CHANGE_LOG_CAPACITY: usize = 64;
+
 pub struct BlockHistory {
     pub order: Vec<BlockId>,
     entries: HashMap<BlockId, BlockEntry>,
@@ -1494,6 +1496,10 @@ pub struct BlockHistory {
     /// Bumped when a persisted descriptor may have changed. Unlike `generation`,
     /// this ignores display-only status changes.
     descriptor_dirty_generation: u64,
+    /// Recent descriptor mutation boundaries remain available after persistence
+    /// clears `descriptor_dirty_from`, allowing projections that have not rendered
+    /// yet to update an appended suffix without scanning the unchanged prefix.
+    descriptor_changes: VecDeque<(u64, usize)>,
 }
 
 impl BlockHistory {
@@ -1513,6 +1519,7 @@ impl BlockHistory {
             navigation_generation: 0,
             descriptor_dirty_from: None,
             descriptor_dirty_generation: 0,
+            descriptor_changes: VecDeque::new(),
         }
     }
 
@@ -1556,6 +1563,30 @@ impl BlockHistory {
         self.descriptor_dirty_generation
     }
 
+    pub fn descriptor_changed_from_since(&self, generation: u64) -> Option<usize> {
+        if generation == self.descriptor_dirty_generation {
+            return Some(self.order.len());
+        }
+        let first_generation = generation.checked_add(1)?;
+        let first = self
+            .descriptor_changes
+            .iter()
+            .position(|(change_generation, _)| *change_generation == first_generation)?;
+        let mut expected_generation = first_generation;
+        let mut changed_from = self.order.len();
+        for (change_generation, index) in self.descriptor_changes.iter().skip(first) {
+            if *change_generation != expected_generation {
+                return None;
+            }
+            changed_from = changed_from.min(*index);
+            if *change_generation == self.descriptor_dirty_generation {
+                return Some(changed_from);
+            }
+            expected_generation = expected_generation.checked_add(1)?;
+        }
+        None
+    }
+
     pub fn clear_descriptor_dirty(&mut self) {
         self.descriptor_dirty_from = None;
     }
@@ -1565,6 +1596,11 @@ impl BlockHistory {
             .descriptor_dirty_generation
             .checked_add(1)
             .expect("transcript descriptor generation overflow");
+        self.descriptor_changes
+            .push_back((self.descriptor_dirty_generation, idx));
+        if self.descriptor_changes.len() > DESCRIPTOR_CHANGE_LOG_CAPACITY {
+            self.descriptor_changes.pop_front();
+        }
         self.descriptor_dirty_from = Some(
             self.descriptor_dirty_from
                 .map_or(idx, |current| current.min(idx)),
@@ -2520,6 +2556,35 @@ mod tests {
         assert_ne!(history.generation(), generation);
         assert_eq!(history.descriptor_dirty_generation(), descriptor_generation);
         assert_eq!(history.descriptor_dirty_from(), None);
+    }
+
+    #[test]
+    fn descriptor_change_log_tracks_unrendered_mutations_after_persistence() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "first".into(),
+        });
+        history.clear_descriptor_dirty();
+        let generation = history.descriptor_dirty_generation();
+
+        assert_eq!(
+            history.descriptor_changed_from_since(generation),
+            Some(history.order.len())
+        );
+
+        history.push(Block::Text {
+            content: "second".into(),
+        });
+        history.clear_descriptor_dirty();
+        assert_eq!(history.descriptor_changed_from_since(generation), Some(1));
+
+        history.require_descriptor_resave_from(0);
+        assert_eq!(history.descriptor_changed_from_since(generation), Some(0));
+
+        for _ in 0..DESCRIPTOR_CHANGE_LOG_CAPACITY {
+            history.require_descriptor_resave_from(0);
+        }
+        assert_eq!(history.descriptor_changed_from_since(generation), None);
     }
 
     #[test]

@@ -186,7 +186,7 @@ impl TuiApp {
             }),
             first_user_message,
         );
-        let rewind_block_idx = self.user_turns().last().map(|(idx, _)| *idx);
+        let rewind_block_idx = self.last_user_block_index();
         self.publish_turn_input(submitted);
         Some(self.dispatch_turn(content, history, model_target, rewind_block_idx))
     }

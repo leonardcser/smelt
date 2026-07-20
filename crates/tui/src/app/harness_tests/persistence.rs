@@ -1379,7 +1379,7 @@ fn pre_request_compaction_append_save_resume_keeps_canonical_history() {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         app.app
             .dispatch_host_call(engine::HostCall::PrepareRequest {
-                messages,
+                messages: engine::PreparedRequestMessages::model_only(messages),
                 estimated_tokens: 200,
                 reply: tx,
             });
