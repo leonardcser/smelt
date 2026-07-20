@@ -104,6 +104,9 @@ impl PersistenceCause {
             | smelt_store::SessionCommitFailure::InvalidDescriptorSuffix { .. }
             | smelt_store::SessionCommitFailure::InvalidSideTableSuffix { .. }
             | smelt_store::SessionCommitFailure::InvalidSideTableRow { .. }
+            | smelt_store::SessionCommitFailure::InvalidTurn { .. }
+            | smelt_store::SessionCommitFailure::TurnNotFound { .. }
+            | smelt_store::SessionCommitFailure::InvalidTurnTransition { .. }
             | smelt_store::SessionCommitFailure::InvalidCommand { .. }
             | smelt_store::SessionCommitFailure::Integrity { .. } => {
                 PersistenceFailureClass::Invariant
@@ -2021,10 +2024,20 @@ fn describe_commit_failure(failure: &smelt_store::SessionCommitFailure) -> Strin
         smelt_store::SessionCommitFailure::UnsupportedSchema { found, expected } => {
             format!("unsupported schema version {found}; expected {expected}")
         }
-        smelt_store::SessionCommitFailure::InvalidCommand { message }
+        smelt_store::SessionCommitFailure::InvalidTurn { message }
+        | smelt_store::SessionCommitFailure::InvalidCommand { message }
         | smelt_store::SessionCommitFailure::Integrity { message }
         | smelt_store::SessionCommitFailure::Io { message, .. }
         | smelt_store::SessionCommitFailure::Sqlite { message, .. } => message.clone(),
+        smelt_store::SessionCommitFailure::TurnNotFound { turn_id } => {
+            format!("turn {} was not found", turn_id.get())
+        }
+        smelt_store::SessionCommitFailure::InvalidTurnTransition { turn_id, from, to } => {
+            format!(
+                "turn {} cannot transition from {from:?} to {to:?}",
+                turn_id.get()
+            )
+        }
     }
 }
 

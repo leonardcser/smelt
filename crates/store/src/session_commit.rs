@@ -64,6 +64,155 @@ typed_u64!(HistoryIndex);
 typed_u64!(HistoryLen);
 typed_u64!(DescriptorIndex);
 typed_u64!(DescriptorLen);
+typed_u64!(TurnId);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnKind {
+    User,
+    Command,
+    Continuation,
+    Note,
+}
+
+impl TurnKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Command => "command",
+            Self::Continuation => "continuation",
+            Self::Note => "note",
+        }
+    }
+
+    pub(crate) fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "command" => Some(Self::Command),
+            "continuation" => Some(Self::Continuation),
+            "note" => Some(Self::Note),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnState {
+    Ready,
+    Running,
+    Completed,
+    Interrupted,
+    Failed,
+    Cancelled,
+}
+
+impl TurnState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Interrupted => "interrupted",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Interrupted | Self::Failed | Self::Cancelled
+        )
+    }
+
+    pub(crate) fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "ready" => Some(Self::Ready),
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "interrupted" => Some(Self::Interrupted),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct NewTurn {
+    pub kind: TurnKind,
+    pub submitted_history_idx: HistoryIndex,
+    pub continuation_of: Option<TurnId>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SubmitTurn {
+    pub session: SessionCommit,
+    pub turn: NewTurn,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SubmitTurnReceipt {
+    pub session: SaveReceipt,
+    pub turn_id: TurnId,
+}
+
+impl SubmitTurnReceipt {
+    pub const fn head(&self) -> StoreHead {
+        self.session.current
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct TurnTransition {
+    pub session: SessionCommit,
+    pub turn_id: TurnId,
+    pub state: TurnState,
+    pub at_ms: u64,
+    pub terminal_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct TurnTransitionReceipt {
+    pub session: SaveReceipt,
+    pub turn_id: TurnId,
+    pub state: TurnState,
+}
+
+impl TurnTransitionReceipt {
+    pub const fn head(&self) -> StoreHead {
+        self.session.current
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct StartupRecoveryReceipt {
+    pub session: SaveReceipt,
+    pub interrupted_turns: Vec<TurnId>,
+}
+
+impl StartupRecoveryReceipt {
+    pub const fn head(&self) -> StoreHead {
+        self.session.current
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct StoredTurn {
+    pub turn_id: TurnId,
+    pub submitted_history_idx: HistoryIndex,
+    pub submitted_history_hash: String,
+    pub submitted_revision: Revision,
+    pub kind: TurnKind,
+    pub state: TurnState,
+    pub continuation_of: Option<TurnId>,
+    pub created_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
+    pub terminal_reason: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct SessionCommit {
@@ -155,6 +304,17 @@ pub enum SessionCommitFailure {
         index: HistoryIndex,
         final_len: HistoryLen,
         bound: HistoryIndexBound,
+    },
+    InvalidTurn {
+        message: String,
+    },
+    TurnNotFound {
+        turn_id: TurnId,
+    },
+    InvalidTurnTransition {
+        turn_id: TurnId,
+        from: TurnState,
+        to: TurnState,
     },
     OwnershipLost,
     Busy {

@@ -14,10 +14,12 @@ use crate::{
     DescriptorIndex, FullSession, HistoryIndex, HistoryLen, HistorySuffix, ObjectMeta,
     RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery, RequestAuditStats,
     RequestAuditSummary, Result, SaveReceipt, SessionCommit, SessionCommitFailure, SessionIdentity,
-    SessionMeta, SessionMetadata, SideTableSuffixes, StoreError, StoreHead, StoredObject,
-    StoredSession, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
-    TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
-    TranscriptDescriptorSuffix, TranscriptSearchCandidate, TranscriptSearchDirection, WriterOwner,
+    SessionMeta, SessionMetadata, SideTableSuffixes, StartupRecoveryReceipt, StoreError, StoreHead,
+    StoredObject, StoredSession, StoredTurn, SubmitTurn, SubmitTurnReceipt,
+    TranscriptBlockMetadataRecord, TranscriptDescriptorIndex, TranscriptDescriptorRange,
+    TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptDescriptorSuffix,
+    TranscriptSearchCandidate, TranscriptSearchDirection, TurnId, TurnTransition,
+    TurnTransitionReceipt, WriterOwner,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +91,14 @@ impl SessionReader {
 
     pub fn store_head(&self) -> Result<StoreHead> {
         self.db.store_head()
+    }
+
+    pub fn turn(&self, turn_id: TurnId) -> Result<Option<StoredTurn>> {
+        self.db.turn(turn_id)
+    }
+
+    pub fn turns(&self) -> Result<Vec<StoredTurn>> {
+        self.db.turns()
     }
 
     pub fn load_session_resume_snapshot(
@@ -599,6 +609,7 @@ pub struct OwnedSessionWriter {
     location: SessionLocation,
     db: Option<SessionDb>,
     publication: Option<PublicationExpectation>,
+    startup_recovery: Option<StartupRecoveryReceipt>,
     owner_active: bool,
 }
 
@@ -658,11 +669,19 @@ impl OwnedSessionWriter {
             let _ = db.release_writer_owner(&lease.token);
             return Err(err);
         }
+        let startup_recovery = match db.interrupt_nonterminal_turns_owned(&lease.token, now_ms()) {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                let _ = db.release_writer_owner(&lease.token);
+                return Err(err);
+            }
+        };
         Ok(Self {
             lease,
             location: SessionLocation::Published,
             db: Some(db),
             publication: None,
+            startup_recovery,
             owner_active: true,
         })
     }
@@ -688,6 +707,7 @@ impl OwnedSessionWriter {
             location: SessionLocation::Staged { path },
             db: Some(db),
             publication: None,
+            startup_recovery: None,
             owner_active: true,
         })
     }
@@ -729,6 +749,14 @@ impl OwnedSessionWriter {
 
     pub fn store_head(&self) -> Result<StoreHead> {
         self.db()?.store_head()
+    }
+
+    pub fn startup_recovery(&self) -> Option<&StartupRecoveryReceipt> {
+        self.startup_recovery.as_ref()
+    }
+
+    pub fn take_startup_recovery(&mut self) -> Option<StartupRecoveryReceipt> {
+        self.startup_recovery.take()
     }
 
     pub fn last_session_commit(&self) -> Result<Option<(String, SaveReceipt)>> {
@@ -847,6 +875,32 @@ impl OwnedSessionWriter {
         self.commit_canonical(command)
     }
 
+    pub fn submit_turn(
+        &mut self,
+        command: &SubmitTurn,
+    ) -> std::result::Result<SubmitTurnReceipt, SessionCommitFailure> {
+        self.recover_staged_blobs()
+            .map_err(session_commit_failure_from_blob_error)?;
+        self.validate_canonical_session(&command.session)?;
+        let token = self.lease.token.clone();
+        self.db_mut()
+            .map_err(session_commit_failure_from_blob_error)?
+            .submit_turn_owned(&token, command)
+    }
+
+    pub fn transition_turn(
+        &mut self,
+        command: &TurnTransition,
+    ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
+        self.recover_staged_blobs()
+            .map_err(session_commit_failure_from_blob_error)?;
+        self.validate_canonical_session(&command.session)?;
+        let token = self.lease.token.clone();
+        self.db_mut()
+            .map_err(session_commit_failure_from_blob_error)?
+            .transition_turn_owned(&token, command)
+    }
+
     #[cfg(test)]
     pub(crate) fn commit_session_with_blobs(
         &mut self,
@@ -876,16 +930,24 @@ impl OwnedSessionWriter {
         })
     }
 
-    fn commit_canonical(
-        &mut self,
+    fn validate_canonical_session(
+        &self,
         command: &SessionCommit,
-    ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+    ) -> std::result::Result<(), SessionCommitFailure> {
         if command.session_id != self.session_id() || command.identity.id != self.session_id() {
             return Err(SessionCommitFailure::SessionMismatch {
                 expected: self.session_id().to_string(),
                 actual: Some(command.identity.id.clone()),
             });
         }
+        Ok(())
+    }
+
+    fn commit_canonical(
+        &mut self,
+        command: &SessionCommit,
+    ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+        self.validate_canonical_session(command)?;
         let token = self.lease.token.clone();
         self.db_mut()
             .map_err(session_commit_failure_from_blob_error)?
@@ -1456,11 +1518,17 @@ fn database_schema_version(path: &Path) -> Result<i32> {
     crate::schema::user_version(&connection)
 }
 
-fn create_staging_directory(layout: &SessionLayout, staging_root: &Path) -> Result<PathBuf> {
-    let timestamp = SystemTime::now()
+fn now_ms() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn create_staging_directory(layout: &SessionLayout, staging_root: &Path) -> Result<PathBuf> {
+    let timestamp = now_ms();
     for _ in 0..16 {
         let path = staging_root.join(format!(
             "{}.{}.{}.{}",
@@ -1857,6 +1925,50 @@ mod tests {
         }
     }
 
+    fn no_op_commit(session_id: &str, expected: StoreHead) -> SessionCommit {
+        let mut command = empty_commit(session_id, expected.revision.get());
+        command.expected = expected;
+        command.history.start = crate::HistoryIndex::new(expected.history_len.get());
+        command.history.final_len = expected.history_len;
+        command.side_tables.start = crate::HistoryIndex::new(expected.history_len.get());
+        command
+    }
+
+    fn submit_command(writer: &OwnedSessionWriter, text: &str, created_at_ms: u64) -> SubmitTurn {
+        let expected = writer.store_head().unwrap();
+        let history_idx = expected.history_len.get();
+        let mut session = no_op_commit(writer.session_id(), expected);
+        session.history = crate::HistorySuffix {
+            start: crate::HistoryIndex::new(history_idx),
+            final_len: crate::HistoryLen::new(history_idx + 1),
+            items: vec![protocol::HistoryItem::user(protocol::Content::text(text))],
+        };
+        SubmitTurn {
+            session,
+            turn: crate::NewTurn {
+                kind: crate::TurnKind::User,
+                submitted_history_idx: crate::HistoryIndex::new(history_idx),
+                continuation_of: None,
+                created_at_ms,
+            },
+        }
+    }
+
+    fn transition_command(
+        writer: &OwnedSessionWriter,
+        turn_id: TurnId,
+        state: crate::TurnState,
+        at_ms: u64,
+    ) -> TurnTransition {
+        TurnTransition {
+            session: no_op_commit(writer.session_id(), writer.store_head().unwrap()),
+            turn_id,
+            state,
+            at_ms,
+            terminal_reason: state.is_terminal().then(|| state.as_str().to_string()),
+        }
+    }
+
     #[test]
     fn invalid_session_ids_never_reach_the_lock_namespace() {
         let root = tempfile::tempdir().unwrap();
@@ -2106,6 +2218,93 @@ mod tests {
             replacement.owner().process_start_id,
             first_owner.process_start_id
         );
+    }
+
+    #[test]
+    fn writable_reopen_interrupts_nonterminal_turns_once_and_reader_never_mutates() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join(SESSION_ID);
+        let mut writer = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+
+        let first_command = submit_command(&writer, "ready", 100);
+        let ready = writer.submit_turn(&first_command).unwrap();
+        let second_command = submit_command(&writer, "running", 200);
+        let running = writer.submit_turn(&second_command).unwrap();
+        let running_command =
+            transition_command(&writer, running.turn_id, crate::TurnState::Running, 210);
+        writer.transition_turn(&running_command).unwrap();
+        let third_command = submit_command(&writer, "terminal", 300);
+        let terminal = writer.submit_turn(&third_command).unwrap();
+        let terminal_command =
+            transition_command(&writer, terminal.turn_id, crate::TurnState::Failed, 310);
+        writer.transition_turn(&terminal_command).unwrap();
+        let head_before_recovery = writer.store_head().unwrap();
+        writer.publish().unwrap();
+        writer.release().unwrap();
+
+        let reader = SessionReader::open_existing(&session_dir).unwrap();
+        assert_eq!(reader.store_head().unwrap(), head_before_recovery);
+        assert_eq!(
+            reader
+                .turns()
+                .unwrap()
+                .into_iter()
+                .map(|turn| turn.state)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::TurnState::Ready,
+                crate::TurnState::Running,
+                crate::TurnState::Failed,
+            ]
+        );
+        drop(reader);
+
+        let mut reopened = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        let recovery = reopened
+            .startup_recovery()
+            .expect("nonterminal turns require recovery");
+        assert_eq!(recovery.session.previous, head_before_recovery);
+        assert_eq!(
+            recovery.session.current.revision,
+            crate::Revision::new(head_before_recovery.revision.get() + 1)
+        );
+        assert_eq!(
+            recovery.interrupted_turns,
+            vec![ready.turn_id, running.turn_id]
+        );
+        assert_eq!(
+            reopened
+                .db()
+                .unwrap()
+                .turns()
+                .unwrap()
+                .into_iter()
+                .map(|turn| (turn.state, turn.terminal_reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    crate::TurnState::Interrupted,
+                    Some("process_restart".into())
+                ),
+                (
+                    crate::TurnState::Interrupted,
+                    Some("process_restart".into())
+                ),
+                (crate::TurnState::Failed, Some("failed".into())),
+            ]
+        );
+        let recovered_head = reopened.store_head().unwrap();
+        assert_eq!(
+            reopened.take_startup_recovery().unwrap().interrupted_turns,
+            vec![ready.turn_id, running.turn_id]
+        );
+        assert!(reopened.startup_recovery().is_none());
+        reopened.release().unwrap();
+
+        let reopened_again = OwnedSessionWriter::open(root.path(), SESSION_ID).unwrap();
+        assert!(reopened_again.startup_recovery().is_none());
+        assert_eq!(reopened_again.store_head().unwrap(), recovered_head);
+        reopened_again.release().unwrap();
     }
 
     #[test]

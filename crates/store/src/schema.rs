@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     let current = user_version(conn)?;
@@ -84,6 +84,9 @@ fn migrate_inner(conn: &Connection, current: i32, app_version: &str) -> Result<(
     }
     if (1..=6).contains(&current) {
         migrate_to_v7(conn)?;
+    }
+    if (1..=7).contains(&current) {
+        migrate_to_v8(conn)?;
     }
     ensure_schema_shape(conn)?;
     set_user_version(conn, SCHEMA_VERSION)?;
@@ -427,6 +430,17 @@ fn migrate_to_v7(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_v8(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "session_state", "next_turn_id")? {
+        conn.execute_batch(
+            "ALTER TABLE session_state
+             ADD COLUMN next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)",
+        )?;
+    }
+    conn.execute_batch(SCHEMA)?;
+    Ok(())
+}
+
 fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
     if !column_exists(conn, "session_state", "fast_mode")? {
         conn.execute_batch("ALTER TABLE session_state ADD COLUMN fast_mode INTEGER")?;
@@ -701,7 +715,8 @@ CREATE TABLE IF NOT EXISTS session_state (
     history_len INTEGER NOT NULL DEFAULT 0 CHECK (history_len >= 0),
     created_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()) CHECK (updated_at >= 0),
-    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0)
+    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0),
+    next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)
 );
 
 CREATE TABLE IF NOT EXISTS history_items (
@@ -714,6 +729,32 @@ CREATE TABLE IF NOT EXISTS history_items (
 );
 CREATE INDEX IF NOT EXISTS history_items_kind_idx ON history_items(kind, idx);
 CREATE INDEX IF NOT EXISTS history_items_created_at_idx ON history_items(created_at, idx);
+
+CREATE TABLE IF NOT EXISTS turns (
+    turn_id INTEGER PRIMARY KEY CHECK (turn_id > 0),
+    submitted_history_idx INTEGER NOT NULL CHECK (submitted_history_idx >= 0),
+    submitted_history_hash TEXT NOT NULL
+        CHECK (length(submitted_history_hash) = 64
+               AND submitted_history_hash NOT GLOB '*[^0-9a-f]*'),
+    submitted_revision INTEGER NOT NULL UNIQUE CHECK (submitted_revision > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('user', 'command', 'continuation', 'note')),
+    state TEXT NOT NULL CHECK (
+        state IN ('ready', 'running', 'completed', 'interrupted', 'failed', 'cancelled')
+    ),
+    continuation_of INTEGER REFERENCES turns(turn_id) ON DELETE RESTRICT,
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    started_at INTEGER CHECK (started_at IS NULL OR started_at >= created_at),
+    finished_at INTEGER CHECK (finished_at IS NULL OR finished_at >= created_at),
+    terminal_reason TEXT,
+    CHECK (
+        (state = 'ready' AND started_at IS NULL AND finished_at IS NULL)
+        OR (state = 'running' AND started_at IS NOT NULL AND finished_at IS NULL)
+        OR (state IN ('completed', 'interrupted', 'failed', 'cancelled')
+            AND finished_at IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS turns_state_idx ON turns(state, turn_id);
+CREATE INDEX IF NOT EXISTS turns_history_idx ON turns(submitted_history_idx, turn_id);
 
 CREATE TABLE IF NOT EXISTS transcript_blocks (
     block_idx INTEGER PRIMARY KEY CHECK (block_idx >= 0),
@@ -898,6 +939,21 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
     }
 
+    fn schema_without_v8() -> String {
+        let mut schema = SCHEMA.replace(
+            ",\n    next_turn_id INTEGER NOT NULL DEFAULT 1 CHECK (next_turn_id > 0)",
+            "",
+        );
+        let turns_start = schema
+            .find("\nCREATE TABLE IF NOT EXISTS turns (")
+            .expect("canonical turns table");
+        let turns_end = schema
+            .find("\nCREATE TABLE IF NOT EXISTS transcript_blocks (")
+            .expect("canonical table after turns");
+        schema.replace_range(turns_start..turns_end, "");
+        schema
+    }
+
     fn insert_legacy_object(conn: &Connection, kind: &str, bytes: &[u8]) -> String {
         let hash = crate::object::sha256_hex(bytes);
         conn.execute(
@@ -949,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v7_migration_moves_search_text_and_removes_dead_schema() {
+    fn v1_to_v8_migration_moves_search_text_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -1031,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_to_v7_migration_preserves_data_and_removes_dead_schema() {
+    fn v2_to_v8_migration_preserves_data_and_removes_dead_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.pragma_update(None, "ignore_check_constraints", true)
@@ -1157,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v7_migration_preserves_fast_mode_appended_by_v3() {
+    fn v3_to_v8_migration_preserves_fast_mode_appended_by_v3() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         conn.execute_batch(
@@ -1227,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v7_migration_backfills_typed_refs_and_removes_semantic_columns() {
+    fn v4_to_v8_migration_backfills_typed_refs_and_removes_semantic_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         install_legacy_v4_schema(&conn);
         let hash = insert_legacy_object(&conn, "request_body", b"{}");
@@ -1267,9 +1323,9 @@ mod tests {
     }
 
     #[test]
-    fn v6_to_v7_migration_caches_descriptor_count_without_rebuilding() {
+    fn v6_to_v8_migration_caches_descriptor_count_without_rebuilding() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let v6_schema = SCHEMA
+        let v6_schema = schema_without_v8()
             .replace(
                 ",\n    descriptor_len INTEGER NOT NULL DEFAULT 0 CHECK (descriptor_len >= 0)",
                 "",
@@ -1347,6 +1403,70 @@ CREATE TABLE IF NOT EXISTS transcript_search_chars (
             .unwrap(),
             masks
         );
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v7_to_v8_migration_adds_empty_canonical_turn_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&schema_without_v8()).unwrap();
+        conn.execute(
+            "INSERT INTO session_state (
+                 singleton, id, title, revision, history_len, descriptor_len, created_at, updated_at
+             ) VALUES (1, 'session', 'kept', 4, 1, 1, 10, 20)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history_items (idx, kind, json, hash, search_text, created_at)
+             VALUES (
+                 0, 'user', '{}',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'hello', 15
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_blocks (
+                 block_idx, descriptor_idx, history_idx, kind, descriptor_json
+             ) VALUES (0, 0, 0, 'user', '{}')",
+            [],
+        )
+        .unwrap();
+        set_user_version(&conn, 7).unwrap();
+        assert!(!column_exists(&conn, "session_state", "next_turn_id").unwrap());
+        assert!(!table_exists(&conn, "turns").unwrap());
+
+        migrate(&mut conn, "test-v8").unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT id, title, revision, history_len, descriptor_len, next_turn_id
+                 FROM session_state",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                }
+            )
+            .unwrap(),
+            ("session".into(), "kept".into(), 4, 1, 1, 1)
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM turns", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(schema_object_exists(&conn, "index", "turns_state_idx").unwrap());
+        assert!(schema_object_exists(&conn, "index", "turns_history_idx").unwrap());
         validate_read_only_schema(&conn).unwrap();
     }
 

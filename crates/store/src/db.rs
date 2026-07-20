@@ -18,8 +18,10 @@ use crate::request_audit::{
 };
 use crate::schema;
 use crate::session_commit::{
-    DescriptorIndex, DescriptorLen, HistoryIndex, HistoryIndexBound, HistoryLen, SaveReceipt,
-    SessionCommit, SessionCommitFailure, StoreHead,
+    DescriptorIndex, DescriptorLen, HistoryIndex, HistoryIndexBound, HistoryLen, NewTurn, Revision,
+    SaveReceipt, SessionCommit, SessionCommitFailure, StartupRecoveryReceipt, StoreHead,
+    StoredTurn, SubmitTurn, SubmitTurnReceipt, TurnId, TurnKind, TurnState, TurnTransition,
+    TurnTransitionReceipt,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,10 +53,20 @@ const JOURNAL_SIZE_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 const WAL_AUTOCHECKPOINT_PAGES: u64 = 1_000;
 const SESSION_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct PersistedSessionCommit {
     fingerprint: String,
     receipt: SaveReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn: Option<PersistedTurnReceipt>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PersistedTurnReceipt {
+    Submitted { turn_id: TurnId },
+    Transitioned { turn_id: TurnId, state: TurnState },
+    StartupRecovery { interrupted_turns: Vec<TurnId> },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
@@ -886,19 +898,34 @@ impl SessionDb {
         command: &SessionCommit,
         owner_token: Option<&str>,
     ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-        let prepared = prepare_session_commit(command)?;
+        let prepared = prepare_canonical_update(command)?;
+        let fingerprint = canonical_session_commit_fingerprint(command, &prepared.side_tables)
+            .map_err(session_commit_failure_from_store_error)?;
         let compression = self.object_compression;
         smelt_perf::perf::record_value("store:transaction:session_commit:attempts", 1);
         let result = self.run_immediate_transaction(
             "apply session commit",
             |conn| {
-                apply_session_commit_in_transaction(
+                verify_canonical_owner(conn, owner_token)?;
+                if let Some(persisted) = idempotent_persisted_commit(conn, &fingerprint)? {
+                    verify_idempotent_receipt(conn, command.expected, &persisted.receipt)?;
+                    if persisted.turn.is_some() {
+                        return Err(SessionCommitFailure::Integrity {
+                            message: "ordinary session commit recovered a turn receipt".into(),
+                        });
+                    }
+                    return Ok(persisted.receipt);
+                }
+                let receipt = apply_canonical_update_in_transaction(
                     conn,
                     command,
                     &prepared,
-                    owner_token,
                     compression,
-                )
+                    false,
+                )?;
+                persist_canonical_receipt(conn, &fingerprint, &receipt, None)
+                    .map_err(session_commit_failure_from_store_error)?;
+                Ok(receipt)
             },
             session_commit_failure_from_store_error,
         );
@@ -910,6 +937,187 @@ impl SessionDb {
             );
         }
         result
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn submit_turn(
+        &mut self,
+        command: &SubmitTurn,
+    ) -> std::result::Result<SubmitTurnReceipt, SessionCommitFailure> {
+        self.submit_turn_with_owner(command, None)
+    }
+
+    pub(crate) fn submit_turn_owned(
+        &mut self,
+        token: &str,
+        command: &SubmitTurn,
+    ) -> std::result::Result<SubmitTurnReceipt, SessionCommitFailure> {
+        self.submit_turn_with_owner(command, Some(token))
+    }
+
+    fn submit_turn_with_owner(
+        &mut self,
+        command: &SubmitTurn,
+        owner_token: Option<&str>,
+    ) -> std::result::Result<SubmitTurnReceipt, SessionCommitFailure> {
+        let prepared = prepare_canonical_update(&command.session)?;
+        validate_new_turn(&command.turn, command.session.history.final_len)?;
+        let fingerprint = canonical_submit_turn_fingerprint(command, &prepared.side_tables)
+            .map_err(session_commit_failure_from_store_error)?;
+        let compression = self.object_compression;
+        smelt_perf::perf::record_value("store:transaction:submit_turn:attempts", 1);
+        let result = self.run_immediate_transaction(
+            "submit turn",
+            |conn| {
+                verify_canonical_owner(conn, owner_token)?;
+                if let Some(persisted) = idempotent_persisted_commit(conn, &fingerprint)? {
+                    verify_idempotent_receipt(conn, command.session.expected, &persisted.receipt)?;
+                    let Some(PersistedTurnReceipt::Submitted { turn_id }) = persisted.turn else {
+                        return Err(SessionCommitFailure::Integrity {
+                            message: "submitted turn commit has no submitted-turn receipt".into(),
+                        });
+                    };
+                    return Ok(SubmitTurnReceipt {
+                        session: persisted.receipt,
+                        turn_id,
+                    });
+                }
+                validate_new_turn_in_transaction(conn, command)?;
+                let receipt = apply_canonical_update_in_transaction(
+                    conn,
+                    &command.session,
+                    &prepared,
+                    compression,
+                    true,
+                )?;
+                let turn_id = insert_ready_turn(conn, &command.turn, receipt.current.revision)?;
+                persist_canonical_receipt(
+                    conn,
+                    &fingerprint,
+                    &receipt,
+                    Some(PersistedTurnReceipt::Submitted { turn_id }),
+                )
+                .map_err(session_commit_failure_from_store_error)?;
+                Ok(SubmitTurnReceipt {
+                    session: receipt,
+                    turn_id,
+                })
+            },
+            session_commit_failure_from_store_error,
+        );
+        if result.is_ok() {
+            smelt_perf::perf::record_value("store:transaction:submit_turn:committed", 1);
+        }
+        result
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn transition_turn(
+        &mut self,
+        command: &TurnTransition,
+    ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
+        self.transition_turn_with_owner(command, None)
+    }
+
+    pub(crate) fn transition_turn_owned(
+        &mut self,
+        token: &str,
+        command: &TurnTransition,
+    ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
+        self.transition_turn_with_owner(command, Some(token))
+    }
+
+    fn transition_turn_with_owner(
+        &mut self,
+        command: &TurnTransition,
+        owner_token: Option<&str>,
+    ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
+        let prepared = prepare_canonical_update(&command.session)?;
+        validate_turn_transition_command(command)?;
+        let fingerprint = canonical_turn_transition_fingerprint(command, &prepared.side_tables)
+            .map_err(session_commit_failure_from_store_error)?;
+        let compression = self.object_compression;
+        smelt_perf::perf::record_value("store:transaction:turn_transition:attempts", 1);
+        let result = self.run_immediate_transaction(
+            "transition turn",
+            |conn| {
+                verify_canonical_owner(conn, owner_token)?;
+                if let Some(persisted) = idempotent_persisted_commit(conn, &fingerprint)? {
+                    verify_idempotent_receipt(conn, command.session.expected, &persisted.receipt)?;
+                    let Some(PersistedTurnReceipt::Transitioned { turn_id, state }) =
+                        persisted.turn
+                    else {
+                        return Err(SessionCommitFailure::Integrity {
+                            message: "turn transition has no transition receipt".into(),
+                        });
+                    };
+                    if turn_id != command.turn_id || state != command.state {
+                        return Err(SessionCommitFailure::Integrity {
+                            message: "persisted turn transition receipt does not match command"
+                                .into(),
+                        });
+                    }
+                    return Ok(TurnTransitionReceipt {
+                        session: persisted.receipt,
+                        turn_id,
+                        state,
+                    });
+                }
+                validate_turn_transition_in_transaction(conn, command)?;
+                let receipt = apply_canonical_update_in_transaction(
+                    conn,
+                    &command.session,
+                    &prepared,
+                    compression,
+                    true,
+                )?;
+                apply_turn_transition(conn, command)?;
+                persist_canonical_receipt(
+                    conn,
+                    &fingerprint,
+                    &receipt,
+                    Some(PersistedTurnReceipt::Transitioned {
+                        turn_id: command.turn_id,
+                        state: command.state,
+                    }),
+                )
+                .map_err(session_commit_failure_from_store_error)?;
+                Ok(TurnTransitionReceipt {
+                    session: receipt,
+                    turn_id: command.turn_id,
+                    state: command.state,
+                })
+            },
+            session_commit_failure_from_store_error,
+        );
+        if result.is_ok() {
+            smelt_perf::perf::record_value("store:transaction:turn_transition:committed", 1);
+        }
+        result
+    }
+
+    pub(crate) fn interrupt_nonterminal_turns_owned(
+        &mut self,
+        token: &str,
+        at_ms: u64,
+    ) -> Result<Option<StartupRecoveryReceipt>> {
+        checked_sql_coordinate(at_ms, "startup recovery timestamp")?;
+        self.immediate_transaction("interrupt nonterminal turns", |conn| {
+            interrupt_nonterminal_turns_in_transaction(conn, token, at_ms)
+        })
+    }
+
+    pub fn turn(&self, turn_id: TurnId) -> Result<Option<StoredTurn>> {
+        stored_turn(&self.conn, turn_id)
+    }
+
+    pub fn turns(&self) -> Result<Vec<StoredTurn>> {
+        stored_turns(&self.conn)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn next_turn_id(&self) -> Result<Option<TurnId>> {
+        next_turn_id(&self.conn)
     }
 
     pub fn load_full_session(&self) -> Result<Option<FullSession>> {
@@ -1525,7 +1733,6 @@ pub(crate) fn session_commit_failure_from_store_error(err: StoreError) -> Sessio
 
 #[derive(Debug)]
 struct PreparedSessionCommit {
-    fingerprint: String,
     history_start: usize,
     history_final_len: usize,
     history_hashes: Vec<String>,
@@ -1537,7 +1744,7 @@ struct PreparedSessionCommit {
     side_tables: PreparedSideTables,
 }
 
-fn prepare_session_commit(
+fn prepare_canonical_update(
     command: &SessionCommit,
 ) -> std::result::Result<PreparedSessionCommit, SessionCommitFailure> {
     if command.identity.id != command.session_id {
@@ -1639,10 +1846,7 @@ fn prepare_session_commit(
             .map(|suffix| suffix.records.as_slice()),
     )
     .map_err(session_commit_failure_from_store_error)?;
-    let fingerprint = canonical_session_commit_fingerprint(command, &side_tables)
-        .map_err(session_commit_failure_from_store_error)?;
     Ok(PreparedSessionCommit {
-        fingerprint,
         history_start,
         history_final_len,
         history_hashes,
@@ -1655,28 +1859,13 @@ fn prepare_session_commit(
     })
 }
 
-fn apply_session_commit_in_transaction(
+fn apply_canonical_update_in_transaction(
     conn: &Connection,
     command: &SessionCommit,
     prepared: &PreparedSessionCommit,
-    owner_token: Option<&str>,
     compression: ObjectCompression,
+    force_revision: bool,
 ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
-    if let Some(token) = owner_token {
-        meta::verify_writer_owner(conn, token).map_err(session_commit_failure_from_store_error)?;
-    }
-    if let Some(receipt) = idempotent_session_commit_receipt(conn, &prepared.fingerprint)
-        .map_err(session_commit_failure_from_store_error)?
-    {
-        let current = current_store_head(conn).map_err(session_commit_failure_from_store_error)?;
-        if receipt.previous != command.expected || receipt.current != current {
-            return Err(SessionCommitFailure::Integrity {
-                message: "persisted commit receipt does not match the command or store head".into(),
-            });
-        }
-        return Ok(receipt);
-    }
-
     let current_session =
         meta::stored_session(conn).map_err(session_commit_failure_from_store_error)?;
     let current = current_store_head_from(conn, current_session.as_ref())
@@ -1756,7 +1945,8 @@ fn apply_session_commit_in_transaction(
         .map_err(session_commit_failure_from_store_error)?,
         _ => false,
     };
-    let changed = current_session.is_none()
+    let changed = force_revision
+        || current_session.is_none()
         || metadata_changed
         || history_changed
         || side_table_changes.any()
@@ -1851,15 +2041,6 @@ fn apply_session_commit_in_transaction(
         previous: command.expected,
         current,
     };
-    let persisted = PersistedSessionCommit {
-        fingerprint: prepared.fingerprint.clone(),
-        receipt: receipt.clone(),
-    };
-    let persisted = serde_json::to_string(&persisted)
-        .map_err(StoreError::from)
-        .map_err(session_commit_failure_from_store_error)?;
-    meta::set_meta(conn, LAST_SESSION_COMMIT_KEY, &persisted)
-        .map_err(session_commit_failure_from_store_error)?;
     record_session_commit_metrics(
         history_replace_from,
         prepared.history_final_len,
@@ -1872,7 +2053,18 @@ fn apply_session_commit_in_transaction(
 pub fn session_commit_fingerprint(
     command: &SessionCommit,
 ) -> std::result::Result<String, SessionCommitFailure> {
-    prepare_session_commit(command).map(|prepared| prepared.fingerprint)
+    let prepared = prepare_canonical_update(command)?;
+    canonical_session_commit_fingerprint(command, &prepared.side_tables)
+        .map_err(session_commit_failure_from_store_error)
+}
+
+pub fn submit_turn_fingerprint(
+    command: &SubmitTurn,
+) -> std::result::Result<String, SessionCommitFailure> {
+    let prepared = prepare_canonical_update(&command.session)?;
+    validate_new_turn(&command.turn, command.session.history.final_len)?;
+    canonical_submit_turn_fingerprint(command, &prepared.side_tables)
+        .map_err(session_commit_failure_from_store_error)
 }
 
 fn canonical_session_commit_fingerprint(
@@ -1880,12 +2072,51 @@ fn canonical_session_commit_fingerprint(
     side_tables: &PreparedSideTables,
 ) -> Result<String> {
     let mut encoder = CanonicalEncoder::new(b"smelt-session-commit-v1\0");
+    encode_session_commit(&mut encoder, command, side_tables)?;
+    Ok(crate::object::sha256_hex(&encoder.finish()))
+}
+
+fn canonical_submit_turn_fingerprint(
+    command: &SubmitTurn,
+    side_tables: &PreparedSideTables,
+) -> Result<String> {
+    let mut encoder = CanonicalEncoder::new(b"smelt-submit-turn-v1\0");
+    encode_session_commit(&mut encoder, &command.session, side_tables)?;
+    encode_new_turn(&mut encoder, &command.turn);
+    Ok(crate::object::sha256_hex(&encoder.finish()))
+}
+
+fn canonical_turn_transition_fingerprint(
+    command: &TurnTransition,
+    side_tables: &PreparedSideTables,
+) -> Result<String> {
+    let mut encoder = CanonicalEncoder::new(b"smelt-turn-transition-v1\0");
+    encode_session_commit(&mut encoder, &command.session, side_tables)?;
+    encoder.u64(command.turn_id.get());
+    encoder.string(command.state.as_str());
+    encoder.u64(command.at_ms);
+    encoder.optional_string(command.terminal_reason.as_deref());
+    Ok(crate::object::sha256_hex(&encoder.finish()))
+}
+
+fn encode_new_turn(encoder: &mut CanonicalEncoder, turn: &NewTurn) {
+    encoder.string(turn.kind.as_str());
+    encoder.u64(turn.submitted_history_idx.get());
+    encoder.optional_u64(turn.continuation_of.map(TurnId::get));
+    encoder.u64(turn.created_at_ms);
+}
+
+fn encode_session_commit(
+    encoder: &mut CanonicalEncoder,
+    command: &SessionCommit,
+    side_tables: &PreparedSideTables,
+) -> Result<()> {
     encoder.string(&command.session_id);
-    encode_store_head(&mut encoder, command.expected);
+    encode_store_head(encoder, command.expected);
     encoder.string(&command.identity.id);
     encoder.i64(command.identity.created_at);
     encoder.optional_string(command.identity.parent_id.as_deref());
-    encode_session_metadata(&mut encoder, &command.metadata)?;
+    encode_session_metadata(encoder, &command.metadata)?;
     encoder.u64(command.history.start.get());
     encoder.u64(command.history.final_len.get());
     encoder.u64(command.history.items.len() as u64);
@@ -1893,9 +2124,9 @@ fn canonical_session_commit_fingerprint(
         encoder.json(item)?;
     }
     encoder.u64(side_tables.start);
-    encode_side_table_rows(&mut encoder, &side_tables.turn_metas)?;
-    encode_side_table_rows(&mut encoder, &side_tables.metadata_snapshots)?;
-    encode_side_table_rows(&mut encoder, &side_tables.context_snapshots)?;
+    encode_side_table_rows(encoder, &side_tables.turn_metas)?;
+    encode_side_table_rows(encoder, &side_tables.metadata_snapshots)?;
+    encode_side_table_rows(encoder, &side_tables.context_snapshots)?;
     match &command.descriptors {
         Some(suffix) => {
             encoder.bool(true);
@@ -1918,7 +2149,7 @@ fn canonical_session_commit_fingerprint(
         }
         None => encoder.bool(false),
     }
-    Ok(crate::object::sha256_hex(&encoder.finish()))
+    Ok(())
 }
 
 fn encode_store_head(encoder: &mut CanonicalEncoder, head: StoreHead) {
@@ -2207,23 +2438,516 @@ fn persisted_session_commit(conn: &Connection) -> Result<Option<PersistedSession
         .transpose()
 }
 
-fn idempotent_session_commit_receipt(
+fn verify_canonical_owner(
+    conn: &Connection,
+    owner_token: Option<&str>,
+) -> std::result::Result<(), SessionCommitFailure> {
+    if let Some(token) = owner_token {
+        meta::verify_writer_owner(conn, token).map_err(session_commit_failure_from_store_error)?;
+    }
+    Ok(())
+}
+
+fn idempotent_persisted_commit(
     conn: &Connection,
     fingerprint: &str,
-) -> Result<Option<SaveReceipt>> {
-    let Some(value) = persisted_session_commit_value(conn)? else {
-        return Ok(None);
+) -> std::result::Result<Option<PersistedSessionCommit>, SessionCommitFailure> {
+    let persisted =
+        persisted_session_commit(conn).map_err(session_commit_failure_from_store_error)?;
+    Ok(persisted.filter(|persisted| persisted.fingerprint == fingerprint))
+}
+
+fn verify_idempotent_receipt(
+    conn: &Connection,
+    expected: StoreHead,
+    receipt: &SaveReceipt,
+) -> std::result::Result<(), SessionCommitFailure> {
+    let current = current_store_head(conn).map_err(session_commit_failure_from_store_error)?;
+    if receipt.previous != expected || receipt.current != current {
+        return Err(SessionCommitFailure::Integrity {
+            message: "persisted commit receipt does not match the command or store head".into(),
+        });
+    }
+    Ok(())
+}
+
+fn persist_canonical_receipt(
+    conn: &Connection,
+    fingerprint: &str,
+    receipt: &SaveReceipt,
+    turn: Option<PersistedTurnReceipt>,
+) -> Result<()> {
+    let persisted = PersistedSessionCommit {
+        fingerprint: fingerprint.to_string(),
+        receipt: receipt.clone(),
+        turn,
     };
-    if value.get("fingerprint").and_then(serde_json::Value::as_str) != Some(fingerprint) {
+    let persisted = serde_json::to_string(&persisted)?;
+    meta::set_meta(conn, LAST_SESSION_COMMIT_KEY, &persisted)
+}
+
+const MAX_TERMINAL_REASON_BYTES: usize = 1024;
+
+fn validate_new_turn(
+    turn: &NewTurn,
+    final_history_len: HistoryLen,
+) -> std::result::Result<(), SessionCommitFailure> {
+    validate_sql_coordinate(turn.submitted_history_idx.get(), "submitted history index")?;
+    validate_sql_coordinate(turn.created_at_ms, "turn creation timestamp")?;
+    if turn.submitted_history_idx.get() >= final_history_len.get() {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: format!(
+                "submitted history index {} is outside final history length {}",
+                turn.submitted_history_idx.get(),
+                final_history_len.get()
+            ),
+        });
+    }
+    if let Some(continuation_of) = turn.continuation_of {
+        validate_turn_id(continuation_of)?;
+    }
+    if matches!(turn.kind, TurnKind::Continuation) != turn.continuation_of.is_some() {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: "continuation turns require exactly one continuation target".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_new_turn_in_transaction(
+    conn: &Connection,
+    command: &SubmitTurn,
+) -> std::result::Result<(), SessionCommitFailure> {
+    let Some(continuation_of) = command.turn.continuation_of else {
+        return Ok(());
+    };
+    let Some(previous) =
+        stored_turn(conn, continuation_of).map_err(session_commit_failure_from_store_error)?
+    else {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: format!("continuation turn {} does not exist", continuation_of.get()),
+        });
+    };
+    if !previous.state.is_terminal() {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: format!(
+                "continuation turn {} is not terminal",
+                continuation_of.get()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_turn_id(turn_id: TurnId) -> std::result::Result<i64, SessionCommitFailure> {
+    let value = i64::try_from(turn_id.get()).map_err(|_| SessionCommitFailure::InvalidTurn {
+        message: "turn ID exceeds SQLite integer range".into(),
+    })?;
+    if value <= 0 {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: "turn ID must be positive".into(),
+        });
+    }
+    Ok(value)
+}
+
+fn next_turn_id(conn: &Connection) -> Result<Option<TurnId>> {
+    conn.query_row(
+        "SELECT next_turn_id FROM session_state WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()?
+    .map(|value| {
+        u64::try_from(value)
+            .ok()
+            .filter(|value| *value > 0)
+            .map(TurnId::new)
+            .ok_or_else(|| StoreError::Integrity("invalid next turn ID".into()))
+    })
+    .transpose()
+}
+
+fn insert_ready_turn(
+    conn: &Connection,
+    turn: &NewTurn,
+    submitted_revision: Revision,
+) -> std::result::Result<TurnId, SessionCommitFailure> {
+    let history_idx =
+        checked_sql_coordinate(turn.submitted_history_idx.get(), "submitted history index")
+            .map_err(session_commit_failure_from_store_error)?;
+    let submitted_history_hash = conn
+        .query_row(
+            "SELECT hash FROM history_items WHERE idx = ?1",
+            [history_idx],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(StoreError::from)
+        .map_err(session_commit_failure_from_store_error)?
+        .ok_or_else(|| SessionCommitFailure::InvalidTurn {
+            message: format!(
+                "submitted history index {} has no canonical row",
+                turn.submitted_history_idx.get()
+            ),
+        })?;
+    let turn_id = next_turn_id(conn)
+        .map_err(session_commit_failure_from_store_error)?
+        .ok_or_else(|| SessionCommitFailure::Integrity {
+            message: "cannot allocate a turn before session state exists".into(),
+        })?;
+    let turn_id_sql = validate_turn_id(turn_id)?;
+    let next = turn_id_sql
+        .checked_add(1)
+        .filter(|next| *next > 0)
+        .ok_or_else(|| SessionCommitFailure::InvalidTurn {
+            message: "turn ID sequence exhausted".into(),
+        })?;
+    let continuation_of = turn.continuation_of.map(validate_turn_id).transpose()?;
+    let created_at = checked_sql_coordinate(turn.created_at_ms, "turn creation timestamp")
+        .map_err(session_commit_failure_from_store_error)?;
+    let revision = checked_sql_coordinate(submitted_revision.get(), "submitted revision")
+        .map_err(session_commit_failure_from_store_error)?;
+
+    conn.execute(
+        "INSERT INTO turns (
+             turn_id, submitted_history_idx, submitted_history_hash, submitted_revision,
+             kind, state, continuation_of, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?7)",
+        rusqlite::params![
+            turn_id_sql,
+            history_idx,
+            submitted_history_hash,
+            revision,
+            turn.kind.as_str(),
+            continuation_of,
+            created_at,
+        ],
+    )
+    .map_err(StoreError::from)
+    .map_err(session_commit_failure_from_store_error)?;
+    let updated = conn
+        .execute(
+            "UPDATE session_state SET next_turn_id = ?1 WHERE singleton = 1",
+            [next],
+        )
+        .map_err(StoreError::from)
+        .map_err(session_commit_failure_from_store_error)?;
+    if updated != 1 {
+        return Err(SessionCommitFailure::Integrity {
+            message: "turn ID allocation did not update session state".into(),
+        });
+    }
+    Ok(turn_id)
+}
+
+fn validate_turn_transition_command(
+    command: &TurnTransition,
+) -> std::result::Result<(), SessionCommitFailure> {
+    validate_turn_id(command.turn_id)?;
+    validate_sql_coordinate(command.at_ms, "turn transition timestamp")?;
+    if command.state == TurnState::Ready {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: "a transition cannot target ready".into(),
+        });
+    }
+    if command.state == TurnState::Running && command.terminal_reason.is_some() {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: "a running transition cannot have a terminal reason".into(),
+        });
+    }
+    if command
+        .terminal_reason
+        .as_ref()
+        .is_some_and(|reason| reason.len() > MAX_TERMINAL_REASON_BYTES)
+    {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: format!("terminal reason exceeds {MAX_TERMINAL_REASON_BYTES} UTF-8 bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_turn_transition_in_transaction(
+    conn: &Connection,
+    command: &TurnTransition,
+) -> std::result::Result<(), SessionCommitFailure> {
+    let current = stored_turn(conn, command.turn_id)
+        .map_err(session_commit_failure_from_store_error)?
+        .ok_or(SessionCommitFailure::TurnNotFound {
+            turn_id: command.turn_id,
+        })?;
+    let allowed = matches!(
+        (current.state, command.state),
+        (TurnState::Ready, TurnState::Running)
+            | (TurnState::Ready, TurnState::Failed)
+            | (TurnState::Ready, TurnState::Cancelled)
+            | (TurnState::Ready, TurnState::Interrupted)
+            | (TurnState::Running, TurnState::Completed)
+            | (TurnState::Running, TurnState::Failed)
+            | (TurnState::Running, TurnState::Cancelled)
+            | (TurnState::Running, TurnState::Interrupted)
+    );
+    if !allowed {
+        return Err(SessionCommitFailure::InvalidTurnTransition {
+            turn_id: command.turn_id,
+            from: current.state,
+            to: command.state,
+        });
+    }
+    let minimum_time = current.started_at_ms.unwrap_or(current.created_at_ms);
+    if command.at_ms < minimum_time {
+        return Err(SessionCommitFailure::InvalidTurn {
+            message: format!(
+                "turn transition timestamp {} precedes {}",
+                command.at_ms, minimum_time
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn apply_turn_transition(
+    conn: &Connection,
+    command: &TurnTransition,
+) -> std::result::Result<(), SessionCommitFailure> {
+    let turn_id = validate_turn_id(command.turn_id)?;
+    let at_ms = checked_sql_coordinate(command.at_ms, "turn transition timestamp")
+        .map_err(session_commit_failure_from_store_error)?;
+    let updated = if command.state == TurnState::Running {
+        conn.execute(
+            "UPDATE turns
+             SET state = 'running', started_at = ?1
+             WHERE turn_id = ?2 AND state = 'ready'",
+            (at_ms, turn_id),
+        )
+    } else {
+        conn.execute(
+            "UPDATE turns
+             SET state = ?1, finished_at = ?2, terminal_reason = ?3
+             WHERE turn_id = ?4 AND state IN ('ready', 'running')",
+            rusqlite::params![
+                command.state.as_str(),
+                at_ms,
+                command.terminal_reason,
+                turn_id,
+            ],
+        )
+    }
+    .map_err(StoreError::from)
+    .map_err(session_commit_failure_from_store_error)?;
+    if updated != 1 {
+        return Err(SessionCommitFailure::Integrity {
+            message: format!("turn {} changed during transition", command.turn_id.get()),
+        });
+    }
+    Ok(())
+}
+
+fn interrupt_nonterminal_turns_in_transaction(
+    conn: &Connection,
+    owner_token: &str,
+    at_ms: u64,
+) -> Result<Option<StartupRecoveryReceipt>> {
+    meta::verify_writer_owner(conn, owner_token)?;
+    let interrupted_turns = nonterminal_turn_ids(conn)?;
+    if interrupted_turns.is_empty() {
         return Ok(None);
     }
-    let receipt = value
-        .get("receipt")
-        .cloned()
-        .ok_or_else(|| StoreError::Integrity("persisted session commit has no receipt".into()))?;
-    serde_json::from_value(receipt)
-        .map(Some)
-        .map_err(|err| StoreError::Integrity(format!("invalid persisted commit receipt: {err}")))
+    let previous = current_store_head(conn)?;
+    let revision = previous
+        .revision
+        .checked_add(1)
+        .filter(|revision| revision.get() <= i64::MAX as u64)
+        .ok_or_else(|| {
+            StoreError::Integrity("session revision exceeds SQLite integer range".into())
+        })?;
+    let at_ms_sql = checked_sql_coordinate(at_ms, "startup recovery timestamp")?;
+    let updated = conn.execute(
+        "UPDATE turns
+         SET state = 'interrupted',
+             finished_at = MAX(?1, created_at, COALESCE(started_at, created_at)),
+             terminal_reason = 'process_restart'
+         WHERE state IN ('ready', 'running')",
+        [at_ms_sql],
+    )?;
+    if updated != interrupted_turns.len() {
+        return Err(StoreError::Integrity(
+            "nonterminal turn count changed during startup recovery".into(),
+        ));
+    }
+    let revision_sql = checked_sql_coordinate(revision.get(), "session revision")?;
+    if conn.execute(
+        "UPDATE session_state SET revision = ?1 WHERE singleton = 1",
+        [revision_sql],
+    )? != 1
+    {
+        return Err(StoreError::Integrity(
+            "startup recovery has turns without session state".into(),
+        ));
+    }
+    let current = StoreHead {
+        revision,
+        ..previous
+    };
+    let receipt = SaveReceipt {
+        session_id: session_id(conn)?,
+        previous,
+        current,
+    };
+    let fingerprint = canonical_startup_recovery_fingerprint(
+        receipt.session_id.as_str(),
+        previous,
+        at_ms,
+        &interrupted_turns,
+    );
+    persist_canonical_receipt(
+        conn,
+        &fingerprint,
+        &receipt,
+        Some(PersistedTurnReceipt::StartupRecovery {
+            interrupted_turns: interrupted_turns.clone(),
+        }),
+    )?;
+    smelt_perf::perf::record_value(
+        "store:turn:interrupted_on_startup",
+        interrupted_turns.len() as u64,
+    );
+    Ok(Some(StartupRecoveryReceipt {
+        session: receipt,
+        interrupted_turns,
+    }))
+}
+
+fn canonical_startup_recovery_fingerprint(
+    session_id: &str,
+    previous: StoreHead,
+    at_ms: u64,
+    interrupted_turns: &[TurnId],
+) -> String {
+    let mut encoder = CanonicalEncoder::new(b"smelt-startup-turn-recovery-v1\0");
+    encoder.string(session_id);
+    encode_store_head(&mut encoder, previous);
+    encoder.u64(at_ms);
+    encoder.u64(interrupted_turns.len() as u64);
+    for turn_id in interrupted_turns {
+        encoder.u64(turn_id.get());
+    }
+    crate::object::sha256_hex(&encoder.finish())
+}
+
+fn session_id(conn: &Connection) -> Result<String> {
+    conn.query_row(
+        "SELECT id FROM session_state WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn nonterminal_turn_ids(conn: &Connection) -> Result<Vec<TurnId>> {
+    let mut statement = conn.prepare(
+        "SELECT turn_id FROM turns WHERE state IN ('ready', 'running') ORDER BY turn_id",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+    rows.map(|row| {
+        let value = row?;
+        u64::try_from(value)
+            .ok()
+            .filter(|value| *value > 0)
+            .map(TurnId::new)
+            .ok_or_else(|| StoreError::Integrity("invalid stored turn ID".into()))
+    })
+    .collect()
+}
+
+struct RawStoredTurn {
+    turn_id: i64,
+    history_idx: i64,
+    history_hash: String,
+    revision: i64,
+    kind: String,
+    state: String,
+    continuation_of: Option<i64>,
+    created_at: i64,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+    terminal_reason: Option<String>,
+}
+
+fn raw_stored_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawStoredTurn> {
+    Ok(RawStoredTurn {
+        turn_id: row.get(0)?,
+        history_idx: row.get(1)?,
+        history_hash: row.get(2)?,
+        revision: row.get(3)?,
+        kind: row.get(4)?,
+        state: row.get(5)?,
+        continuation_of: row.get(6)?,
+        created_at: row.get(7)?,
+        started_at: row.get(8)?,
+        finished_at: row.get(9)?,
+        terminal_reason: row.get(10)?,
+    })
+}
+
+fn parse_stored_turn(raw: RawStoredTurn) -> Result<StoredTurn> {
+    let positive = |value: i64, field: &str| {
+        u64::try_from(value)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| StoreError::Integrity(format!("invalid stored {field}")))
+    };
+    let nonnegative = |value: i64, field: &str| {
+        u64::try_from(value).map_err(|_| StoreError::Integrity(format!("invalid stored {field}")))
+    };
+    Ok(StoredTurn {
+        turn_id: TurnId::new(positive(raw.turn_id, "turn ID")?),
+        submitted_history_idx: HistoryIndex::new(nonnegative(raw.history_idx, "history index")?),
+        submitted_history_hash: raw.history_hash,
+        submitted_revision: Revision::new(positive(raw.revision, "submitted revision")?),
+        kind: TurnKind::from_db(&raw.kind).ok_or_else(|| {
+            StoreError::Integrity(format!("invalid stored turn kind {:?}", raw.kind))
+        })?,
+        state: TurnState::from_db(&raw.state).ok_or_else(|| {
+            StoreError::Integrity(format!("invalid stored turn state {:?}", raw.state))
+        })?,
+        continuation_of: raw
+            .continuation_of
+            .map(|value| positive(value, "continuation turn ID").map(TurnId::new))
+            .transpose()?,
+        created_at_ms: nonnegative(raw.created_at, "turn creation timestamp")?,
+        started_at_ms: raw
+            .started_at
+            .map(|value| nonnegative(value, "turn start timestamp"))
+            .transpose()?,
+        finished_at_ms: raw
+            .finished_at
+            .map(|value| nonnegative(value, "turn finish timestamp"))
+            .transpose()?,
+        terminal_reason: raw.terminal_reason,
+    })
+}
+
+const STORED_TURN_COLUMNS: &str =
+    "turn_id, submitted_history_idx, submitted_history_hash, submitted_revision, kind, state, \
+     continuation_of, created_at, started_at, finished_at, terminal_reason";
+
+fn stored_turn(conn: &Connection, turn_id: TurnId) -> Result<Option<StoredTurn>> {
+    let turn_id = i64::try_from(turn_id.get())
+        .map_err(|_| StoreError::Integrity("turn ID exceeds SQLite integer range".into()))?;
+    let sql = format!("SELECT {STORED_TURN_COLUMNS} FROM turns WHERE turn_id = ?1");
+    conn.query_row(&sql, [turn_id], raw_stored_turn)
+        .optional()?
+        .map(parse_stored_turn)
+        .transpose()
+}
+
+fn stored_turns(conn: &Connection) -> Result<Vec<StoredTurn>> {
+    let sql = format!("SELECT {STORED_TURN_COLUMNS} FROM turns ORDER BY turn_id");
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map([], raw_stored_turn)?;
+    rows.map(|row| parse_stored_turn(row?)).collect()
 }
 
 fn validate_side_table_suffixes(
@@ -3060,6 +3784,78 @@ mod tests {
         }
     }
 
+    fn test_submit_user_command(
+        db: &SessionDb,
+        id: &str,
+        text: &str,
+        created_at_ms: u64,
+    ) -> SubmitTurn {
+        let expected = db.store_head().unwrap();
+        let history_idx = expected.history_len.get();
+        let descriptor_idx = expected.descriptor_len.get();
+        SubmitTurn {
+            session: SessionCommit {
+                session_id: id.into(),
+                expected,
+                identity: test_identity(id),
+                metadata: test_metadata(),
+                history: HistorySuffix {
+                    start: HistoryIndex::new(history_idx),
+                    final_len: HistoryLen::new(history_idx + 1),
+                    items: vec![protocol::HistoryItem::user(protocol::Content::text(text))],
+                },
+                side_tables: SideTableSuffixes {
+                    start: HistoryIndex::new(history_idx),
+                    ..SideTableSuffixes::default()
+                },
+                descriptors: Some(TranscriptDescriptorSuffix {
+                    start: DescriptorIndex::new(descriptor_idx),
+                    records: vec![transcript_user_record_with_history(
+                        descriptor_idx,
+                        history_idx,
+                        text,
+                        text,
+                    )],
+                }),
+            },
+            turn: NewTurn {
+                kind: TurnKind::User,
+                submitted_history_idx: HistoryIndex::new(history_idx),
+                continuation_of: None,
+                created_at_ms,
+            },
+        }
+    }
+
+    fn test_transition_command(
+        db: &SessionDb,
+        id: &str,
+        turn_id: TurnId,
+        state: TurnState,
+        at_ms: u64,
+    ) -> TurnTransition {
+        TurnTransition {
+            session: test_empty_commit(id, db.store_head().unwrap()),
+            turn_id,
+            state,
+            at_ms,
+            terminal_reason: state
+                .is_terminal()
+                .then(|| format!("test_{}", state.as_str())),
+        }
+    }
+
+    fn transition_test_turn(
+        db: &mut SessionDb,
+        id: &str,
+        turn_id: TurnId,
+        state: TurnState,
+        at_ms: u64,
+    ) -> TurnTransitionReceipt {
+        let command = test_transition_command(db, id, turn_id, state, at_ms);
+        db.transition_turn(&command).unwrap()
+    }
+
     #[test]
     fn creates_and_reopens_session_db() {
         let dir = tempfile::tempdir().unwrap();
@@ -3569,6 +4365,12 @@ mod tests {
         };
 
         let receipt = db.apply_session_commit(&command).unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(&db.meta(LAST_SESSION_COMMIT_KEY).unwrap().unwrap()).unwrap();
+        assert!(
+            persisted.get("turn").is_none(),
+            "ordinary receipts retain the pre-turn persisted JSON shape"
+        );
         drop(db);
         let mut db = SessionDb::open(&path).unwrap();
         let repeated = db.apply_session_commit(&command).unwrap();
@@ -3580,6 +4382,659 @@ mod tests {
         assert_eq!(receipt.current.descriptor_len, crate::DescriptorLen::new(1));
         assert_eq!(db.history_item_count().unwrap(), 1);
         assert_eq!(db.transcript_descriptor_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn submit_turn_commits_history_descriptor_search_and_ready_state_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let command = test_submit_user_command(&db, "submit-atomic", "canonical needle", 100);
+        let expected_hash = history::item_hash(&command.session.history.items[0]).unwrap();
+
+        let receipt = db.submit_turn(&command).unwrap();
+
+        assert_eq!(receipt.turn_id, TurnId::new(1));
+        assert_eq!(receipt.session.previous, StoreHead::default());
+        assert_eq!(receipt.session.current, test_store_head(1, 1, 1));
+        assert_eq!(db.next_turn_id().unwrap(), Some(TurnId::new(2)));
+        assert_eq!(
+            db.turn(receipt.turn_id).unwrap(),
+            Some(StoredTurn {
+                turn_id: TurnId::new(1),
+                submitted_history_idx: HistoryIndex::ZERO,
+                submitted_history_hash: expected_hash,
+                submitted_revision: Revision::new(1),
+                kind: TurnKind::User,
+                state: TurnState::Ready,
+                continuation_of: None,
+                created_at_ms: 100,
+                started_at_ms: None,
+                finished_at_ms: None,
+                terminal_reason: None,
+            })
+        );
+        assert_eq!(
+            db.read_history_items_range(0..1).unwrap(),
+            command.session.history.items
+        );
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap(),
+            command.session.descriptors.unwrap().records
+        );
+        assert_eq!(
+            db.search_transcript_candidates("needle").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 0,
+                history_idx: Some(0),
+            }]
+        );
+    }
+
+    #[test]
+    fn submit_turn_exact_replay_after_wal_reopen_returns_original_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        let command = test_submit_user_command(&db, "submit-replay", "replayed prompt", 100);
+        let receipt = db.submit_turn(&command).unwrap();
+        drop(db);
+
+        let mut reopened = SessionDb::open(&path).unwrap();
+        let repeated = reopened.submit_turn(&command).unwrap();
+
+        assert_eq!(repeated, receipt);
+        assert_eq!(reopened.store_head().unwrap(), receipt.session.current);
+        assert_eq!(reopened.turns().unwrap().len(), 1);
+        assert_eq!(reopened.next_turn_id().unwrap(), Some(TurnId::new(2)));
+    }
+
+    #[test]
+    fn turn_transition_exact_replay_after_wal_reopen_returns_original_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        let submit = test_submit_user_command(&db, "transition-replay", "prompt", 100);
+        let turn = db.submit_turn(&submit).unwrap();
+        let command = test_transition_command(
+            &db,
+            "transition-replay",
+            turn.turn_id,
+            TurnState::Running,
+            110,
+        );
+        let receipt = db.transition_turn(&command).unwrap();
+        drop(db);
+
+        let mut reopened = SessionDb::open(&path).unwrap();
+        let repeated = reopened.transition_turn(&command).unwrap();
+
+        assert_eq!(repeated, receipt);
+        assert_eq!(reopened.store_head().unwrap(), receipt.session.current);
+        assert_eq!(
+            reopened.turn(turn.turn_id).unwrap().unwrap().state,
+            TurnState::Running
+        );
+    }
+
+    #[test]
+    fn invalid_submitted_history_coordinate_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut command =
+            test_submit_user_command(&db, "invalid-turn-history", "not committed", 100);
+        command.turn.submitted_history_idx = HistoryIndex::new(1);
+
+        assert!(matches!(
+            db.submit_turn(&command),
+            Err(SessionCommitFailure::InvalidTurn { .. })
+        ));
+        assert_eq!(db.store_head().unwrap(), StoreHead::default());
+        assert_eq!(db.history_item_count().unwrap(), 0);
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert!(db.turns().unwrap().is_empty());
+        assert!(db
+            .search_transcript_candidates("not committed")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn submit_turn_fingerprint_changes_for_every_turn_field() {
+        let session = SessionCommit {
+            session_id: "turn-fingerprint".into(),
+            expected: StoreHead::default(),
+            identity: test_identity("turn-fingerprint"),
+            metadata: test_metadata(),
+            history: HistorySuffix {
+                start: HistoryIndex::ZERO,
+                final_len: HistoryLen::new(2),
+                items: vec![
+                    protocol::HistoryItem::user(protocol::Content::text("first")),
+                    protocol::HistoryItem::user(protocol::Content::text("second")),
+                ],
+            },
+            side_tables: SideTableSuffixes::default(),
+            descriptors: None,
+        };
+        let baseline = SubmitTurn {
+            session: session.clone(),
+            turn: NewTurn {
+                kind: TurnKind::User,
+                submitted_history_idx: HistoryIndex::ZERO,
+                continuation_of: None,
+                created_at_ms: 100,
+            },
+        };
+        let baseline_fingerprint = submit_turn_fingerprint(&baseline).unwrap();
+
+        let mut changed_kind = baseline.clone();
+        changed_kind.turn.kind = TurnKind::Command;
+        assert_ne!(
+            submit_turn_fingerprint(&changed_kind).unwrap(),
+            baseline_fingerprint
+        );
+        let mut changed_history = baseline.clone();
+        changed_history.turn.submitted_history_idx = HistoryIndex::new(1);
+        assert_ne!(
+            submit_turn_fingerprint(&changed_history).unwrap(),
+            baseline_fingerprint
+        );
+        let mut changed_time = baseline.clone();
+        changed_time.turn.created_at_ms += 1;
+        assert_ne!(
+            submit_turn_fingerprint(&changed_time).unwrap(),
+            baseline_fingerprint
+        );
+
+        let continuation = SubmitTurn {
+            session,
+            turn: NewTurn {
+                kind: TurnKind::Continuation,
+                submitted_history_idx: HistoryIndex::ZERO,
+                continuation_of: Some(TurnId::new(1)),
+                created_at_ms: 100,
+            },
+        };
+        let mut changed_continuation = continuation.clone();
+        changed_continuation.turn.continuation_of = Some(TurnId::new(2));
+        assert_ne!(
+            submit_turn_fingerprint(&changed_continuation).unwrap(),
+            submit_turn_fingerprint(&continuation).unwrap()
+        );
+    }
+
+    #[test]
+    fn failed_turn_insert_rolls_back_canonical_rows_and_does_not_consume_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.connection()
+            .execute_batch(
+                "CREATE TRIGGER test_fail_turn_insert BEFORE INSERT ON turns BEGIN
+                     SELECT RAISE(ABORT, 'injected turn failure');
+                 END;",
+            )
+            .unwrap();
+        let command = test_submit_user_command(&db, "submit-rollback", "must roll back", 100);
+
+        let error = db.submit_turn(&command).unwrap_err();
+
+        assert!(matches!(error, SessionCommitFailure::Sqlite { .. }));
+        assert_eq!(db.store_head().unwrap(), StoreHead::default());
+        assert_eq!(db.history_item_count().unwrap(), 0);
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert!(db.turns().unwrap().is_empty());
+        assert_eq!(db.next_turn_id().unwrap(), None);
+        assert!(db
+            .search_transcript_candidates("roll back")
+            .unwrap()
+            .is_empty());
+
+        db.connection()
+            .execute_batch("DROP TRIGGER test_fail_turn_insert")
+            .unwrap();
+        let receipt = db.submit_turn(&command).unwrap();
+        assert_eq!(receipt.turn_id, TurnId::new(1));
+        assert_eq!(db.next_turn_id().unwrap(), Some(TurnId::new(2)));
+    }
+
+    #[test]
+    fn exhausted_turn_id_sequence_rolls_back_the_canonical_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let initial = db
+            .apply_session_commit(&test_empty_commit("turn-overflow", StoreHead::default()))
+            .unwrap();
+        db.connection()
+            .execute("UPDATE session_state SET next_turn_id = ?1", [i64::MAX])
+            .unwrap();
+        let command = test_submit_user_command(&db, "turn-overflow", "not committed", 100);
+
+        let error = db.submit_turn(&command).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionCommitFailure::InvalidTurn { message }
+                if message.contains("sequence exhausted")
+        ));
+        assert_eq!(db.store_head().unwrap(), initial.current);
+        assert_eq!(db.history_item_count().unwrap(), 0);
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert!(db.turns().unwrap().is_empty());
+        assert_eq!(
+            db.next_turn_id().unwrap(),
+            Some(TurnId::new(i64::MAX as u64))
+        );
+    }
+
+    #[test]
+    fn continuation_requires_a_terminal_target_and_foreign_key_restricts_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = test_submit_user_command(&db, "continuations", "first", 100);
+        let first_receipt = db.submit_turn(&first).unwrap();
+        assert_eq!(first_receipt.turn_id, TurnId::new(1));
+        let head_before_failures = db.store_head().unwrap();
+
+        for target in [TurnId::new(1), TurnId::new(999)] {
+            let mut continuation = test_submit_user_command(&db, "continuations", "retry", 200);
+            continuation.turn.kind = TurnKind::Continuation;
+            continuation.turn.continuation_of = Some(target);
+            assert!(matches!(
+                db.submit_turn(&continuation),
+                Err(SessionCommitFailure::InvalidTurn { .. })
+            ));
+            assert_eq!(db.store_head().unwrap(), head_before_failures);
+            assert_eq!(db.next_turn_id().unwrap(), Some(TurnId::new(2)));
+        }
+
+        transition_test_turn(
+            &mut db,
+            "continuations",
+            first_receipt.turn_id,
+            TurnState::Failed,
+            110,
+        );
+        let mut continuation = test_submit_user_command(&db, "continuations", "retry", 200);
+        continuation.turn.kind = TurnKind::Continuation;
+        continuation.turn.continuation_of = Some(first_receipt.turn_id);
+        let second = db.submit_turn(&continuation).unwrap();
+
+        assert_eq!(second.turn_id, TurnId::new(2));
+        assert_eq!(
+            db.turn(second.turn_id).unwrap().unwrap().continuation_of,
+            Some(first_receipt.turn_id)
+        );
+        assert!(db
+            .connection()
+            .execute("DELETE FROM turns WHERE turn_id = 1", [])
+            .is_err());
+        assert_eq!(db.turns().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn every_allowed_turn_transition_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let allowed = [
+            (TurnState::Ready, TurnState::Running),
+            (TurnState::Ready, TurnState::Failed),
+            (TurnState::Ready, TurnState::Cancelled),
+            (TurnState::Ready, TurnState::Interrupted),
+            (TurnState::Running, TurnState::Completed),
+            (TurnState::Running, TurnState::Failed),
+            (TurnState::Running, TurnState::Cancelled),
+            (TurnState::Running, TurnState::Interrupted),
+        ];
+
+        for (index, (from, to)) in allowed.into_iter().enumerate() {
+            let created_at = 1_000 + index as u64 * 10;
+            let submit = test_submit_user_command(
+                &db,
+                "allowed-transitions",
+                &format!("turn {index}"),
+                created_at,
+            );
+            let submitted = db.submit_turn(&submit).unwrap();
+            if from == TurnState::Running {
+                transition_test_turn(
+                    &mut db,
+                    "allowed-transitions",
+                    submitted.turn_id,
+                    TurnState::Running,
+                    created_at + 1,
+                );
+            }
+            let before = db.store_head().unwrap();
+            let receipt = transition_test_turn(
+                &mut db,
+                "allowed-transitions",
+                submitted.turn_id,
+                to,
+                created_at + 2,
+            );
+            let stored = db.turn(submitted.turn_id).unwrap().unwrap();
+
+            assert_eq!(receipt.state, to);
+            assert_eq!(receipt.session.previous, before);
+            assert_eq!(
+                receipt.session.current.revision,
+                Revision::new(before.revision.get() + 1)
+            );
+            assert_eq!(stored.state, to);
+            if to == TurnState::Running {
+                assert_eq!(stored.started_at_ms, Some(created_at + 2));
+                assert_eq!(stored.finished_at_ms, None);
+            } else {
+                assert_eq!(stored.finished_at_ms, Some(created_at + 2));
+                assert_eq!(stored.started_at_ms.is_some(), from == TurnState::Running);
+            }
+        }
+    }
+
+    #[test]
+    fn every_disallowed_turn_transition_preserves_state_and_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let states = [
+            TurnState::Ready,
+            TurnState::Running,
+            TurnState::Completed,
+            TurnState::Interrupted,
+            TurnState::Failed,
+            TurnState::Cancelled,
+        ];
+        let allowed = |from, to| {
+            matches!(
+                (from, to),
+                (TurnState::Ready, TurnState::Running)
+                    | (TurnState::Ready, TurnState::Failed)
+                    | (TurnState::Ready, TurnState::Cancelled)
+                    | (TurnState::Ready, TurnState::Interrupted)
+                    | (TurnState::Running, TurnState::Completed)
+                    | (TurnState::Running, TurnState::Failed)
+                    | (TurnState::Running, TurnState::Cancelled)
+                    | (TurnState::Running, TurnState::Interrupted)
+            )
+        };
+
+        for (index, from) in states.into_iter().enumerate() {
+            let created_at = 2_000 + index as u64 * 20;
+            let submit = test_submit_user_command(
+                &db,
+                "invalid-transitions",
+                &format!("source {index}"),
+                created_at,
+            );
+            let submitted = db.submit_turn(&submit).unwrap();
+            match from {
+                TurnState::Ready => {}
+                TurnState::Running => {
+                    transition_test_turn(
+                        &mut db,
+                        "invalid-transitions",
+                        submitted.turn_id,
+                        TurnState::Running,
+                        created_at + 1,
+                    );
+                }
+                TurnState::Completed => {
+                    transition_test_turn(
+                        &mut db,
+                        "invalid-transitions",
+                        submitted.turn_id,
+                        TurnState::Running,
+                        created_at + 1,
+                    );
+                    transition_test_turn(
+                        &mut db,
+                        "invalid-transitions",
+                        submitted.turn_id,
+                        TurnState::Completed,
+                        created_at + 2,
+                    );
+                }
+                terminal => {
+                    transition_test_turn(
+                        &mut db,
+                        "invalid-transitions",
+                        submitted.turn_id,
+                        terminal,
+                        created_at + 1,
+                    );
+                }
+            }
+            let stored_before = db.turn(submitted.turn_id).unwrap().unwrap();
+            let head_before = db.store_head().unwrap();
+
+            for to in states {
+                if allowed(from, to) {
+                    continue;
+                }
+                let command = test_transition_command(
+                    &db,
+                    "invalid-transitions",
+                    submitted.turn_id,
+                    to,
+                    created_at + 10,
+                );
+                assert!(db.transition_turn(&command).is_err(), "{from:?} -> {to:?}");
+                assert_eq!(db.store_head().unwrap(), head_before);
+                assert_eq!(db.turn(submitted.turn_id).unwrap().unwrap(), stored_before);
+            }
+        }
+    }
+
+    #[test]
+    fn turn_transition_validates_target_timestamps_and_terminal_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first_command = test_submit_user_command(&db, "transition-validation", "first", 100);
+        let first = db.submit_turn(&first_command).unwrap();
+        let head = db.store_head().unwrap();
+
+        let missing = test_transition_command(
+            &db,
+            "transition-validation",
+            TurnId::new(999),
+            TurnState::Running,
+            100,
+        );
+        assert!(matches!(
+            db.transition_turn(&missing),
+            Err(SessionCommitFailure::TurnNotFound { .. })
+        ));
+        let too_early = test_transition_command(
+            &db,
+            "transition-validation",
+            first.turn_id,
+            TurnState::Running,
+            99,
+        );
+        assert!(matches!(
+            db.transition_turn(&too_early),
+            Err(SessionCommitFailure::InvalidTurn { .. })
+        ));
+        let mut running_reason = test_transition_command(
+            &db,
+            "transition-validation",
+            first.turn_id,
+            TurnState::Running,
+            100,
+        );
+        running_reason.terminal_reason = Some("not terminal".into());
+        assert!(db.transition_turn(&running_reason).is_err());
+        let mut oversized = test_transition_command(
+            &db,
+            "transition-validation",
+            first.turn_id,
+            TurnState::Failed,
+            100,
+        );
+        oversized.terminal_reason = Some("é".repeat(513));
+        assert!(db.transition_turn(&oversized).is_err());
+        assert_eq!(db.store_head().unwrap(), head);
+
+        transition_test_turn(
+            &mut db,
+            "transition-validation",
+            first.turn_id,
+            TurnState::Running,
+            120,
+        );
+        let before_terminal = db.store_head().unwrap();
+        let too_early_terminal = test_transition_command(
+            &db,
+            "transition-validation",
+            first.turn_id,
+            TurnState::Completed,
+            119,
+        );
+        assert!(db.transition_turn(&too_early_terminal).is_err());
+        assert_eq!(db.store_head().unwrap(), before_terminal);
+
+        let second_command = test_submit_user_command(&db, "transition-validation", "second", 200);
+        let second = db.submit_turn(&second_command).unwrap();
+        let mut maximum_reason = test_transition_command(
+            &db,
+            "transition-validation",
+            second.turn_id,
+            TurnState::Failed,
+            200,
+        );
+        maximum_reason.terminal_reason = Some("x".repeat(MAX_TERMINAL_REASON_BYTES));
+        db.transition_turn(&maximum_reason).unwrap();
+        assert_eq!(
+            db.turn(second.turn_id)
+                .unwrap()
+                .unwrap()
+                .terminal_reason
+                .unwrap()
+                .len(),
+            MAX_TERMINAL_REASON_BYTES
+        );
+    }
+
+    #[test]
+    fn terminal_transition_commits_final_canonical_state_without_mixed_reader_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        let submit = test_submit_user_command(&db, "terminal-atomic", "question", 100);
+        let submitted = db.submit_turn(&submit).unwrap();
+        transition_test_turn(
+            &mut db,
+            "terminal-atomic",
+            submitted.turn_id,
+            TurnState::Running,
+            110,
+        );
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN DEFERRED").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT state FROM turns WHERE turn_id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "running"
+        );
+
+        let expected = db.store_head().unwrap();
+        let mut session = test_empty_commit("terminal-atomic", expected);
+        session.metadata.title = Some("complete".into());
+        session.history = HistorySuffix {
+            start: HistoryIndex::new(1),
+            final_len: HistoryLen::new(2),
+            items: vec![protocol::HistoryItem::assistant(
+                protocol::AssistantStep::terminal(
+                    Some(protocol::Content::text("final response")),
+                    None,
+                    Vec::new(),
+                ),
+            )],
+        };
+        session.side_tables = SideTableSuffixes {
+            start: HistoryIndex::new(1),
+            turn_metas: vec![(HistoryIndex::new(1), serde_json::json!({"done": true}))],
+            ..SideTableSuffixes::default()
+        };
+        session.descriptors = Some(TranscriptDescriptorSuffix {
+            start: DescriptorIndex::new(1),
+            records: vec![transcript_record_with_history(
+                1,
+                1,
+                "final",
+                "final response",
+            )],
+        });
+        let command = TurnTransition {
+            session,
+            turn_id: submitted.turn_id,
+            state: TurnState::Completed,
+            at_ms: 120,
+            terminal_reason: None,
+        };
+        let receipt = db.transition_turn(&command).unwrap();
+
+        assert_eq!(receipt.session.previous, expected);
+        assert_eq!(receipt.session.current, test_store_head(3, 2, 2));
+        assert_eq!(
+            reader
+                .query_row("SELECT state FROM turns WHERE turn_id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "running"
+        );
+        assert_eq!(
+            reader
+                .query_row(
+                    "SELECT COUNT(*) FROM transcript_search WHERE indexed_text = 'final response'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        reader.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT state FROM turns WHERE turn_id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "completed"
+        );
+        assert_eq!(
+            reader
+                .query_row(
+                    "SELECT COUNT(*) FROM transcript_search WHERE indexed_text = 'final response'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.test_session_model().unwrap().unwrap().title.as_deref(),
+            Some("complete")
+        );
+        assert_eq!(
+            db.load_full_session().unwrap().unwrap().turn_metas,
+            vec![(1, serde_json::json!({"done": true}))]
+        );
+        assert_eq!(
+            db.search_transcript_candidates("response").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 1,
+                history_idx: Some(1),
+            }]
+        );
+        let stored = db.turn(submitted.turn_id).unwrap().unwrap();
+        assert_eq!(stored.state, TurnState::Completed);
+        assert_eq!(stored.started_at_ms, Some(110));
+        assert_eq!(stored.finished_at_ms, Some(120));
     }
 
     #[test]
