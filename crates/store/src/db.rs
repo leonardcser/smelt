@@ -955,6 +955,32 @@ impl SessionDb {
         self.submit_turn_with_owner(command, Some(token))
     }
 
+    pub(crate) fn recover_submit_turn_owned(
+        &self,
+        token: &str,
+        command: &SubmitTurn,
+    ) -> std::result::Result<Option<SubmitTurnReceipt>, SessionCommitFailure> {
+        let prepared = prepare_canonical_update(&command.session)?;
+        validate_new_turn(&command.turn, command.session.history.final_len)?;
+        let fingerprint = canonical_submit_turn_fingerprint(command, &prepared.side_tables)
+            .map_err(session_commit_failure_from_store_error)?;
+        meta::verify_writer_owner(&self.conn, token)
+            .map_err(session_commit_failure_from_store_error)?;
+        let Some(persisted) = idempotent_persisted_commit(&self.conn, &fingerprint)? else {
+            return Ok(None);
+        };
+        verify_idempotent_receipt(&self.conn, command.session.expected, &persisted.receipt)?;
+        let Some(PersistedTurnReceipt::Submitted { turn_id }) = persisted.turn else {
+            return Err(SessionCommitFailure::Integrity {
+                message: "submitted turn commit has no submitted-turn receipt".into(),
+            });
+        };
+        Ok(Some(SubmitTurnReceipt {
+            session: persisted.receipt,
+            turn_id,
+        }))
+    }
+
     fn submit_turn_with_owner(
         &mut self,
         command: &SubmitTurn,
@@ -1007,6 +1033,10 @@ impl SessionDb {
         );
         if result.is_ok() {
             smelt_perf::perf::record_value("store:transaction:submit_turn:committed", 1);
+            smelt_perf::perf::record_value(
+                "store:transaction:submit_turn:committed_at_us",
+                smelt_perf::perf::timestamp_us(),
+            );
         }
         result
     }
@@ -1025,6 +1055,38 @@ impl SessionDb {
         command: &TurnTransition,
     ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
         self.transition_turn_with_owner(command, Some(token))
+    }
+
+    pub(crate) fn recover_turn_transition_owned(
+        &self,
+        token: &str,
+        command: &TurnTransition,
+    ) -> std::result::Result<Option<TurnTransitionReceipt>, SessionCommitFailure> {
+        let prepared = prepare_canonical_update(&command.session)?;
+        validate_turn_transition_command(command)?;
+        let fingerprint = canonical_turn_transition_fingerprint(command, &prepared.side_tables)
+            .map_err(session_commit_failure_from_store_error)?;
+        meta::verify_writer_owner(&self.conn, token)
+            .map_err(session_commit_failure_from_store_error)?;
+        let Some(persisted) = idempotent_persisted_commit(&self.conn, &fingerprint)? else {
+            return Ok(None);
+        };
+        verify_idempotent_receipt(&self.conn, command.session.expected, &persisted.receipt)?;
+        let Some(PersistedTurnReceipt::Transitioned { turn_id, state }) = persisted.turn else {
+            return Err(SessionCommitFailure::Integrity {
+                message: "turn transition has no transition receipt".into(),
+            });
+        };
+        if turn_id != command.turn_id || state != command.state {
+            return Err(SessionCommitFailure::Integrity {
+                message: "persisted turn transition receipt does not match command".into(),
+            });
+        }
+        Ok(Some(TurnTransitionReceipt {
+            session: persisted.receipt,
+            turn_id,
+            state,
+        }))
     }
 
     fn transition_turn_with_owner(
@@ -1113,6 +1175,10 @@ impl SessionDb {
 
     pub fn turns(&self) -> Result<Vec<StoredTurn>> {
         stored_turns(&self.conn)
+    }
+
+    pub fn latest_terminal_turn_id(&self) -> Result<Option<TurnId>> {
+        latest_terminal_turn_id(&self.conn)
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -2948,6 +3014,29 @@ fn stored_turns(conn: &Connection) -> Result<Vec<StoredTurn>> {
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map([], raw_stored_turn)?;
     rows.map(|row| parse_stored_turn(row?)).collect()
+}
+
+fn latest_terminal_turn_id(conn: &Connection) -> Result<Option<TurnId>> {
+    let turn_id = conn
+        .query_row(
+            "SELECT turn_id
+             FROM turns
+             WHERE state IN ('completed', 'interrupted', 'failed', 'cancelled')
+             ORDER BY turn_id DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    turn_id
+        .map(|turn_id| {
+            u64::try_from(turn_id)
+                .ok()
+                .filter(|turn_id| *turn_id > 0)
+                .map(TurnId::new)
+                .ok_or_else(|| StoreError::Integrity("invalid terminal turn ID".into()))
+        })
+        .transpose()
 }
 
 fn validate_side_table_suffixes(

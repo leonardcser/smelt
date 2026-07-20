@@ -1,6 +1,6 @@
 //! Thin wrapper around `EngineHandle` that pauses output while a confirm dialog is open.
 
-use engine::{EngineHandle, EngineOutput};
+use engine::{EngineDisconnected, EngineHandle, EngineOutput};
 use protocol::{EngineEvent, UiCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,6 +21,10 @@ impl EngineClient {
 
     pub fn send(&self, cmd: UiCommand) {
         self.handle.send(cmd);
+    }
+
+    pub fn try_send(&self, cmd: UiCommand) -> Result<(), EngineDisconnected> {
+        self.handle.try_send(cmd)
     }
 
     /// Returns `pending()` when a confirm dialog is open, pausing the engine.

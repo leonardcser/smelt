@@ -305,6 +305,7 @@ pub struct TuiApp {
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
+    pub(crate) last_terminal_turn_id: Option<u64>,
     pub(crate) next_continuation_token: u64,
     pub(crate) pending_continuation_token: Option<u64>,
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
@@ -628,6 +629,7 @@ pub enum AppFocus {
 
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
+    pub(crate) canonical: bool,
     pub(crate) pending: Vec<PendingTool>,
     pub(crate) permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
     pub(crate) rewind_block_idx: Option<usize>,
@@ -732,6 +734,7 @@ pub(crate) enum SessionControl {
 
 /// How the active turn is ending. Drives whether queued inputs are preserved
 /// and whether the next queued turn is auto-started.
+#[derive(Clone, Copy)]
 pub(crate) enum TurnEnd {
     /// Clean completion: queue may chain into the next turn.
     Complete,
@@ -1690,6 +1693,7 @@ impl TuiApp {
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,
+            last_terminal_turn_id: None,
             next_continuation_token: 1,
             pending_continuation_token: None,
             pending_turn_meta: None,

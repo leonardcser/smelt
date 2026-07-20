@@ -2368,29 +2368,40 @@ mod tests {
     #[test]
     fn empty_enter_continue_does_not_add_user_block() {
         let mut app = TestApp::builder().build();
-        app.app
-            .core
-            .session
-            .history
-            .push(protocol::HistoryItem::user(protocol::Content::text(
-                "before",
-            )));
+        app.type_text("before");
+        app.press(KeyCode::Enter);
+        let first_turn_id = app.current_turn_id().expect("first turn starts");
         app.push_assistant_text("done");
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
+            protocol::EngineEvent::TurnComplete {
+                turn_id: first_turn_id,
+                history: None,
+                meta: None,
+            },
+        ));
+        let user_blocks_before = app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .filter_map(|id| app.app.session_document.transcript.history().block(*id))
+            .filter(|block| matches!(block, smelt_core::Block::User { .. }))
+            .count();
+        app.clear_actions();
 
         app.press(KeyCode::Enter);
 
         assert!(app.agent_running());
         let history = app.app.session_document.transcript.history();
-        let users = history
+        let user_blocks_after = history
             .order
             .iter()
             .filter_map(|id| history.block(*id))
-            .filter_map(|block| match block {
-                smelt_core::Block::User { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(users.is_empty());
+            .filter(|block| matches!(block, smelt_core::Block::User { .. }))
+            .count();
+        assert_eq!(user_blocks_after, user_blocks_before);
         assert!(app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty())

@@ -21,6 +21,7 @@ impl TestApp {
         self.app.context_tokens_updated_this_turn = false;
         self.app.agent = Some(crate::app::TurnState {
             turn_id,
+            canonical: false,
             pending: Vec::new(),
             permissions: self.app.core.permissions.snapshot(),
             rewind_block_idx: None,

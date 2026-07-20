@@ -683,6 +683,8 @@ impl Default for ModelHistorySource {
 pub struct PersistenceScope {
     pub epoch: u64,
     pub required_generation: u64,
+    /// Canonical session revision that made this request dispatchable.
+    pub store_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1115,6 +1117,7 @@ mod tests {
             persistence: PersistenceScope {
                 epoch: 3,
                 required_generation: 7,
+                store_revision: 11,
             },
             stream: true,
             visible_retries: false,

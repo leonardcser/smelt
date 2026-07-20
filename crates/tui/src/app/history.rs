@@ -974,7 +974,11 @@ impl TuiApp {
         }
     }
 
-    fn rewind_session_history_to(&mut self, hist_idx: usize, keep_checkpoint_at_boundary: bool) {
+    pub(crate) fn rewind_session_history_to(
+        &mut self,
+        hist_idx: usize,
+        keep_checkpoint_at_boundary: bool,
+    ) {
         let identity = self.active_context_token_identity();
         let result = self.apply_session_document_mutation(
             crate::app::session_document::SessionMutation::RewindHistoryTo {
@@ -1312,6 +1316,7 @@ impl TuiApp {
         self.stop_background_processes();
         self.core.session = session::Session::new(self.core.env.pid(), self.core.env.cwd());
         self.session_access = SessionAccess::Owned;
+        self.last_terminal_turn_id = None;
         self.session_document.mark_session_unpersisted();
         self.bump_epoch("session_epoch");
         if let Ok(mut guard) = self.shared_session.lock() {
@@ -1331,6 +1336,7 @@ impl TuiApp {
 
     fn install_loaded_session(&mut self, loaded: session::Session) {
         self.core.session = loaded;
+        self.last_terminal_turn_id = None;
         let session_cwd = self.core.session.cwd.clone();
         if let crate::app::cwd::SessionCwdRestore::Fallback {
             requested,
@@ -1369,12 +1375,33 @@ impl TuiApp {
             self.session_document.durable_generation(),
             self.session_document.acknowledged_head(),
         ) {
-            Ok(persistence) => {
+            Ok((persistence, startup)) => {
                 self.persistence_epoch = epoch;
                 self.observed_persistence_status = None;
                 self.session_document.bind_persistence(epoch);
                 self.persistence = Some(persistence);
                 self.session_access = SessionAccess::Owned;
+                self.last_terminal_turn_id = startup
+                    .latest_terminal_turn_id
+                    .map(smelt_store::TurnId::get);
+                if let Some(recovery) = startup.recovery {
+                    let history_len = self.session_history_len();
+                    if !self.session_document.acknowledge(
+                        epoch,
+                        self.session_document.generation(),
+                        &recovery.session,
+                        &self.core.session.id,
+                        history_len,
+                        self.core.session.checkpoint.as_ref(),
+                    ) {
+                        let reason =
+                            "startup turn recovery receipt did not match the session document";
+                        self.notify_error_sticky(format!("opened session read-only: {reason}"));
+                        self.session_access = SessionAccess::ReadOnly {
+                            reason: reason.into(),
+                        };
+                    }
+                }
             }
             Err(cause) => {
                 let reason = cause.message;
@@ -1833,6 +1860,160 @@ impl TuiApp {
         self.submit_save_intent(intent);
     }
 
+    pub(crate) fn submit_canonical_turn(
+        &mut self,
+        turn: smelt_store::NewTurn,
+    ) -> Result<crate::persist::SubmitTurnAcknowledgement, crate::persist::PersistenceCause> {
+        if self.persistence.is_none() {
+            self.claim_writer_access_for_current_session();
+        }
+        if self.session_access.is_read_only() {
+            return Err(crate::persist::PersistenceCause::unavailable(
+                "session is read-only",
+            ));
+        }
+        let metadata = self.runtime_session_metadata();
+        let intent = self
+            .session_document
+            .prepare_turn_update(&mut self.core.session, metadata)
+            .map_err(crate::persist::PersistenceCause::invariant)?;
+        self.publish_shared_session_state();
+        let acknowledgement = self
+            .persistence
+            .as_ref()
+            .ok_or_else(|| {
+                crate::persist::PersistenceCause::unavailable("persistence actor is unavailable")
+            })?
+            .submit_turn(
+                crate::persist::SubmitTurnIntent {
+                    session: intent,
+                    turn,
+                },
+                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+            )?;
+        if !self.apply_submit_turn_acknowledgement(&acknowledgement) {
+            return Err(crate::persist::PersistenceCause::invariant(
+                "turn submission receipt did not match the session document",
+            ));
+        }
+        Ok(acknowledgement)
+    }
+
+    pub(crate) fn enqueue_canonical_turn_transition(
+        &mut self,
+        turn_id: smelt_store::TurnId,
+        state: smelt_store::TurnState,
+        terminal_reason: Option<String>,
+    ) -> Result<(), crate::persist::PersistenceCause> {
+        let metadata = self.runtime_session_metadata();
+        let intent = self
+            .session_document
+            .prepare_turn_update(&mut self.core.session, metadata)
+            .map_err(crate::persist::PersistenceCause::invariant)?;
+        self.publish_shared_session_state();
+        self.persistence
+            .as_ref()
+            .ok_or_else(|| {
+                crate::persist::PersistenceCause::unavailable("persistence actor is unavailable")
+            })?
+            .enqueue_turn_transition(crate::persist::TurnTransitionIntent {
+                session: intent,
+                turn_id,
+                state,
+                at_ms: session::now_ms(),
+                terminal_reason,
+            })
+    }
+
+    pub(crate) fn commit_canonical_turn_transition(
+        &mut self,
+        turn_id: smelt_store::TurnId,
+        state: smelt_store::TurnState,
+        terminal_reason: Option<String>,
+    ) -> Result<crate::persist::TurnTransitionAcknowledgement, crate::persist::PersistenceCause>
+    {
+        let metadata = self.runtime_session_metadata();
+        let intent = self
+            .session_document
+            .prepare_turn_update(&mut self.core.session, metadata)
+            .map_err(crate::persist::PersistenceCause::invariant)?;
+        self.publish_shared_session_state();
+        let acknowledgement = self
+            .persistence
+            .as_ref()
+            .ok_or_else(|| {
+                crate::persist::PersistenceCause::unavailable("persistence actor is unavailable")
+            })?
+            .transition_turn(
+                crate::persist::TurnTransitionIntent {
+                    session: intent,
+                    turn_id,
+                    state,
+                    at_ms: session::now_ms(),
+                    terminal_reason,
+                },
+                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+            )?;
+        if !self.apply_turn_transition_acknowledgement(&acknowledgement) {
+            return Err(crate::persist::PersistenceCause::invariant(
+                "turn transition receipt did not match the session document",
+            ));
+        }
+        Ok(acknowledgement)
+    }
+
+    fn apply_submit_turn_acknowledgement(
+        &mut self,
+        acknowledgement: &crate::persist::SubmitTurnAcknowledgement,
+    ) -> bool {
+        self.apply_canonical_turn_acknowledgement(
+            acknowledgement.epoch,
+            acknowledgement.generation,
+            acknowledgement.previous,
+            &acknowledgement.receipt.session,
+        )
+    }
+
+    fn apply_turn_transition_acknowledgement(
+        &mut self,
+        acknowledgement: &crate::persist::TurnTransitionAcknowledgement,
+    ) -> bool {
+        self.apply_canonical_turn_acknowledgement(
+            acknowledgement.epoch,
+            acknowledgement.generation,
+            acknowledgement.previous,
+            &acknowledgement.receipt.session,
+        )
+    }
+
+    fn apply_canonical_turn_acknowledgement(
+        &mut self,
+        epoch: crate::persist::SessionEpoch,
+        generation: crate::app::session_document::PersistenceGeneration,
+        previous: smelt_store::StoreHead,
+        receipt: &smelt_store::SaveReceipt,
+    ) -> bool {
+        let acknowledgement = crate::persist::PersistenceAcknowledgement {
+            generation,
+            previous,
+            receipt: receipt.clone(),
+        };
+        let history_len = self.session_history_len();
+        let applied = self.session_document.acknowledge_convergence(
+            epoch,
+            &acknowledgement,
+            &self.core.session.id,
+            history_len,
+            self.core.session.checkpoint.as_ref(),
+        );
+        if applied {
+            if let Some(persistence) = self.persistence.as_ref() {
+                persistence.confirm_acknowledgement(&acknowledgement);
+            }
+        }
+        applied
+    }
+
     fn runtime_session_metadata(&self) -> crate::app::session_document::RuntimeSessionMetadata {
         crate::app::session_document::RuntimeSessionMetadata {
             updated_at_ms: session::now_ms(),
@@ -2287,15 +2468,15 @@ impl TuiApp {
         self.publish_history_delta("rewound");
     }
 
-    pub(crate) fn commit_request_history_item(
+    pub(crate) fn stage_request_history_item(
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
     ) -> protocol::ModelHistorySource {
-        self.commit_request_history_item_with_first_user(item, block, None)
+        self.stage_request_history_item_with_first_user(item, block, None)
     }
 
-    pub(crate) fn commit_request_history_item_with_first_user(
+    pub(crate) fn stage_request_history_item_with_first_user(
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
@@ -2305,6 +2486,27 @@ impl TuiApp {
         self.commit_request_history_item_to_document(item, block, first_user_message);
         self.sync_session_snapshot();
         self.publish_history_delta("request");
+        history
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn commit_request_history_item(
+        &mut self,
+        item: HistoryItem,
+        block: Option<Block>,
+    ) -> protocol::ModelHistorySource {
+        self.commit_request_history_item_with_first_user(item, block, None)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn commit_request_history_item_with_first_user(
+        &mut self,
+        item: HistoryItem,
+        block: Option<Block>,
+        first_user_message: Option<String>,
+    ) -> protocol::ModelHistorySource {
+        let history =
+            self.stage_request_history_item_with_first_user(item, block, first_user_message);
         self.save_session_and_flush();
         history
     }

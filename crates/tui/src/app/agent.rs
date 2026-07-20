@@ -8,15 +8,24 @@ use smelt_core::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
+struct StagedTurnRollback {
+    history_len: Option<usize>,
+    transcript_len: Option<usize>,
+}
+
 struct PreparedTurn {
     input: protocol::StartTurnInput,
     history: protocol::ModelHistorySource,
+    kind: smelt_store::TurnKind,
+    submitted_history_idx: smelt_store::HistoryIndex,
+    continuation_of: Option<smelt_store::TurnId>,
     model_target: protocol::ModelTarget,
     request_config: protocol::RequestRuntimeConfig,
     reasoning_effort: protocol::ReasoningEffort,
     permission_overrides: Option<protocol::PermissionOverrides>,
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
     rewind_block_idx: Option<usize>,
+    rollback: Option<StagedTurnRollback>,
 }
 
 fn is_resumable_turn_error(
@@ -131,6 +140,27 @@ impl TuiApp {
         }
     }
 
+    fn continuation_target(&mut self) -> Option<smelt_store::TurnId> {
+        match self.last_terminal_turn_id {
+            Some(turn_id) => Some(smelt_store::TurnId::new(turn_id)),
+            None => {
+                self.notify_error_sticky(
+                    "cannot continue: this session has no durable prior turn; submit a new request first"
+                        .into(),
+                );
+                None
+            }
+        }
+    }
+
+    fn require_reopen_after_submit_failure(&mut self, cause: &crate::persist::PersistenceCause) {
+        let reason = format!(
+            "a canonical turn may already be durable; reopen the session before retrying ({})",
+            cause.message
+        );
+        self.session_access = crate::app::SessionAccess::ReadOnly { reason };
+    }
+
     fn expand_at_file_refs_in_text(&mut self, text: &str) -> String {
         smelt_core::file_ref::expand_at_file_refs(text, &self.cwd, &self.core.files)
     }
@@ -158,6 +188,9 @@ impl TuiApp {
         content: Content,
     ) -> Option<TurnState> {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
+        if self.block_read_only_mutation("submit a turn to this read-only session") {
+            return None;
+        }
         let model_target = self.resolve_model_target()?;
         let content = self.expand_at_file_refs(content);
         let text = content.text_content();
@@ -165,19 +198,39 @@ impl TuiApp {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
-        self.prepare_user_visible_turn();
         if content.is_empty() {
+            let continuation_of = self.continuation_target()?;
+            self.prepare_user_visible_turn();
             self.publish_turn_input(submitted);
             let history = self.model_history_source();
-            return Some(self.dispatch_turn(content, history, model_target, None));
+            let submitted_history_idx = self.session_history_len().checked_sub(1)?;
+            return self.dispatch_prepared_turn(PreparedTurn {
+                input: protocol::StartTurnInput::user(content, None),
+                history,
+                kind: smelt_store::TurnKind::Continuation,
+                submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
+                continuation_of: Some(continuation_of),
+                model_target,
+                request_config: self.core.config.request_runtime_config(),
+                reasoning_effort: self.core.config.reasoning_effort,
+                permission_overrides: None,
+                permissions: self.core.permissions.snapshot(),
+                rewind_block_idx: None,
+                rollback: None,
+            });
         }
+        self.prepare_user_visible_turn();
+        let rollback = StagedTurnRollback {
+            history_len: Some(self.session_history_len()),
+            transcript_len: Some(self.session_document.transcript.history().order.len()),
+        };
         let first_user_message = self
             .core
             .session
             .first_user_message
             .is_none()
             .then(|| text.clone().into_owned());
-        let history = self.commit_request_history_item_with_first_user(
+        let history = self.stage_request_history_item_with_first_user(
             protocol::history_item_from_user_content(content.clone()),
             Some(Block::User {
                 text: display.to_string(),
@@ -186,46 +239,39 @@ impl TuiApp {
             }),
             first_user_message,
         );
+        let submitted_history_idx = self.session_history_len().checked_sub(1)?;
         let rewind_block_idx = self.last_user_block_index();
         self.publish_turn_input(submitted);
-        Some(self.dispatch_turn(content, history, model_target, rewind_block_idx))
-    }
-
-    fn dispatch_turn(
-        &mut self,
-        content: Content,
-        history: protocol::ModelHistorySource,
-        model_target: protocol::ModelTarget,
-        rewind_block_idx: Option<usize>,
-    ) -> TurnState {
-        let request_config = self.core.config.request_runtime_config();
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(content),
             history,
+            kind: smelt_store::TurnKind::User,
+            submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
+            continuation_of: None,
             model_target,
-            request_config,
+            request_config: self.core.config.request_runtime_config(),
             reasoning_effort: self.core.config.reasoning_effort,
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
             rewind_block_idx,
+            rollback: Some(rollback),
         })
     }
 
-    fn persist_model_history_source(&mut self, history: &protocol::ModelHistorySource) {
-        if matches!(history, protocol::ModelHistorySource::Store { .. })
-            && history.requested_len() > 0
-            && self.session_document_has_unflushed_work()
-        {
-            self.save_session();
-            self.flush_persist();
+    fn rollback_staged_turn(&mut self, rollback: &StagedTurnRollback) {
+        if let Some(history_len) = rollback.history_len {
+            self.rewind_session_history_to(history_len, false);
         }
+        if let Some(transcript_len) = rollback.transcript_len {
+            self.truncate_to(transcript_len);
+        }
+        self.sync_session_snapshot();
+        self.publish_history_delta("submit_failed");
     }
 
-    fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> TurnState {
+    fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> Option<TurnState> {
         self.pending_continuation_token = None;
-        {
-            self.working.begin(TurnPhase::Working);
-        };
+        self.working.begin(TurnPhase::Working);
 
         self.core.signals.set_dyn(
             "turn_start",
@@ -234,81 +280,156 @@ impl TuiApp {
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
-        self.persist_model_history_source(&turn.history);
-
-        let turn_id = self.next_turn_id;
-        self.next_turn_id += 1;
+        let (turn_id, submitted_revision, required_generation) = if self.ephemeral() {
+            let turn_id = self.next_turn_id;
+            (turn_id, 0, self.session_document.generation().get())
+        } else {
+            let acknowledgement = match self.submit_canonical_turn(smelt_store::NewTurn {
+                kind: turn.kind,
+                submitted_history_idx: turn.submitted_history_idx,
+                continuation_of: turn.continuation_of,
+                created_at_ms: session::now_ms(),
+            }) {
+                Ok(acknowledgement) => acknowledgement,
+                Err(cause) => {
+                    if cause.definitely_not_committed() {
+                        if let Some(rollback) = turn.rollback.as_ref() {
+                            self.rollback_staged_turn(rollback);
+                        }
+                    } else if cause.requires_reopen() {
+                        self.require_reopen_after_submit_failure(&cause);
+                    }
+                    self.sleep_inhibit.release();
+                    self.working.finish(TurnOutcome::Errored);
+                    self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+                    return None;
+                }
+            };
+            (
+                acknowledgement.receipt.turn_id.get(),
+                acknowledgement.receipt.session.current.revision.get(),
+                acknowledgement.generation.get(),
+            )
+        };
+        self.next_turn_id = turn_id.checked_add(1).unwrap_or(turn_id);
 
         let permissions = turn.permissions.clone();
         self.applied_agent_mode = self.core.config.mode.clone();
         self.applied_reasoning_effort = turn.reasoning_effort;
+        let payload = protocol::StartTurnPayload {
+            turn_id,
+            input: turn.input,
+            mode: self.core.config.mode.clone(),
+            model_target: turn.model_target,
+            request_config: turn.request_config,
+            reasoning_effort: turn.reasoning_effort,
+            fast_mode: self.fast_mode_active(),
+            history: turn.history,
+            session_id: self.core.session.id.clone(),
+            session_dir: self.current_session_dir(),
+            persistence: protocol::PersistenceScope {
+                epoch: self
+                    .persistence
+                    .as_ref()
+                    .map_or(0, |actor| actor.epoch().get()),
+                required_generation,
+                store_revision: submitted_revision,
+            },
+            permission_overrides: turn.permission_overrides,
+            system_prompt: Some(system_prompt),
+            tools,
+        };
+        if self
+            .core
+            .engine
+            .try_send(UiCommand::StartTurn(Box::new(payload)))
+            .is_err()
+        {
+            if !self.ephemeral() {
+                let _ = self.enqueue_canonical_turn_transition(
+                    smelt_store::TurnId::new(turn_id),
+                    smelt_store::TurnState::Failed,
+                    Some("engine_channel_rejected".into()),
+                );
+            }
+            self.sleep_inhibit.release();
+            self.working.finish(TurnOutcome::Errored);
+            self.notify_error_sticky("engine stopped before accepting the request".into());
+            return None;
+        }
         smelt_perf::perf::record_value("agent:dispatch:start_turn:turn_id", turn_id);
+        smelt_perf::perf::record_value("agent:dispatch:start_turn:revision", submitted_revision);
         smelt_perf::perf::record_value(
             "agent:dispatch:start_turn:at_us",
             smelt_perf::perf::timestamp_us(),
         );
-        self.core
-            .engine
-            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
-                turn_id,
-                input: turn.input,
-                mode: self.core.config.mode.clone(),
-                model_target: turn.model_target,
-                request_config: turn.request_config,
-                reasoning_effort: turn.reasoning_effort,
-                fast_mode: self.fast_mode_active(),
-                history: turn.history,
-                session_id: self.core.session.id.clone(),
-                session_dir: self.current_session_dir(),
-                persistence: protocol::PersistenceScope {
-                    epoch: self
-                        .persistence
-                        .as_ref()
-                        .map_or(0, |actor| actor.epoch().get()),
-                    required_generation: self.session_document.generation().get(),
-                },
-                permission_overrides: turn.permission_overrides,
-                system_prompt: Some(system_prompt),
-                tools,
-            })));
 
-        TurnState {
+        if !self.ephemeral() {
+            if let Err(cause) = self.enqueue_canonical_turn_transition(
+                smelt_store::TurnId::new(turn_id),
+                smelt_store::TurnState::Running,
+                None,
+            ) {
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+            }
+        }
+
+        Some(TurnState {
             turn_id,
+            canonical: !self.ephemeral(),
             pending: Vec::new(),
             permissions,
             rewind_block_idx: turn.rewind_block_idx,
             assistant_output_started: false,
             _perf: smelt_perf::perf::begin("agent:turn"),
-        }
+        })
     }
 
     pub(crate) fn begin_process_status_turn(
         &mut self,
         history_note: protocol::HistoryNote,
     ) -> Option<TurnState> {
+        if self.block_read_only_mutation("submit a turn to this read-only session") {
+            return None;
+        }
         let model_target = self.resolve_model_target()?;
         self.invalidate_prompt_prediction();
-        self.prepare_user_visible_turn();
         let block = crate::app::history::history_note_to_block(&self.lua, &history_note);
-        let history = if !history_note.text().is_empty() {
-            self.commit_request_history_item(HistoryItem::note(history_note.clone()), block)
+        let adds_history = !history_note.text().is_empty();
+        let adds_block = block.is_some();
+        if !adds_history && self.session_history_len() == 0 {
+            return None;
+        }
+        self.prepare_user_visible_turn();
+        let rollback = StagedTurnRollback {
+            history_len: adds_history.then(|| self.session_history_len()),
+            transcript_len: adds_block
+                .then(|| self.session_document.transcript.history().order.len()),
+        };
+        let history = if adds_history {
+            self.stage_request_history_item(HistoryItem::note(history_note.clone()), block)
         } else {
             if let Some(block) = block {
                 self.push_block(block);
             }
             self.model_history_source()
         };
+        let submitted_history_idx = self.session_history_len().checked_sub(1)?;
         let request_config = self.core.config.request_runtime_config();
-        Some(self.dispatch_prepared_turn(PreparedTurn {
+        self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::note(history_note),
             history,
+            kind: smelt_store::TurnKind::Note,
+            submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
+            continuation_of: None,
             model_target,
             request_config,
             reasoning_effort: self.core.config.reasoning_effort,
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
             rewind_block_idx: None,
-        }))
+            rollback: (adds_history || adds_block).then_some(rollback),
+        })
     }
 
     fn custom_command_parts(
@@ -389,12 +510,29 @@ impl TuiApp {
         overrides: smelt_core::custom_commands::CommandOverrides,
         start: CommandTurnStart,
     ) -> Option<TurnState> {
+        if self.block_read_only_mutation("submit a turn to this read-only session") {
+            return None;
+        }
         let submitted = match evaluated.trim() {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
         let mut model_target = self.resolve_command_model_target(&overrides)?;
+        let (kind, continuation_of) = match start {
+            CommandTurnStart::Fresh => (smelt_store::TurnKind::Command, None),
+            CommandTurnStart::ContinueFromLast => (
+                smelt_store::TurnKind::Continuation,
+                Some(self.continuation_target()?),
+            ),
+        };
+        if evaluated.is_empty() && self.session_history_len() == 0 {
+            return None;
+        }
         self.prepare_user_visible_turn();
+        let rollback = StagedTurnRollback {
+            history_len: (!evaluated.is_empty()).then(|| self.session_history_len()),
+            transcript_len: Some(self.session_document.transcript.history().order.len()),
+        };
 
         let history = if !evaluated.is_empty() {
             let first_user_message = self
@@ -403,7 +541,7 @@ impl TuiApp {
                 .first_user_message
                 .is_none()
                 .then(|| display.clone());
-            self.commit_request_history_item_with_first_user(
+            self.stage_request_history_item_with_first_user(
                 protocol::HistoryItem::user_command(
                     Content::text(evaluated.clone()),
                     display.clone(),
@@ -500,17 +638,22 @@ impl TuiApp {
             self.working.continue_from_last(TurnPhase::Working);
         }
 
+        let submitted_history_idx = self.session_history_len().checked_sub(1)?;
         let request_config = self.core.config.request_runtime_config();
-        Some(self.dispatch_prepared_turn(PreparedTurn {
+        self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user_command(Content::text(evaluated), display),
             history,
+            kind,
+            submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
+            continuation_of,
             model_target,
             request_config,
             reasoning_effort: reasoning,
             permission_overrides,
             permissions,
             rewind_block_idx,
-        }))
+            rollback: Some(rollback),
+        })
     }
 
     fn record_finished_turn_state(&mut self, ui_meta: protocol::TurnMeta) {
@@ -549,8 +692,39 @@ impl TuiApp {
         self.discard_model_tool_cwd_change();
     }
 
+    fn commit_terminal_turn(
+        &mut self,
+        turn_id: u64,
+        state: smelt_store::TurnState,
+        reason: Option<String>,
+    ) -> bool {
+        if self.ephemeral() {
+            self.last_terminal_turn_id = Some(turn_id);
+            self.save_session();
+            return true;
+        }
+        match self.commit_canonical_turn_transition(
+            smelt_store::TurnId::new(turn_id),
+            state,
+            reason,
+        ) {
+            Ok(_) => {
+                self.last_terminal_turn_id = Some(turn_id);
+                true
+            }
+            Err(cause) => {
+                self.notify_session_save_failure(&self.core.session.id.clone(), &cause.message);
+                false
+            }
+        }
+    }
+
     /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.
     pub(crate) fn cancel_agent(&mut self) {
+        let turn = self
+            .agent
+            .as_ref()
+            .map(|turn| (turn.turn_id, turn.canonical));
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
         self.cancel_turn_lua_tasks();
@@ -568,6 +742,18 @@ impl TuiApp {
         self.pending_history_appends.clear();
         let meta = self.working.finish(TurnOutcome::Cancelled);
         self.record_finished_turn_state(meta);
+        self.sync_agent_mode_applied();
+        self.sync_reasoning_effort_applied();
+        match turn {
+            Some((turn_id, true)) => {
+                self.commit_terminal_turn(
+                    turn_id,
+                    smelt_store::TurnState::Cancelled,
+                    Some("user_cancelled".into()),
+                );
+            }
+            Some((_, false)) | None => self.save_session(),
+        }
         self.queued_inputs.clear();
     }
 
@@ -606,6 +792,25 @@ impl TuiApp {
     pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
         let _perf = smelt_perf::perf::begin("tui:finish_turn");
         use crate::app::TurnEnd;
+
+        let turn = self
+            .agent
+            .as_ref()
+            .map(|turn| (turn.turn_id, turn.canonical));
+        let (terminal_state, terminal_reason) = match &end {
+            TurnEnd::Complete => (smelt_store::TurnState::Completed, None),
+            TurnEnd::Cancelled => (
+                smelt_store::TurnState::Cancelled,
+                Some("user_cancelled".to_string()),
+            ),
+            TurnEnd::Errored { kind, .. } => (
+                smelt_store::TurnState::Failed,
+                Some(kind.map_or_else(
+                    || "engine_error".to_string(),
+                    |kind| format!("engine_error:{}", kind.as_str()),
+                )),
+            ),
+        };
 
         self.sleep_inhibit.release();
         match end {
@@ -697,12 +902,29 @@ impl TuiApp {
         }
         self.sync_agent_mode_applied();
         self.sync_reasoning_effort_applied();
-        if matches!(end, TurnEnd::Complete) {
-            self.schedule_session_save();
-        } else {
-            self.save_session();
-        }
-        start_queued
+        let terminal_committed = match turn {
+            Some((turn_id, true)) => {
+                self.commit_terminal_turn(turn_id, terminal_state, terminal_reason)
+            }
+            Some((turn_id, false)) => {
+                self.last_terminal_turn_id = Some(turn_id);
+                if matches!(end, TurnEnd::Complete) {
+                    self.schedule_session_save();
+                } else {
+                    self.save_session();
+                }
+                true
+            }
+            None => {
+                if matches!(end, TurnEnd::Complete) {
+                    self.schedule_session_save();
+                } else {
+                    self.save_session();
+                }
+                true
+            }
+        };
+        start_queued && terminal_committed
     }
 
     /// Invokes the Lua handler for a plugin-defined tool; synchronous handlers resolve immediately, async ones park until `drive_tasks` completes them.
@@ -1395,6 +1617,12 @@ mod tests {
     #[test]
     fn starting_command_continuation_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
+        let previous = app
+            .app
+            .begin_agent_turn("previous", Content::text("previous"))
+            .expect("previous turn starts");
+        app.app.agent = Some(previous);
+        app.app.discard_turn(crate::app::TurnEnd::Complete);
         app.app.notify_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
@@ -1456,8 +1684,89 @@ mod tests {
     }
 
     #[test]
-    // COMPAT(session-derived-sidecar-exports): lock the Phase 0 synchronous export barrier.
-    fn enter_persists_through_sqlite_and_sidecar_before_engine_dispatch() {
+    fn terminal_turn_commits_final_history_and_completed_state_together() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let turn = app
+            .app
+            .begin_agent_turn("finish me", Content::text("finish me"))
+            .expect("turn starts");
+        let turn_id = turn.turn_id;
+        app.app.agent = Some(turn);
+        app.app
+            .session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("finished")),
+                None,
+                Vec::new(),
+            )));
+
+        app.app.discard_turn(crate::app::TurnEnd::Complete);
+
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .expect("open completed session");
+        let stored = reader
+            .turn(smelt_store::TurnId::new(turn_id))
+            .unwrap()
+            .expect("stored turn");
+        assert_eq!(stored.state, smelt_store::TurnState::Completed);
+        let head = reader.store_head().unwrap();
+        let history = reader
+            .read_history_items_range(0..head.history_len.get() as usize)
+            .unwrap();
+        assert!(matches!(
+            history.last(),
+            Some(HistoryItem::Assistant { .. })
+        ));
+        assert!(stored
+            .finished_at_ms
+            .is_some_and(|finished| finished >= stored.created_at_ms));
+    }
+
+    #[test]
+    fn terminal_transition_failure_keeps_queued_turn_from_starting() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let turn = app
+            .app
+            .begin_agent_turn("first", Content::text("first"))
+            .expect("turn starts");
+        let turn_id = turn.turn_id;
+        app.app.agent = Some(turn);
+        let _ = app.app.flush_persist();
+        app.push_queued_message("must remain queued".into());
+        app.clear_actions();
+        app.app
+            .persistence
+            .as_ref()
+            .expect("persistence actor")
+            .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+
+        app.app.discard_turn(crate::app::TurnEnd::Complete);
+
+        assert!(!app.agent_running());
+        assert_eq!(app.state().queued_inputs, vec!["must remain queued"]);
+        assert!(app.actions().iter().all(|action| !matches!(
+            action,
+            crate::app::test_harness::Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+        )));
+        assert!(app.app.session_document_has_unflushed_work());
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .unwrap();
+        assert_eq!(
+            reader
+                .turn(smelt_store::TurnId::new(turn_id))
+                .unwrap()
+                .unwrap()
+                .state,
+            smelt_store::TurnState::Running
+        );
+    }
+
+    #[test]
+    fn enter_submits_one_canonical_turn_before_engine_dispatch() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.type_text("phase zero submit");
         app.clear_actions();
@@ -1486,65 +1795,69 @@ mod tests {
             "dispatch instrumentation should observe exactly one StartTurn"
         );
         assert_eq!(
+            perf_value_total(&snapshot, "store:transaction:submit_turn:attempts"),
+            1,
+            "Enter should issue exactly one SubmitTurn transaction"
+        );
+        assert_eq!(
+            perf_value_total(&snapshot, "store:transaction:submit_turn:committed"),
+            1,
+            "Enter should commit exactly one ready turn before dispatch"
+        );
+        assert_eq!(
             perf_value_total(&snapshot, "store:transaction:session_commit:attempts"),
-            1,
-            "Enter should currently issue one canonical session commit"
-        );
-        assert_eq!(
-            perf_value_total(&snapshot, "store:transaction:session_commit:committed"),
-            1,
-            "Enter should commit exactly once before dispatch"
-        );
-        assert_eq!(
-            perf_value_total(&snapshot, "session:compat_export:meta:writes"),
-            1,
-            "the Phase 0 baseline keeps metadata export in the Enter barrier"
+            0,
+            "Enter must not issue a preliminary ordinary save transaction"
         );
         assert_eq!(
             perf_value_last(&snapshot, "agent:dispatch:start_turn:turn_id"),
             Some(payload.turn_id)
         );
 
-        let committed_at = perf_value_last(
-            &snapshot,
-            "store:transaction:session_commit:committed_at_us",
-        )
-        .expect("canonical commit timestamp");
-        let meta_written_at =
-            perf_value_last(&snapshot, "session:compat_export:meta:completed_at_us")
-                .expect("metadata export timestamp");
+        let committed_at =
+            perf_value_last(&snapshot, "store:transaction:submit_turn:committed_at_us")
+                .expect("SubmitTurn commit timestamp");
         let dispatched_at = perf_value_last(&snapshot, "agent:dispatch:start_turn:at_us")
             .expect("dispatch timestamp");
         assert!(
-            committed_at <= meta_written_at && meta_written_at <= dispatched_at,
-            "expected commit ({committed_at}) <= metadata export ({meta_written_at}) <= dispatch ({dispatched_at})"
+            committed_at <= dispatched_at,
+            "expected SubmitTurn commit ({committed_at}) before dispatch ({dispatched_at})"
         );
+        for metric in [
+            "persist:projection:compat_export:requested_at_us",
+            "session:compat_export:meta:completed_at_us",
+            "session:compat_export:content:completed_at_us",
+        ] {
+            if let Some(exported_at) = perf_value_last(&snapshot, metric) {
+                assert!(
+                    dispatched_at <= exported_at,
+                    "compatibility export {metric} completed before dispatch"
+                );
+            }
+        }
 
         let session_dir = smelt_core::session::dir_for(&app.app.core.session);
         let reader = smelt_store::SessionReader::open_database(session_dir.join("session.db"))
             .expect("open committed session");
         let head = reader.store_head().expect("read committed head");
+        let stored_turn = reader
+            .turn(smelt_store::TurnId::new(payload.turn_id))
+            .expect("read submitted turn")
+            .expect("submitted turn exists");
+        assert_eq!(stored_turn.kind, smelt_store::TurnKind::User);
+        assert!(matches!(
+            stored_turn.state,
+            smelt_store::TurnState::Ready | smelt_store::TurnState::Running
+        ));
         assert_eq!(
-            perf_value_last(
-                &snapshot,
-                "persist:projection:compat_content:requested_revision",
-            ),
-            Some(head.revision.get())
+            stored_turn.submitted_revision.get(),
+            payload.persistence.store_revision
         );
         assert_eq!(
-            perf_value_last(&snapshot, "persist:projection:compat_content:queue_depth",),
-            Some(1),
-            "the baseline compatibility worker has a capacity-1 wake queue"
+            perf_value_last(&snapshot, "agent:dispatch:start_turn:revision"),
+            Some(stored_turn.submitted_revision.get())
         );
-        let meta: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(session_dir.join("meta.json")).expect("read metadata export"),
-        )
-        .expect("parse metadata export");
-        assert_eq!(
-            meta.get("source_revision")
-                .and_then(serde_json::Value::as_u64),
-            Some(head.revision.get())
-        );
+        assert!(head.revision >= stored_turn.submitted_revision);
         let history = reader
             .read_history_items_range(0..head.history_len.get() as usize)
             .expect("read committed history");
@@ -1552,6 +1865,407 @@ mod tests {
             history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "phase zero submit"
         ));
+    }
+
+    #[test]
+    fn canonical_submit_failure_preserves_prompt_and_prevents_dispatch() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
+                "published baseline",
+            )));
+        app.app.save_session_and_flush();
+        app.type_text("retry this exact input");
+        app.app
+            .persistence
+            .as_ref()
+            .expect("persistence actor")
+            .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+                message: "injected pre-commit rejection".into(),
+            });
+
+        app.press(crossterm::event::KeyCode::Enter);
+
+        assert_eq!(app.state().prompt_text, "retry this exact input");
+        assert!(!app.state().agent_running);
+        assert_eq!(app.app.session_history_len(), 1);
+        assert!(app.actions().iter().all(|action| !matches!(
+            action,
+            crate::app::test_harness::Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+        )));
+
+        app.app
+            .persistence
+            .as_ref()
+            .unwrap()
+            .retry_blocked()
+            .unwrap();
+        app.clear_actions();
+        app.press(crossterm::event::KeyCode::Enter);
+        assert!(app.agent_running());
+        let _ = app.app.flush_persist();
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .unwrap();
+        let head = reader.store_head().unwrap();
+        let history = reader
+            .read_history_items_range(0..head.history_len.get() as usize)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "retry this exact input"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn command_submit_failure_rolls_back_staged_history_and_retries_once() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
+                "published baseline",
+            )));
+        app.app.save_session_and_flush();
+        let baseline_history_len = app.app.session_history_len();
+        let baseline_transcript_len = app.app.session_document.transcript.history().order.len();
+        app.app
+            .persistence
+            .as_ref()
+            .expect("persistence actor")
+            .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+                message: "injected command rejection".into(),
+            });
+
+        assert!(app
+            .app
+            .begin_command_request_turn(
+                "/retry".into(),
+                "retry command".into(),
+                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandTurnStart::Fresh,
+            )
+            .is_none());
+
+        assert_eq!(app.app.session_history_len(), baseline_history_len);
+        assert_eq!(
+            app.app.session_document.transcript.history().order.len(),
+            baseline_transcript_len
+        );
+        assert!(app.app.core.session.first_user_message.is_none());
+        assert!(user_blocks(&app).is_empty());
+        assert!(app
+            .drain_engine_sends()
+            .into_iter()
+            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+
+        app.app
+            .persistence
+            .as_ref()
+            .unwrap()
+            .retry_blocked()
+            .unwrap();
+        let turn = app
+            .app
+            .begin_command_request_turn(
+                "/retry".into(),
+                "retry command".into(),
+                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandTurnStart::Fresh,
+            )
+            .expect("command retry starts");
+        app.app.agent = Some(turn);
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .unwrap();
+        let head = reader.store_head().unwrap();
+        let history = reader
+            .read_history_items_range(0..head.history_len.get() as usize)
+            .unwrap();
+        assert_eq!(history.len(), baseline_history_len + 1);
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "retry command"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn note_submit_failure_rolls_back_staged_history_and_retries_once() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
+                "published baseline",
+            )));
+        app.app.save_session_and_flush();
+        let baseline_history_len = app.app.session_history_len();
+        let baseline_transcript_len = app.app.session_document.transcript.history().order.len();
+        let note = protocol::HistoryNote::process_status("background process 9 finished");
+        app.app
+            .persistence
+            .as_ref()
+            .expect("persistence actor")
+            .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+                message: "injected note rejection".into(),
+            });
+
+        assert!(app.app.begin_process_status_turn(note.clone()).is_none());
+
+        assert_eq!(app.app.session_history_len(), baseline_history_len);
+        assert_eq!(
+            app.app.session_document.transcript.history().order.len(),
+            baseline_transcript_len
+        );
+        assert!(process_status_blocks(&app).is_empty());
+        assert!(app
+            .drain_engine_sends()
+            .into_iter()
+            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+
+        app.app
+            .persistence
+            .as_ref()
+            .unwrap()
+            .retry_blocked()
+            .unwrap();
+        let turn = app
+            .app
+            .begin_process_status_turn(note)
+            .expect("note retry starts");
+        app.app.agent = Some(turn);
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .unwrap();
+        let head = reader.store_head().unwrap();
+        let history = reader
+            .read_history_items_range(0..head.history_len.get() as usize)
+            .unwrap();
+        assert_eq!(history.len(), baseline_history_len + 1);
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| item.note_kind() == Some(protocol::HistoryNoteKind::ProcessStatus))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_history_without_turn_rows_explains_continuation_requirement() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app
+            .session_append_history(HistoryItem::user(Content::text("legacy request")));
+        app.app
+            .session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("legacy response")),
+                None,
+                Vec::new(),
+            )));
+        app.app.save_session_and_flush();
+        assert_eq!(app.app.last_terminal_turn_id, None);
+
+        assert!(app.app.begin_agent_turn("", Content::text("")).is_none());
+        assert!(app.app.notification.as_ref().is_some_and(|notification| {
+            notification.summary.contains("no durable prior turn")
+        }));
+        assert!(app
+            .app
+            .begin_command_request_turn(
+                "/continue".into(),
+                String::new(),
+                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandTurnStart::ContinueFromLast,
+            )
+            .is_none());
+        assert!(app
+            .drain_engine_sends()
+            .into_iter()
+            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .unwrap();
+        assert!(reader.turns().unwrap().is_empty());
+    }
+
+    #[test]
+    fn engine_rejection_records_failed_after_durable_submit() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.disconnect_engine_commands();
+
+        assert!(app
+            .app
+            .begin_agent_turn("rejected", Content::text("rejected"))
+            .is_none());
+        let _ = app.app.flush_persist();
+
+        let reader = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for(
+            &app.app.core.session,
+        ))
+        .expect("submitted session was published");
+        let turns = reader.turns().expect("read turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, smelt_store::TurnState::Failed);
+        assert_eq!(
+            turns[0].terminal_reason.as_deref(),
+            Some("engine_channel_rejected")
+        );
+    }
+
+    #[test]
+    fn committed_ready_turn_is_interrupted_after_receipt_publication_failure() {
+        let session_id;
+        {
+            let mut app = crate::app::test_harness::TestApp::builder().build();
+            app.app
+                .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
+                    "published baseline",
+                )));
+            app.app.save_session_and_flush();
+            session_id = app.app.core.session.id.clone();
+            app.type_text("durable before dispatch failure");
+            app.clear_actions();
+            app.app
+                .persistence
+                .as_ref()
+                .expect("persistence actor")
+                .inject_publish_failure();
+
+            app.press(crossterm::event::KeyCode::Enter);
+
+            assert!(!app.state().agent_running);
+            assert!(app.actions().iter().all(|action| !matches!(
+                action,
+                crate::app::test_harness::Action::EngineSend(command)
+                    if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+            )));
+            let reader = smelt_store::SessionReader::open_existing(
+                smelt_core::session::dir_for_id(&session_id),
+            )
+            .expect("open committed session");
+            assert_eq!(
+                reader.turns().unwrap()[0].state,
+                smelt_store::TurnState::Ready
+            );
+            assert!(app.app.session_access.is_read_only());
+            let staged_history_len = app.app.session_history_len();
+            let staged_transcript_len = app.app.session_document.transcript.history().order.len();
+            app.clear_actions();
+
+            app.press(crossterm::event::KeyCode::Enter);
+
+            assert_eq!(app.app.session_history_len(), staged_history_len);
+            assert_eq!(
+                app.app.session_document.transcript.history().order.len(),
+                staged_transcript_len
+            );
+            assert!(app.actions().iter().all(|action| !matches!(
+                action,
+                crate::app::test_harness::Action::EngineSend(command)
+                    if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+            )));
+            assert_eq!(reader.turns().unwrap().len(), 1);
+        }
+
+        let session_dir = smelt_core::session::dir_for_id(&session_id);
+        let root = session_dir.parent().expect("session root");
+        let writer = smelt_store::OwnedSessionWriter::open(root, &session_id)
+            .expect("writable restart recovers nonterminal turn");
+        let recovery = writer
+            .startup_recovery()
+            .expect("ready turn was interrupted on restart");
+        assert_eq!(
+            recovery.interrupted_turns,
+            vec![smelt_store::TurnId::new(1)]
+        );
+        let reader = smelt_store::SessionReader::open_existing(session_dir).unwrap();
+        assert_eq!(
+            reader
+                .turn(smelt_store::TurnId::new(1))
+                .unwrap()
+                .unwrap()
+                .state,
+            smelt_store::TurnState::Interrupted
+        );
+        writer.release().unwrap();
+    }
+
+    #[test]
+    fn session_resume_interrupts_running_turn_without_redispatch() {
+        let home = crate::app::test_harness::test_home_guard();
+        let session_id;
+        let turn_id;
+        {
+            let mut app =
+                crate::app::test_harness::TestApp::builder().build_with_test_home_guard(&home);
+            let turn = app
+                .app
+                .begin_agent_turn("before restart", Content::text("before restart"))
+                .expect("turn starts");
+            turn_id = turn.turn_id;
+            app.app.agent = Some(turn);
+            let _ = app.app.flush_persist();
+            session_id = app.app.core.session.id.clone();
+            let reader = smelt_store::SessionReader::open_existing(
+                smelt_core::session::dir_for_id(&session_id),
+            )
+            .unwrap();
+            assert_eq!(
+                reader
+                    .turn(smelt_store::TurnId::new(turn_id))
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                smelt_store::TurnState::Running
+            );
+        }
+
+        let mut resumed =
+            crate::app::test_harness::TestApp::builder().build_without_test_home_reset(&home);
+        resumed.clear_actions();
+        resumed.app.load_session_by_id(&session_id);
+
+        assert_eq!(
+            resumed.app.core.session.id,
+            session_id,
+            "resume failed: {:?}",
+            resumed
+                .app
+                .notification
+                .as_ref()
+                .map(|notification| notification.summary.as_str())
+        );
+        assert!(!resumed.agent_running());
+        assert!(resumed.actions().iter().all(|action| !matches!(
+            action,
+            crate::app::test_harness::Action::EngineSend(command)
+                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
+        )));
+        assert_eq!(resumed.app.last_terminal_turn_id, Some(turn_id));
+        assert!(!resumed.app.session_access.is_read_only());
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&session_id))
+                .unwrap();
+        assert_eq!(
+            reader
+                .turn(smelt_store::TurnId::new(turn_id))
+                .unwrap()
+                .unwrap()
+                .state,
+            smelt_store::TurnState::Interrupted
+        );
+        assert_eq!(
+            resumed.app.session_document.acknowledged_head(),
+            reader.store_head().unwrap()
+        );
     }
 
     #[test]

@@ -307,6 +307,9 @@ pub(crate) fn output_channel(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineDisconnected;
+
 pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: EngineEventSender,
@@ -315,7 +318,11 @@ pub struct EngineHandle {
 
 impl EngineHandle {
     pub fn send(&self, cmd: UiCommand) {
-        let _ = self.cmd_tx.send(cmd);
+        let _ = self.try_send(cmd);
+    }
+
+    pub fn try_send(&self, cmd: UiCommand) -> Result<(), EngineDisconnected> {
+        self.cmd_tx.send(cmd).map_err(|_| EngineDisconnected)
     }
 
     pub async fn recv_output(&mut self) -> Option<EngineOutput> {

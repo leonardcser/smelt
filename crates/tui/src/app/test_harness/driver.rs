@@ -235,6 +235,11 @@ impl TestApp {
         out
     }
 
+    pub fn disconnect_engine_commands(&mut self) {
+        let (_, replacement) = tokio::sync::mpsc::unbounded_channel();
+        self.cmd_rx = replacement;
+    }
+
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }

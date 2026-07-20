@@ -161,6 +161,14 @@ fn has_started_turn(cmds: &[protocol::UiCommand]) -> bool {
         .any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(_)))
 }
 
+fn start_canonical_turn(app: &mut TestApp) -> u64 {
+    app.type_text("initial request");
+    app.press(crossterm::event::KeyCode::Enter);
+    let turn_id = app.current_turn_id().expect("canonical turn starts");
+    let _ = app.drain_engine_sends();
+    turn_id
+}
+
 fn clear_goal(app: &mut TestApp) {
     assert!(app.run_lua(r#"require("smelt.goal").clear()"#));
 }
@@ -182,7 +190,7 @@ fn isolated_app() -> (std::sync::MutexGuard<'static, ()>, TestApp) {
 fn goal_auto_continues_after_recoverable_quota_error() {
     let (_home_guard, mut app) = isolated_app();
     create_auto_goal(&mut app, "finish quota test");
-    app.start_turn(1);
+    start_canonical_turn(&mut app);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
@@ -198,7 +206,7 @@ fn auto_continue_off_disables_quota_retry() {
     let (_home_guard, mut app) = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
     create_auto_goal(&mut app, "finish quota test");
-    app.start_turn(1);
+    start_canonical_turn(&mut app);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "quota exceeded".to_string(),
@@ -214,10 +222,10 @@ fn auto_continue_always_continues_without_goal() {
     let (_home_guard, mut app) = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
     clear_goal(&mut app);
-    app.start_turn(1);
+    let turn_id = start_canonical_turn(&mut app);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
-        turn_id: 1,
+        turn_id,
         history: None,
         meta: None,
     }));
@@ -229,10 +237,10 @@ fn auto_continue_always_continues_without_goal() {
 fn auto_continue_goal_mode_ignores_sessions_without_goal() {
     let (_home_guard, mut app) = isolated_app();
     clear_goal(&mut app);
-    app.start_turn(1);
+    let turn_id = start_canonical_turn(&mut app);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
-        turn_id: 1,
+        turn_id,
         history: None,
         meta: None,
     }));
@@ -244,7 +252,7 @@ fn auto_continue_goal_mode_ignores_sessions_without_goal() {
 fn goal_auto_continue_ignores_non_quota_errors() {
     let (_home_guard, mut app) = isolated_app();
     create_auto_goal(&mut app, "finish quota test");
-    app.start_turn(1);
+    start_canonical_turn(&mut app);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
         message: "network failed".to_string(),

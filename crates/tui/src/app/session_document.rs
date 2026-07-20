@@ -349,6 +349,20 @@ impl TuiSessionDocument {
         }))
     }
 
+    pub(crate) fn prepare_turn_update(
+        &mut self,
+        session: &mut Session,
+        metadata: RuntimeSessionMetadata,
+    ) -> Result<SessionSaveIntent, String> {
+        if self.changes.current == self.changes.durable
+            && self.transcript.history().descriptor_dirty_from().is_none()
+        {
+            self.changes.force_dirty();
+        }
+        self.prepare_save(session, metadata)?
+            .ok_or_else(|| "a canonical turn update requires persisted session history".to_string())
+    }
+
     pub(crate) fn acknowledge(
         &mut self,
         epoch: SessionEpoch,

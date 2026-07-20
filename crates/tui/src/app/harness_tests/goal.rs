@@ -399,7 +399,10 @@ fn lua_submit_command_continuation_carries_last_turn_elapsed_without_using_queue
     let mut app = TestApp::builder().build();
     let _ = app.drain_engine_sends();
 
-    app.start_turn(10);
+    app.type_text("initial request");
+    app.press(crossterm::event::KeyCode::Enter);
+    assert!(app.agent_running());
+    let _ = app.drain_engine_sends();
     app.feed_one(SourceEvent::Tick(750));
     app.app.discard_turn(crate::app::TurnEnd::Complete);
     let token = app

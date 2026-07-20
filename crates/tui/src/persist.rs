@@ -1,10 +1,10 @@
 //! Fixed-session persistence convergence actor.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,10 +44,18 @@ pub(crate) enum PersistenceFailureClass {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalCommitStatus {
+    NotCommitted,
+    Unknown,
+    Committed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PersistenceCause {
     pub(crate) class: PersistenceFailureClass,
     pub(crate) message: String,
+    canonical_commit: CanonicalCommitStatus,
 }
 
 impl PersistenceCause {
@@ -55,14 +63,35 @@ impl PersistenceCause {
         Self {
             class,
             message: message.into(),
+            canonical_commit: CanonicalCommitStatus::NotCommitted,
         }
+    }
+
+    fn with_unknown_commit(mut self) -> Self {
+        if self.canonical_commit == CanonicalCommitStatus::NotCommitted {
+            self.canonical_commit = CanonicalCommitStatus::Unknown;
+        }
+        self
+    }
+
+    fn after_commit(mut self) -> Self {
+        self.canonical_commit = CanonicalCommitStatus::Committed;
+        self
+    }
+
+    pub(crate) fn definitely_not_committed(&self) -> bool {
+        self.canonical_commit == CanonicalCommitStatus::NotCommitted
+    }
+
+    pub(crate) fn requires_reopen(&self) -> bool {
+        self.canonical_commit != CanonicalCommitStatus::NotCommitted
     }
 
     pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self::new(PersistenceFailureClass::Unavailable, message)
     }
 
-    fn invariant(message: impl Into<String>) -> Self {
+    pub(crate) fn invariant(message: impl Into<String>) -> Self {
         Self::new(PersistenceFailureClass::Invariant, message)
     }
 
@@ -236,10 +265,51 @@ pub(crate) struct RequestAuditIntent {
     pub(crate) payload_capture_skipped_bytes: Option<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SubmitTurnIntent {
+    pub(crate) session: SessionSaveIntent,
+    pub(crate) turn: smelt_store::NewTurn,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TurnTransitionIntent {
+    pub(crate) session: SessionSaveIntent,
+    pub(crate) turn_id: smelt_store::TurnId,
+    pub(crate) state: smelt_store::TurnState,
+    pub(crate) at_ms: u64,
+    pub(crate) terminal_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SubmitTurnAcknowledgement {
+    pub(crate) epoch: SessionEpoch,
+    pub(crate) generation: PersistenceGeneration,
+    pub(crate) previous: smelt_store::StoreHead,
+    pub(crate) receipt: smelt_store::SubmitTurnReceipt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TurnTransitionAcknowledgement {
+    pub(crate) epoch: SessionEpoch,
+    pub(crate) generation: PersistenceGeneration,
+    pub(crate) previous: smelt_store::StoreHead,
+    pub(crate) receipt: smelt_store::TurnTransitionReceipt,
+}
+
 enum PersistenceControl {
     WakeDesired,
     AppendRequestAudit(Box<QueuedAudit>),
     RetryBlocked,
+    SubmitTurn {
+        intent: Box<SubmitTurnIntent>,
+        deadline: Instant,
+        reply: mpsc::Sender<Result<SubmitTurnAcknowledgement, PersistenceCause>>,
+    },
+    TransitionTurn {
+        intent: Box<TurnTransitionIntent>,
+        deadline: Option<Instant>,
+        reply: Option<mpsc::Sender<Result<TurnTransitionAcknowledgement, PersistenceCause>>>,
+    },
     Flush {
         target: PersistenceGeneration,
         deadline: Instant,
@@ -257,6 +327,8 @@ enum PersistenceControl {
     InjectAuditFailure(mpsc::Sender<()>),
     #[cfg(test)]
     InjectPublishFailure(mpsc::Sender<()>),
+    #[cfg(test)]
+    InjectSubmitReceiptFailure(mpsc::Sender<()>),
     #[cfg(test)]
     Pause(mpsc::Sender<()>, mpsc::Receiver<()>),
     #[cfg(test)]
@@ -401,13 +473,18 @@ fn reject_audit(cause: PersistenceCause) -> Result<(), PersistenceCause> {
     Err(cause)
 }
 
+pub(crate) struct SessionPersistenceStartup {
+    pub(crate) recovery: Option<smelt_store::StartupRecoveryReceipt>,
+    pub(crate) latest_terminal_turn_id: Option<smelt_store::TurnId>,
+}
+
 pub(crate) struct SessionPersistence {
     session_id: smelt_core::session_id::SessionId,
     epoch: SessionEpoch,
     latest: Arc<Mutex<LatestIntentState>>,
     control: Option<SyncSender<PersistenceControl>>,
     status: Arc<Mutex<SessionPersistenceStatus>>,
-    status_wake: Receiver<()>,
+    status_wake: Mutex<Receiver<()>>,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
     thread: Option<thread::JoinHandle<()>>,
@@ -419,7 +496,7 @@ impl SessionPersistence {
         epoch: SessionEpoch,
         generation: PersistenceGeneration,
         acknowledged_head: smelt_store::StoreHead,
-    ) -> Result<Self, PersistenceCause> {
+    ) -> Result<(Self, SessionPersistenceStartup), PersistenceCause> {
         let latest = Arc::new(Mutex::new(LatestIntentState {
             accepting: true,
             wake_pending: false,
@@ -492,17 +569,20 @@ impl SessionPersistence {
                 PersistenceCause::unavailable(format!("spawn persistence actor: {error}"))
             })?;
         match started_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                session_id,
-                epoch,
-                latest,
-                control: Some(control),
-                status,
-                status_wake,
-                pending_audits,
-                pending_full_audit_bytes,
-                thread: Some(thread),
-            }),
+            Ok(Ok(startup_recovery)) => Ok((
+                Self {
+                    session_id,
+                    epoch,
+                    latest,
+                    control: Some(control),
+                    status,
+                    status_wake: Mutex::new(status_wake),
+                    pending_audits,
+                    pending_full_audit_bytes,
+                    thread: Some(thread),
+                },
+                startup_recovery,
+            )),
             Ok(Err(cause)) => {
                 let _ = thread.join();
                 Err(cause)
@@ -591,6 +671,199 @@ impl SessionPersistence {
             }
         }
         Ok(())
+    }
+
+    fn supersede_queued_intent(
+        &self,
+        generation: PersistenceGeneration,
+    ) -> Result<Option<Arc<SessionSaveIntent>>, PersistenceCause> {
+        let mut latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !latest.accepting {
+            return Err(PersistenceCause::unavailable(
+                "persistence actor is not accepting canonical commands",
+            ));
+        }
+        if let Some(queued) = latest.desired.as_ref() {
+            if queued.generation > generation {
+                return Err(PersistenceCause::invariant(format!(
+                    "canonical command generation {} is older than queued generation {}",
+                    generation.get(),
+                    queued.generation.get()
+                )));
+            }
+        }
+        let superseded = latest.desired.take();
+        if superseded.is_some() {
+            smelt_perf::perf::record_value("persist:latest_slot:superseded_by_turn", 1);
+        }
+        Ok(superseded)
+    }
+
+    fn restore_superseded_intent(&self, superseded: Option<Arc<SessionSaveIntent>>) {
+        let Some(superseded) = superseded else {
+            return;
+        };
+        let mut latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if latest
+            .desired
+            .as_ref()
+            .is_none_or(|current| current.generation <= superseded.generation)
+        {
+            latest.desired = Some(superseded);
+        }
+    }
+
+    pub(crate) fn submit_turn(
+        &self,
+        intent: SubmitTurnIntent,
+        deadline: Instant,
+    ) -> Result<SubmitTurnAcknowledgement, PersistenceCause> {
+        if intent.session.identity.id != self.session_id.as_str() {
+            return Err(PersistenceCause::invariant(format!(
+                "turn submit session {} does not match actor session {}",
+                intent.session.identity.id, self.session_id
+            )));
+        }
+        let superseded = self.supersede_queued_intent(intent.session.generation)?;
+        let Some(control) = &self.control else {
+            self.restore_superseded_intent(superseded);
+            return Err(PersistenceCause::unavailable(
+                "persistence actor control lane is closed",
+            ));
+        };
+        let (reply, result) = mpsc::channel();
+        if let Err(error) = send_control_until(
+            control,
+            PersistenceControl::SubmitTurn {
+                intent: Box::new(intent),
+                deadline,
+                reply,
+            },
+            deadline,
+        ) {
+            self.restore_superseded_intent(superseded);
+            return Err(PersistenceCause::unavailable(match error {
+                ControlSendError::Deadline => {
+                    "persistence deadline elapsed before turn submission was queued"
+                }
+                ControlSendError::Disconnected => {
+                    "persistence actor stopped before turn submission was queued"
+                }
+            }));
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(PersistenceCause::unavailable(
+                "persistence deadline elapsed before turn submission completed",
+            )
+            .with_unknown_commit());
+        };
+        result.recv_timeout(remaining).unwrap_or_else(|error| {
+            Err(PersistenceCause::unavailable(match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    "persistence deadline elapsed before turn submission completed"
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "persistence actor stopped before turn submission completed"
+                }
+            })
+            .with_unknown_commit())
+        })
+    }
+
+    pub(crate) fn enqueue_turn_transition(
+        &self,
+        intent: TurnTransitionIntent,
+    ) -> Result<(), PersistenceCause> {
+        if intent.session.identity.id != self.session_id.as_str() {
+            return Err(PersistenceCause::invariant(format!(
+                "turn transition session {} does not match actor session {}",
+                intent.session.identity.id, self.session_id
+            )));
+        }
+        let superseded = self.supersede_queued_intent(intent.session.generation)?;
+        let Some(control) = &self.control else {
+            self.restore_superseded_intent(superseded);
+            return Err(PersistenceCause::unavailable(
+                "persistence actor control lane is closed",
+            ));
+        };
+        match control.try_send(PersistenceControl::TransitionTurn {
+            intent: Box::new(intent),
+            deadline: None,
+            reply: None,
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.restore_superseded_intent(superseded);
+                Err(PersistenceCause::unavailable(match error {
+                    TrySendError::Full(_) => "persistence actor control lane is full",
+                    TrySendError::Disconnected(_) => "persistence actor control lane disconnected",
+                }))
+            }
+        }
+    }
+
+    pub(crate) fn transition_turn(
+        &self,
+        intent: TurnTransitionIntent,
+        deadline: Instant,
+    ) -> Result<TurnTransitionAcknowledgement, PersistenceCause> {
+        if intent.session.identity.id != self.session_id.as_str() {
+            return Err(PersistenceCause::invariant(format!(
+                "turn transition session {} does not match actor session {}",
+                intent.session.identity.id, self.session_id
+            )));
+        }
+        let superseded = self.supersede_queued_intent(intent.session.generation)?;
+        let Some(control) = &self.control else {
+            self.restore_superseded_intent(superseded);
+            return Err(PersistenceCause::unavailable(
+                "persistence actor control lane is closed",
+            ));
+        };
+        let (reply, result) = mpsc::channel();
+        if let Err(error) = send_control_until(
+            control,
+            PersistenceControl::TransitionTurn {
+                intent: Box::new(intent),
+                deadline: Some(deadline),
+                reply: Some(reply),
+            },
+            deadline,
+        ) {
+            self.restore_superseded_intent(superseded);
+            return Err(PersistenceCause::unavailable(match error {
+                ControlSendError::Deadline => {
+                    "persistence deadline elapsed before turn transition was queued"
+                }
+                ControlSendError::Disconnected => {
+                    "persistence actor stopped before turn transition was queued"
+                }
+            }));
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(PersistenceCause::unavailable(
+                "persistence deadline elapsed before turn transition completed",
+            )
+            .with_unknown_commit());
+        };
+        result.recv_timeout(remaining).unwrap_or_else(|error| {
+            Err(PersistenceCause::unavailable(match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    "persistence deadline elapsed before turn transition completed"
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "persistence actor stopped before turn transition completed"
+                }
+            })
+            .with_unknown_commit())
+        })
     }
 
     pub(crate) fn append_request_audit(
@@ -754,8 +1027,12 @@ impl SessionPersistence {
     }
 
     pub(crate) fn drain_status_wake(&self) -> bool {
+        let status_wake = self
+            .status_wake
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut changed = false;
-        while self.status_wake.try_recv().is_ok() {
+        while status_wake.try_recv().is_ok() {
             changed = true;
         }
         changed
@@ -996,6 +1273,18 @@ impl SessionPersistence {
     }
 
     #[cfg(test)]
+    fn inject_submit_receipt_failure(&self) {
+        let (reply, done) = mpsc::channel();
+        self.control
+            .as_ref()
+            .expect("persistence actor is running")
+            .send(PersistenceControl::InjectSubmitReceiptFailure(reply))
+            .expect("persistence actor accepts submit receipt failure injection");
+        done.recv()
+            .expect("persistence actor acknowledges submit receipt failure injection");
+    }
+
+    #[cfg(test)]
     fn pause(&self) -> mpsc::Sender<()> {
         let (paused, waiting) = mpsc::channel();
         let (release, released) = mpsc::channel();
@@ -1081,7 +1370,7 @@ impl StatusPublisher {
         &self,
         generation: PersistenceGeneration,
         receipt: smelt_store::SaveReceipt,
-    ) {
+    ) -> PersistenceAcknowledgement {
         let mut status = self
             .status
             .lock()
@@ -1096,17 +1385,19 @@ impl StatusPublisher {
                 );
                 current.previous
             });
-        status.acknowledgement = Some(PersistenceAcknowledgement {
+        let acknowledgement = PersistenceAcknowledgement {
             generation,
             previous,
             receipt: receipt.clone(),
-        });
+        };
+        status.acknowledgement = Some(acknowledgement.clone());
         status.state = PersistenceState::Durable {
             generation,
             receipt,
         };
         drop(status);
         let _ = self.wake.try_send(());
+        acknowledgement
     }
 
     fn publish_audit_warning(&self, warning: Option<PersistenceCause>) {
@@ -1142,92 +1433,122 @@ impl StatusPublisher {
     }
 }
 
-// COMPAT(session-derived-sidecar-exports): per-session alpha content exporter.
-struct DerivedContentRefresh {
-    wake: Option<SyncSender<()>>,
-    thread: Option<thread::JoinHandle<()>>,
+const MAX_PENDING_COMPATIBILITY_EXPORTS: usize = 64;
+
+// COMPAT(session-derived-sidecar-exports): process-level bounded alpha exporter.
+struct CompatibilityExportRequest {
+    session_dir: PathBuf,
+    session_id: String,
+    revision: smelt_store::Revision,
+    publisher: StatusPublisher,
 }
 
-impl DerivedContentRefresh {
-    fn spawn(session_dir: PathBuf, session_id: String, publisher: StatusPublisher) -> Self {
+struct CompatibilityExporter {
+    pending: Arc<Mutex<BTreeMap<String, CompatibilityExportRequest>>>,
+    wake: SyncSender<()>,
+}
+
+impl CompatibilityExporter {
+    fn spawn() -> Result<Self, String> {
+        let pending = Arc::new(Mutex::new(
+            BTreeMap::<String, CompatibilityExportRequest>::new(),
+        ));
+        let worker_pending = Arc::clone(&pending);
         let (wake, wakes) = mpsc::sync_channel(1);
-        let worker_session_id = session_id.clone();
-        let worker_publisher = publisher.clone();
-        let thread = thread::Builder::new()
-            .name("smelt-derived-content".into())
+        thread::Builder::new()
+            .name("smelt-compat-export".into())
             .spawn(move || {
                 while wakes.recv().is_ok() {
                     loop {
-                        while wakes.try_recv().is_ok() {}
-                        let warning = smelt_core::session::refresh_derived_content_file(&session_dir)
-                            .err()
-                            .map(|error| {
-                                PersistenceCause::new(
-                                    PersistenceFailureClass::Environment,
-                                    format!(
-                                        "session {worker_session_id} is durable, but derived content cache refresh failed: {error}"
-                                    ),
-                                )
-                            });
-                        worker_publisher.publish_sidecar_warning(warning);
-                        match wakes.try_recv() {
-                            Ok(()) => continue,
-                            Err(mpsc::TryRecvError::Empty) => break,
-                            Err(mpsc::TryRecvError::Disconnected) => return,
-                        }
+                        let request = {
+                            let mut pending = worker_pending
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            let Some(session_id) = pending.keys().next().cloned() else {
+                                break;
+                            };
+                            pending.remove(&session_id).expect("pending export")
+                        };
+                        let warning = smelt_core::session::refresh_derived_files(
+                            &request.session_dir,
+                        )
+                        .err()
+                        .map(|error| {
+                            PersistenceCause::new(
+                                PersistenceFailureClass::Environment,
+                                format!(
+                                    "session {} is durable at revision {}, but compatibility export failed: {error}",
+                                    request.session_id,
+                                    request.revision.get()
+                                ),
+                            )
+                        });
+                        request.publisher.publish_sidecar_warning(warning);
                     }
                 }
-            });
-        match thread {
-            Ok(handle) => Self {
-                wake: Some(wake),
-                thread: Some(handle),
-            },
-            Err(error) => {
-                let cause = PersistenceCause::new(
-                    PersistenceFailureClass::Environment,
-                    format!(
-                        "session {session_id} is durable, but its derived content worker could not start: {error}"
-                    ),
-                );
-                publisher.publish_sidecar_warning(Some(cause));
-                Self {
-                    wake: None,
-                    thread: None,
-                }
-            }
-        }
+            })
+            .map_err(|error| format!("spawn compatibility exporter: {error}"))?;
+        Ok(Self { pending, wake })
     }
 
-    fn request(&self, revision: smelt_store::Revision) {
+    fn request(&self, request: CompatibilityExportRequest) -> Result<(), PersistenceCause> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(current) = pending.get_mut(&request.session_id) {
+            if request.revision >= current.revision {
+                *current = request;
+            }
+            smelt_perf::perf::record_value("persist:projection:compat_export:coalesced", 1);
+        } else {
+            if pending.len() >= MAX_PENDING_COMPATIBILITY_EXPORTS {
+                return Err(PersistenceCause::unavailable(format!(
+                    "compatibility export queue reached its {MAX_PENDING_COMPATIBILITY_EXPORTS}-session limit"
+                )));
+            }
+            pending.insert(request.session_id.clone(), request);
+        }
         smelt_perf::perf::record_value(
-            "persist:projection:compat_content:requested_revision",
-            revision.get(),
+            "persist:projection:compat_export:queue_depth",
+            pending.len() as u64,
         );
-        let Some(wake) = &self.wake else {
-            return;
-        };
-        match wake.try_send(()) {
-            Ok(()) => {
-                smelt_perf::perf::record_value("persist:projection:compat_content:queue_depth", 1);
-            }
-            Err(TrySendError::Full(())) => {
-                smelt_perf::perf::record_value("persist:projection:compat_content:queue_depth", 1);
-                smelt_perf::perf::record_value("persist:projection:compat_content:coalesced", 1);
-            }
-            Err(TrySendError::Disconnected(())) => {
-                smelt_perf::perf::record_value("persist:sidecar:worker_disconnected", 1);
-            }
+        drop(pending);
+        match self.wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => Ok(()),
+            Err(TrySendError::Disconnected(())) => Err(PersistenceCause::unavailable(
+                "compatibility export worker disconnected",
+            )),
         }
     }
 }
 
-impl Drop for DerivedContentRefresh {
-    fn drop(&mut self) {
-        self.wake = None;
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+fn request_compatibility_export(
+    session_dir: PathBuf,
+    session_id: String,
+    revision: smelt_store::Revision,
+    publisher: StatusPublisher,
+) {
+    static EXPORTER: OnceLock<Result<CompatibilityExporter, String>> = OnceLock::new();
+    smelt_perf::perf::record_value(
+        "persist:projection:compat_export:requested_revision",
+        revision.get(),
+    );
+    smelt_perf::perf::record_value(
+        "persist:projection:compat_export:requested_at_us",
+        smelt_perf::perf::timestamp_us(),
+    );
+    let result = match EXPORTER.get_or_init(CompatibilityExporter::spawn) {
+        Ok(exporter) => exporter.request(CompatibilityExportRequest {
+            session_dir,
+            session_id,
+            revision,
+            publisher: publisher.clone(),
+        }),
+        Err(error) => Err(PersistenceCause::unavailable(error.clone())),
+    };
+    if let Err(cause) = result {
+        publisher.publish_sidecar_warning(Some(cause));
     }
 }
 
@@ -1244,13 +1565,14 @@ struct PersistenceActor {
     audits: VecDeque<QueuedAudit>,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
-    derived_content_refresh: DerivedContentRefresh,
     #[cfg(test)]
     commit_failures: VecDeque<smelt_store::SessionCommitFailure>,
     #[cfg(test)]
     fail_next_audit: bool,
     #[cfg(test)]
     fail_next_publish: bool,
+    #[cfg(test)]
+    fail_next_submit_receipt: bool,
     #[cfg(test)]
     commit_barrier: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
 }
@@ -1267,7 +1589,7 @@ fn persistence_actor(
     status_wake: SyncSender<()>,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
-    started: mpsc::Sender<Result<(), PersistenceCause>>,
+    started: mpsc::Sender<Result<SessionPersistenceStartup, PersistenceCause>>,
 ) {
     let publisher = StatusPublisher {
         status,
@@ -1284,7 +1606,7 @@ fn persistence_actor(
         let _ = started.send(Err(cause));
         return;
     };
-    let writer = match smelt_store::OwnedSessionWriter::open(root, session_id.as_str()) {
+    let mut writer = match smelt_store::OwnedSessionWriter::open(root, session_id.as_str()) {
         Ok(writer) => writer,
         Err(error) => {
             let cause = PersistenceCause::from_store("open session writer", error);
@@ -1311,9 +1633,27 @@ fn persistence_actor(
             return;
         }
     };
-    if actual_head != acknowledged_head {
+    let startup_recovery = writer.take_startup_recovery();
+    let latest_terminal_turn_id = match writer.latest_terminal_turn_id() {
+        Ok(turn_id) => turn_id,
+        Err(error) => {
+            let cause = PersistenceCause::from_store("read latest terminal turn", error);
+            publisher.publish_state(PersistenceState::Stopped {
+                durable: generation,
+                omitted: None,
+                cause: Some(cause.clone()),
+            });
+            let _ = started.send(Err(cause));
+            let _ = writer.release();
+            return;
+        }
+    };
+    let expected_head = startup_recovery
+        .as_ref()
+        .map_or(actual_head, |recovery| recovery.session.previous);
+    if expected_head != acknowledged_head {
         let cause = PersistenceCause::invariant(format!(
-            "document store head {acknowledged_head:?} does not match actor store head {actual_head:?}"
+            "document store head {acknowledged_head:?} does not match actor pre-recovery head {expected_head:?}"
         ));
         publisher.publish_state(PersistenceState::Stopped {
             durable: generation,
@@ -1324,11 +1664,11 @@ fn persistence_actor(
         let _ = writer.release();
         return;
     }
-    let derived_content_refresh = DerivedContentRefresh::spawn(
-        session_dir,
-        session_id.as_str().to_string(),
-        publisher.clone(),
-    );
+    publisher.publish_state(PersistenceState::Idle {
+        durable: generation,
+        head: actual_head,
+    });
+    let worker_session_id = session_id.as_str().to_string();
     let mut actor = PersistenceActor {
         session_id,
         epoch,
@@ -1342,7 +1682,6 @@ fn persistence_actor(
         audits: VecDeque::new(),
         pending_audits,
         pending_full_audit_bytes,
-        derived_content_refresh,
         #[cfg(test)]
         commit_failures: VecDeque::new(),
         #[cfg(test)]
@@ -1350,9 +1689,22 @@ fn persistence_actor(
         #[cfg(test)]
         fail_next_publish: false,
         #[cfg(test)]
+        fail_next_submit_receipt: false,
+        #[cfg(test)]
         commit_barrier: None,
     };
-    let _ = started.send(Ok(()));
+    if let Some(recovery) = startup_recovery.as_ref() {
+        request_compatibility_export(
+            session_dir,
+            worker_session_id,
+            recovery.session.current.revision,
+            actor.publisher.clone(),
+        );
+    }
+    let _ = started.send(Ok(SessionPersistenceStartup {
+        recovery: startup_recovery,
+        latest_terminal_turn_id,
+    }));
     actor.run(controls);
 }
 
@@ -1399,6 +1751,44 @@ impl PersistenceActor {
                 }
                 PersistenceControl::RetryBlocked => {
                     self.blocked = None;
+                }
+                PersistenceControl::SubmitTurn {
+                    intent,
+                    deadline,
+                    reply,
+                } => {
+                    let generation = intent.session.generation;
+                    let result = if Instant::now() >= deadline {
+                        Err(PersistenceCause::unavailable(
+                            "persistence deadline elapsed before turn submission started",
+                        ))
+                    } else {
+                        self.submit_turn_intent(&intent)
+                    };
+                    if let Err(cause) = &result {
+                        self.block_canonical(generation, cause.clone());
+                    }
+                    let _ = reply.send(result);
+                }
+                PersistenceControl::TransitionTurn {
+                    intent,
+                    deadline,
+                    reply,
+                } => {
+                    let generation = intent.session.generation;
+                    let result = if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        Err(PersistenceCause::unavailable(
+                            "persistence deadline elapsed before turn transition started",
+                        ))
+                    } else {
+                        self.transition_turn_intent(&intent)
+                    };
+                    if let Err(cause) = &result {
+                        self.block_canonical(generation, cause.clone());
+                    }
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
                 }
                 PersistenceControl::Flush {
                     target,
@@ -1497,6 +1887,11 @@ impl PersistenceActor {
                     let _ = reply.send(());
                 }
                 #[cfg(test)]
+                PersistenceControl::InjectSubmitReceiptFailure(reply) => {
+                    self.fail_next_submit_receipt = true;
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
                 PersistenceControl::Pause(paused, release) => {
                     let _ = paused.send(());
                     let _ = release.recv();
@@ -1537,6 +1932,26 @@ impl PersistenceActor {
         latest.desired.clone()
     }
 
+    fn block_canonical(&mut self, desired: PersistenceGeneration, cause: PersistenceCause) {
+        self.blocked = Some((desired, cause.clone()));
+        let state = if cause.class == PersistenceFailureClass::Ownership {
+            record_failure_transition("persist:ownership_lost:transitions", cause.class);
+            PersistenceState::OwnershipLost {
+                desired,
+                durable: self.durable,
+                cause,
+            }
+        } else {
+            record_failure_transition("persist:blocked:transitions", cause.class);
+            PersistenceState::Blocked {
+                desired,
+                durable: self.durable,
+                cause,
+            }
+        };
+        self.publisher.publish_state(state);
+    }
+
     fn drive_latest(&mut self) {
         let Some(intent) = self.latest_intent() else {
             return;
@@ -1556,25 +1971,7 @@ impl PersistenceActor {
                 self.blocked = None;
                 self.publisher.publish_durable(intent.generation, receipt);
             }
-            Err(cause) => {
-                self.blocked = Some((intent.generation, cause.clone()));
-                let state = if cause.class == PersistenceFailureClass::Ownership {
-                    record_failure_transition("persist:ownership_lost:transitions", cause.class);
-                    PersistenceState::OwnershipLost {
-                        desired: intent.generation,
-                        durable: self.durable,
-                        cause,
-                    }
-                } else {
-                    record_failure_transition("persist:blocked:transitions", cause.class);
-                    PersistenceState::Blocked {
-                        desired: intent.generation,
-                        durable: self.durable,
-                        cause,
-                    }
-                };
-                self.publisher.publish_state(state);
-            }
+            Err(cause) => self.block_canonical(intent.generation, cause),
         }
     }
 
@@ -1731,6 +2128,18 @@ impl PersistenceActor {
 }
 
 impl PersistenceActor {
+    fn session_command(&self, intent: &SessionSaveIntent) -> smelt_store::SessionCommit {
+        smelt_store::SessionCommit {
+            session_id: self.session_id.as_str().to_string(),
+            expected: self.head,
+            identity: intent.identity.clone(),
+            metadata: intent.metadata.clone(),
+            history: intent.history.clone(),
+            side_tables: intent.side_tables.clone(),
+            descriptors: intent.descriptors.clone(),
+        }
+    }
+
     fn commit_session(
         &mut self,
         command: &smelt_store::SessionCommit,
@@ -1745,19 +2154,288 @@ impl PersistenceActor {
             .commit_session(command)
     }
 
+    fn commit_submit_turn(
+        &mut self,
+        command: &smelt_store::SubmitTurn,
+    ) -> Result<smelt_store::SubmitTurnReceipt, smelt_store::SessionCommitFailure> {
+        #[cfg(test)]
+        if let Some(failure) = self.commit_failures.pop_front() {
+            return Err(failure);
+        }
+        let result = self
+            .writer
+            .as_mut()
+            .expect("actor writer")
+            .submit_turn(command);
+        #[cfg(test)]
+        if result.is_ok() && std::mem::take(&mut self.fail_next_submit_receipt) {
+            return Err(smelt_store::SessionCommitFailure::Io {
+                message: "injected failure after committed turn submission".into(),
+            });
+        }
+        result
+    }
+
+    fn commit_turn_transition(
+        &mut self,
+        command: &smelt_store::TurnTransition,
+    ) -> Result<smelt_store::TurnTransitionReceipt, smelt_store::SessionCommitFailure> {
+        #[cfg(test)]
+        if let Some(failure) = self.commit_failures.pop_front() {
+            return Err(failure);
+        }
+        self.writer
+            .as_mut()
+            .expect("actor writer")
+            .transition_turn(command)
+    }
+
+    fn submit_turn_intent(
+        &mut self,
+        intent: &SubmitTurnIntent,
+    ) -> Result<SubmitTurnAcknowledgement, PersistenceCause> {
+        if let Some((_, cause)) = self.blocked.as_ref() {
+            return Err(cause.clone());
+        }
+        let command = smelt_store::SubmitTurn {
+            session: self.session_command(&intent.session),
+            turn: intent.turn.clone(),
+        };
+        self.writer
+            .as_mut()
+            .expect("actor writer")
+            .reopen_connection()
+            .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
+        let actual_head = self
+            .writer
+            .as_ref()
+            .expect("actor writer")
+            .store_head()
+            .map_err(|error| PersistenceCause::from_store("read session store head", error))?;
+        if actual_head != command.session.expected {
+            return Err(PersistenceCause::invariant(format!(
+                "session store advanced unexpectedly: actor head {:?}, store head {:?}",
+                command.session.expected, actual_head
+            )));
+        }
+
+        #[cfg(test)]
+        if let Some((started, release)) = self.commit_barrier.take() {
+            let _ = started.send(());
+            let _ = release.recv();
+        }
+
+        let commit_perf = smelt_perf::perf::begin("persist:submit_turn");
+        let result = self.commit_submit_turn(&command);
+        drop(commit_perf);
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(failure) => {
+                let cause = PersistenceCause::from_commit(&failure);
+                if cause.class != PersistenceFailureClass::Environment {
+                    return Err(cause);
+                }
+                self.recover_ambiguous_submit_turn(&command, cause)
+                    .map_err(PersistenceCause::with_unknown_commit)?
+            }
+        };
+        if receipt.turn_id.get() == 0 {
+            return Err(PersistenceCause::invariant(
+                "turn submission returned turn ID zero",
+            ));
+        }
+        let session_receipt = self
+            .complete_commit(&command.session, receipt.session.clone(), false)
+            .map_err(PersistenceCause::after_commit)?;
+        let receipt = smelt_store::SubmitTurnReceipt {
+            session: session_receipt,
+            turn_id: receipt.turn_id,
+        };
+        self.head = receipt.session.current;
+        self.durable = intent.session.generation;
+        self.last_receipt = Some(receipt.session.clone());
+        self.blocked = None;
+        let acknowledgement = self
+            .publisher
+            .publish_durable(intent.session.generation, receipt.session.clone());
+        Ok(SubmitTurnAcknowledgement {
+            epoch: self.epoch,
+            generation: intent.session.generation,
+            previous: acknowledgement.previous,
+            receipt,
+        })
+    }
+
+    fn recover_ambiguous_submit_turn(
+        &mut self,
+        command: &smelt_store::SubmitTurn,
+        original: PersistenceCause,
+    ) -> Result<smelt_store::SubmitTurnReceipt, PersistenceCause> {
+        smelt_perf::perf::record_value("persist:recovery:submit_turn_reopen", 1);
+        let writer = self.writer.as_mut().expect("actor writer");
+        writer.invalidate_connection();
+        writer.reopen_connection().map_err(|error| {
+            PersistenceCause::from_store(
+                &format!(
+                    "recover ambiguous turn submission after {}",
+                    original.message
+                ),
+                error,
+            )
+        })?;
+        if let Some(receipt) = writer
+            .recover_submit_turn(command)
+            .map_err(|failure| PersistenceCause::from_commit(&failure))?
+        {
+            smelt_perf::perf::record_value("persist:recovery:submit_turn_matches", 1);
+            return Ok(receipt);
+        }
+        let head = writer
+            .store_head()
+            .map_err(|error| PersistenceCause::from_store("read turn recovery head", error))?;
+        if head != command.session.expected {
+            return Err(PersistenceCause::invariant(format!(
+                "ambiguous turn submission was not recorded but changed the store head from {:?} to {:?}",
+                command.session.expected, head
+            )));
+        }
+        smelt_perf::perf::record_value("persist:recovery:submit_turn_exact_repeats", 1);
+        self.commit_submit_turn(command).map_err(|failure| {
+            let repeated = PersistenceCause::from_commit(&failure);
+            PersistenceCause::new(
+                repeated.class,
+                format!(
+                    "ambiguous turn submission failed ({}) and its single exact repeat failed ({})",
+                    original.message, repeated.message
+                ),
+            )
+        })
+    }
+
+    fn transition_turn_intent(
+        &mut self,
+        intent: &TurnTransitionIntent,
+    ) -> Result<TurnTransitionAcknowledgement, PersistenceCause> {
+        if let Some((_, cause)) = self.blocked.as_ref() {
+            return Err(cause.clone());
+        }
+        let command = smelt_store::TurnTransition {
+            session: self.session_command(&intent.session),
+            turn_id: intent.turn_id,
+            state: intent.state,
+            at_ms: intent.at_ms,
+            terminal_reason: intent.terminal_reason.clone(),
+        };
+        self.writer
+            .as_mut()
+            .expect("actor writer")
+            .reopen_connection()
+            .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
+        let actual_head = self
+            .writer
+            .as_ref()
+            .expect("actor writer")
+            .store_head()
+            .map_err(|error| PersistenceCause::from_store("read session store head", error))?;
+        if actual_head != command.session.expected {
+            return Err(PersistenceCause::invariant(format!(
+                "session store advanced unexpectedly: actor head {:?}, store head {:?}",
+                command.session.expected, actual_head
+            )));
+        }
+        let commit_perf = smelt_perf::perf::begin("persist:turn_transition");
+        let result = self.commit_turn_transition(&command);
+        drop(commit_perf);
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(failure) => {
+                let cause = PersistenceCause::from_commit(&failure);
+                if cause.class != PersistenceFailureClass::Environment {
+                    return Err(cause);
+                }
+                self.recover_ambiguous_turn_transition(&command, cause)
+                    .map_err(PersistenceCause::with_unknown_commit)?
+            }
+        };
+        if receipt.turn_id != command.turn_id || receipt.state != command.state {
+            return Err(PersistenceCause::invariant(
+                "turn transition receipt does not match its command",
+            ));
+        }
+        let session_receipt = self
+            .complete_commit(&command.session, receipt.session.clone(), true)
+            .map_err(PersistenceCause::after_commit)?;
+        let receipt = smelt_store::TurnTransitionReceipt {
+            session: session_receipt,
+            turn_id: receipt.turn_id,
+            state: receipt.state,
+        };
+        self.head = receipt.session.current;
+        self.durable = intent.session.generation;
+        self.last_receipt = Some(receipt.session.clone());
+        self.blocked = None;
+        let acknowledgement = self
+            .publisher
+            .publish_durable(intent.session.generation, receipt.session.clone());
+        Ok(TurnTransitionAcknowledgement {
+            epoch: self.epoch,
+            generation: intent.session.generation,
+            previous: acknowledgement.previous,
+            receipt,
+        })
+    }
+
+    fn recover_ambiguous_turn_transition(
+        &mut self,
+        command: &smelt_store::TurnTransition,
+        original: PersistenceCause,
+    ) -> Result<smelt_store::TurnTransitionReceipt, PersistenceCause> {
+        smelt_perf::perf::record_value("persist:recovery:turn_transition_reopen", 1);
+        let writer = self.writer.as_mut().expect("actor writer");
+        writer.invalidate_connection();
+        writer.reopen_connection().map_err(|error| {
+            PersistenceCause::from_store(
+                &format!(
+                    "recover ambiguous turn transition after {}",
+                    original.message
+                ),
+                error,
+            )
+        })?;
+        if let Some(receipt) = writer
+            .recover_turn_transition(command)
+            .map_err(|failure| PersistenceCause::from_commit(&failure))?
+        {
+            smelt_perf::perf::record_value("persist:recovery:turn_transition_matches", 1);
+            return Ok(receipt);
+        }
+        let head = writer.store_head().map_err(|error| {
+            PersistenceCause::from_store("read turn transition recovery head", error)
+        })?;
+        if head != command.session.expected {
+            return Err(PersistenceCause::invariant(format!(
+                "ambiguous turn transition was not recorded but changed the store head from {:?} to {:?}",
+                command.session.expected, head
+            )));
+        }
+        smelt_perf::perf::record_value("persist:recovery:turn_transition_exact_repeats", 1);
+        self.commit_turn_transition(command).map_err(|failure| {
+            let repeated = PersistenceCause::from_commit(&failure);
+            PersistenceCause::new(
+                repeated.class,
+                format!(
+                    "ambiguous turn transition failed ({}) and its single exact repeat failed ({})",
+                    original.message, repeated.message
+                ),
+            )
+        })
+    }
+
     fn converge(
         &mut self,
         intent: &SessionSaveIntent,
     ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
-        let command = smelt_store::SessionCommit {
-            session_id: self.session_id.as_str().to_string(),
-            expected: self.head,
-            identity: intent.identity.clone(),
-            metadata: intent.metadata.clone(),
-            history: intent.history.clone(),
-            side_tables: intent.side_tables.clone(),
-            descriptors: intent.descriptors.clone(),
-        };
+        let command = self.session_command(intent);
         let fingerprint = smelt_store::session_commit_fingerprint(&command)
             .map_err(|failure| PersistenceCause::from_commit(&failure))?;
         self.writer
@@ -1766,7 +2444,9 @@ impl PersistenceActor {
             .reopen_connection()
             .map_err(|error| PersistenceCause::from_store("reopen session writer", error))?;
         if let Some(receipt) = self.matching_persisted_commit(&fingerprint)? {
-            return self.complete_commit(&command, receipt);
+            return self
+                .complete_commit(&command, receipt, true)
+                .map_err(PersistenceCause::after_commit);
         }
         let actual_head = self
             .writer
@@ -1798,10 +2478,12 @@ impl PersistenceActor {
                 if cause.class != PersistenceFailureClass::Environment {
                     return Err(cause);
                 }
-                self.recover_ambiguous_commit(&command, &fingerprint, cause)?
+                self.recover_ambiguous_commit(&command, &fingerprint, cause)
+                    .map_err(PersistenceCause::with_unknown_commit)?
             }
         };
-        self.complete_commit(&command, receipt)
+        self.complete_commit(&command, receipt, true)
+            .map_err(PersistenceCause::after_commit)
     }
 
     fn matching_persisted_commit(
@@ -1874,6 +2556,7 @@ impl PersistenceActor {
         &mut self,
         command: &smelt_store::SessionCommit,
         receipt: smelt_store::SaveReceipt,
+        schedule_compatibility_export: bool,
     ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
         let receipt = validate_receipt(command, receipt)?;
         #[cfg(test)]
@@ -1895,22 +2578,15 @@ impl PersistenceActor {
                 .map_err(|error| PersistenceCause::from_store("publish session", error))?;
             drop(publication_perf);
         }
+        let session_dir = writer.session_dir().to_path_buf();
         record_save_receipt(&receipt);
-        // COMPAT(session-derived-sidecar-exports): synchronous alpha metadata export.
-        let meta_result = smelt_core::session::refresh_derived_meta_file(writer.session_dir());
-        let warning = meta_result.as_ref().err().map(|error| {
-            PersistenceCause::new(
-                PersistenceFailureClass::Environment,
-                format!(
-                    "session {} is durable, but derived cache refresh failed: {error}",
-                    receipt.session_id
-                ),
-            )
-        });
-        self.publisher.publish_sidecar_warning(warning);
-        if meta_result.is_ok() {
-            self.derived_content_refresh
-                .request(receipt.current.revision);
+        if schedule_compatibility_export {
+            request_compatibility_export(
+                session_dir,
+                receipt.session_id.clone(),
+                receipt.current.revision,
+                self.publisher.clone(),
+            );
         }
         Ok(receipt)
     }
@@ -2103,6 +2779,7 @@ mod tests {
             smelt_store::StoreHead::default(),
         )
         .unwrap()
+        .0
     }
 
     fn intent(generation: u64, history: &[&str]) -> SessionSaveIntent {
@@ -2186,6 +2863,21 @@ mod tests {
 
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(5)
+    }
+
+    fn submit_intent(generation: u64, history: &[&str]) -> SubmitTurnIntent {
+        assert!(!history.is_empty());
+        SubmitTurnIntent {
+            session: intent(generation, history),
+            turn: smelt_store::NewTurn {
+                kind: smelt_store::TurnKind::User,
+                submitted_history_idx: smelt_store::HistoryIndex::new(
+                    history.len().saturating_sub(1) as u64,
+                ),
+                continuation_of: None,
+                created_at_ms: generation,
+            },
+        }
     }
 
     fn wait_until_finished(actor: &SessionPersistence) {
@@ -2313,6 +3005,201 @@ mod tests {
                 && receipt.current.history_len == smelt_store::HistoryLen::ZERO
                 && receipt.current.revision.get() == 1
         ));
+        let _ = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn submit_turn_supersedes_a_queued_not_started_save() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+        actor.submit(intent(1, &["queued"])).unwrap();
+
+        let acknowledgement = thread::scope(|scope| {
+            let submit =
+                scope.spawn(|| actor.submit_turn(submit_intent(1, &["queued"]), deadline()));
+            while actor
+                .latest
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .desired
+                .is_some()
+            {
+                thread::yield_now();
+            }
+            release.send(()).unwrap();
+            submit.join().unwrap().unwrap()
+        });
+
+        assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
+        assert_eq!(acknowledgement.receipt.session.current.revision.get(), 1);
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        assert_eq!(reader.turns().unwrap().len(), 1);
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn ambiguous_submit_turn_recovers_the_original_receipt_without_repeating() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_submit_receipt_failure();
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+
+        let acknowledgement = actor
+            .submit_turn(submit_intent(1, &["committed once"]), deadline())
+            .expect("ambiguous committed submission is recovered");
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+
+        assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
+        assert_eq!(acknowledgement.receipt.session.current.revision.get(), 1);
+        assert_eq!(
+            snapshot
+                .values
+                .iter()
+                .find(|entry| entry.label == "persist:recovery:submit_turn_matches")
+                .map_or(0, |entry| entry.total),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .values
+                .iter()
+                .find(|entry| entry.label == "persist:recovery:submit_turn_exact_repeats")
+                .map_or(0, |entry| entry.total),
+            0
+        );
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        assert_eq!(reader.turns().unwrap().len(), 1);
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn queued_submit_timeout_requires_reopen_before_retry() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let release = actor.pause();
+
+        let cause = actor
+            .submit_turn(
+                submit_intent(1, &["queued past its deadline"]),
+                Instant::now() + Duration::from_millis(20),
+            )
+            .expect_err("caller times out while the actor is paused");
+
+        assert!(cause.requires_reopen());
+        assert!(!cause.definitely_not_committed());
+        release.send(()).unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(1), deadline()),
+            PersistenceFlushOutcome::Blocked { durable, cause, .. }
+                if durable == PersistenceGeneration::ZERO && cause.definitely_not_committed()
+        ));
+        let closed = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::AllowUnsaved,
+        );
+        assert_eq!(closed.omitted, Some(PersistenceGeneration::new(1)));
+    }
+
+    #[test]
+    fn failed_running_transition_leaves_ready_for_restart_interruption() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let submitted = actor
+            .submit_turn(submit_intent(1, &["dispatch accepted"]), deadline())
+            .unwrap();
+        actor.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+        actor
+            .enqueue_turn_transition(TurnTransitionIntent {
+                session: intent(2, &["dispatch accepted"]),
+                turn_id: submitted.receipt.turn_id,
+                state: smelt_store::TurnState::Running,
+                at_ms: 200,
+                terminal_reason: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            actor.flush(PersistenceGeneration::new(2), deadline()),
+            PersistenceFlushOutcome::OwnershipLost { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        assert_eq!(
+            reader
+                .turn(submitted.receipt.turn_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            smelt_store::TurnState::Ready
+        );
+        drop(reader);
+        let closed = actor.close(
+            PersistenceGeneration::new(2),
+            deadline(),
+            ClosePolicy::AllowUnsaved,
+        );
+        assert_eq!(closed.omitted, Some(PersistenceGeneration::new(2)));
+
+        let session_dir = smelt_core::session::dir_for_id(SESSION_ID);
+        let root = session_dir.parent().unwrap();
+        let writer = smelt_store::OwnedSessionWriter::open(root, SESSION_ID).unwrap();
+        assert_eq!(
+            writer
+                .startup_recovery()
+                .expect("ready turn is interrupted")
+                .interrupted_turns,
+            vec![submitted.receipt.turn_id]
+        );
+        assert_eq!(
+            writer.latest_terminal_turn_id().unwrap(),
+            Some(submitted.receipt.turn_id)
+        );
+        writer.release().unwrap();
+    }
+
+    #[test]
+    fn submit_turn_waits_behind_without_duplicating_an_executing_save() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        let (started, release) = actor.install_commit_barrier();
+        actor.submit(intent(1, &["saved"])).unwrap();
+        started.recv().unwrap();
+
+        let acknowledgement = thread::scope(|scope| {
+            let submit =
+                scope.spawn(|| actor.submit_turn(submit_intent(2, &["saved", "turn"]), deadline()));
+            release.send(()).unwrap();
+            submit.join().unwrap().unwrap()
+        });
+
+        assert_eq!(acknowledgement.receipt.turn_id, smelt_store::TurnId::new(1));
+        assert_eq!(acknowledgement.receipt.session.previous.revision.get(), 1);
+        assert_eq!(acknowledgement.receipt.session.current.revision.get(), 2);
+        let reader =
+            smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(SESSION_ID))
+                .unwrap();
+        assert_eq!(reader.turns().unwrap().len(), 1);
         let _ = actor.close(
             PersistenceGeneration::new(2),
             deadline(),
@@ -2660,7 +3547,10 @@ mod tests {
         let _home = crate::app::test_harness::initialized_test_home_guard();
         let mut actor = actor();
         let (_replacement_tx, replacement_rx) = mpsc::sync_channel(1);
-        drop(std::mem::replace(&mut actor.status_wake, replacement_rx));
+        drop(std::mem::replace(
+            &mut actor.status_wake,
+            Mutex::new(replacement_rx),
+        ));
         actor.submit(intent(1, &["saved"])).unwrap();
 
         assert!(matches!(

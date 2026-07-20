@@ -499,6 +499,11 @@ fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
     app.app.save_session_and_flush();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
     let meta_path = session_dir.join("meta.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !meta_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(meta_path.exists(), "baseline sidecar export did not finish");
     std::fs::remove_file(&meta_path).unwrap();
     std::fs::create_dir(&meta_path).unwrap();
 
@@ -508,12 +513,21 @@ fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
         )));
     app.app.save_session_and_flush();
 
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !app
+        .app
+        .notification
+        .as_ref()
+        .is_some_and(|notification| notification.summary.contains("compatibility export failed"))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.app.drain_persist_reports();
+    }
     assert!(!app.app.session_document_has_unflushed_work());
     assert_eq!(loaded_session(&session_id).history.len(), 2);
     assert!(app.app.notification.as_ref().is_some_and(|notification| {
-        notification
-            .summary
-            .contains("durable, but derived cache refresh failed")
+        notification.summary.contains("compatibility export failed")
     }));
 }
 
@@ -550,6 +564,7 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
         persistence: protocol::PersistenceScope {
             epoch: app.app.persistence_epoch.get(),
             required_generation: app.app.session_document.generation().get(),
+            store_revision: app.app.session_document.acknowledged_head().revision.get(),
         },
         entry: Box::new(audit),
         payload_mode: smelt_store::RequestAuditPayloadMode::Full,
@@ -593,6 +608,7 @@ fn stale_request_audit_after_session_switch_is_rejected() {
     let old_scope = protocol::PersistenceScope {
         epoch: app.app.persistence_epoch.get(),
         required_generation: app.app.session_document.generation().get(),
+        store_revision: app.app.session_document.acknowledged_head().revision.get(),
     };
 
     app.app.reset_session();

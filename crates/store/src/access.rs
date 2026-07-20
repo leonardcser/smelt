@@ -101,6 +101,10 @@ impl SessionReader {
         self.db.turns()
     }
 
+    pub fn latest_terminal_turn_id(&self) -> Result<Option<TurnId>> {
+        self.db.latest_terminal_turn_id()
+    }
+
     pub fn load_session_resume_snapshot(
         &self,
         descriptor_width: u16,
@@ -751,6 +755,10 @@ impl OwnedSessionWriter {
         self.db()?.store_head()
     }
 
+    pub fn latest_terminal_turn_id(&self) -> Result<Option<TurnId>> {
+        self.db()?.latest_terminal_turn_id()
+    }
+
     pub fn startup_recovery(&self) -> Option<&StartupRecoveryReceipt> {
         self.startup_recovery.as_ref()
     }
@@ -888,6 +896,19 @@ impl OwnedSessionWriter {
             .submit_turn_owned(&token, command)
     }
 
+    pub fn recover_submit_turn(
+        &mut self,
+        command: &SubmitTurn,
+    ) -> std::result::Result<Option<SubmitTurnReceipt>, SessionCommitFailure> {
+        self.recover_staged_blobs()
+            .map_err(session_commit_failure_from_blob_error)?;
+        self.validate_canonical_session(&command.session)?;
+        let token = self.lease.token.clone();
+        self.db()
+            .map_err(session_commit_failure_from_blob_error)?
+            .recover_submit_turn_owned(&token, command)
+    }
+
     pub fn transition_turn(
         &mut self,
         command: &TurnTransition,
@@ -899,6 +920,19 @@ impl OwnedSessionWriter {
         self.db_mut()
             .map_err(session_commit_failure_from_blob_error)?
             .transition_turn_owned(&token, command)
+    }
+
+    pub fn recover_turn_transition(
+        &mut self,
+        command: &TurnTransition,
+    ) -> std::result::Result<Option<TurnTransitionReceipt>, SessionCommitFailure> {
+        self.recover_staged_blobs()
+            .map_err(session_commit_failure_from_blob_error)?;
+        self.validate_canonical_session(&command.session)?;
+        let token = self.lease.token.clone();
+        self.db()
+            .map_err(session_commit_failure_from_blob_error)?
+            .recover_turn_transition_owned(&token, command)
     }
 
     #[cfg(test)]
@@ -2271,6 +2305,10 @@ mod tests {
         assert_eq!(
             recovery.interrupted_turns,
             vec![ready.turn_id, running.turn_id]
+        );
+        assert_eq!(
+            reopened.latest_terminal_turn_id().unwrap(),
+            Some(terminal.turn_id)
         );
         assert_eq!(
             reopened

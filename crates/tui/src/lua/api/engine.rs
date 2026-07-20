@@ -522,6 +522,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let persistence = protocol::PersistenceScope {
                         epoch: app.persistence.as_ref().map_or(0, |actor| actor.epoch().get()),
                         required_generation: app.session_document.generation().get(),
+                        store_revision: app.session_document.acknowledged_head().revision.get(),
                     };
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
@@ -612,6 +613,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let persistence = protocol::PersistenceScope {
                         epoch: app.persistence.as_ref().map_or(0, |actor| actor.epoch().get()),
                         required_generation: app.session_document.generation().get(),
+                        store_revision: app.session_document.acknowledged_head().revision.get(),
                     };
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
