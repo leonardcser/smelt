@@ -2,7 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, DropBehavior, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{
+    Connection, DropBehavior, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};

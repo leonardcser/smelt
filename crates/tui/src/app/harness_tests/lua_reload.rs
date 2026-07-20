@@ -970,6 +970,77 @@ fn lua_config_session_and_transcript_contracts_are_available() {
 }
 
 #[test]
+fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
+    let mut app = TestApp::builder().build();
+    app.app.handle_resize(100, 32);
+    for index in 0..700 {
+        let marker = match index {
+            10 => "lua sparse early exact marker",
+            699 => "lua sparse tail exact marker",
+            _ => "ordinary lua sparse content",
+        };
+        app.app.push_block(smelt_core::Block::Text {
+            content: format!("block {index}: {marker}"),
+        });
+    }
+    app.app.save_session_and_flush();
+    let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(
+        smelt_core::session::dir_for(&app.app.core.session),
+        100,
+        32,
+    )
+    .expect("load sparse transcript");
+    app.app.clear_transcript();
+    app.app
+        .session_document
+        .transcript
+        .replace_loaded_transcript(loaded);
+    app.app.session_document.transcript.set_memory_budget(
+        crate::app::transcript::TranscriptMemoryBudget {
+            hydrated_blocks: 1,
+            ..Default::default()
+        },
+    );
+    app.render_silent();
+
+    assert!(app.run_lua(
+        r#"
+            local text = smelt.transcript.loaded_text_expensive()
+            assert(text:find("lua sparse tail exact marker", 1, true))
+            local blocks = smelt.transcript.loaded_blocks_expensive()
+            assert(#blocks > 0)
+            local rows = smelt.transcript.rows(blocks[#blocks].first_row, 1)
+            assert(type(rows) == "table")
+        "#,
+    ));
+    let tail_snapshot = app.app.session_document.transcript.memory_snapshot();
+    assert!(tail_snapshot.hydration_reads > 0);
+    assert!(
+        tail_snapshot.hydrated_blocks < 100,
+        "Lua detail operation retained its full loaded window: {tail_snapshot:?}"
+    );
+
+    assert!(app.run_lua(
+        r#"
+            assert(smelt.transcript.reveal_block(10, { cursor = true }))
+        "#,
+    ));
+    app.render_silent();
+    assert!(app.run_lua(
+        r#"
+            local text = smelt.transcript.loaded_text_expensive()
+            assert(text:find("lua sparse early exact marker", 1, true))
+        "#,
+    ));
+    let early_snapshot = app.app.session_document.transcript.memory_snapshot();
+    assert!(early_snapshot.hydration_reads > tail_snapshot.hydration_reads);
+    assert!(
+        early_snapshot.hydrated_blocks < 100,
+        "Lua reveal/detail pins did not converge: {early_snapshot:?}"
+    );
+}
+
+#[test]
 fn lua_context_note_updates_named_history_notes_independently() {
     let mut app = TestApp::builder().build();
     app.app

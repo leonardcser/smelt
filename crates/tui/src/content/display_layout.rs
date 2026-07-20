@@ -10,7 +10,8 @@ use smelt_core::content::highlight::InlineOptions;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 11;
 
@@ -201,24 +202,165 @@ pub(crate) struct RenderCtx<'a> {
 struct CachedLayout {
     key: DisplayCacheKey,
     layout: LayoutIr,
+    weight: usize,
 }
 
-type SourceViewCache = HashMap<u64, SourceViewIr>;
+struct CachedSourceView {
+    ir: SourceViewIr,
+    weight: usize,
+}
+
+#[derive(Default)]
+struct SourceViewCache {
+    entries: HashMap<u64, CachedSourceView>,
+    lru: VecDeque<u64>,
+    retained_bytes: usize,
+}
+
+impl SourceViewCache {
+    fn get(&mut self, key: u64) -> Option<&SourceViewIr> {
+        let ir = self.entries.get(&key)?;
+        self.lru.retain(|candidate| *candidate != key);
+        self.lru.push_back(key);
+        Some(&ir.ir)
+    }
+
+    fn insert(&mut self, key: u64, ir: SourceViewIr) {
+        let weight = retained_serialized_bytes(&ir);
+        if let Some(previous) = self.entries.remove(&key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(previous.weight);
+        }
+        self.lru.retain(|candidate| *candidate != key);
+        self.lru.push_back(key);
+        self.retained_bytes = self.retained_bytes.saturating_add(weight);
+        self.entries.insert(key, CachedSourceView { ir, weight });
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some(key) = self.lru.pop_front() else {
+            return false;
+        };
+        if let Some(entry) = self.entries.remove(&key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
+            return true;
+        }
+        false
+    }
+}
 
 struct CompileLayoutCache<'a> {
     source_views: &'a mut SourceViewCache,
     source_views_enabled: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DisplayMemorySnapshot {
+    pub(crate) layout_bytes: usize,
+    pub(crate) source_view_bytes: usize,
+    pub(crate) pinned_layout_bytes: usize,
+    pub(crate) oversize_debt_bytes: usize,
+}
+
 pub(crate) struct DisplayModel {
     blocks: HashMap<RenderNodeId, CachedLayout>,
     source_views: SourceViewCache,
+    lru: RefCell<VecDeque<RenderNodeId>>,
+    pinned: HashSet<RenderNodeId>,
+    retained_bytes: usize,
+    budget: usize,
+}
+
+impl Default for DisplayModel {
+    fn default() -> Self {
+        Self {
+            blocks: HashMap::new(),
+            source_views: SourceViewCache::default(),
+            lru: RefCell::new(VecDeque::new()),
+            pinned: HashSet::new(),
+            retained_bytes: 0,
+            budget: 16 * 1024 * 1024,
+        }
+    }
+}
+
+fn retained_serialized_bytes<T: serde::Serialize>(value: &T) -> usize {
+    std::mem::size_of_val(value)
+        .saturating_add(serde_json::to_vec(value).map_or(0, |encoded| encoded.len()))
 }
 
 impl DisplayModel {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+        self.enforce_budget();
+    }
+
+    pub(crate) fn set_pinned_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
+        self.pinned.clear();
+        self.pinned.extend(ids);
+        self.enforce_budget();
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+            .saturating_add(self.source_views.retained_bytes)
+    }
+
+    pub(crate) fn memory_snapshot(&self) -> DisplayMemorySnapshot {
+        let pinned_layout_bytes = self
+            .pinned
+            .iter()
+            .filter_map(|id| self.blocks.get(id).map(|entry| entry.weight))
+            .sum();
+        DisplayMemorySnapshot {
+            layout_bytes: self.retained_bytes,
+            source_view_bytes: self.source_views.retained_bytes,
+            pinned_layout_bytes,
+            oversize_debt_bytes: self.retained_bytes().saturating_sub(self.budget),
+        }
+    }
+
+    fn touch(&self, id: RenderNodeId) {
+        let mut lru = self.lru.borrow_mut();
+        lru.retain(|candidate| *candidate != id);
+        lru.push_back(id);
+    }
+
+    fn enforce_budget(&mut self) {
+        let mut attempts = self.lru.borrow().len();
+        while self.retained_bytes() > self.budget && attempts > 0 {
+            attempts -= 1;
+            let Some(id) = self.lru.borrow_mut().pop_front() else {
+                break;
+            };
+            if self.pinned.contains(&id) {
+                self.lru.borrow_mut().push_back(id);
+                continue;
+            }
+            if let Some(entry) = self.blocks.remove(&id) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
+                attempts = self.lru.borrow().len();
+            }
+        }
+        while self.retained_bytes() > self.budget && self.source_views.evict_oldest() {}
+        smelt_perf::perf::record_value(
+            "transcript:render_cache:retained_bytes",
+            self.retained_bytes() as u64,
+        );
+        smelt_perf::perf::record_value(
+            "transcript:render_cache:pinned_bytes",
+            self.pinned
+                .iter()
+                .filter_map(|id| self.blocks.get(id).map(|entry| entry.weight))
+                .sum::<usize>() as u64,
+        );
+        smelt_perf::perf::record_value(
+            "transcript:render_cache:oversize_debt_bytes",
+            self.retained_bytes().saturating_sub(self.budget) as u64,
+        );
     }
 
     #[cfg(test)]
@@ -293,12 +435,17 @@ impl DisplayModel {
                 .get(&id)
                 .is_some_and(|cached| cached.key == display_key)
             {
+                self.touch(id);
                 continue;
             }
             match node {
                 RenderNode::Block { id: block_id, .. } => {
                     let Some(block) = history.block(block_id).cloned() else {
-                        self.blocks.remove(&id);
+                        if let Some(removed) = self.blocks.remove(&id) {
+                            self.retained_bytes =
+                                self.retained_bytes.saturating_sub(removed.weight);
+                        }
+                        self.lru.borrow_mut().retain(|candidate| *candidate != id);
                         continue;
                     };
                     let state = match &block {
@@ -359,13 +506,37 @@ impl DisplayModel {
     ) {
         let _perf = smelt_perf::perf::begin("transcript:display_model:insert_cache");
         for (id, key, layout) in layouts {
-            self.blocks.insert(id, CachedLayout { key, layout });
+            let weight = retained_serialized_bytes(&layout);
+            if let Some(previous) = self.blocks.remove(&id) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(previous.weight);
+            }
+            self.retained_bytes = self.retained_bytes.saturating_add(weight);
+            self.blocks.insert(
+                id,
+                CachedLayout {
+                    key,
+                    layout,
+                    weight,
+                },
+            );
+            self.touch(id);
         }
+        self.enforce_budget();
     }
 
     pub(crate) fn retain_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
         let live: HashSet<RenderNodeId> = ids.into_iter().collect();
-        self.blocks.retain(|id, _| live.contains(id));
+        self.blocks.retain(|id, entry| {
+            if live.contains(id) {
+                true
+            } else {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
+                false
+            }
+        });
+        self.lru.borrow_mut().retain(|id| live.contains(id));
+        self.pinned.retain(|id| live.contains(id));
+        self.enforce_budget();
     }
 
     pub(crate) fn get(
@@ -377,10 +548,13 @@ impl DisplayModel {
     ) -> Option<&LayoutIr> {
         let display_key =
             DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
-        self.blocks
+        let layout = self
+            .blocks
             .get(&id)
             .filter(|cached| cached.key == display_key)
-            .map(|cached| &cached.layout)
+            .map(|cached| &cached.layout)?;
+        self.touch(id);
+        Some(layout)
     }
 }
 
@@ -669,16 +843,13 @@ fn cached_source_view(
     build: impl FnOnce() -> SourceViewIr,
 ) -> Result<LayoutIr, String> {
     if enabled {
-        if let Some(ir) = source_views.get(&key) {
+        if let Some(ir) = source_views.get(key) {
             return Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())));
         }
     }
 
     let ir = build();
     if enabled {
-        if source_views.len() >= 128 {
-            source_views.clear();
-        }
         source_views.insert(key, ir.clone());
     }
     Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir)))
@@ -1079,6 +1250,49 @@ mod tests {
         ]);
 
         assert_eq!(measured_rows(&display, 24), rendered_rows(&display, 24));
+    }
+
+    #[test]
+    fn display_model_lru_accounts_replacement_access_and_pins() {
+        let mut model = DisplayModel::new();
+        model.set_budget(usize::MAX);
+        let first = RenderNodeId::Block(BlockId::new(1));
+        let second = RenderNodeId::Block(BlockId::new(2));
+        let key = DisplayCacheKey::new(1, 0, 0, None, 0);
+        let small = compile_block(&Block::Text {
+            content: "small layout".into(),
+        });
+        let weight = retained_serialized_bytes(&small);
+
+        model.insert_compiled_blocks(vec![
+            (first, key, small.clone()),
+            (second, key, small.clone()),
+        ]);
+        assert_eq!(model.retained_bytes, weight * 2);
+        model.touch(first);
+        model.set_budget(weight);
+        assert!(model.blocks.contains_key(&first));
+        assert!(!model.blocks.contains_key(&second));
+        assert_eq!(model.retained_bytes, weight);
+
+        let replacement = compile_block(&Block::Text {
+            content: "replacement ".repeat(128),
+        });
+        let replacement_weight = retained_serialized_bytes(&replacement);
+        model.set_budget(usize::MAX);
+        model.insert_compiled_blocks(vec![(first, key, replacement)]);
+        assert_eq!(model.blocks.len(), 1);
+        assert_eq!(model.retained_bytes, replacement_weight);
+
+        model.set_pinned_nodes([first]);
+        model.set_budget(0);
+        let pinned = model.memory_snapshot();
+        assert_eq!(pinned.pinned_layout_bytes, replacement_weight);
+        assert_eq!(pinned.oversize_debt_bytes, replacement_weight);
+        assert!(model.blocks.contains_key(&first));
+        model.set_pinned_nodes(std::iter::empty());
+        assert!(model.blocks.is_empty());
+        assert_eq!(model.retained_bytes(), 0);
     }
 
     #[test]

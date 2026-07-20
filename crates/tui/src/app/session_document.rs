@@ -317,6 +317,7 @@ impl TuiSessionDocument {
             history_len,
         )
         .map_err(|error| error.to_string())?;
+        let descriptor_pins = self.transcript.pin_descriptor_suffix_for_save()?;
         let descriptors =
             descriptor_save_plan(&self.transcript, true, self.changes.history_dirty_from)
                 .map(|plan| {
@@ -337,8 +338,10 @@ impl TuiSessionDocument {
                         records,
                     })
                 })
-                .transpose()
-                .map_err(|error| format!("prepare transcript descriptors: {error}"))?;
+                .transpose();
+        self.transcript.unpin_operation_blocks(&descriptor_pins);
+        let descriptors =
+            descriptors.map_err(|error| format!("prepare transcript descriptors: {error}"))?;
         Ok(Some(SessionSaveIntent {
             generation: self.changes.current,
             identity,
@@ -425,6 +428,7 @@ impl TuiSessionDocument {
         if self.persistence_epoch != Some(epoch) || generation != self.changes.current {
             return false;
         }
+        let descriptor_dirty_from = self.transcript.history().descriptor_dirty_from();
         let expected_descriptor_len =
             descriptor_save_plan(&self.transcript, true, self.changes.history_dirty_from)
                 .and_then(|plan| plan.start_descriptor_idx.checked_add(plan.records.len()))
@@ -472,6 +476,12 @@ impl TuiSessionDocument {
                 checkpoint,
             );
         }
+        let session_dir = self
+            .live_session
+            .as_ref()
+            .map(|live_session| live_session.dir().to_path_buf())
+            .unwrap_or_else(|| smelt_core::session::dir_for_id(session_id));
+        self.transcript.set_session_dir(session_dir);
         if let Some(total) = self.transcript.descriptor_total_count() {
             if expected_descriptor_len >= total {
                 self.transcript
@@ -483,6 +493,8 @@ impl TuiSessionDocument {
                 return false;
             }
         }
+        self.transcript
+            .schedule_durable_compaction(expected_descriptor_len, descriptor_dirty_from);
         self.transcript.history_mut().clear_descriptor_dirty();
         self.changes.mark_clean(receipt.current);
         true
@@ -3089,6 +3101,52 @@ mod tests {
         assert_eq!(document.durable_generation(), intent.generation);
         assert_eq!(document.dirty_history_from_for_test(), None);
         assert!(!document.has_session_work());
+    }
+
+    #[test]
+    fn receipt_schedules_compaction_but_operation_pin_delays_dematerialization() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let mut parser = StreamParser::new();
+        document.apply(
+            &mut session,
+            &mut parser,
+            true,
+            SessionMutation::CommitRequestHistoryItem {
+                item: HistoryItem::user(Content::text("durable prompt")),
+                block: Some(Block::User {
+                    text: "durable prompt".into(),
+                    image_labels: Vec::new(),
+                    command: false,
+                }),
+                first_user_message: Some("durable prompt".into()),
+            },
+        );
+        let id = document.transcript.history().order[0];
+
+        assert!(!document.transcript.drain_compaction_slice());
+        assert!(document.transcript.history().is_live(id));
+        assert!(document.transcript.pin_operation_blocks(&[id]));
+
+        let previous = document.acknowledged_head();
+        let intent = document
+            .prepare_save(&mut session, runtime_metadata())
+            .expect("prepare intent")
+            .expect("dirty intent");
+        let epoch = SessionEpoch::new(9);
+        let receipt = receipt_for(&intent, previous);
+        document.bind_persistence(epoch);
+        assert!(document.acknowledge(epoch, intent.generation, &receipt, &session.id, 1, None));
+
+        assert!(!document.transcript.drain_compaction_slice());
+        assert!(document.transcript.history().is_live(id));
+        document.transcript.unpin_operation_blocks(&[id]);
+        assert!(document.transcript.drain_compaction_slice());
+        assert!(!document.transcript.history().is_materialized(id));
+        assert_eq!(
+            document.transcript.memory_snapshot().dematerialized_entries,
+            1
+        );
     }
 
     #[test]

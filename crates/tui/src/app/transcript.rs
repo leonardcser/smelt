@@ -22,10 +22,10 @@ use smelt_core::content::highlight::InlineOptions;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::transcript_model::{
-    Block, BlockHistory, BlockId, BlockText, LayoutKey, ToolOutputRef, ToolStatus,
-    TranscriptBlockDescriptor, TranscriptBlockRecordWithId,
+    Block, BlockHistory, BlockId, LayoutKey, Status, StoredBlockWithId, ToolOutputRef, ToolStatus,
+    TranscriptBlockRecordWithId,
 };
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,12 +39,122 @@ const TRANSCRIPT_DESCRIPTOR_PAGE_SIZE: usize = 128;
 const TRANSCRIPT_DESCRIPTOR_CACHE_GUARD_PAGES: usize = 2;
 const TRANSCRIPT_LOCAL_DELTA_EXACTIFY_OVERSCAN_VIEWPORTS: RowIndex = 2;
 const TRANSCRIPT_DESCRIPTOR_PREFIX_STRIDE: usize = 4096;
+const TRANSCRIPT_IDLE_COMPACTION_BLOCKS: usize = 64;
+const TRANSCRIPT_IDLE_COMPACTION_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_HYDRATED_BLOCK_BUDGET: usize = 32 * 1024 * 1024;
+const DEFAULT_DESCRIPTOR_WINDOW_BUDGET: usize = 16 * 1024 * 1024;
+const DEFAULT_RENDERED_PAYLOAD_BUDGET: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptMemoryBudget {
+    pub(crate) hydrated_blocks: usize,
+    pub(crate) descriptor_windows: usize,
+    pub(crate) rendered_rows: usize,
+}
+
+impl Default for TranscriptMemoryBudget {
+    fn default() -> Self {
+        Self {
+            hydrated_blocks: DEFAULT_HYDRATED_BLOCK_BUDGET,
+            descriptor_windows: DEFAULT_DESCRIPTOR_WINDOW_BUDGET,
+            rendered_rows: DEFAULT_RENDERED_PAYLOAD_BUDGET,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TranscriptMemorySnapshot {
+    pub(crate) live_blocks: usize,
+    pub(crate) stored_blocks: usize,
+    pub(crate) hydrated_blocks: usize,
+    pub(crate) hydrated_budget_bytes: usize,
+    pub(crate) descriptor_budget_bytes: usize,
+    pub(crate) rendered_budget_bytes: usize,
+    pub(crate) live_block_bytes: usize,
+    pub(crate) live_tool_state_bytes: usize,
+    pub(crate) hydrated_block_bytes: usize,
+    pub(crate) hydrated_tool_state_bytes: usize,
+    pub(crate) compact_descriptor_bytes: usize,
+    pub(crate) descriptor_window_bytes: usize,
+    pub(crate) tool_state_metadata_bytes: usize,
+    pub(crate) origin_hash_bytes: usize,
+    pub(crate) layout_bytes: usize,
+    pub(crate) source_view_bytes: usize,
+    pub(crate) height_index_bytes: usize,
+    pub(crate) height_index_cache_bytes: usize,
+    pub(crate) visible_rows_bytes: usize,
+    pub(crate) full_rows_bytes: usize,
+    pub(crate) pinned_hydrated_bytes: usize,
+    pub(crate) pinned_rendered_bytes: usize,
+    pub(crate) hydrated_oversize_debt_bytes: usize,
+    pub(crate) descriptor_oversize_debt_bytes: usize,
+    pub(crate) rendered_oversize_debt_bytes: usize,
+    pub(crate) hydration_reads: u64,
+    pub(crate) hydration_ranges: u64,
+    pub(crate) hydration_bytes: u64,
+    pub(crate) hydration_duration_us: u64,
+    pub(crate) evicted_entries: u64,
+    pub(crate) evicted_bytes: u64,
+    pub(crate) dematerialized_entries: u64,
+    pub(crate) dematerialized_bytes: u64,
+}
+
+#[derive(Default)]
+struct TranscriptHydrationState {
+    lru: VecDeque<BlockId>,
+    viewport_pins: HashSet<BlockId>,
+    operation_pins: HashMap<BlockId, usize>,
+    hydration_reads: u64,
+    hydration_ranges: u64,
+    hydration_bytes: u64,
+    hydration_duration_us: u64,
+    evicted_entries: u64,
+    evicted_bytes: u64,
+    dematerialized_entries: u64,
+    dematerialized_bytes: u64,
+}
+
+impl TranscriptHydrationState {
+    fn is_pinned(&self, id: BlockId) -> bool {
+        self.viewport_pins.contains(&id) || self.operation_pins.contains_key(&id)
+    }
+
+    fn touch(&mut self, id: BlockId) {
+        self.lru.retain(|candidate| *candidate != id);
+        self.lru.push_back(id);
+    }
+
+    fn pin_operation(&mut self, ids: &[BlockId]) {
+        for id in ids {
+            *self.operation_pins.entry(*id).or_default() += 1;
+        }
+    }
+
+    fn unpin_operation(&mut self, ids: &[BlockId]) {
+        for id in ids {
+            let Some(count) = self.operation_pins.get_mut(id) else {
+                continue;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.operation_pins.remove(id);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingTranscriptCompaction {
+    descriptor_len: usize,
+    next_order_index: usize,
+    next_descriptor_index: usize,
+}
 
 pub(crate) struct LoadedDescriptorWindow {
     pub(crate) start: smelt_store::TranscriptDescriptorIndex,
     pub(crate) total_count: usize,
     pub(crate) hydration: smelt_store::TranscriptDescriptorHydration,
-    pub(crate) records: Vec<TranscriptBlockRecordWithId>,
+    pub(crate) records: Vec<StoredBlockWithId>,
 }
 
 impl LoadedDescriptorWindow {
@@ -58,11 +168,12 @@ impl LoadedDescriptorWindow {
         if slice.is_empty() {
             return None;
         }
+        let start = slice.start;
         Some(Self {
-            start: slice.start,
+            start,
             total_count: slice.total_count,
             hydration: slice.hydration,
-            records: descriptor_records_from_rows(slice.into_records())?,
+            records: compact_descriptor_rows(start, slice.into_records())?,
         })
     }
 }
@@ -128,21 +239,19 @@ impl LoadedTranscript {
     }
 }
 
-fn descriptor_records_from_rows(
+fn compact_descriptor_rows(
+    start: smelt_store::TranscriptDescriptorIndex,
     rows: Vec<smelt_store::TranscriptDescriptorRecord>,
-) -> Option<Vec<TranscriptBlockRecordWithId>> {
+) -> Option<Vec<StoredBlockWithId>> {
     if rows.is_empty() {
         return None;
     }
-    let _perf = smelt_perf::perf::begin("transcript:descriptor_window:decode_records");
+    let _perf = smelt_perf::perf::begin("transcript:descriptor_window:compact_records");
     smelt_perf::perf::record_value(
         "transcript:descriptor_window:decode_rows",
         rows.len() as u64,
     );
-    rows.into_iter()
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<_>, serde_json::Error>>()
-        .ok()
+    smelt_core::transcript_model::compact_descriptor_rows(start.get(), rows).ok()
 }
 
 struct SqliteTranscriptStore {
@@ -170,6 +279,19 @@ impl SqliteTranscriptStore {
         range: smelt_store::TranscriptDescriptorRange,
     ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
         self.db.read_transcript_descriptor_slice(range)
+    }
+
+    fn read_hydration_records(
+        &self,
+        range: smelt_store::TranscriptDescriptorRange,
+    ) -> Option<Vec<TranscriptBlockRecordWithId>> {
+        let slice = self.db.read_transcript_descriptor_slice(range).ok()?;
+        slice
+            .into_records()
+            .into_iter()
+            .map(TranscriptBlockRecordWithId::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
     }
 
     fn estimated_descriptor_rows(
@@ -213,6 +335,15 @@ impl TranscriptStoreCache {
             .read_descriptor_slice(range)
             .ok()
     }
+
+    fn read_hydration_records(
+        &mut self,
+        session_dir: Option<&PathBuf>,
+        range: smelt_store::TranscriptDescriptorRange,
+    ) -> Option<Vec<TranscriptBlockRecordWithId>> {
+        self.store_for_session(session_dir)?
+            .read_hydration_records(range)
+    }
 }
 
 pub(crate) fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
@@ -222,11 +353,10 @@ pub(crate) fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
         .max(DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS)
 }
 
-fn descriptor_window_payload_bytes(records: &[TranscriptBlockRecordWithId]) -> u64 {
+fn descriptor_window_payload_bytes(records: &[StoredBlockWithId]) -> u64 {
     records
         .iter()
-        .filter_map(|record| record.record.descriptor.raw_text())
-        .map(|text| text.len() as u64)
+        .map(|record| record.stored.retained_bytes() as u64)
         .sum()
 }
 
@@ -264,7 +394,8 @@ fn record_descriptor_window_metrics(window: &LoadedDescriptorWindow) {
 struct SparseTranscriptDescriptors {
     total_count: Option<usize>,
     loaded_ranges: Vec<Range<smelt_store::TranscriptDescriptorIndex>>,
-    records: BTreeMap<smelt_store::TranscriptDescriptorIndex, TranscriptBlockRecordWithId>,
+    records: BTreeMap<smelt_store::TranscriptDescriptorIndex, StoredBlockWithId>,
+    lru: VecDeque<smelt_store::TranscriptDescriptorIndex>,
 }
 
 impl SparseTranscriptDescriptors {
@@ -286,11 +417,12 @@ impl SparseTranscriptDescriptors {
         self.total_count = Some(loaded.total_count);
         self.records
             .retain(|index, _| *index < start || *index >= end);
+        self.lru.retain(|index| *index < start || *index >= end);
         for (offset, record) in loaded.records.iter().cloned().enumerate() {
-            self.records.insert(
-                smelt_store::TranscriptDescriptorIndex::new(start.get().saturating_add(offset)),
-                record,
-            );
+            let index =
+                smelt_store::TranscriptDescriptorIndex::new(start.get().saturating_add(offset));
+            self.records.insert(index, record);
+            self.lru.push_back(index);
         }
         self.add_loaded_range(start..end);
         true
@@ -319,7 +451,7 @@ impl SparseTranscriptDescriptors {
     fn records_for_range(
         &self,
         range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-    ) -> Vec<TranscriptBlockRecordWithId> {
+    ) -> Vec<StoredBlockWithId> {
         match range {
             Some(range) => self
                 .records
@@ -424,29 +556,73 @@ impl SparseTranscriptDescriptors {
             ..smelt_store::TranscriptDescriptorIndex::new(end)
     }
 
-    fn retain_range(&mut self, retain: &Range<smelt_store::TranscriptDescriptorIndex>) {
+    fn touch_range(&mut self, range: &Range<smelt_store::TranscriptDescriptorIndex>) {
+        self.lru
+            .retain(|index| !(range.start <= *index && *index < range.end));
+        self.lru
+            .extend(self.records.range(range.clone()).map(|(index, _)| *index));
+    }
+
+    fn retained_bytes(&self) -> usize {
         self.records
-            .retain(|index, _| retain.start <= *index && *index < retain.end);
-        self.loaded_ranges = self
-            .loaded_ranges
-            .iter()
-            .filter_map(|loaded| {
-                let start = loaded.start.max(retain.start);
-                let end = loaded.end.min(retain.end);
-                (start < end).then_some(start..end)
-            })
-            .collect();
+            .values()
+            .map(|record| record.stored.retained_bytes())
+            .sum()
     }
 
-    fn retain_around_range(&mut self, range: &Range<smelt_store::TranscriptDescriptorIndex>) {
-        let retain = self.cache_range_around(range);
-        self.retain_range(&retain);
+    fn enforce_byte_budget(
+        &mut self,
+        pinned: &Range<smelt_store::TranscriptDescriptorIndex>,
+        budget: usize,
+    ) {
+        let mut retained = self.retained_bytes();
+        let mut attempts = self.lru.len();
+        while retained > budget && attempts > 0 {
+            attempts -= 1;
+            let Some(candidate) = self.lru.pop_front() else {
+                break;
+            };
+            if pinned.start <= candidate && candidate < pinned.end {
+                self.lru.push_back(candidate);
+                continue;
+            }
+            if let Some(record) = self.records.remove(&candidate) {
+                retained = retained.saturating_sub(record.stored.retained_bytes());
+                attempts = self.lru.len();
+            }
+        }
+        self.lru.retain(|index| self.records.contains_key(index));
+        self.rebuild_loaded_ranges();
+        smelt_perf::perf::record_value(
+            "transcript:descriptor_cache:retained_bytes",
+            retained as u64,
+        );
+        smelt_perf::perf::record_value(
+            "transcript:descriptor_cache:oversize_debt_bytes",
+            retained.saturating_sub(budget) as u64,
+        );
     }
 
-    fn record(
-        &self,
-        index: smelt_store::TranscriptDescriptorIndex,
-    ) -> Option<&TranscriptBlockRecordWithId> {
+    fn rebuild_loaded_ranges(&mut self) {
+        let mut ranges: Vec<Range<smelt_store::TranscriptDescriptorIndex>> = Vec::new();
+        for index in self.records.keys().copied() {
+            match ranges.last_mut() {
+                Some(range) if range.end.get() == index.get() => {
+                    range.end =
+                        smelt_store::TranscriptDescriptorIndex::new(index.get().saturating_add(1));
+                }
+                _ => ranges.push(
+                    index
+                        ..smelt_store::TranscriptDescriptorIndex::new(
+                            index.get().saturating_add(1),
+                        ),
+                ),
+            }
+        }
+        self.loaded_ranges = ranges;
+    }
+
+    fn record(&self, index: smelt_store::TranscriptDescriptorIndex) -> Option<&StoredBlockWithId> {
         self.records.get(&index)
     }
 
@@ -464,15 +640,14 @@ impl SparseTranscriptDescriptors {
         role: &str,
         anchor: smelt_store::TranscriptDescriptorIndex,
         direction: TranscriptNavigationDirection,
-    ) -> Option<(usize, TranscriptBlockRecordWithId)> {
+    ) -> Option<(usize, StoredBlockWithId)> {
         match direction {
             TranscriptNavigationDirection::Previous => {
                 self.records
                     .range(..anchor)
                     .rev()
                     .find_map(|(index, record)| {
-                        (descriptor_role(&record.record.descriptor) == role)
-                            .then(|| (index.get(), record.clone()))
+                        (record.stored.kind.as_str() == role).then(|| (index.get(), record.clone()))
                     })
             }
             TranscriptNavigationDirection::Next => {
@@ -481,8 +656,7 @@ impl SparseTranscriptDescriptors {
                 self.records
                     .range(after_anchor..)
                     .find_map(|(index, record)| {
-                        (descriptor_role(&record.record.descriptor) == role)
-                            .then(|| (index.get(), record.clone()))
+                        (record.stored.kind.as_str() == role).then(|| (index.get(), record.clone()))
                     })
             }
         }
@@ -665,11 +839,10 @@ impl TranscriptExtentIndex {
                 self.exact_local_rows_for_descriptor(index.get(), width)
                     .unwrap_or_else(|| {
                         record
-                            .record
-                            .descriptor
-                            .raw_text()
-                            .map(|text| crate::content::estimate_text_rows(&text, width))
-                            .unwrap_or(1)
+                            .stored
+                            .estimated_text_bytes
+                            .max(1)
+                            .div_ceil(u64::from(width.max(1)))
                             .saturating_add(1)
                     })
             })
@@ -968,6 +1141,11 @@ pub(crate) struct TranscriptDocument {
     store_cache: TranscriptStoreCache,
     extent_index: TranscriptExtentIndex,
     viewport: TranscriptViewportRuntime,
+    memory_budget: TranscriptMemoryBudget,
+    hydration: TranscriptHydrationState,
+    pending_compaction: Option<PendingTranscriptCompaction>,
+    compaction_order_index: usize,
+    compacted_descriptor_len: usize,
 }
 
 struct TranscriptContentState {
@@ -1006,7 +1184,7 @@ impl TranscriptDescriptorState {
         self.sparse.total_count()
     }
 
-    fn records_for_active_range(&self) -> Vec<TranscriptBlockRecordWithId> {
+    fn records_for_active_range(&self) -> Vec<StoredBlockWithId> {
         self.sparse.records_for_range(self.active_range())
     }
 }
@@ -1460,8 +1638,21 @@ impl TranscriptDocument {
             store_cache: TranscriptStoreCache::default(),
             extent_index: TranscriptExtentIndex::default(),
             viewport: TranscriptViewportRuntime::default(),
+            memory_budget: TranscriptMemoryBudget::default(),
+            hydration: TranscriptHydrationState::default(),
+            pending_compaction: None,
+            compaction_order_index: 0,
+            compacted_descriptor_len: 0,
         };
-        if document.descriptors.active_range().is_some() {
+        document
+            .content
+            .projection
+            .set_memory_budget(document.memory_budget.rendered_rows);
+        if let Some(active_range) = document.descriptors.active_range().cloned() {
+            document
+                .descriptors
+                .sparse
+                .enforce_byte_budget(&active_range, document.memory_budget.descriptor_windows);
             document.install_active_descriptor_projection();
         }
         document
@@ -1474,9 +1665,567 @@ impl TranscriptDocument {
     pub(crate) fn replace_loaded_transcript(&mut self, loaded: LoadedTranscript) {
         let inline_options = self.content.projection.inline_options().clone();
         let scroll_trace = self.viewport.trace.take();
+        let memory_budget = self.memory_budget;
         *self = Self::from_loaded_transcript(loaded);
         self.viewport.trace = scroll_trace;
         self.set_inline_options(inline_options);
+        self.set_memory_budget(memory_budget);
+    }
+
+    pub(crate) fn set_memory_budget(&mut self, budget: TranscriptMemoryBudget) {
+        self.memory_budget = budget;
+        self.content
+            .projection
+            .set_memory_budget(budget.rendered_rows);
+        if let Some(active) = self.descriptors.active_range().cloned() {
+            self.descriptors.sparse.touch_range(&active);
+            self.descriptors
+                .sparse
+                .enforce_byte_budget(&active, budget.descriptor_windows);
+        }
+        self.enforce_hydrated_budget();
+    }
+
+    pub(crate) fn set_session_dir(&mut self, session_dir: PathBuf) {
+        if self.descriptors.session_dir.as_ref() != Some(&session_dir) {
+            self.descriptors.session_dir = Some(session_dir);
+            self.store_cache = TranscriptStoreCache::default();
+        }
+    }
+
+    pub(crate) fn session_dir(&self) -> Option<&std::path::Path> {
+        self.descriptors.session_dir.as_deref()
+    }
+
+    fn touch_hydrated(&mut self, ids: &[BlockId]) {
+        for id in ids {
+            if self.content.transcript.history.is_hydrated(*id) {
+                self.hydration.touch(*id);
+            }
+        }
+    }
+
+    pub(crate) fn ensure_hydrated_ids(&mut self, ids: &[BlockId]) -> bool {
+        let mut requested = ids
+            .iter()
+            .copied()
+            .filter_map(|id| {
+                let history = &self.content.transcript.history;
+                (!history.is_materialized(id)).then(|| {
+                    history
+                        .stored_ref(id)
+                        .cloned()
+                        .map(|stored| (stored.descriptor_index, id, stored))
+                })?
+            })
+            .collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(descriptor_index, _, _)| *descriptor_index);
+        requested.dedup_by_key(|(_, id, _)| *id);
+        if requested.is_empty() {
+            self.touch_hydrated(ids);
+            self.enforce_hydrated_budget();
+            return ids
+                .iter()
+                .all(|id| self.content.transcript.history.is_materialized(*id));
+        }
+
+        let mut ranges = Vec::<Range<usize>>::new();
+        for (descriptor_index, _, _) in &requested {
+            match ranges.last_mut() {
+                Some(range) if range.end == *descriptor_index => {
+                    range.end = range.end.saturating_add(1);
+                }
+                Some(range) if range.end > *descriptor_index => {}
+                _ => ranges.push(*descriptor_index..descriptor_index.saturating_add(1)),
+            }
+        }
+        let requested_by_id = requested
+            .into_iter()
+            .map(|(_, id, stored)| (id, stored))
+            .collect::<HashMap<_, _>>();
+        let session_dir = self.descriptors.session_dir.clone();
+        let hydration_started_at = Instant::now();
+        let mut hydrated = 0_u64;
+        let mut hydrated_bytes = 0_u64;
+        for range in ranges {
+            let Some(records) = self.store_cache.read_hydration_records(
+                session_dir.as_ref(),
+                smelt_store::TranscriptDescriptorRange::from(range),
+            ) else {
+                smelt_perf::perf::record_value("transcript:block_cache:hydration_failures", 1);
+                continue;
+            };
+            self.hydration.hydration_ranges = self.hydration.hydration_ranges.saturating_add(1);
+            for record in records {
+                let Some(stored) = requested_by_id.get(&record.block_id).cloned() else {
+                    continue;
+                };
+                if self.content.transcript.history.install_hydrated_record(
+                    record.block_id,
+                    stored,
+                    record.record,
+                ) {
+                    hydrated = hydrated.saturating_add(1);
+                    hydrated_bytes = hydrated_bytes.saturating_add(
+                        self.content
+                            .transcript
+                            .history
+                            .materialized_retained_bytes(record.block_id)
+                            as u64,
+                    );
+                }
+            }
+        }
+        let hydration_duration_us =
+            u64::try_from(hydration_started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.hydration.hydration_reads = self.hydration.hydration_reads.saturating_add(hydrated);
+        self.hydration.hydration_bytes = self
+            .hydration
+            .hydration_bytes
+            .saturating_add(hydrated_bytes);
+        self.hydration.hydration_duration_us = self
+            .hydration
+            .hydration_duration_us
+            .saturating_add(hydration_duration_us);
+        smelt_perf::perf::record_value("transcript:block_cache:hydration_reads", hydrated);
+        smelt_perf::perf::record_value("transcript:block_cache:hydration_bytes", hydrated_bytes);
+        smelt_perf::perf::record_value(
+            "transcript:block_cache:hydration_duration_us",
+            hydration_duration_us,
+        );
+        smelt_perf::perf::record_value(
+            "transcript:block_cache:hydration_ranges",
+            self.hydration.hydration_ranges,
+        );
+        self.touch_hydrated(ids);
+        self.enforce_hydrated_budget();
+        ids.iter()
+            .all(|id| self.content.transcript.history.is_materialized(*id))
+    }
+
+    fn set_viewport_hydration_ids(&mut self, ids: &[BlockId]) -> bool {
+        self.hydration.viewport_pins.clear();
+        self.hydration.viewport_pins.extend(ids.iter().copied());
+        let hydrated = self.ensure_hydrated_ids(ids);
+        self.enforce_hydrated_budget();
+        hydrated
+    }
+
+    pub(crate) fn pin_operation_blocks(&mut self, ids: &[BlockId]) -> bool {
+        self.hydration.pin_operation(ids);
+        if self.ensure_hydrated_ids(ids) {
+            true
+        } else {
+            self.hydration.unpin_operation(ids);
+            self.enforce_hydrated_budget();
+            false
+        }
+    }
+
+    pub(crate) fn unpin_operation_blocks(&mut self, ids: &[BlockId]) {
+        self.hydration.unpin_operation(ids);
+        self.enforce_hydrated_budget();
+    }
+
+    pub(crate) fn pin_descriptor_suffix_for_save(&mut self) -> Result<Vec<BlockId>, String> {
+        let Some(start) = self.content.transcript.history.descriptor_dirty_from() else {
+            return Ok(Vec::new());
+        };
+        let ids = self
+            .content
+            .transcript
+            .history
+            .order
+            .iter()
+            .skip(start)
+            .copied()
+            .filter(|id| self.content.transcript.history.stored_ref(*id).is_some())
+            .collect::<Vec<_>>();
+        if self.pin_operation_blocks(&ids) {
+            Ok(ids)
+        } else {
+            Err("hydrate canonical transcript descriptor suffix".to_string())
+        }
+    }
+
+    fn enforce_hydrated_budget(&mut self) {
+        let history = &self.content.transcript.history;
+        for (id, _) in history.hydrated_blocks() {
+            if !self.hydration.lru.contains(&id) {
+                self.hydration.lru.push_back(id);
+            }
+        }
+
+        let mut retained = self.content.transcript.history.hydrated_retained_bytes();
+        let mut attempts = self.hydration.lru.len();
+        while retained > self.memory_budget.hydrated_blocks && attempts > 0 {
+            attempts -= 1;
+            let Some(id) = self.hydration.lru.pop_front() else {
+                break;
+            };
+            if self.hydration.is_pinned(id) {
+                self.hydration.lru.push_back(id);
+                continue;
+            }
+            let evicted = self.content.transcript.history.evict_hydrated(id);
+            if evicted == 0 {
+                continue;
+            }
+            retained = retained.saturating_sub(evicted);
+            self.hydration.evicted_entries = self.hydration.evicted_entries.saturating_add(1);
+            self.hydration.evicted_bytes =
+                self.hydration.evicted_bytes.saturating_add(evicted as u64);
+            attempts = self.hydration.lru.len();
+        }
+        self.hydration
+            .lru
+            .retain(|id| self.content.transcript.history.is_hydrated(*id));
+
+        let pinned_bytes = self
+            .content
+            .transcript
+            .history
+            .hydrated_blocks()
+            .filter(|(id, _)| self.hydration.is_pinned(*id))
+            .map(|(_, bytes)| bytes)
+            .sum::<usize>();
+        let debt = retained.saturating_sub(self.memory_budget.hydrated_blocks);
+        smelt_perf::perf::record_value("transcript:block_cache:retained_bytes", retained as u64);
+        smelt_perf::perf::record_value("transcript:block_cache:pinned_bytes", pinned_bytes as u64);
+        smelt_perf::perf::record_value("transcript:block_cache:oversize_debt_bytes", debt as u64);
+    }
+
+    pub(crate) fn memory_snapshot(&self) -> TranscriptMemorySnapshot {
+        let history = &self.content.transcript.history;
+        let mut descriptor_window_bytes = 0;
+        let mut seen = HashSet::new();
+        for record in self.descriptors.sparse.records.values() {
+            if seen.insert(Arc::as_ptr(&record.stored) as usize) {
+                descriptor_window_bytes += record.stored.retained_bytes();
+            }
+        }
+        let mut compact_descriptor_bytes = 0;
+        for id in &history.order {
+            let Some(stored) = history.stored_ref(*id) else {
+                continue;
+            };
+            if seen.insert(Arc::as_ptr(stored) as usize) {
+                compact_descriptor_bytes += stored.retained_bytes();
+            }
+        }
+        let pinned_hydrated_bytes = history
+            .hydrated_blocks()
+            .filter(|(id, _)| self.hydration.is_pinned(*id))
+            .map(|(_, bytes)| bytes)
+            .sum();
+        let hydrated_block_bytes = history.hydrated_block_retained_bytes();
+        let hydrated_tool_state_bytes = history.hydrated_tool_state_retained_bytes();
+        let hydrated_cache_bytes = hydrated_block_bytes.saturating_add(hydrated_tool_state_bytes);
+        let render = self.content.projection.memory_snapshot();
+        TranscriptMemorySnapshot {
+            live_blocks: history.live_block_count(),
+            stored_blocks: history.stored_block_count(),
+            hydrated_blocks: history.hydrated_block_count(),
+            hydrated_budget_bytes: self.memory_budget.hydrated_blocks,
+            descriptor_budget_bytes: self.memory_budget.descriptor_windows,
+            rendered_budget_bytes: self.memory_budget.rendered_rows,
+            live_block_bytes: history.live_block_retained_bytes(),
+            live_tool_state_bytes: history.live_tool_state_retained_bytes(),
+            hydrated_block_bytes,
+            hydrated_tool_state_bytes,
+            compact_descriptor_bytes,
+            descriptor_window_bytes,
+            tool_state_metadata_bytes: history.tool_state_metadata_retained_bytes(),
+            origin_hash_bytes: history.origin_hash_retained_bytes(),
+            layout_bytes: render.layout_bytes,
+            source_view_bytes: render.source_view_bytes,
+            height_index_bytes: render.height_index_bytes,
+            height_index_cache_bytes: render.height_index_cache_bytes,
+            visible_rows_bytes: render.visible_rows_bytes,
+            full_rows_bytes: render.full_rows_bytes,
+            pinned_hydrated_bytes,
+            pinned_rendered_bytes: render
+                .pinned_layout_bytes
+                .saturating_add(render.height_index_bytes)
+                .saturating_add(render.visible_rows_bytes),
+            hydrated_oversize_debt_bytes: hydrated_cache_bytes
+                .saturating_sub(self.memory_budget.hydrated_blocks),
+            descriptor_oversize_debt_bytes: descriptor_window_bytes
+                .saturating_sub(self.memory_budget.descriptor_windows),
+            rendered_oversize_debt_bytes: render.oversize_debt_bytes,
+            hydration_reads: self.hydration.hydration_reads,
+            hydration_ranges: self.hydration.hydration_ranges,
+            hydration_bytes: self.hydration.hydration_bytes,
+            hydration_duration_us: self.hydration.hydration_duration_us,
+            evicted_entries: self.hydration.evicted_entries,
+            evicted_bytes: self.hydration.evicted_bytes,
+            dematerialized_entries: self.hydration.dematerialized_entries,
+            dematerialized_bytes: self.hydration.dematerialized_bytes,
+        }
+    }
+
+    fn record_memory_metrics(&self) {
+        let snapshot = self.memory_snapshot();
+        for (label, value) in [
+            ("transcript:memory:live_blocks", snapshot.live_blocks as u64),
+            (
+                "transcript:memory:stored_blocks",
+                snapshot.stored_blocks as u64,
+            ),
+            (
+                "transcript:memory:hydrated_blocks",
+                snapshot.hydrated_blocks as u64,
+            ),
+            (
+                "transcript:memory:live_block_bytes",
+                snapshot.live_block_bytes as u64,
+            ),
+            (
+                "transcript:memory:live_tool_state_bytes",
+                snapshot.live_tool_state_bytes as u64,
+            ),
+            (
+                "transcript:memory:hydrated_block_bytes",
+                snapshot.hydrated_block_bytes as u64,
+            ),
+            (
+                "transcript:memory:hydrated_tool_state_bytes",
+                snapshot.hydrated_tool_state_bytes as u64,
+            ),
+            (
+                "transcript:memory:compact_descriptor_bytes",
+                snapshot.compact_descriptor_bytes as u64,
+            ),
+            (
+                "transcript:memory:descriptor_window_bytes",
+                snapshot.descriptor_window_bytes as u64,
+            ),
+            (
+                "transcript:memory:tool_state_metadata_bytes",
+                snapshot.tool_state_metadata_bytes as u64,
+            ),
+            (
+                "transcript:memory:origin_hash_bytes",
+                snapshot.origin_hash_bytes as u64,
+            ),
+            (
+                "transcript:memory:layout_bytes",
+                snapshot.layout_bytes as u64,
+            ),
+            (
+                "transcript:memory:source_view_bytes",
+                snapshot.source_view_bytes as u64,
+            ),
+            (
+                "transcript:memory:height_index_bytes",
+                snapshot.height_index_bytes as u64,
+            ),
+            (
+                "transcript:memory:height_index_cache_bytes",
+                snapshot.height_index_cache_bytes as u64,
+            ),
+            (
+                "transcript:memory:visible_rows_bytes",
+                snapshot.visible_rows_bytes as u64,
+            ),
+            (
+                "transcript:memory:full_rows_bytes",
+                snapshot.full_rows_bytes as u64,
+            ),
+            (
+                "transcript:memory:pinned_hydrated_bytes",
+                snapshot.pinned_hydrated_bytes as u64,
+            ),
+            (
+                "transcript:memory:pinned_rendered_bytes",
+                snapshot.pinned_rendered_bytes as u64,
+            ),
+            (
+                "transcript:memory:hydrated_budget_bytes",
+                self.memory_budget.hydrated_blocks as u64,
+            ),
+            (
+                "transcript:memory:descriptor_budget_bytes",
+                self.memory_budget.descriptor_windows as u64,
+            ),
+            (
+                "transcript:memory:rendered_budget_bytes",
+                self.memory_budget.rendered_rows as u64,
+            ),
+            (
+                "transcript:memory:hydrated_oversize_debt_bytes",
+                snapshot.hydrated_oversize_debt_bytes as u64,
+            ),
+            (
+                "transcript:memory:descriptor_oversize_debt_bytes",
+                snapshot.descriptor_oversize_debt_bytes as u64,
+            ),
+            (
+                "transcript:memory:rendered_oversize_debt_bytes",
+                snapshot.rendered_oversize_debt_bytes as u64,
+            ),
+            (
+                "transcript:memory:hydration_reads",
+                snapshot.hydration_reads,
+            ),
+            (
+                "transcript:memory:hydration_ranges",
+                snapshot.hydration_ranges,
+            ),
+            (
+                "transcript:memory:hydration_bytes",
+                snapshot.hydration_bytes,
+            ),
+            (
+                "transcript:memory:hydration_duration_us",
+                snapshot.hydration_duration_us,
+            ),
+            (
+                "transcript:memory:evicted_entries",
+                snapshot.evicted_entries,
+            ),
+            ("transcript:memory:evicted_bytes", snapshot.evicted_bytes),
+            (
+                "transcript:memory:dematerialized_entries",
+                snapshot.dematerialized_entries,
+            ),
+            (
+                "transcript:memory:dematerialized_bytes",
+                snapshot.dematerialized_bytes,
+            ),
+        ] {
+            smelt_perf::perf::record_value(label, value);
+        }
+    }
+
+    pub(crate) fn schedule_durable_compaction(
+        &mut self,
+        descriptor_len: usize,
+        dirty_from: Option<usize>,
+    ) {
+        let mut next_order_index = self.compaction_order_index;
+        let mut next_descriptor_index = self.compacted_descriptor_len;
+        if let Some(dirty_from) = dirty_from.filter(|dirty| *dirty < next_order_index) {
+            next_order_index = dirty_from;
+            next_descriptor_index = self
+                .content
+                .transcript
+                .history
+                .descriptor_record_index_for_order_index(dirty_from);
+        }
+        match self.pending_compaction.as_mut() {
+            Some(pending) => {
+                pending.descriptor_len = pending.descriptor_len.max(descriptor_len);
+                if next_order_index < pending.next_order_index {
+                    pending.next_order_index = next_order_index;
+                    pending.next_descriptor_index = next_descriptor_index;
+                }
+            }
+            None => {
+                self.pending_compaction = Some(PendingTranscriptCompaction {
+                    descriptor_len,
+                    next_order_index,
+                    next_descriptor_index,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn drain_compaction_slice(&mut self) -> bool {
+        let Some(mut pending) = self.pending_compaction.take() else {
+            self.enforce_hydrated_budget();
+            return false;
+        };
+        let mut visited = 0;
+        let mut released_bytes = 0;
+        let mut progressed = false;
+        while visited < TRANSCRIPT_IDLE_COMPACTION_BLOCKS
+            && released_bytes < TRANSCRIPT_IDLE_COMPACTION_BYTES
+        {
+            if pending.next_descriptor_index >= pending.descriptor_len {
+                break;
+            }
+            let history = &self.content.transcript.history;
+            if history
+                .descriptor_dirty_from()
+                .is_some_and(|dirty_from| pending.next_order_index >= dirty_from)
+            {
+                break;
+            }
+            let Some(id) = history.order.get(pending.next_order_index).copied() else {
+                break;
+            };
+            if let Some(stored) = self.content.transcript.history.stored_ref(id) {
+                pending.next_descriptor_index = stored.descriptor_index.saturating_add(1);
+                pending.next_order_index = pending.next_order_index.saturating_add(1);
+                visited += 1;
+                progressed = true;
+                continue;
+            }
+            let temporarily_pinned = self.hydration.is_pinned(id)
+                || history.status(id) == Status::Streaming
+                || history.tool_call_id(id).is_some_and(|call_id| {
+                    history.tool_status(call_id).is_some_and(|status| {
+                        !matches!(
+                            status,
+                            ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
+                        )
+                    })
+                });
+            if temporarily_pinned {
+                break;
+            }
+            let candidate_bytes = history.materialized_retained_bytes(id);
+            if released_bytes > 0
+                && released_bytes.saturating_add(candidate_bytes) > TRANSCRIPT_IDLE_COMPACTION_BYTES
+            {
+                break;
+            }
+            let stored = history.stored_ref_for_materialized(id, pending.next_descriptor_index);
+            let Some(stored) = stored else {
+                pending.next_order_index = pending.next_order_index.saturating_add(1);
+                visited += 1;
+                progressed = true;
+                continue;
+            };
+            let released = self
+                .content
+                .transcript
+                .history
+                .dematerialize_live(id, stored);
+            if released == 0 {
+                break;
+            }
+            released_bytes = released_bytes.saturating_add(released);
+            pending.next_descriptor_index = pending.next_descriptor_index.saturating_add(1);
+            pending.next_order_index = pending.next_order_index.saturating_add(1);
+            visited += 1;
+            progressed = true;
+            self.hydration.dematerialized_entries =
+                self.hydration.dematerialized_entries.saturating_add(1);
+            self.hydration.dematerialized_bytes = self
+                .hydration
+                .dematerialized_bytes
+                .saturating_add(released as u64);
+        }
+        self.compaction_order_index = pending.next_order_index;
+        self.compacted_descriptor_len = pending.next_descriptor_index;
+        if pending.next_descriptor_index < pending.descriptor_len {
+            self.pending_compaction = Some(pending);
+        }
+        smelt_perf::perf::record_value(
+            "transcript:block_cache:dematerialized_entries",
+            self.hydration.dematerialized_entries,
+        );
+        smelt_perf::perf::record_value(
+            "transcript:block_cache:dematerialized_bytes",
+            self.hydration.dematerialized_bytes,
+        );
+        self.enforce_hydrated_budget();
+        if self.pending_compaction.is_none() {
+            self.record_memory_metrics();
+        }
+        progressed
     }
 
     pub(crate) fn load_descriptor_window(
@@ -2017,8 +2766,15 @@ impl TranscriptDocument {
             return;
         }
         let inline_options = self.content.projection.inline_options().clone();
-        self.content.transcript = Transcript::from_descriptor_records_with_ids(records);
+        self.content.transcript.history.install_stored_projection(
+            records
+                .into_iter()
+                .map(|record| (record.block_id, record.stored)),
+        );
         self.content.projection = crate::content::transcript_buf::TranscriptProjection::new();
+        self.content
+            .projection
+            .set_memory_budget(self.memory_budget.rendered_rows);
         self.content.projection.set_inline_options(inline_options);
     }
 
@@ -2113,9 +2869,18 @@ impl TranscriptDocument {
         width: u16,
         theme: &Theme,
     ) -> Arc<Vec<String>> {
-        self.content
-            .projection
-            .build_rows(lua, &mut self.content.transcript.history, width, theme)
+        let ids = self.content.transcript.history.order.clone();
+        if !self.pin_operation_blocks(&ids) {
+            return Arc::new(Vec::new());
+        }
+        let rows = self.content.projection.build_rows(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            theme,
+        );
+        self.unpin_operation_blocks(&ids);
+        rows
     }
 
     pub(crate) fn approximate_scrollbar_total_rows(
@@ -2141,12 +2906,19 @@ impl TranscriptDocument {
         crate::smelt_edit::RowIndex,
     )> {
         let offset = self.approximate_sparse_prefix_row_offset(width);
-        self.content
+        let ids = self.content.transcript.history.order.clone();
+        if !self.pin_operation_blocks(&ids) {
+            return Vec::new();
+        }
+        let layout = self
+            .content
             .projection
             .materialize_block_layout(lua, &mut self.content.transcript.history, width)
             .into_iter()
             .map(|(id, first_row, rows)| (id, first_row.saturating_add(offset), rows))
-            .collect()
+            .collect();
+        self.unpin_operation_blocks(&ids);
+        layout
     }
 
     fn block_snapshot_for_block(
@@ -2156,7 +2928,6 @@ impl TranscriptDocument {
         rows: crate::smelt_edit::RowIndex,
     ) -> Option<TranscriptBlockSnapshot> {
         let history = self.history();
-        let block = history.block(block_id)?;
         let descriptor_index = self
             .descriptor_index_for_block_id(block_id)
             .or_else(|| self.stored_descriptor_index_for_block_idx(block_id.get()))
@@ -2164,10 +2935,10 @@ impl TranscriptDocument {
         Some(TranscriptBlockSnapshot {
             descriptor_index,
             block_id,
-            role: transcript_block_role(block),
+            role: history.block_kind(block_id)?,
             first_row,
             rows,
-            first_line: transcript_block_first_line(block),
+            first_line: history.first_line(block_id).unwrap_or_default(),
         })
     }
 
@@ -2203,16 +2974,16 @@ impl TranscriptDocument {
 
     fn navigation_block_from_record(
         index: usize,
-        record: &TranscriptBlockRecordWithId,
+        record: &StoredBlockWithId,
     ) -> Option<TranscriptNavigationBlock> {
-        let first_line = descriptor_first_line(&record.record.descriptor);
+        let first_line = record.stored.first_line().to_string();
         if first_line.is_empty() {
             return None;
         }
         Some(TranscriptNavigationBlock {
             descriptor_index: index,
             block_id: record.block_id,
-            role: descriptor_role(&record.record.descriptor),
+            role: record.stored.kind.as_str(),
             first_line,
         })
     }
@@ -2460,7 +3231,7 @@ impl TranscriptDocument {
         role: &str,
         anchor_index: usize,
         direction: TranscriptNavigationDirection,
-    ) -> Option<(usize, TranscriptBlockRecordWithId)> {
+    ) -> Option<(usize, StoredBlockWithId)> {
         let session_dir = self.descriptors.session_dir()?.clone();
         let db = smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
         let record = match direction {
@@ -2483,15 +3254,24 @@ impl TranscriptDocument {
             .ok()
             .flatten()?
             .get();
+        let estimated_text_bytes = record.estimated_text_bytes;
+        let preview = record.preview_text.clone();
         let record = TranscriptBlockRecordWithId::try_from(record).ok()?;
-        Some((index, record))
+        let (block_id, stored) = smelt_core::transcript_model::StoredBlockRef::from_record(
+            index,
+            record.block_id,
+            &record.record,
+            estimated_text_bytes,
+            preview,
+        );
+        Some((index, StoredBlockWithId { block_id, stored }))
     }
 
     fn choose_navigation_record(
-        loaded: Option<(usize, TranscriptBlockRecordWithId)>,
-        stored: Option<(usize, TranscriptBlockRecordWithId)>,
+        loaded: Option<(usize, StoredBlockWithId)>,
+        stored: Option<(usize, StoredBlockWithId)>,
         direction: TranscriptNavigationDirection,
-    ) -> Option<(usize, TranscriptBlockRecordWithId)> {
+    ) -> Option<(usize, StoredBlockWithId)> {
         match (loaded, stored) {
             (Some(loaded), Some(stored)) => match direction {
                 TranscriptNavigationDirection::Previous => {
@@ -2522,9 +3302,7 @@ impl TranscriptDocument {
                     .record(smelt_store::TranscriptDescriptorIndex::new(
                         anchor.descriptor_index,
                     ))?;
-            if record.block_id != anchor.block_id
-                || descriptor_role(&record.record.descriptor) != role
-            {
+            if record.block_id != anchor.block_id || record.stored.kind.as_str() != role {
                 return None;
             }
             return Self::navigation_block_from_record(anchor.descriptor_index, record);
@@ -2721,6 +3499,17 @@ impl TranscriptDocument {
         width: u16,
         block_indices: &[u64],
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
+        let hydration_ids = block_indices
+            .iter()
+            .copied()
+            .map(BlockId::new)
+            .collect::<Vec<_>>();
+        if !self.pin_operation_blocks(&hydration_ids) {
+            return crate::content::transcript_buf::TranscriptSearchLayout {
+                generation: 0,
+                entries: Vec::new(),
+            };
+        }
         let offset = self.approximate_sparse_prefix_row_offset(width);
         let mut layout = self
             .content
@@ -2731,6 +3520,7 @@ impl TranscriptDocument {
                 width,
                 block_indices,
             );
+        self.unpin_operation_blocks(&hydration_ids);
         for entry in &mut layout.entries {
             entry.first_row = entry.first_row.saturating_add(offset);
         }
@@ -2927,9 +3717,10 @@ impl TranscriptDocument {
             return false;
         }
         self.descriptors.active_range = Some(projection_range.clone());
+        self.descriptors.sparse.touch_range(&projection_range);
         self.descriptors
             .sparse
-            .retain_around_range(&projection_range);
+            .enforce_byte_budget(&projection_range, self.memory_budget.descriptor_windows);
         self.install_active_descriptor_projection();
         true
     }
@@ -3085,9 +3876,7 @@ impl TranscriptDocument {
     }
 
     fn stable_viewport_anchor(&self, anchor: TranscriptContentAnchor) -> bool {
-        self.history()
-            .block(anchor.block_id)
-            .is_some_and(Block::is_stable_scroll_anchor)
+        self.history().is_stable_scroll_anchor(anchor.block_id)
     }
 
     fn capture_viewport_anchor(
@@ -3157,6 +3946,10 @@ impl TranscriptDocument {
             if active.end.get() < total {
                 return false;
             }
+            return rows
+                .clamped_scroll
+                .saturating_add(RowIndex::from(viewport_rows.max(1)))
+                >= rows.total_rows;
         }
         let row_offset = self.approximate_sparse_prefix_row_offset(width);
         let loaded_rows = self.content.projection.estimated_total_rows(
@@ -3720,7 +4513,13 @@ impl TranscriptDocument {
                 let _ = self.activate_tail_descriptor_window(width, viewport_rows);
             }
         }
-        let row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let mut row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let viewport_row_count = RowIndex::from(viewport_rows.max(1));
+        let active_range_reaches_tail = self
+            .descriptors
+            .active_range()
+            .zip(self.descriptors.sparse.total_count())
+            .is_some_and(|(range, total)| range.end.get() >= total);
         let requested_scroll = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
@@ -3745,7 +4544,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => crate::content::transcript_buf::ScrollTarget::visible_tail(),
         };
-        let inner = self.content.projection.plan_projection_measured(
+        let (hydration_ids, hydration_plan) = self.content.projection.projection_hydration_ids(
             lua,
             &mut self.content.transcript.history,
             width,
@@ -3753,13 +4552,61 @@ impl TranscriptDocument {
             local_target,
             viewport_rows,
         );
-        let loaded_rows = self.content.projection.estimated_total_rows(
+        let _ = self.set_viewport_hydration_ids(&hydration_ids);
+        let mut inner = self.content.projection.remeasure_projection_plan(
+            lua,
+            &mut self.content.transcript.history,
+            theme,
+            hydration_plan,
+        );
+        let mut loaded_rows = self.content.projection.estimated_total_rows(
             lua,
             &mut self.content.transcript.history,
             width,
         );
-        let total_rows = self.approximate_mixed_scrollbar_total_rows(width, loaded_rows);
-        let viewport_row_count = RowIndex::from(viewport_rows.max(1));
+        let mut total_rows = self.approximate_mixed_scrollbar_total_rows(width, loaded_rows);
+        let target_reaches_tail = match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::Tail,
+            ) => true,
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
+                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+            ) => row >= total_rows.saturating_sub(viewport_row_count),
+        };
+        if target_reaches_tail && active_range_reaches_tail {
+            let planned_as_tail = matches!(
+                local_target,
+                crate::content::transcript_buf::ScrollTarget::Visible(
+                    crate::content::transcript_buf::ScrollAnchor::Tail
+                )
+            );
+            if !planned_as_tail && options.repin_at_semantic_tail {
+                let (tail_hydration_ids, tail_hydration_plan) =
+                    self.content.projection.projection_hydration_ids(
+                        lua,
+                        &mut self.content.transcript.history,
+                        width,
+                        theme,
+                        crate::content::transcript_buf::ScrollTarget::visible_tail(),
+                        viewport_rows,
+                    );
+                let _ = self.set_viewport_hydration_ids(&tail_hydration_ids);
+                inner = self.content.projection.remeasure_projection_plan(
+                    lua,
+                    &mut self.content.transcript.history,
+                    theme,
+                    tail_hydration_plan,
+                );
+                loaded_rows = self.content.projection.estimated_total_rows(
+                    lua,
+                    &mut self.content.transcript.history,
+                    width,
+                );
+                total_rows = self.approximate_mixed_scrollbar_total_rows(width, loaded_rows);
+            }
+            row_offset = total_rows.saturating_sub(loaded_rows);
+        }
         let loaded_start = row_offset;
         let loaded_end = row_offset.saturating_add(loaded_rows).min(total_rows);
         let sparse_gap = if options.allow_sparse_placeholders {
@@ -3998,6 +4845,15 @@ impl TranscriptDocument {
         }
         let local_start = start.saturating_sub(row_offset);
         let local_end = end.saturating_sub(row_offset).min(loaded_rows);
+        let hydration_ids = self.content.projection.row_range_hydration_ids(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            local_start..local_end,
+        );
+        if !self.pin_operation_blocks(&hydration_ids) {
+            return DisplayRows { rows };
+        }
         let mut loaded = self.content.projection.display_rows_for_range(
             lua,
             &mut self.content.transcript.history,
@@ -4005,6 +4861,7 @@ impl TranscriptDocument {
             theme,
             local_start..local_end,
         );
+        self.unpin_operation_blocks(&hydration_ids);
         rows.append(&mut loaded.rows);
         if end > loaded_end {
             rows.extend(inert_sparse_gap_rows(end.saturating_sub(loaded_end)));
@@ -4256,13 +5113,24 @@ impl TranscriptDocument {
         {
             return crate::smelt_edit::CopyOutput::default();
         }
-        self.content.projection.copy_range(
+        let hydration_ids = self.content.projection.row_range_hydration_ids(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            local_range.start.row..local_range.end.row.saturating_add(1),
+        );
+        if !self.pin_operation_blocks(&hydration_ids) {
+            return crate::smelt_edit::CopyOutput::default();
+        }
+        let copied = self.content.projection.copy_range(
             lua,
             &mut self.content.transcript.history,
             width,
             theme,
             local_range,
-        )
+        );
+        self.unpin_operation_blocks(&hydration_ids);
+        copied
     }
 
     pub(crate) fn descriptor_save_suffix(
@@ -4375,14 +5243,12 @@ impl TranscriptDocument {
         let end = start.saturating_add(active_records.len());
         let mut sparse = SparseTranscriptDescriptors {
             total_count: Some(total_count),
-            loaded_ranges: Vec::new(),
-            records: BTreeMap::new(),
+            ..Default::default()
         };
         for (offset, record) in active_records.into_iter().enumerate() {
-            sparse.records.insert(
-                smelt_store::TranscriptDescriptorIndex::new(start.saturating_add(offset)),
-                record,
-            );
+            let index = smelt_store::TranscriptDescriptorIndex::new(start.saturating_add(offset));
+            sparse.records.insert(index, record);
+            sparse.lru.push_back(index);
         }
         if start < end {
             sparse.add_loaded_range(
@@ -4534,7 +5400,497 @@ mod document_tests {
         TranscriptDescriptorTraceRange, TranscriptProjectionTargetTrace, TranscriptScrollIntent,
         TranscriptScrollTraceRenderInput, TranscriptTraceAnchor,
     };
-    use smelt_core::transcript_model::TranscriptBlockRecord;
+    use smelt_core::transcript_model::{block_retained_bytes, ToolState, TranscriptBlockRecord};
+
+    fn stored_count(document: &TranscriptDocument) -> usize {
+        document
+            .history()
+            .order
+            .iter()
+            .filter(|id| document.history().stored_ref(**id).is_some())
+            .count()
+    }
+
+    fn comparable_descriptor_suffix(
+        suffix: TranscriptDescriptorSaveSuffix,
+    ) -> Option<(usize, Vec<(u64, String)>)> {
+        match suffix {
+            TranscriptDescriptorSaveSuffix::Unchanged => None,
+            TranscriptDescriptorSaveSuffix::Suffix {
+                descriptor_start_idx,
+                descriptor_records,
+            } => Some((
+                descriptor_start_idx,
+                descriptor_records
+                    .into_iter()
+                    .map(|record| {
+                        (
+                            record.block_id.get(),
+                            serde_json::to_string(&record.record).expect("serialize descriptor"),
+                        )
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    #[test]
+    fn descriptor_window_lru_respects_recent_access_and_active_pins() {
+        let records = transcript_records(4);
+        let first = LoadedDescriptorWindow {
+            start: smelt_store::TranscriptDescriptorIndex::new(0),
+            total_count: 4,
+            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+            records: descriptor_records_with_ids(&records[0..2], 0),
+        };
+        let second = LoadedDescriptorWindow {
+            start: smelt_store::TranscriptDescriptorIndex::new(2),
+            total_count: 4,
+            hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+            records: descriptor_records_with_ids(&records[2..4], 2),
+        };
+        let mut cache = SparseTranscriptDescriptors::default();
+        assert!(cache.merge(&first));
+        assert!(cache.merge(&second));
+        let zero = smelt_store::TranscriptDescriptorIndex::new(0);
+        let two = smelt_store::TranscriptDescriptorIndex::new(2);
+        cache.touch_range(&(zero..smelt_store::TranscriptDescriptorIndex::new(1)));
+        let budget = cache.records[&zero]
+            .stored
+            .retained_bytes()
+            .saturating_add(cache.records[&two].stored.retained_bytes());
+
+        cache.enforce_byte_budget(
+            &(two..smelt_store::TranscriptDescriptorIndex::new(3)),
+            budget,
+        );
+
+        assert_eq!(cache.records.len(), 2);
+        assert!(cache.records.contains_key(&zero));
+        assert!(cache.records.contains_key(&two));
+        assert_eq!(cache.retained_bytes(), budget);
+    }
+
+    #[test]
+    fn sqlite_hydration_reads_only_requested_descriptor_ranges() {
+        let records = transcript_records(4);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..4,
+            Some(dir.path().to_path_buf()),
+        ));
+        document.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: usize::MAX,
+            ..Default::default()
+        });
+        let ids = document.history().order.clone();
+
+        assert!(document.ensure_hydrated_ids(&[ids[0], ids[2]]));
+        let first = document.memory_snapshot();
+        assert_eq!(first.hydration_reads, 2);
+        assert_eq!(first.hydration_ranges, 2);
+        assert!(
+            matches!(document.history().block(ids[0]), Some(Block::Text { content }) if content == "block 0")
+        );
+        assert!(
+            matches!(document.history().block(ids[2]), Some(Block::Text { content }) if content == "block 2")
+        );
+
+        assert!(document.ensure_hydrated_ids(&[ids[0], ids[2]]));
+        let second = document.memory_snapshot();
+        assert_eq!(second.hydration_reads, first.hydration_reads);
+        assert_eq!(second.hydration_ranges, first.hydration_ranges);
+    }
+
+    #[test]
+    fn hydrated_lru_evicts_by_bytes_and_rehydrates_exactly() {
+        let records = transcript_records(3);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..3,
+            Some(dir.path().to_path_buf()),
+        ));
+        let ids = document.history().order.clone();
+        let one_block_budget = block_retained_bytes(&records[0].descriptor.to_block());
+        document.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: one_block_budget,
+            ..Default::default()
+        });
+
+        assert!(document.ensure_hydrated_ids(&[ids[0]]));
+        assert!(document.history().is_hydrated(ids[0]));
+        assert!(document.ensure_hydrated_ids(&[ids[1]]));
+        assert!(!document.history().is_materialized(ids[0]));
+        assert!(document.history().is_hydrated(ids[1]));
+        assert_eq!(document.memory_snapshot().evicted_entries, 1);
+
+        assert!(document.ensure_hydrated_ids(&[ids[0]]));
+        assert!(
+            matches!(document.history().block(ids[0]), Some(Block::Text { content }) if content == "block 0")
+        );
+        assert!(!document.history().is_materialized(ids[1]));
+        assert_eq!(document.memory_snapshot().hydration_reads, 3);
+    }
+
+    #[test]
+    fn copy_range_hydrates_exact_content_and_releases_operation_pins() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let records = transcript_records(1);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..1,
+            Some(dir.path().to_path_buf()),
+        ));
+        document.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: 1,
+            ..Default::default()
+        });
+        let id = document.history().order[0];
+
+        let copy = document.copy_exact_loaded_range(
+            &lua,
+            80,
+            &theme,
+            DocRange {
+                start: DocPosition {
+                    row: 0,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 1,
+                    byte_col: 0,
+                },
+            },
+        );
+
+        assert!(copy.kill_ring.contains("block 0"));
+        assert!(!document.history().is_materialized(id));
+        assert_eq!(document.memory_snapshot().hydration_reads, 1);
+
+        let second = document.copy_exact_loaded_range(
+            &lua,
+            80,
+            &theme,
+            DocRange {
+                start: DocPosition {
+                    row: 0,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 1,
+                    byte_col: 0,
+                },
+            },
+        );
+        assert_eq!(second, copy);
+        assert_eq!(document.memory_snapshot().hydration_reads, 2);
+        assert!(!document.history().is_materialized(id));
+    }
+
+    #[test]
+    fn exact_reveal_rows_and_scroll_anchors_survive_eviction_and_rehydration() {
+        let lua = LuaRuntime::new();
+        let records = varied_transcript_records(40);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..records.len(),
+            Some(dir.path().to_path_buf()),
+        ));
+        document.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: 1,
+            ..Default::default()
+        });
+
+        let first = document
+            .descriptor_block_reveal_position(&lua, 48, 23, 2, 3, 12)
+            .expect("first exact reveal");
+        let anchor = document
+            .row_anchor_at_row(&lua, 48, first.target_row)
+            .expect("target row anchor");
+        let first_snapshot = document.memory_snapshot();
+        assert!(first_snapshot.hydration_reads > 0);
+        assert_eq!(first_snapshot.hydrated_blocks, 0);
+
+        let second = document
+            .descriptor_block_reveal_position(&lua, 48, 23, 2, 3, 12)
+            .expect("rehydrated exact reveal");
+        assert_eq!(second, first);
+        assert_eq!(
+            document.row_for_anchor(&lua, 48, anchor),
+            Some(first.target_row)
+        );
+        let second_snapshot = document.memory_snapshot();
+        assert!(second_snapshot.hydration_reads > first_snapshot.hydration_reads);
+        assert_eq!(second_snapshot.hydrated_blocks, 0);
+    }
+
+    #[test]
+    fn randomized_bounded_cache_matches_non_evicting_transcript_behavior() {
+        let records = transcript_records(32);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let loaded =
+            || sparse_loaded_transcript(&records, 0..records.len(), Some(dir.path().to_path_buf()));
+        let mut bounded = TranscriptDocument::from_loaded_transcript(loaded());
+        let mut non_evicting = TranscriptDocument::from_loaded_transcript(loaded());
+        bounded.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: block_retained_bytes(&records[0].descriptor.to_block()),
+            ..Default::default()
+        });
+        non_evicting.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: usize::MAX,
+            ..Default::default()
+        });
+
+        let mut seed = 0x9e37_79b9_u64;
+        for step in 0..160_u64 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let index = (seed as usize) % bounded.history().order.len();
+            let bounded_id = bounded.history().order[index];
+            let non_evicting_id = non_evicting.history().order[index];
+            assert_eq!(bounded_id, non_evicting_id);
+            assert!(bounded.pin_operation_blocks(&[bounded_id]));
+            assert!(non_evicting.pin_operation_blocks(&[non_evicting_id]));
+            assert_eq!(
+                bounded.history().block(bounded_id),
+                non_evicting.history().block(non_evicting_id)
+            );
+            assert_eq!(
+                bounded.history().block_origin(bounded_id),
+                non_evicting.history().block_origin(non_evicting_id)
+            );
+            assert_eq!(
+                bounded.history().content_hash(bounded_id),
+                non_evicting.history().content_hash(non_evicting_id)
+            );
+
+            if step.is_multiple_of(29) {
+                let replacement = Block::Text {
+                    content: format!("rewritten block {index} at step {step}"),
+                };
+                bounded
+                    .history_mut()
+                    .rewrite(bounded_id, replacement.clone());
+                non_evicting
+                    .history_mut()
+                    .rewrite(non_evicting_id, replacement);
+            }
+            bounded.unpin_operation_blocks(&[bounded_id]);
+            non_evicting.unpin_operation_blocks(&[non_evicting_id]);
+
+            assert_eq!(bounded.history().order, non_evicting.history().order);
+            assert_eq!(
+                bounded.history().generation(),
+                non_evicting.history().generation()
+            );
+            assert_eq!(
+                bounded.history().navigation_generation(),
+                non_evicting.history().navigation_generation()
+            );
+            assert_eq!(
+                bounded.history().descriptor_dirty_from(),
+                non_evicting.history().descriptor_dirty_from()
+            );
+        }
+
+        let bounded_pins = bounded.pin_descriptor_suffix_for_save().unwrap();
+        let non_evicting_pins = non_evicting.pin_descriptor_suffix_for_save().unwrap();
+        assert_eq!(
+            comparable_descriptor_suffix(bounded.descriptor_save_suffix(true, None)),
+            comparable_descriptor_suffix(non_evicting.descriptor_save_suffix(true, None))
+        );
+        bounded.unpin_operation_blocks(&bounded_pins);
+        non_evicting.unpin_operation_blocks(&non_evicting_pins);
+
+        bounded.history_mut().clear_descriptor_dirty();
+        non_evicting.history_mut().clear_descriptor_dirty();
+        bounded.truncate_to(17);
+        non_evicting.truncate_to(17);
+        assert_eq!(bounded.history().order, non_evicting.history().order);
+        assert_eq!(
+            comparable_descriptor_suffix(bounded.descriptor_save_suffix(true, None)),
+            comparable_descriptor_suffix(non_evicting.descriptor_save_suffix(true, None))
+        );
+        assert!(bounded.memory_snapshot().evicted_entries > 0);
+    }
+
+    #[test]
+    fn pinned_oversize_hydration_records_debt_and_converges_after_unpin() {
+        let records = transcript_records(1);
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            0..1,
+            Some(dir.path().to_path_buf()),
+        ));
+        document.set_memory_budget(TranscriptMemoryBudget {
+            hydrated_blocks: 1,
+            ..Default::default()
+        });
+        let id = document.history().order[0];
+
+        assert!(document.pin_operation_blocks(&[id]));
+        let pinned = document.memory_snapshot();
+        assert!(pinned.pinned_hydrated_bytes > 1);
+        assert_eq!(
+            pinned.hydrated_oversize_debt_bytes,
+            pinned.pinned_hydrated_bytes - 1
+        );
+        document.unpin_operation_blocks(&[id]);
+
+        let converged = document.memory_snapshot();
+        assert_eq!(converged.hydrated_block_bytes, 0);
+        assert_eq!(converged.hydrated_tool_state_bytes, 0);
+        assert_eq!(converged.hydrated_oversize_debt_bytes, 0);
+        assert!(!document.history().is_materialized(id));
+    }
+
+    #[test]
+    fn idle_compaction_obeys_block_and_byte_slice_limits() {
+        let mut source = Transcript::new();
+        for index in 0..(TRANSCRIPT_IDLE_COMPACTION_BLOCKS + 6) {
+            source.push(Block::Text {
+                content: format!("small durable block {index}"),
+            });
+        }
+        source.history.clear_descriptor_dirty();
+        let descriptor_len = source.history.descriptor_records().len();
+        let mut document = TranscriptDocument::from_transcript(source);
+        document.schedule_durable_compaction(descriptor_len, None);
+
+        assert!(document.drain_compaction_slice());
+        assert_eq!(stored_count(&document), TRANSCRIPT_IDLE_COMPACTION_BLOCKS);
+        assert!(document.drain_compaction_slice());
+        assert_eq!(stored_count(&document), descriptor_len);
+
+        let mut source = Transcript::new();
+        for marker in ['a', 'b', 'c'] {
+            source.push(Block::Text {
+                content: marker
+                    .to_string()
+                    .repeat(TRANSCRIPT_IDLE_COMPACTION_BYTES / 2 + 1024),
+            });
+        }
+        source.history.clear_descriptor_dirty();
+        let descriptor_len = source.history.descriptor_records().len();
+        let mut document = TranscriptDocument::from_transcript(source);
+        document.schedule_durable_compaction(descriptor_len, None);
+
+        assert!(document.drain_compaction_slice());
+        assert_eq!(stored_count(&document), 1);
+        assert!(document.memory_snapshot().dematerialized_bytes > 0);
+    }
+
+    #[test]
+    fn idle_compaction_preserves_pins_pending_tools_and_identity() {
+        let mut source = Transcript::new();
+        source.push(Block::User {
+            text: "durable user".into(),
+            image_labels: vec![],
+            command: false,
+        });
+        source.push_tool_call(
+            Block::ToolCall {
+                call_id: "pending-call".into(),
+                name: "bash".into(),
+                summary: "running".into(),
+                args: HashMap::new(),
+            },
+            ToolState {
+                status: ToolStatus::Pending,
+                elapsed: None,
+                output: None,
+                user_message: None,
+                preview_output: None,
+            },
+        );
+        source.history.clear_descriptor_dirty();
+        let mut document = TranscriptDocument::from_transcript(source);
+        let ids = document.history().order.clone();
+        let generation = document.history().generation();
+        let navigation_generation = document.history().navigation_generation();
+        let descriptor_generation = document.history().descriptor_dirty_generation();
+        document.schedule_durable_compaction(2, None);
+
+        assert!(document.pin_operation_blocks(&[ids[0]]));
+        assert!(!document.drain_compaction_slice());
+        assert!(document.history().is_live(ids[0]));
+        document.unpin_operation_blocks(&[ids[0]]);
+
+        assert!(document.drain_compaction_slice());
+        assert!(!document.history().is_materialized(ids[0]));
+        assert!(document.history().is_live(ids[1]));
+        assert_eq!(document.history().order, ids);
+        assert_eq!(document.history().generation(), generation);
+        assert_eq!(
+            document.history().navigation_generation(),
+            navigation_generation
+        );
+        assert_eq!(
+            document.history().descriptor_dirty_generation(),
+            descriptor_generation
+        );
+
+        assert!(document
+            .history_mut()
+            .update_tool_state("pending-call", |state| state.status = ToolStatus::Ok));
+        let dirty_from = document.history().descriptor_dirty_from();
+        document.history_mut().clear_descriptor_dirty();
+        document.schedule_durable_compaction(2, dirty_from);
+        assert!(document.drain_compaction_slice());
+        assert!(!document.history().is_materialized(ids[1]));
+    }
+
+    #[test]
+    fn idle_compaction_skips_transient_blocks_and_stops_at_new_dirtiness() {
+        let mut source = Transcript::new();
+        source.push_compaction_preview("transient".into());
+        source.push(Block::Text {
+            content: "durable".into(),
+        });
+        source.history.clear_descriptor_dirty();
+        let mut document = TranscriptDocument::from_transcript(source);
+        let preview_id = document.history().order[0];
+        let durable_id = document.history().order[1];
+        document.schedule_durable_compaction(1, None);
+
+        assert!(document.drain_compaction_slice());
+        assert!(document.history().is_live(preview_id));
+        assert!(!document.history().is_materialized(durable_id));
+
+        let mut source = Transcript::new();
+        source.push(Block::Text {
+            content: "acknowledged".into(),
+        });
+        source.history.clear_descriptor_dirty();
+        let mut document = TranscriptDocument::from_transcript(source);
+        let id = document.history().order[0];
+        document.schedule_durable_compaction(1, None);
+        document.history_mut().rewrite(
+            id,
+            Block::Text {
+                content: "new dirty content".into(),
+            },
+        );
+
+        assert!(!document.drain_compaction_slice());
+        assert!(document.history().is_live(id));
+        assert!(
+            matches!(document.history().block(id), Some(Block::Text { content }) if content == "new dirty content")
+        );
+    }
 
     #[test]
     fn sparse_tail_document_reports_virtual_prefix_rows() {
@@ -4547,17 +5903,7 @@ mod document_tests {
             content: "tail two".into(),
         });
         let records = source.history.descriptor_records();
-        let window_records = descriptor_records_with_ids(&records, 8);
-        let loaded = LoadedTranscript {
-            transcript: Transcript::new(),
-            descriptor_window: Some(LoadedDescriptorWindow {
-                start: smelt_store::TranscriptDescriptorIndex::new(8),
-                total_count: 10,
-                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records: window_records,
-            }),
-            session_dir: None,
-        };
+        let loaded = loaded_transcript_with_window(&records, 8, 10, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let loaded_rows = document.content.projection.estimated_total_rows(
             &lua,
@@ -4583,17 +5929,7 @@ mod document_tests {
             content: "tail two".into(),
         });
         let records = source.history.descriptor_records();
-        let window_records = descriptor_records_with_ids(&records, 8);
-        let loaded = LoadedTranscript {
-            transcript: Transcript::new(),
-            descriptor_window: Some(LoadedDescriptorWindow {
-                start: smelt_store::TranscriptDescriptorIndex::new(8),
-                total_count: 10,
-                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records: window_records,
-            }),
-            session_dir: None,
-        };
+        let loaded = loaded_transcript_with_window(&records, 8, 10, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         let offset = document.approximate_sparse_prefix_row_offset(80);
         let plan = document.plan_projection_measured(
@@ -4625,17 +5961,7 @@ mod document_tests {
             content: "trace tail".into(),
         });
         let records = source.history.descriptor_records();
-        let window_records = descriptor_records_with_ids(&records, 0);
-        let loaded = LoadedTranscript {
-            transcript: Transcript::new(),
-            descriptor_window: Some(LoadedDescriptorWindow {
-                start: smelt_store::TranscriptDescriptorIndex::new(0),
-                total_count: 2,
-                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records: window_records,
-            }),
-            session_dir: None,
-        };
+        let loaded = loaded_transcript_with_window(&records, 0, 2, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
         document.set_scroll_trace_enabled(true);
         document.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
@@ -5465,16 +6791,50 @@ mod document_tests {
     fn descriptor_records_with_ids(
         records: &[TranscriptBlockRecord],
         block_id_start: usize,
-    ) -> Vec<TranscriptBlockRecordWithId> {
-        records
+    ) -> Vec<StoredBlockWithId> {
+        let rows = records
             .iter()
-            .cloned()
             .enumerate()
-            .map(|(offset, record)| TranscriptBlockRecordWithId {
-                block_id: BlockId::new(block_id_start.saturating_add(offset) as u64),
-                record,
+            .map(|(offset, record)| {
+                smelt_core::transcript_model::transcript_descriptor_row_with_block_idx(
+                    block_id_start.saturating_add(offset),
+                    block_id_start.saturating_add(offset) as u64,
+                    record,
+                )
+                .expect("descriptor row")
             })
-            .collect()
+            .collect();
+        smelt_core::transcript_model::compact_descriptor_rows(block_id_start, rows)
+            .expect("compact descriptor rows")
+    }
+
+    fn loaded_transcript_with_window(
+        records: &[TranscriptBlockRecord],
+        start: usize,
+        total_count: usize,
+        session_dir: Option<PathBuf>,
+    ) -> LoadedTranscript {
+        let window_records = descriptor_records_with_ids(records, start);
+        let mut transcript = Transcript::new();
+        if session_dir.is_none() {
+            for (stored, record) in window_records.iter().zip(records.iter().cloned()) {
+                assert!(transcript.history.install_hydrated_record(
+                    stored.block_id,
+                    Arc::clone(&stored.stored),
+                    record,
+                ));
+            }
+        }
+        LoadedTranscript {
+            transcript,
+            descriptor_window: Some(LoadedDescriptorWindow {
+                start: smelt_store::TranscriptDescriptorIndex::new(start),
+                total_count,
+                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+                records: window_records,
+            }),
+            session_dir,
+        }
     }
 
     fn sparse_loaded_transcript(
@@ -5482,17 +6842,12 @@ mod document_tests {
         range: Range<usize>,
         session_dir: Option<PathBuf>,
     ) -> LoadedTranscript {
-        let window_records = descriptor_records_with_ids(&records[range.clone()], range.start);
-        LoadedTranscript {
-            transcript: Transcript::new(),
-            descriptor_window: Some(LoadedDescriptorWindow {
-                start: smelt_store::TranscriptDescriptorIndex::new(range.start),
-                total_count: records.len(),
-                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records: window_records,
-            }),
+        loaded_transcript_with_window(
+            &records[range.clone()],
+            range.start,
+            records.len(),
             session_dir,
-        }
+        )
     }
 
     fn exact_height_snapshot(
@@ -6555,16 +7910,13 @@ mod document_tests {
                     ..smelt_store::TranscriptDescriptorIndex::new(48)
             )
         );
+        assert_eq!(document.content.transcript.history.order.len(), 8);
+        let first = document.content.transcript.history.order[0];
         assert_eq!(
-            document
-                .content
-                .transcript
-                .history
-                .descriptor_records()
-                .len(),
-            8
+            document.content.transcript.history.first_line(first),
+            Some("block 40".to_string())
         );
-        assert!(active_history_contains(&document, "block 40"));
+        assert!(!document.content.transcript.history.is_materialized(first));
         assert!(!active_history_contains(&document, "block 90"));
     }
 
@@ -6742,8 +8094,16 @@ mod document_tests {
                     ..smelt_store::TranscriptDescriptorIndex::new(100)
             )
         );
-        assert!(active_history_contains(&document, "block 90"));
-        assert!(!active_history_contains(&document, "block 40"));
+        let active_first_lines = document
+            .content
+            .transcript
+            .history
+            .order
+            .iter()
+            .filter_map(|id| document.content.transcript.history.first_line(*id))
+            .collect::<Vec<_>>();
+        assert!(active_first_lines.iter().any(|line| line == "block 90"));
+        assert!(!active_first_lines.iter().any(|line| line == "block 40"));
     }
 }
 
@@ -6889,33 +8249,8 @@ pub(crate) struct TranscriptBlockRevealPosition {
     pub(crate) scroll_top: RowIndex,
 }
 
-fn transcript_block_role(block: &Block) -> &'static str {
-    block.kind()
-}
-
-fn descriptor_role(descriptor: &TranscriptBlockDescriptor) -> &'static str {
-    descriptor.kind()
-}
-
-fn descriptor_first_line(descriptor: &TranscriptBlockDescriptor) -> String {
-    descriptor
-        .row_estimate_text()
-        .map(BlockText::first_source_line)
-        .unwrap_or_default()
-}
-
-fn transcript_block_first_line(block: &Block) -> String {
-    block
-        .row_estimate_text()
-        .map(BlockText::first_source_line)
-        .unwrap_or_default()
-}
-
 fn transcript_raw_first_line(history: &BlockHistory, id: BlockId) -> String {
-    history
-        .row_estimate_text(id)
-        .map(BlockText::first_source_line)
-        .unwrap_or_default()
+    history.first_line(id).unwrap_or_default()
 }
 
 fn transcript_history_role(history: &BlockHistory, id: BlockId) -> &'static str {
@@ -8078,9 +9413,9 @@ mod tests {
         );
         let origins = document
             .history()
-            .descriptor_records()
-            .into_iter()
-            .map(|record| record.origin)
+            .order
+            .iter()
+            .map(|id| document.history().block_origin(*id))
             .collect::<Vec<_>>();
         assert_eq!(
             origins,

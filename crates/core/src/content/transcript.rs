@@ -230,7 +230,7 @@ impl Transcript {
             .rev()
             .find_map(|(index, id)| {
                 blocks_scanned = blocks_scanned.saturating_add(1);
-                matches!(self.history.block(*id), Some(Block::User { .. })).then_some(index)
+                (self.history.block_kind(*id) == Some("user")).then_some(index)
             });
         smelt_perf::perf::record_value(
             "transcript:last_user_block_index:blocks_scanned",
@@ -251,12 +251,16 @@ impl Transcript {
             .order
             .iter()
             .enumerate()
-            .filter_map(|(i, id)| match self.history.block(*id) {
-                Some(Block::User { text, .. }) => {
-                    text_bytes = text_bytes.saturating_add(text.len() as u64);
-                    Some((i, text.clone()))
+            .filter_map(|(i, id)| {
+                if self.history.block_kind(*id) != Some("user") {
+                    return None;
                 }
-                _ => None,
+                let text = match self.history.block(*id) {
+                    Some(Block::User { text, .. }) => text.clone(),
+                    _ => self.history.first_line(*id).unwrap_or_default(),
+                };
+                text_bytes = text_bytes.saturating_add(text.len() as u64);
+                Some((i, text))
             })
             .collect::<Vec<_>>();
         smelt_perf::perf::record_value("transcript:user_turns:users_cloned", turns.len() as u64);
@@ -268,7 +272,7 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript_model::ToolStatus;
+    use crate::transcript_model::{ToolStatus, TranscriptBlockRecord};
 
     fn tool_state() -> ToolState {
         ToolState {
@@ -447,11 +451,41 @@ mod tests {
     }
 
     #[test]
+    fn user_turn_navigation_uses_compact_stored_metadata() {
+        let mut t = Transcript::new();
+        t.history = BlockHistory::from_descriptor_records(vec![
+            TranscriptBlockRecord {
+                descriptor: TranscriptBlockDescriptor::User {
+                    text: "first line\nfull stored prompt".into(),
+                    image_labels: vec![],
+                    command: false,
+                },
+                content_hash: 0,
+                origin: Some(BlockOrigin::History(0)),
+                tool_state: None,
+            },
+            TranscriptBlockRecord {
+                descriptor: TranscriptBlockDescriptor::Text {
+                    content: "assistant".into(),
+                },
+                content_hash: 0,
+                origin: Some(BlockOrigin::History(1)),
+                tool_state: None,
+            },
+        ]);
+
+        assert_eq!(t.last_user_block_index(), Some(0));
+        assert_eq!(t.user_turns(), vec![(0, "first line".to_string())]);
+        assert!(t.history.block(t.history.order[0]).is_none());
+    }
+
+    #[test]
     fn last_user_block_index_searches_from_the_tail_without_cloning_text() {
         let mut t = Transcript::new();
         t.push(Block::User {
             text: "first".into(),
             image_labels: vec![],
+            command: false,
         });
         t.push(Block::Text {
             content: "assistant".into(),
@@ -459,6 +493,7 @@ mod tests {
         t.push(Block::User {
             text: "second".into(),
             image_labels: vec![],
+            command: false,
         });
         t.push(Block::Text {
             content: "tail".into(),

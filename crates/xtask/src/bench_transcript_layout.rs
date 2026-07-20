@@ -51,6 +51,8 @@ pub fn run(args: Vec<String>) {
     let mut resumed_wheel_frames: Option<String> = None;
     let mut resumed_wheel_ticks: Option<String> = None;
     let mut hot_path = false;
+    let mut active_memory = false;
+    let mut active_memory_bytes: Option<String> = None;
     let mut hot_path_history: Option<String> = None;
     let mut hot_path_item_bytes: Option<String> = None;
     let mut no_warmup = false;
@@ -85,13 +87,22 @@ pub fn run(args: Vec<String>) {
                     Some(take_positive_usize_arg(&mut iter, "--resumed-wheel-ticks"));
             }
             "--save-request" => hot_path = true,
+            "--active-memory" => active_memory = true,
+            "--active-memory-bytes" => {
+                active_memory = true;
+                active_memory_bytes =
+                    Some(take_positive_usize_arg(&mut iter, "--active-memory-bytes"));
+            }
             "--scale-500mb" => {
                 resumed_wheel = true;
                 search = true;
                 resume = true;
+                active_memory = true;
                 no_warmup = true;
-                search_bytes = Some((500usize * 1024 * 1024).to_string());
-                resume_bytes = Some((500usize * 1024 * 1024).to_string());
+                let bytes = (500usize * 1024 * 1024).to_string();
+                search_bytes = Some(bytes.clone());
+                resume_bytes = Some(bytes.clone());
+                active_memory_bytes = Some(bytes);
             }
             "--no-warmup" => no_warmup = true,
             "--save-request-history" => {
@@ -205,10 +216,26 @@ pub fn run(args: Vec<String>) {
             env,
         );
     }
+    if active_memory {
+        let mut env = Vec::new();
+        if let Some(bytes) = active_memory_bytes {
+            env.push(("SMELT_TRANSCRIPT_ACTIVE_MEMORY_BYTES", bytes));
+        }
+        eprintln!(
+            "running active transcript memory benchmark: profile={}",
+            if release { "release" } else { "test/debug" },
+        );
+        run_tui_bench(
+            "bench-transcript-active-memory",
+            "transcript_active_memory_benchmark_suite",
+            release,
+            env,
+        );
+    }
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--save-request] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--save-request] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -224,6 +251,10 @@ fn print_usage() {
     eprintln!(
         "--resumed-wheel-ticks N sets wheel events queued per rendered frame; default is 24."
     );
+    eprintln!(
+        "--active-memory runs the receipt-compacted active-session retained-memory benchmark."
+    );
+    eprintln!("--active-memory-bytes N sets its generated transcript size; default is 50 MiB.");
     eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
     eprintln!(
         "--save-request-history N sets its generated hot-path history length; default is 1024."

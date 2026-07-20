@@ -593,12 +593,12 @@ mod tests {
         assert_eq!(descriptor_window.records.len(), 40);
         assert_eq!(descriptor_window.records[0].block_id.get(), 160);
         assert_eq!(
-            descriptor_window.records[0].record.origin,
+            descriptor_window.records[0].stored.origin,
             Some(smelt_core::BlockOrigin::History(160))
         );
         assert_eq!(descriptor_window.records[39].block_id.get(), 199);
         assert_eq!(
-            descriptor_window.records[39].record.origin,
+            descriptor_window.records[39].stored.origin,
             Some(smelt_core::BlockOrigin::History(199))
         );
     }
@@ -2144,16 +2144,27 @@ impl TuiApp {
     }
 
     fn suppress_duplicate_carried_tail_before(&mut self, index: usize) -> usize {
-        let history = self.session_document.transcript.history();
-        if index == 0 || index >= history.order.len() {
+        let (prev_id, next_id) = {
+            let history = self.session_document.transcript.history();
+            if index == 0 || index >= history.order.len() {
+                return index;
+            }
+            (history.order[index - 1], history.order[index])
+        };
+        let ids = [prev_id, next_id];
+        if !self.session_document.transcript.pin_operation_blocks(&ids) {
             return index;
         }
-        let prev_id = history.order[index - 1];
-        let next_id = history.order[index];
-        let duplicate = match (history.block(prev_id), history.block(next_id)) {
-            (Some(prev), Some(next)) => checkpoint_suffix_blocks_match(prev, next),
-            _ => false,
+        let duplicate = {
+            let history = self.session_document.transcript.history();
+            match (history.block(prev_id), history.block(next_id)) {
+                (Some(prev), Some(next)) => checkpoint_suffix_blocks_match(prev, next),
+                _ => false,
+            }
         };
+        self.session_document
+            .transcript
+            .unpin_operation_blocks(&ids);
         if duplicate {
             let result =
                 self.apply_session_document_mutation(crate::app::session_document::SessionMutation::RemoveUnoriginatedTranscriptBlockAt {
@@ -2356,42 +2367,64 @@ impl TuiApp {
         &mut self,
         block_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
-        let turns = self.user_turns();
-        let turn_text = turns
-            .iter()
-            .find(|(i, _)| *i == block_idx)
-            .map(|(_, t)| t.clone());
+        let target_id = self
+            .session_document
+            .transcript
+            .history()
+            .order
+            .get(block_idx)
+            .copied()?;
+        let target_ids = [target_id];
+        if !self
+            .session_document
+            .transcript
+            .pin_operation_blocks(&target_ids)
+        {
+            smelt_perf::perf::record_value("rewind:target_hydration_failure", 1);
+            self.notify_error("cannot load this transcript block for rewind".into());
+            return None;
+        }
+        let turn_text = match self.session_document.transcript.history().block(target_id) {
+            Some(Block::User { text, .. }) => Some(text.clone()),
+            _ => None,
+        };
+        self.session_document
+            .transcript
+            .unpin_operation_blocks(&target_ids);
 
-        let hist_idx = if self.session_document.live_session.is_some() {
-            match self
-                .session_document
-                .transcript
-                .history()
-                .block_origin_at(block_idx)
-            {
-                Some(smelt_core::BlockOrigin::History(history_idx)) => history_idx,
-                _ => {
-                    smelt_perf::perf::record_value("rewind:live_missing_history_origin", 1);
-                    self.notify_error("cannot rewind this transcript block".into());
-                    return None;
-                }
-            }
-        } else {
-            self.ensure_live_session_materialized();
-            let user_turns_to_keep = turns.iter().filter(|(i, _)| *i < block_idx).count();
-            let mut user_count = 0;
-            let mut hist_idx = 0;
-            for (i, item) in self.core.session.history.iter().enumerate() {
-                if matches!(item, HistoryItem::User { .. }) {
-                    user_count += 1;
-                    if user_count > user_turns_to_keep {
-                        hist_idx = i;
-                        break;
+        let hist_idx = match self
+            .session_document
+            .transcript
+            .history()
+            .block_origin_at(block_idx)
+        {
+            Some(smelt_core::BlockOrigin::History(history_idx)) => history_idx,
+            _ if self.session_document.live_session.is_none() => {
+                self.ensure_live_session_materialized();
+                let user_turns_to_keep = self
+                    .user_turns()
+                    .iter()
+                    .filter(|(i, _)| *i < block_idx)
+                    .count();
+                let mut user_count = 0;
+                let mut history_index = 0;
+                for (i, item) in self.core.session.history.iter().enumerate() {
+                    if matches!(item, HistoryItem::User { .. }) {
+                        user_count += 1;
+                        if user_count > user_turns_to_keep {
+                            history_index = i;
+                            break;
+                        }
                     }
+                    history_index = i + 1;
                 }
-                hist_idx = i + 1;
+                history_index
             }
-            hist_idx
+            _ => {
+                smelt_perf::perf::record_value("rewind:live_missing_history_origin", 1);
+                self.notify_error("cannot rewind this transcript block".into());
+                return None;
+            }
         };
 
         let rewind_item = self.session_history_range(hist_idx..hist_idx.saturating_add(1));
@@ -4126,6 +4159,116 @@ mod checkpoint_tests {
         assert_eq!(app.app.core.session.context_tokens, Some(50));
         assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));
         assert_eq!(app.app.core.session.context_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn sparse_rewind_hydrates_exact_multiline_target_and_persists_the_same_prefix() {
+        const TARGET_HISTORY_INDEX: usize = 20;
+        let expected = "exact first line\nexact second line\nexact final line";
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = (0usize..600)
+            .map(|index| {
+                if index.is_multiple_of(2) {
+                    user(if index == TARGET_HISTORY_INDEX {
+                        expected
+                    } else {
+                        "ordinary user turn"
+                    })
+                } else {
+                    assistant("ordinary assistant turn")
+                }
+            })
+            .collect();
+        app.app.restore_screen();
+        let target_id = app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .copied()
+            .find(|id| {
+                app.app
+                    .session_document
+                    .transcript
+                    .history()
+                    .block_origin(*id)
+                    == Some(smelt_core::BlockOrigin::History(TARGET_HISTORY_INDEX))
+                    && app
+                        .app
+                        .session_document
+                        .transcript
+                        .history()
+                        .block_kind(*id)
+                        == Some("user")
+            })
+            .expect("rewind target block");
+        app.app.save_session_and_flush();
+
+        let session_dir = session::dir_for(&app.app.core.session);
+        let loaded = load_transcript_tail_from_sqlite_dir(session_dir.clone(), 100, 32)
+            .expect("load sparse transcript");
+        app.app.clear_transcript();
+        app.app
+            .session_document
+            .transcript
+            .replace_loaded_transcript(loaded);
+        assert!(app
+            .app
+            .session_document
+            .transcript
+            .activate_descriptor_window_for_block_idx(100, target_id.get(), 32));
+        app.app.session_document.transcript.set_memory_budget(
+            crate::app::transcript::TranscriptMemoryBudget {
+                hydrated_blocks: 1,
+                ..Default::default()
+            },
+        );
+        assert!(!app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .is_materialized(target_id));
+        let target_index = app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .position(|id| *id == target_id)
+            .expect("target in active descriptor window");
+
+        let restored = app
+            .app
+            .rewind_to(target_index)
+            .expect("rewind stored target");
+        assert_eq!(restored.0, expected);
+        assert!(app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .all(|id| {
+                app.app
+                    .session_document
+                    .transcript
+                    .history()
+                    .block_origin(*id)
+                    .is_none_or(|origin| {
+                        !matches!(origin, smelt_core::BlockOrigin::History(index) if index >= TARGET_HISTORY_INDEX)
+                    })
+            }));
+
+        app.app.save_session_and_flush();
+        let head = smelt_store::SessionReader::open_existing(&session_dir)
+            .and_then(|reader| reader.store_head())
+            .expect("read rewound store head");
+        assert_eq!(head.history_len.get() as usize, TARGET_HISTORY_INDEX);
     }
 
     #[test]

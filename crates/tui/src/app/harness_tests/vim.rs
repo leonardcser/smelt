@@ -1,18 +1,33 @@
 use super::*;
 
-fn user_blocks(app: &TestApp) -> Vec<(String, Vec<String>)> {
-    let history = app.app.session_document.transcript.history();
-    history
-        .order
-        .iter()
-        .filter_map(|id| history.block(*id))
-        .filter_map(|block| match block {
-            smelt_core::transcript_model::Block::User {
-                text, image_labels, ..
-            } => Some((text.clone(), image_labels.clone())),
-            _ => None,
-        })
-        .collect()
+fn user_blocks(app: &mut TestApp) -> Vec<(String, Vec<String>)> {
+    let ids = app.app.session_document.transcript.history().order.clone();
+    assert!(
+        app.app
+            .session_document
+            .transcript
+            .pin_operation_blocks(&ids),
+        "test inspection should hydrate canonical transcript blocks"
+    );
+    let blocks = {
+        let history = app.app.session_document.transcript.history();
+        history
+            .order
+            .iter()
+            .filter_map(|id| history.block(*id))
+            .filter_map(|block| match block {
+                smelt_core::transcript_model::Block::User {
+                    text, image_labels, ..
+                } => Some((text.clone(), image_labels.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    app.app
+        .session_document
+        .transcript
+        .unpin_operation_blocks(&ids);
+    blocks
 }
 
 fn insert_image(app: &mut TestApp, label: &str, data_url: &str) {
@@ -76,7 +91,7 @@ fn vim_insert_double_esc_rewinds_active_user_turn_before_output() {
         "second Esc rewinds the active turn"
     );
     assert_eq!(after_second.prompt_text, "wrong prompt");
-    assert!(user_blocks(&app).is_empty());
+    assert!(user_blocks(&mut app).is_empty());
 }
 
 #[test]
@@ -96,7 +111,10 @@ fn vim_insert_double_esc_only_cancels_after_assistant_output() {
     let after_second = app.state();
     assert!(!after_second.agent_running, "second Esc cancels the agent");
     assert_eq!(after_second.prompt_text, "");
-    assert_eq!(user_blocks(&app), vec![("keep prompt".to_string(), vec![])]);
+    assert_eq!(
+        user_blocks(&mut app),
+        vec![("keep prompt".to_string(), vec![])]
+    );
 }
 
 #[test]
@@ -323,7 +341,7 @@ fn vim_visual_enter_submits_selection_only() {
 
     app.press(KeyCode::Enter);
 
-    let blocks = user_blocks(&app);
+    let blocks = user_blocks(&mut app);
     assert_eq!(blocks, vec![("beta".to_string(), vec![])]);
     assert_eq!(app.state().prompt_text, "alpha  gamma");
     assert_eq!(app.state().vim_mode, VimMode::Normal);
@@ -340,7 +358,7 @@ fn vim_visual_line_enter_submits_selected_lines_only() {
 
     app.press(KeyCode::Enter);
 
-    let blocks = user_blocks(&app);
+    let blocks = user_blocks(&mut app);
     assert_eq!(blocks, vec![("two".to_string(), vec![])]);
     assert_eq!(app.state().prompt_text, "one\nthree");
     assert_eq!(app.state().vim_mode, VimMode::Normal);
@@ -358,7 +376,7 @@ fn vim_visual_line_enter_carries_only_selected_attachments() {
 
     app.press(KeyCode::Enter);
 
-    let blocks = user_blocks(&app);
+    let blocks = user_blocks(&mut app);
     assert_eq!(
         blocks,
         vec![(

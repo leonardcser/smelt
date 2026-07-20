@@ -1497,9 +1497,16 @@ fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
         "test setup should leave tail-follow"
     );
 
+    let mut previous_scroll = app.app.transcript_win().scroll_top();
     for _ in 0..200 {
         wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
         app.render_silent();
+        let current_scroll = app.app.transcript_win().scroll_top();
+        assert!(
+            current_scroll >= previous_scroll,
+            "downward wheel input should never move a sparse viewport backward: {previous_scroll} -> {current_scroll}"
+        );
+        previous_scroll = current_scroll;
         if app.app.transcript_win().is_following_tail() {
             break;
         }
@@ -2544,9 +2551,9 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         "next user target was not revealed in the viewport: target={:?}, lines={lines:?}",
         next.first_line
     );
-    assert!(
-        next.descriptor_index >= previous.descriptor_index,
-        "next user reveal should not move backward by descriptor identity: previous={previous:?}, next={next:?}"
+    assert_eq!(
+        next_marker, "record-0300",
+        "next user reveal should advance from the sparse search target: next={next:?}"
     );
 }
 
@@ -3211,7 +3218,8 @@ fn transcript_drag_autoscroll_bottom_stops_at_real_bottom() {
         .saturating_sub(RowIndex::from(viewport_rows));
     assert!(
         app.app.transcript_win().scroll_top() >= max_scroll,
-        "G should reach the real transcript bottom before testing drag boundary"
+        "G should reach the real transcript bottom before testing drag boundary: scroll={}, max_scroll={max_scroll}, state={state:?}",
+        app.app.transcript_win().scroll_top(),
     );
 
     start_transcript_edge_drag(&mut app, TranscriptDragEdge::Bottom);

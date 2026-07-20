@@ -157,7 +157,7 @@ fn ordered_prepare_request_paints_transient_streaming_state() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     assert!(
         app.inject_host_call(engine::HostCall::PrepareRequest {
-            messages: Vec::new(),
+            messages: engine::PreparedRequestMessages::new(Vec::new(), 0),
             estimated_tokens: 0,
             reply: tx,
         })

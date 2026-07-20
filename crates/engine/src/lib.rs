@@ -602,7 +602,7 @@ mod tests {
         let (reply, _reply_rx) = tokio::sync::oneshot::channel();
         assert!(output_injector
             .send_host_call(HostCall::PrepareRequest {
-                messages: Vec::new(),
+                messages: PreparedRequestMessages::new(Vec::new(), 0),
                 estimated_tokens: 0,
                 reply,
             })
@@ -625,7 +625,7 @@ mod tests {
 
         assert!(host_tx
             .send(HostCall::PrepareRequest {
-                messages: Vec::new(),
+                messages: PreparedRequestMessages::new(Vec::new(), 0),
                 estimated_tokens: 0,
                 reply,
             })

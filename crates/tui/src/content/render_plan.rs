@@ -953,8 +953,15 @@ fn selector_matches(
     if let Some(terminal) = spec.selector.terminal {
         let terminal_state = history
             .tool_call_id(id)
-            .and_then(|call_id| history.tool_state(call_id))
-            .is_some_and(smelt_core::ToolState::is_terminal);
+            .and_then(|call_id| history.tool_status(call_id))
+            .is_some_and(|status| {
+                matches!(
+                    status,
+                    smelt_core::ToolStatus::Ok
+                        | smelt_core::ToolStatus::Err
+                        | smelt_core::ToolStatus::Denied
+                )
+            });
         if terminal_state != terminal {
             return false;
         }
@@ -990,8 +997,8 @@ fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Optio
         "status" if history.is_tool_draft(id) => Some("drafting".to_string()),
         "status" => history
             .tool_call_id(id)
-            .and_then(|call_id| history.tool_state(call_id))
-            .map(|state| state.status.label().to_string()),
+            .and_then(|call_id| history.tool_status(call_id))
+            .map(|status| status.label().to_string()),
         "event" | "event_type" | "process_id" | "exit_code" => history.process_field(id, field),
         field => field
             .strip_prefix("args.")

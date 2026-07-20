@@ -2560,3 +2560,278 @@ fn transcript_layout_hot_path_benchmark_suite() {
         );
     }
 }
+
+fn active_memory_bench_bytes() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_ACTIVE_MEMORY_BYTES", 50 * 1024 * 1024)
+}
+
+fn linux_memory_bytes(field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let value_kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))?
+        .split_ascii_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some(value_kib.saturating_mul(1024))
+}
+
+#[test]
+#[ignore = "manual active transcript retained-memory benchmark; run via `cargo xtask bench-transcript-layout --active-memory`"]
+fn transcript_active_memory_benchmark_suite() {
+    const BLOCK_BYTES: usize = 32 * 1024;
+    const SAVE_BATCH_BLOCKS: usize = 256;
+    const SEARCH_TARGET: &str = "active-memory-unique-search-target";
+
+    let target_bytes = active_memory_bench_bytes();
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    let process_start = smelt_perf::alloc::snapshot();
+    let started_at = std::time::Instant::now();
+    let body = "active transcript canonical payload with markdown wrapping and exact hydration. "
+        .repeat(BLOCK_BYTES / 72);
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(100, 32);
+    let mut generated_bytes = 0usize;
+    let mut block_count = 0usize;
+    let mut batch_count = 0usize;
+    let mut marker_written = false;
+
+    while generated_bytes < target_bytes {
+        let batch_end = block_count.saturating_add(SAVE_BATCH_BLOCKS);
+        while generated_bytes < target_bytes && block_count < batch_end {
+            let marker = if !marker_written && generated_bytes >= target_bytes / 2 {
+                marker_written = true;
+                SEARCH_TARGET
+            } else {
+                "ordinary-active-memory-block"
+            };
+            let content = format!("# Active block {block_count}\n\n{marker}\n\n{body}");
+            generated_bytes = generated_bytes.saturating_add(content.len());
+            app.app
+                .push_block(smelt_core::transcript_model::Block::Text { content });
+            block_count += 1;
+        }
+        save_bench_fixture(&mut app, "active memory");
+        while app.app.session_document.transcript.drain_compaction_slice() {}
+        batch_count += 1;
+    }
+    assert!(marker_written);
+    let seeded_ms = elapsed_ms(started_at.elapsed());
+    let after_compaction = app.app.session_document.transcript.memory_snapshot();
+    assert_eq!(after_compaction.live_blocks, 0);
+    assert_eq!(after_compaction.stored_blocks, block_count);
+    assert_eq!(after_compaction.hydrated_blocks, 0);
+    assert_eq!(
+        after_compaction.dematerialized_entries as usize,
+        block_count
+    );
+
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    app.app.transcript_win_mut().set_vim_enabled(true);
+    app.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+    let render_started_at = std::time::Instant::now();
+    app.render_silent();
+    let first_render_ms = elapsed_ms(render_started_at.elapsed());
+
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    let scroll_started_at = std::time::Instant::now();
+    for _ in 0..20 {
+        app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        app.render_silent();
+    }
+    let scroll_20_ms = elapsed_ms(scroll_started_at.elapsed());
+
+    let search_started_at = std::time::Instant::now();
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        crate::app::search::SearchDirection::Forward,
+        SEARCH_TARGET.to_string(),
+    );
+    app.render_silent();
+    let search_ms = elapsed_ms(search_started_at.elapsed());
+    let next_started_at = std::time::Instant::now();
+    app.type_char('n');
+    app.render_silent();
+    let next_ms = elapsed_ms(next_started_at.elapsed());
+
+    let churn_ids = app
+        .app
+        .session_document
+        .transcript
+        .history()
+        .order
+        .iter()
+        .copied()
+        .take(1_200)
+        .collect::<Vec<_>>();
+    let churn_started_at = std::time::Instant::now();
+    for id in &churn_ids {
+        assert!(app
+            .app
+            .session_document
+            .transcript
+            .ensure_hydrated_ids(&[*id]));
+    }
+    let hydration_churn_ms = elapsed_ms(churn_started_at.elapsed());
+    let reads_before_reuse = app
+        .app
+        .session_document
+        .transcript
+        .memory_snapshot()
+        .hydration_reads;
+    if let Some(id) = churn_ids.last() {
+        assert!(app
+            .app
+            .session_document
+            .transcript
+            .ensure_hydrated_ids(&[*id]));
+    }
+    let working_set_rereads = app
+        .app
+        .session_document
+        .transcript
+        .memory_snapshot()
+        .hydration_reads
+        .saturating_sub(reads_before_reuse);
+    assert_eq!(working_set_rereads, 0);
+
+    let memory = app.app.session_document.transcript.memory_snapshot();
+    let process_end = smelt_perf::alloc::snapshot();
+    let process_delta = smelt_perf::alloc::delta(process_start, process_end);
+    let hydrated_bytes = memory
+        .hydrated_block_bytes
+        .saturating_add(memory.hydrated_tool_state_bytes);
+    let rendered_bytes = memory
+        .layout_bytes
+        .saturating_add(memory.source_view_bytes)
+        .saturating_add(memory.height_index_bytes)
+        .saturating_add(memory.height_index_cache_bytes)
+        .saturating_add(memory.visible_rows_bytes)
+        .saturating_add(memory.full_rows_bytes);
+    assert_eq!(memory.live_block_bytes, 0);
+    assert_eq!(memory.live_tool_state_bytes, 0);
+    assert!(
+        hydrated_bytes
+            <= memory
+                .hydrated_budget_bytes
+                .saturating_add(memory.pinned_hydrated_bytes)
+                .saturating_add(memory.hydrated_oversize_debt_bytes),
+        "hydrated cache exceeded budget plus pins and oversize debt: {memory:?}"
+    );
+    assert!(
+        memory.descriptor_window_bytes
+            <= memory
+                .descriptor_budget_bytes
+                .saturating_add(memory.descriptor_oversize_debt_bytes),
+        "descriptor cache exceeded its measured bound: {memory:?}"
+    );
+    assert!(
+        rendered_bytes
+            <= memory
+                .rendered_budget_bytes
+                .saturating_add(memory.rendered_oversize_debt_bytes),
+        "render cache exceeded its measured bound: {memory:?}"
+    );
+    assert!(
+        memory.live_block_bytes.saturating_add(hydrated_bytes) < 64 * 1024 * 1024,
+        "full block content grew with committed transcript size: {memory:?}"
+    );
+    if target_bytes >= 50 * 1024 * 1024 {
+        assert!(
+            memory.evicted_entries > 0,
+            "default hydration budget never evicted"
+        );
+    }
+    if target_bytes >= 450 * 1024 * 1024 {
+        assert!(
+            memory.live_block_bytes.saturating_add(hydrated_bytes) < 50 * 1024 * 1024,
+            "500 MiB session retained a transcript-sized full-content copy: {memory:?}"
+        );
+    }
+
+    let report = serde_json::json!({
+        "type": "active_transcript_memory",
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "target_bytes": target_bytes,
+        "generated_bytes": generated_bytes,
+        "blocks": block_count,
+        "save_batches": batch_count,
+        "timings_ms": {
+            "seed_persist_compact": seeded_ms,
+            "first_render": first_render_ms,
+            "scroll_20": scroll_20_ms,
+            "search": search_ms,
+            "next": next_ms,
+            "hydration_churn": hydration_churn_ms,
+        },
+        "block_counts": {
+            "live": memory.live_blocks,
+            "stored": memory.stored_blocks,
+            "hydrated": memory.hydrated_blocks,
+        },
+        "budgets": {
+            "hydrated": memory.hydrated_budget_bytes,
+            "descriptor_windows": memory.descriptor_budget_bytes,
+            "rendered": memory.rendered_budget_bytes,
+        },
+        "retained_bytes": {
+            "live_blocks": memory.live_block_bytes,
+            "live_tool_states": memory.live_tool_state_bytes,
+            "hydrated_blocks": memory.hydrated_block_bytes,
+            "hydrated_tool_states": memory.hydrated_tool_state_bytes,
+            "compact_descriptors": memory.compact_descriptor_bytes,
+            "descriptor_windows": memory.descriptor_window_bytes,
+            "tool_state_metadata": memory.tool_state_metadata_bytes,
+            "origin_hash": memory.origin_hash_bytes,
+            "layouts": memory.layout_bytes,
+            "source_views": memory.source_view_bytes,
+            "active_height_index": memory.height_index_bytes,
+            "cached_height_indexes": memory.height_index_cache_bytes,
+            "visible_rows": memory.visible_rows_bytes,
+            "full_rows": memory.full_rows_bytes,
+            "rendered_total": rendered_bytes,
+        },
+        "pins": {
+            "hydrated_bytes": memory.pinned_hydrated_bytes,
+            "rendered_bytes": memory.pinned_rendered_bytes,
+        },
+        "oversize_debt_bytes": {
+            "hydrated": memory.hydrated_oversize_debt_bytes,
+            "descriptor_windows": memory.descriptor_oversize_debt_bytes,
+            "rendered": memory.rendered_oversize_debt_bytes,
+        },
+        "hydration": {
+            "reads": memory.hydration_reads,
+            "ranges": memory.hydration_ranges,
+            "bytes": memory.hydration_bytes,
+            "duration_us": memory.hydration_duration_us,
+            "working_set_rereads": working_set_rereads,
+        },
+        "eviction": {
+            "entries": memory.evicted_entries,
+            "bytes": memory.evicted_bytes,
+        },
+        "dematerialization": {
+            "entries": memory.dematerialized_entries,
+            "bytes": memory.dematerialized_bytes,
+        },
+        "allocator": {
+            "current_bytes_start": process_start.current_bytes,
+            "current_bytes_end": process_end.current_bytes,
+            "retained_delta_bytes": process_end.current_bytes as i64 - process_start.current_bytes as i64,
+            "allocated_bytes": process_delta.bytes_allocated,
+            "deallocated_bytes": process_delta.bytes_deallocated,
+        },
+        "process": {
+            "rss_bytes": linux_memory_bytes("VmRSS:"),
+            "peak_rss_bytes": linux_memory_bytes("VmHWM:"),
+        },
+    });
+    eprintln!("TRANSCRIPT_ACTIVE_MEMORY_JSON {report}");
+    smelt_perf::perf::set_enabled(false);
+}

@@ -136,6 +136,7 @@ impl TuiApp {
         did_work |= self.try_perform_scheduled_runtime_reconcile();
         did_work |= self.try_perform_scheduled_cwd_change();
         did_work |= self.try_perform_scheduled_lua_reload();
+        did_work |= self.session_document.transcript.drain_compaction_slice();
         did_work
     }
 

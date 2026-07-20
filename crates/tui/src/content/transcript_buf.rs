@@ -34,6 +34,8 @@ pub(crate) struct TranscriptProjection {
     renderer_generation: Option<u64>,
     renderer_cache_key: Option<u64>,
     inline_options: InlineOptions,
+    display_layout_budget: usize,
+    full_rows_budget: usize,
     #[cfg(test)]
     counters: TranscriptProjectionCounters,
 }
@@ -69,10 +71,32 @@ struct VisibleProjectionState {
     full_rows: Option<CachedRows>,
 }
 
-#[derive(Default)]
 struct MeasurementIndexStore {
     active: TranscriptHeightIndex,
     entries: Vec<DisplayRowIndexEntry>,
+    budget: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TranscriptRenderMemorySnapshot {
+    pub(crate) layout_bytes: usize,
+    pub(crate) source_view_bytes: usize,
+    pub(crate) pinned_layout_bytes: usize,
+    pub(crate) height_index_bytes: usize,
+    pub(crate) height_index_cache_bytes: usize,
+    pub(crate) visible_rows_bytes: usize,
+    pub(crate) full_rows_bytes: usize,
+    pub(crate) oversize_debt_bytes: usize,
+}
+
+impl Default for MeasurementIndexStore {
+    fn default() -> Self {
+        Self {
+            active: TranscriptHeightIndex::default(),
+            entries: Vec::new(),
+            budget: 2 * 1024 * 1024,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +138,12 @@ struct CachedRows {
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
     width: u16,
+}
+
+fn cached_rows_retained_bytes(rows: &Arc<Vec<String>>) -> usize {
+    rows.capacity()
+        .saturating_mul(std::mem::size_of::<String>())
+        .saturating_add(rows.iter().map(String::capacity).sum::<usize>())
 }
 
 #[derive(Clone, Copy)]
@@ -643,15 +673,58 @@ impl TranscriptHeightIndex {
     }
 }
 
+impl TranscriptHeightIndex {
+    fn retained_bytes(&self) -> usize {
+        self.nodes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<TranscriptHeightNode>())
+            .saturating_add(
+                self.prefix_rows
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<RowIndex>()),
+            )
+    }
+}
+
 impl MeasurementIndexStore {
     fn clear(&mut self) {
         self.active = TranscriptHeightIndex::default();
         self.entries.clear();
     }
 
+    fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+        self.enforce_budget();
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| {
+                std::mem::size_of::<DisplayRowIndexEntry>().saturating_add(
+                    entry
+                        .nodes
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<DisplayRowIndexNode>()),
+                )
+            })
+            .sum()
+    }
+
+    fn enforce_budget(&mut self) {
+        while self.retained_bytes() > self.budget && !self.entries.is_empty() {
+            self.entries.remove(0);
+        }
+        smelt_perf::perf::record_value(
+            "transcript:height_index_cache:retained_bytes",
+            self.retained_bytes() as u64,
+        );
+    }
+
     fn remember_active(&mut self) {
         if let Some(entry) = self.active.cache_entry() {
             upsert_row_index_entry(&mut self.entries, entry);
+            self.enforce_budget();
         }
     }
 }
@@ -935,6 +1008,12 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
     if let Some(text) = tool_output {
         return estimate_text_rows(text, width);
     }
+    if !history.is_materialized(id) {
+        let estimated_bytes = history.estimated_text_bytes(id);
+        if estimated_bytes > 0 {
+            return estimated_bytes.div_ceil(u64::from(width.max(1)));
+        }
+    }
     match history.row_estimate_text(id) {
         Some(BlockText::Plain(text)) => estimate_text_rows(text, width),
         Some(BlockText::Prefixed { prefix, text }) => {
@@ -1189,6 +1268,8 @@ impl TranscriptProjection {
             renderer_generation: None,
             renderer_cache_key: None,
             inline_options: InlineOptions::default(),
+            display_layout_budget: 12 * 1024 * 1024,
+            full_rows_budget: 2 * 1024 * 1024,
             #[cfg(test)]
             counters: TranscriptProjectionCounters::default(),
         }
@@ -1203,7 +1284,7 @@ impl TranscriptProjection {
         let policy_changed = policy != self.default_view_policy;
         if policy_changed {
             self.default_view_policy = policy;
-            self.display_layouts = DisplayModel::new();
+            self.reset_display_layouts();
             self.display_layouts_generation = u64::MAX;
             self.measurements.clear();
             self.clear_visible_state();
@@ -1238,12 +1319,78 @@ impl TranscriptProjection {
         &self.inline_options
     }
 
+    fn reset_display_layouts(&mut self) {
+        self.display_layouts = DisplayModel::new();
+        self.display_layouts.set_budget(self.display_layout_budget);
+    }
+
+    pub(crate) fn set_memory_budget(&mut self, bytes: usize) {
+        let auxiliary = bytes / 4;
+        self.display_layout_budget = bytes.saturating_sub(auxiliary);
+        self.display_layouts.set_budget(self.display_layout_budget);
+        self.measurements.set_budget(auxiliary / 2);
+        self.full_rows_budget = auxiliary.saturating_sub(auxiliary / 2);
+        if self
+            .visible
+            .full_rows
+            .as_ref()
+            .is_some_and(|cached| cached_rows_retained_bytes(&cached.rows) > self.full_rows_budget)
+        {
+            self.visible.full_rows = None;
+        }
+    }
+
+    pub(crate) fn memory_snapshot(&self) -> TranscriptRenderMemorySnapshot {
+        let display = self.display_layouts.memory_snapshot();
+        let height_index_bytes = self.measurements.active.retained_bytes();
+        let height_index_cache_bytes = self.measurements.retained_bytes();
+        let visible_rows_bytes = self
+            .visible
+            .block_layout
+            .capacity()
+            .saturating_mul(std::mem::size_of::<LayoutEntry>())
+            .saturating_add(
+                self.visible
+                    .row_anchors
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Option<ProjectionAnchor>>()),
+            );
+        let full_rows_bytes = self
+            .visible
+            .full_rows
+            .as_ref()
+            .map_or(0, |cached| cached_rows_retained_bytes(&cached.rows));
+        let retained_budgeted = display
+            .layout_bytes
+            .saturating_add(display.source_view_bytes)
+            .saturating_add(height_index_bytes)
+            .saturating_add(height_index_cache_bytes)
+            .saturating_add(visible_rows_bytes)
+            .saturating_add(full_rows_bytes);
+        let budget = self
+            .display_layout_budget
+            .saturating_add(self.measurements.budget)
+            .saturating_add(self.full_rows_budget);
+        TranscriptRenderMemorySnapshot {
+            layout_bytes: display.layout_bytes,
+            source_view_bytes: display.source_view_bytes,
+            pinned_layout_bytes: display.pinned_layout_bytes,
+            height_index_bytes,
+            height_index_cache_bytes,
+            visible_rows_bytes,
+            full_rows_bytes,
+            oversize_debt_bytes: retained_budgeted
+                .saturating_sub(budget)
+                .max(display.oversize_debt_bytes),
+        }
+    }
+
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
         if self.inline_options == options {
             return;
         }
         self.inline_options = options;
-        self.display_layouts = DisplayModel::new();
+        self.reset_display_layouts();
         self.display_layouts_generation = u64::MAX;
         self.measurements.clear();
         self.clear_visible_state();
@@ -1273,7 +1420,7 @@ impl TranscriptProjection {
         if !initialized {
             return false;
         }
-        self.display_layouts = DisplayModel::new();
+        self.reset_display_layouts();
         self.display_layouts_generation = u64::MAX;
         self.measurements.clear();
         self.clear_visible_state();
@@ -1342,6 +1489,11 @@ impl TranscriptProjection {
         node.estimated_height = estimate_node_height(history, &self.render_plan, index, node_key);
         node.exact_height = None;
         self.measurements.active.mark_prefix_dirty_from(index);
+    }
+
+    fn pin_display_node_range(&mut self, range: std::ops::Range<usize>) {
+        let ids = range.filter_map(|index| self.render_plan.node(index).map(RenderNode::id));
+        self.display_layouts.set_pinned_nodes(ids);
     }
 
     fn ensure_node_indices(
@@ -1657,6 +1809,30 @@ impl TranscriptProjection {
         (refined, changed_any)
     }
 
+    pub(crate) fn row_range_hydration_ids(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        rows: std::ops::Range<RowIndex>,
+    ) -> Vec<BlockId> {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env, history, width);
+        let mut ids = self
+            .measurements
+            .active
+            .node_range_for_rows(rows)
+            .flat_map(|index| {
+                self.render_plan
+                    .block_ids_for_node(index)
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable_by_key(|id| id.get());
+        ids.dedup();
+        ids
+    }
+
     pub(crate) fn exactify_rows_for_range(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -1692,6 +1868,11 @@ impl TranscriptProjection {
         }
 
         let missing = self.missing_node_indices();
+        self.display_layouts.set_pinned_nodes(
+            missing
+                .iter()
+                .filter_map(|index| self.render_plan.node(*index).map(RenderNode::id)),
+        );
         smelt_perf::perf::record_value(
             "transcript:rebuild_row_index:missing",
             missing.len() as u64,
@@ -2169,6 +2350,83 @@ impl TranscriptProjection {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn projection_hydration_ids(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        theme: &Theme,
+        scroll_target: ScrollTarget,
+        viewport_rows: u16,
+    ) -> (Vec<BlockId>, ProjectionPlan) {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        let anchor = match scroll_target {
+            ScrollTarget::Visible(ScrollAnchor::ReflowStableRow(row)) => {
+                self.stable_row_anchor_for(history, theme, row)
+            }
+            ScrollTarget::Visible(ScrollAnchor::ExactRow(_) | ScrollAnchor::Tail) => None,
+        };
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        let request = ProjectionRequest {
+            key: self.project_key(
+                width,
+                env.renderer_generation,
+                env.renderer_cache_key,
+                scroll_target,
+                viewport_rows,
+            ),
+            target: ResolvedProjectionTarget {
+                requested: scroll_target,
+                anchor,
+            },
+            viewport_rows,
+        };
+        let plan = self.plan_projection_from_prepared(history, theme, &request);
+        let mut ids = plan
+            .node_range()
+            .flat_map(|index| {
+                self.render_plan
+                    .block_ids_for_node(index)
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        if let Some(
+            ProjectionAnchor::RenderedBlockRow { id, .. }
+            | ProjectionAnchor::RenderedBlockDisplayOffset { id, .. },
+        ) = anchor
+        {
+            ids.push(id);
+        }
+        ids.sort_unstable_by_key(|id| id.get());
+        ids.dedup();
+        (ids, plan)
+    }
+
+    pub(crate) fn remeasure_projection_plan(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        theme: &Theme,
+        plan: ProjectionPlan,
+    ) -> ProjectionPlan {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, plan.key.width);
+        let request = ProjectionRequest {
+            key: self.project_key(
+                plan.key.width,
+                env.renderer_generation,
+                env.renderer_cache_key,
+                plan.target.requested,
+                plan.viewport_rows,
+            ),
+            target: plan.target,
+            viewport_rows: plan.viewport_rows,
+        };
+        self.plan_projection_progressive(env, history, theme, request)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn plan_projection_measured(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -2247,6 +2505,7 @@ impl TranscriptProjection {
         }
         let mut plan = self.plan_projection_from_prepared(history, theme, &request);
         for _ in 0..8 {
+            self.pin_display_node_range(plan.node_range());
             let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
             request.key = self.project_key(
                 request.key.width,
@@ -2264,6 +2523,7 @@ impl TranscriptProjection {
             }
             plan = refined;
         }
+        self.pin_display_node_range(plan.node_range());
         let _ = self.exactify_node_range(env, history, plan.node_range());
         request.key = self.project_key(
             request.key.width,
@@ -2765,11 +3025,16 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
+        let node_count = self.render_plan.len();
+        self.pin_display_node_range(0..node_count);
         self.rebuild_row_index(lua, history, width);
-        self.exact_block_layout(history)
+        let layout = self
+            .exact_block_layout(history)
             .into_iter()
             .map(|e| (e.id, e.start, e.rows))
-            .collect()
+            .collect();
+        self.display_layouts.set_pinned_nodes(std::iter::empty());
+        layout
     }
 
     pub(crate) fn materialize_search_layout(
@@ -2795,17 +3060,24 @@ impl TranscriptProjection {
         block_indices: &[u64],
     ) -> TranscriptSearchLayout {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
-        self.prepare_row_index_with_env(env, history, width);
-        let generation = self
-            .measurements
-            .active
-            .search_layout_hash(self.projection_generation);
+        self.prepare_row_index_with_env(env.clone(), history, width);
         let mut seen = HashSet::new();
         let indices = block_indices
             .iter()
             .filter_map(|idx| self.render_plan.index_for_block(BlockId::new(*idx)))
             .filter(|index| seen.insert(*index))
             .collect::<Vec<_>>();
+        self.display_layouts.set_pinned_nodes(
+            indices
+                .iter()
+                .filter_map(|index| self.render_plan.node(*index).map(RenderNode::id)),
+        );
+        let _ = self.exactify_node_indices(env, history, indices.clone());
+        self.measurements.remember_active();
+        let generation = self
+            .measurements
+            .active
+            .search_layout_hash(self.projection_generation);
         self.search_layout_for_node_indices(generation, history, indices)
     }
 
@@ -2952,14 +3224,30 @@ impl TranscriptProjection {
         self.measurements.active.refresh_prefix_rows();
         self.measurements.remember_active();
         let rows = Arc::new(rows);
-        self.visible.full_rows = Some(CachedRows {
-            rows: Arc::clone(&rows),
-            generation: gen,
-            renderer_generation,
-            renderer_cache_key,
-            presentation_generation: self.presentation.generation(),
-            width,
-        });
+        let retained = cached_rows_retained_bytes(&rows);
+        if retained <= self.full_rows_budget {
+            self.visible.full_rows = Some(CachedRows {
+                rows: Arc::clone(&rows),
+                generation: gen,
+                renderer_generation,
+                renderer_cache_key,
+                presentation_generation: self.presentation.generation(),
+                width,
+            });
+        } else {
+            self.visible.full_rows = None;
+        }
+        smelt_perf::perf::record_value(
+            "transcript:full_rows_cache:retained_bytes",
+            self.visible
+                .full_rows
+                .as_ref()
+                .map_or(0, |cached| cached_rows_retained_bytes(&cached.rows)) as u64,
+        );
+        smelt_perf::perf::record_value(
+            "transcript:full_rows_cache:oversize_transient_bytes",
+            retained.saturating_sub(self.full_rows_budget) as u64,
+        );
         rows
     }
 
@@ -4854,8 +5142,8 @@ mod tests {
         );
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.display_layouts, 0);
-        assert_eq!(counters.exact_height_measured_blocks, 0);
+        assert_eq!(counters.display_layouts, 2);
+        assert_eq!(counters.exact_height_measured_blocks, 2);
     }
 
     #[test]

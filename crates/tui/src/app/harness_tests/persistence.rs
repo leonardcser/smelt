@@ -687,6 +687,63 @@ fn sparse_fork_publishes_a_complete_destination() {
 }
 
 #[test]
+fn large_sparse_fork_preserves_every_canonical_history_and_descriptor_row() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..700 {
+            app.app
+                .session_append_history(HistoryItem::user(Content::text(format!(
+                    "fork source row {index}\nexact suffix {index}"
+                ))));
+        }
+        app.app.restore_screen();
+        app.app.save_session_and_flush();
+        app.app.core.session.id.clone()
+    };
+    let source_dir = smelt_core::session::dir_for_id(&session_id);
+    let source = smelt_store::SessionReader::open_existing(&source_dir).unwrap();
+    let source_history = source.read_history_items_range(0..700).unwrap();
+    let source_descriptors = source.read_all_transcript_descriptor_records().unwrap();
+    assert_eq!(source_history.len(), 700);
+    assert_eq!(source_descriptors.len(), 700);
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.load_session_by_id(&session_id);
+    resumed.app.session_document.transcript.set_memory_budget(
+        crate::app::transcript::TranscriptMemoryBudget {
+            hydrated_blocks: 1,
+            ..Default::default()
+        },
+    );
+    resumed.render_silent();
+    assert!(
+        resumed
+            .app
+            .session_document
+            .transcript
+            .memory_snapshot()
+            .hydrated_blocks
+            < source_descriptors.len()
+    );
+
+    resumed.app.fork_session();
+
+    let fork_id = resumed.app.core.session.id.clone();
+    assert_ne!(fork_id, session_id);
+    let fork = smelt_store::SessionReader::open_existing(smelt_core::session::dir_for_id(&fork_id))
+        .unwrap();
+    assert_eq!(
+        fork.read_history_items_range(0..700).unwrap(),
+        source_history
+    );
+    assert_eq!(
+        fork.read_all_transcript_descriptor_records().unwrap(),
+        source_descriptors
+    );
+}
+
+#[test]
 fn sparse_fork_does_not_copy_unreferenced_legacy_blobs() {
     let guard = test_home_guard();
     let session_id = {

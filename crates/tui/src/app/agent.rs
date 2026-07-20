@@ -205,7 +205,7 @@ impl TuiApp {
             let history = self.model_history_source();
             let submitted_history_idx = self.session_history_len().checked_sub(1)?;
             return self.dispatch_prepared_turn(PreparedTurn {
-                input: protocol::StartTurnInput::user(content, None),
+                input: protocol::StartTurnInput::user(content),
                 history,
                 kind: smelt_store::TurnKind::Continuation,
                 submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),

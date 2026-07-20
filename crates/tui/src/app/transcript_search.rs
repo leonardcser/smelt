@@ -32,7 +32,7 @@ pub(super) struct TranscriptSearchIndex {
 }
 
 pub(super) struct TranscriptSearchStore {
-    session_id: String,
+    session_dir: std::path::PathBuf,
     db: smelt_store::SessionReader,
 }
 
@@ -268,16 +268,21 @@ impl TuiApp {
     }
 
     fn transcript_search_store(&mut self) -> Option<&smelt_store::SessionReader> {
-        let session_id = self.core.session.id.clone();
+        let session_dir = self
+            .session_document
+            .transcript
+            .session_dir()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| smelt_core::session::dir_for(&self.core.session));
         if self
             .search
             .transcript_store
             .as_ref()
-            .is_none_or(|store| store.session_id != session_id)
+            .is_none_or(|store| store.session_dir != session_dir)
         {
-            let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
-            let db = smelt_store::SessionReader::open_database(db_path).ok()?;
-            self.search.transcript_store = Some(TranscriptSearchStore { session_id, db });
+            let db =
+                smelt_store::SessionReader::open_database(session_dir.join("session.db")).ok()?;
+            self.search.transcript_store = Some(TranscriptSearchStore { session_dir, db });
         }
         self.search.transcript_store.as_ref().map(|store| &store.db)
     }
@@ -1115,5 +1120,131 @@ mod tests {
             trigrams,
         };
         assert_eq!(index.candidate_entries("absent", Some(&[8])), vec![0]);
+    }
+
+    #[test]
+    fn sparse_search_hydrates_only_the_match_and_rereads_after_eviction() {
+        use crate::app::test_harness::TestApp;
+        use crate::app::transcript::TranscriptMemoryBudget;
+        use crate::app::{AppFocus, TRANSCRIPT_WIN};
+        use crate::smelt_edit::VimMode;
+
+        const MATCH_INDEX: usize = 42;
+        const QUERY: &str = "phase-five-unique-search-target";
+
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.app.handle_resize(100, 32);
+        for index in 0..700 {
+            let marker = if index == MATCH_INDEX {
+                QUERY
+            } else {
+                "ordinary"
+            };
+            app.app
+                .push_block(smelt_core::transcript_model::Block::Text {
+                    content: format!("search block {index}: {marker}"),
+                });
+        }
+        let match_id = app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .copied()
+            .find(|id| {
+                app.app
+                    .session_document
+                    .transcript
+                    .history()
+                    .block(*id)
+                    .and_then(smelt_core::transcript_model::Block::raw_text)
+                    .is_some_and(|text| text.contains(QUERY))
+            })
+            .expect("search target block");
+        app.app.save_session_and_flush();
+        let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+        let loaded =
+            crate::app::history::load_transcript_tail_from_sqlite_dir(session_dir, 100, 32)
+                .expect("load sparse transcript");
+        app.app.clear_transcript();
+        app.app
+            .session_document
+            .transcript
+            .replace_loaded_transcript(loaded);
+        app.app
+            .session_document
+            .transcript
+            .set_memory_budget(TranscriptMemoryBudget {
+                hydrated_blocks: 1,
+                ..Default::default()
+            });
+        app.app.app_focus = AppFocus::Content;
+        app.app.ui.set_focus(TRANSCRIPT_WIN);
+        app.app.transcript_win_mut().set_vim_enabled(true);
+        app.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+        app.render_silent();
+
+        app.app
+            .submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
+        app.render_silent();
+        let first = app.app.session_document.transcript.memory_snapshot();
+        assert!(first.hydration_reads > 0);
+        assert!(
+            first.hydration_reads <= 64,
+            "candidate verification exceeded one viewport-sized neighborhood: {first:?}"
+        );
+        assert!(app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .filter_map(|id| app.app.session_document.transcript.history().block(*id))
+            .filter_map(smelt_core::transcript_model::Block::raw_text)
+            .any(|text| text.contains(QUERY)));
+
+        app.render_silent();
+        assert_eq!(
+            app.app
+                .session_document
+                .transcript
+                .memory_snapshot()
+                .hydration_reads,
+            first.hydration_reads,
+            "render reread a block that remained in the viewport working set"
+        );
+
+        assert!(app.app.reveal_transcript_descriptor_block(699, 0, true));
+        app.render_silent();
+        assert!(!app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .is_materialized(match_id));
+        let before_reveal = app.app.session_document.transcript.memory_snapshot();
+
+        app.app
+            .submit_search(TRANSCRIPT_WIN, SearchDirection::Forward, QUERY.to_string());
+        app.render_silent();
+        let revealed = app.app.session_document.transcript.memory_snapshot();
+        assert!(revealed.hydration_reads > before_reveal.hydration_reads);
+        assert!(
+            revealed.hydration_reads - before_reveal.hydration_reads <= 64,
+            "search reveal exceeded one viewport-sized neighborhood: before={before_reveal:?}, after={revealed:?}"
+        );
+        assert!(app
+            .app
+            .session_document
+            .transcript
+            .history()
+            .order
+            .iter()
+            .filter_map(|id| app.app.session_document.transcript.history().block(*id))
+            .filter_map(smelt_core::transcript_model::Block::raw_text)
+            .any(|text| text.contains(QUERY)));
     }
 }
