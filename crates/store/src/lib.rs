@@ -1,5 +1,6 @@
 mod access;
 mod blob_staging;
+mod catalog;
 mod compression;
 mod db;
 mod error;
@@ -14,6 +15,11 @@ mod session_commit;
 pub use access::{
     cleanup_abandoned_session_artifacts, ArtifactCleanupReport, LegacyAttachmentBlob,
     OwnedSessionWriter, SessionMaintenance, SessionReader,
+};
+pub use catalog::{
+    archive_corrupt_catalog, rebuild_catalog, Catalog, CatalogAvailability, CatalogCursor,
+    CatalogMetadata, CatalogPage, CatalogQuery, CatalogReader, CatalogReconcileLock,
+    CatalogSession, CATALOG_SCHEMA_VERSION, MAX_CATALOG_PAGE_SIZE,
 };
 pub use compression::{
     benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,

@@ -18,6 +18,13 @@ pub enum SessionStoreError {
     MissingDatabase {
         id: String,
     },
+    InvalidListQuery {
+        message: String,
+    },
+    CatalogUnavailable {
+        kind: String,
+        summary: String,
+    },
     SymlinkNotAllowed {
         operation: &'static str,
         path: String,
@@ -57,12 +64,14 @@ pub enum SessionStoreError {
 }
 
 impl SessionStoreError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::InvalidSessionId { .. } => "invalid_session_id",
             Self::SessionNotFound { .. } => "session_not_found",
             Self::AmbiguousPrefix { .. } => "ambiguous_prefix",
             Self::MissingDatabase { .. } => "missing_database",
+            Self::InvalidListQuery { .. } => "invalid_list_query",
+            Self::CatalogUnavailable { kind, .. } => kind,
             Self::SymlinkNotAllowed { .. } => "symlink_not_allowed",
             Self::ReadOnlyOwnerConflict { .. } => "read_only_owner_conflict",
             Self::Busy { .. } => "busy",
@@ -92,6 +101,10 @@ impl fmt::Display for SessionStoreError {
             Self::MissingDatabase { id } => {
                 write!(f, "session {id} has no sqlite database")
             }
+            Self::InvalidListQuery { message } => {
+                write!(f, "invalid session list query: {message}")
+            }
+            Self::CatalogUnavailable { summary, .. } => f.write_str(summary),
             Self::SymlinkNotAllowed { operation, path } => {
                 write!(f, "cannot {operation} symlinked session path {path}")
             }

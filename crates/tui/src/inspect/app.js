@@ -14,8 +14,6 @@ const state = {
   page: "overview",
   search: "",
   group: "project",
-  sort: "updated",
-  status: "all",
   conversationLimit: 100,
   sidebarLimit: 200,
 };
@@ -49,8 +47,6 @@ function wireEvents() {
   });
   sidebar.addEventListener("change", (event) => {
     if (event.target.id === "session-group") state.group = event.target.value;
-    if (event.target.id === "session-sort") state.sort = event.target.value;
-    if (event.target.id === "session-status") state.status = event.target.value;
     state.sidebarLimit = 200;
     renderSidebar();
   });
@@ -131,11 +127,33 @@ function wireEvents() {
 
 async function loadSessions() {
   try {
-    const response = await fetch("/api/sessions");
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    state.sessions = await response.json();
+    const sessions = [];
+    let cursor = null;
+    let catalog = null;
+    do {
+      const params = new URLSearchParams({ limit: "200" });
+      if (cursor) {
+        params.set("cursor_updated_at_ms", String(cursor.updated_at_ms));
+        params.set("cursor_id", cursor.id);
+      }
+      const response = await fetch(`/api/sessions?${params}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const page = await response.json();
+      sessions.push(...page.sessions);
+      cursor = page.next_cursor;
+      catalog = page.catalog;
+    } while (cursor);
+    state.sessions = sessions;
     state.sessions.forEach(indexSessionSearchText);
     renderSidebar();
+    if (state.sessions.length === 0 && catalog?.state === "reconciling") {
+      sidebar.innerHTML = `<div class="empty">Session catalog is rebuilding. Reload shortly.</div>`;
+      return;
+    }
+    if (state.sessions.length === 0 && catalog?.state === "degraded") {
+      sidebar.innerHTML = `<div class="empty">Session catalog is unavailable.</div>`;
+      return;
+    }
     state.sessions.slice(0, 3).forEach((session) => prefetchSession(session.id));
   } catch (error) {
     sidebar.innerHTML = `<div class="empty">Failed to load sessions: ${escapeHtml(error.message)}</div>`;
@@ -285,20 +303,10 @@ function renderSidebar() {
     <div class="sidebar-tools">
       <label class="search-field">${icon("search")}<input type="search" id="session-search" placeholder="Search sessions…" value="${attr(state.search)}"></label>
       <div class="controls">
-        <select id="session-status">
-          ${option("all", "All", state.status)}
-          ${option("errors", "Errors", state.status)}
-          ${option("active", "Active", state.status)}
-        </select>
         <select id="session-group">
           ${option("project", "Project", state.group)}
           ${option("mode", "Mode", state.group)}
           ${option("none", "No group", state.group)}
-        </select>
-        <select id="session-sort">
-          ${option("updated", "Updated", state.sort)}
-          ${option("requests", "Requests", state.sort)}
-          ${option("cost", "Cost", state.sort)}
         </select>
         <span class="sidebar-count">${fmtNumber(visible.length)} / ${fmtNumber(sessions.length)}</span>
       </div>
@@ -315,18 +323,8 @@ function option(value, label, selected) {
 function filteredSessions() {
   const q = state.search.toLowerCase().trim();
   return [...state.sessions]
-    .filter((session) => {
-      const stats = session.request_stats || {};
-      if (state.status === "errors" && !stats.error_count) return false;
-      if (state.status === "active" && !stats.request_count) return false;
-      if (!q) return true;
-      return getSessionSearchText(session).includes(q);
-    })
-    .sort((a, b) => {
-      if (state.sort === "requests") return (b.request_stats?.request_count || 0) - (a.request_stats?.request_count || 0);
-      if (state.sort === "cost") return (b.request_stats?.total_cost_usd || 0) - (a.request_stats?.total_cost_usd || 0);
-      return (b.updated_at_ms || 0) - (a.updated_at_ms || 0);
-    });
+    .filter((session) => !q || getSessionSearchText(session).includes(q))
+    .sort((a, b) => (b.updated_at_ms || 0) - (a.updated_at_ms || 0));
 }
 
 function renderGroups(sessions) {
@@ -342,7 +340,6 @@ function renderGroups(sessions) {
 }
 
 function renderSessionItem(session) {
-  const stats = session.request_stats || {};
   const active = session.id === state.selectedId ? "active" : "";
   const title = session.title || session.slug || shortText(session.first_user_message, 80) || session.id;
   const preview = session.first_user_message || session.cwd || "No prompt preview";
@@ -351,11 +348,8 @@ function renderSessionItem(session) {
     <div class="preview">${escapeHtml(preview)}</div>
     <div class="session-meta">
       ${modeBadge(session.mode)}
-      <span>${escapeHtml(relativeTime(session.updated_at_ms))}</span><span class="dot">·</span>
-      <span>${icon("server")}${fmtNumber(stats.request_count || 0)} req</span>
-      ${session.text_bytes ? `<span class="badge">${icon("database")}${escapeHtml(fmtBytes(session.text_bytes))}</span>` : ""}
-      ${stats.error_count ? `<span class="badge err">${fmtNumber(stats.error_count)} err</span>` : ""}
-      ${stats.total_cost_usd ? `<span class="badge cache">${escapeHtml(fmtCost(stats.total_cost_usd))}</span>` : ""}
+      <span>${escapeHtml(relativeTime(session.updated_at_ms))}</span>
+      ${session.text_bytes ? `<span class="dot">·</span><span class="badge">${icon("database")}${escapeHtml(fmtBytes(session.text_bytes))}</span>` : ""}
     </div>
   </div>`;
 }

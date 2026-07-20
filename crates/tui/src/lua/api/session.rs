@@ -22,6 +22,45 @@ pub(crate) fn lua_messages_to_protocol(lua: &Lua, table: &mlua::Table) -> Vec<pr
 const DEFAULT_LUA_SESSION_LIMIT: usize = 200;
 const DEFAULT_LUA_SESSION_MAX_BYTES: usize = 1024 * 1024;
 
+fn session_entries_to_lua(
+    lua: &Lua,
+    entries: Vec<smelt_core::session::SessionListEntry>,
+    current_id: &str,
+) -> LuaResult<mlua::Table> {
+    let out = lua.create_table()?;
+    let mut index = 1;
+    for entry in entries {
+        if entry.id == current_id {
+            continue;
+        }
+        let row = lua.create_table()?;
+        row.set("id", entry.id)?;
+        match entry.status {
+            smelt_core::session::SessionListStatus::Available(meta) => {
+                let meta = *meta;
+                row.set("available", true)?;
+                row.set("title", meta.title.unwrap_or_default())?;
+                row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
+                row.set("cwd", meta.cwd.unwrap_or_default())?;
+                row.set("parent_id", meta.parent_id.unwrap_or_default())?;
+                row.set("updated_at_ms", meta.updated_at_ms)?;
+                row.set("created_at_ms", meta.created_at_ms)?;
+                if let Some(size) = meta.text_bytes {
+                    row.set("size_bytes", size)?;
+                }
+            }
+            smelt_core::session::SessionListStatus::Unavailable(error) => {
+                row.set("available", false)?;
+                row.set("error_kind", error.code())?;
+                row.set("error", error.to_string())?;
+            }
+        }
+        out.set(index, row)?;
+        index += 1;
+    }
+    Ok(out)
+}
+
 fn opt_field<T: mlua::FromLua>(table: &Option<mlua::Table>, key: &str) -> LuaResult<Option<T>> {
     match table {
         Some(table) => table.get::<Option<T>>(key),
@@ -821,45 +860,71 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "List persisted SQLite sessions other than the current one. Available rows carry `id`, `available = true`, metadata fields, and `size_bytes` when known. Unavailable rows carry `id`, `available = false`, `error_kind`, and `error`.",
-        &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
+        "List persisted sessions other than the current one from the derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.",
+        &["opts"],
+        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let current_id =
                 crate::lua::try_with_core(|core| core.session.id.clone()).unwrap_or_default();
-            let sessions = smelt_core::session::list_session_entries_result()
-                .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
-            let out = lua.create_table()?;
-            let mut idx = 1;
-            for entry in sessions {
-                if entry.id == current_id {
-                    continue;
+            let Some(opts) = opts else {
+                let entries = smelt_core::session::list_session_entries_result()
+                    .map_err(|error| mlua::Error::RuntimeError(error.to_string()))?;
+                return session_entries_to_lua(lua, entries, &current_id);
+            };
+            let cursor = opts
+                .get::<Option<mlua::Table>>("cursor")?
+                .map(|cursor| -> LuaResult<smelt_core::session::SessionListCursor> {
+                    Ok(smelt_core::session::SessionListCursor {
+                        updated_at_ms: cursor.get("updated_at_ms")?,
+                        id: cursor.get("id")?,
+                    })
+                })
+                .transpose()?;
+            let availability = match opts.get::<Option<String>>("availability")?.as_deref() {
+                None => None,
+                Some("available") => Some(smelt_core::session::SessionListAvailability::Available),
+                Some("unavailable") => {
+                    Some(smelt_core::session::SessionListAvailability::Unavailable)
                 }
-                let row = lua.create_table()?;
-                row.set("id", entry.id)?;
-                match entry.status {
-                    smelt_core::session::SessionListStatus::Available(meta) => {
-                        let meta = *meta;
-                        row.set("available", true)?;
-                        row.set("title", meta.title.unwrap_or_default())?;
-                        row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
-                        row.set("cwd", meta.cwd.unwrap_or_default())?;
-                        row.set("parent_id", meta.parent_id.unwrap_or_default())?;
-                        row.set("updated_at_ms", meta.updated_at_ms)?;
-                        row.set("created_at_ms", meta.created_at_ms)?;
-                        if let Some(size) = meta.text_bytes {
-                            row.set("size_bytes", size)?;
-                        }
-                    }
-                    smelt_core::session::SessionListStatus::Unavailable(err) => {
-                        row.set("available", false)?;
-                        row.set("error_kind", err.code())?;
-                        row.set("error", err.to_string())?;
-                    }
+                Some(other) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "invalid session availability {other:?}"
+                    )))
                 }
-                out.set(idx, row)?;
-                idx += 1;
+            };
+            let page = smelt_core::session::list_session_page_result(
+                smelt_core::session::SessionListQuery {
+                    limit: opts.get::<Option<u32>>("limit")?.unwrap_or(200),
+                    cursor,
+                    cwd: opts.get("cwd")?,
+                    availability,
+                },
+            )
+            .map_err(|error| mlua::Error::RuntimeError(error.to_string()))?;
+            let result = lua.create_table()?;
+            result.set(
+                "entries",
+                session_entries_to_lua(lua, page.entries, &current_id)?,
+            )?;
+            if let Some(cursor) = page.next_cursor {
+                let next = lua.create_table()?;
+                next.set("updated_at_ms", cursor.updated_at_ms)?;
+                next.set("id", cursor.id)?;
+                result.set("next_cursor", next)?;
             }
-            Ok(out)
+            let catalog = lua.create_table()?;
+            catalog.set(
+                "state",
+                match page.catalog.state {
+                    smelt_core::session::SessionCatalogState::Reconciling => "reconciling",
+                    smelt_core::session::SessionCatalogState::Ready => "ready",
+                    smelt_core::session::SessionCatalogState::Degraded => "degraded",
+                },
+            )?;
+            catalog.set("completed_scan_id", page.catalog.completed_scan_id)?;
+            catalog.set("reconciled_at_ms", page.catalog.reconciled_at_ms)?;
+            catalog.set("error", page.catalog.last_error)?;
+            result.set("catalog", catalog)?;
+            Ok(result)
         },
     )?;
     m.fn_(

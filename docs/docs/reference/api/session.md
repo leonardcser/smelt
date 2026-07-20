@@ -141,10 +141,10 @@ Return current session metadata as a table. Includes id, title, slug, timestamps
 ## `smelt.session.list`
 
 ```lua
-fun(): table
+fun(opts: table?): table
 ```
 
-List persisted SQLite sessions other than the current one. Available rows carry `id`, `available = true`, metadata fields, and `size_bytes` when known. Unavailable rows carry `id`, `available = false`, `error_kind`, and `error`.
+List persisted sessions other than the current one from the derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.
 
 ## `smelt.session.load`
 

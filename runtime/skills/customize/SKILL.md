@@ -1584,8 +1584,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Stable session id (matches the on-disk session filename).
 - `smelt.session.info` :: `fun(): table`
   Return current session metadata as a table.
-- `smelt.session.list` :: `fun(): table`
-  List persisted SQLite sessions other than the current one.
+- `smelt.session.list` :: `fun(opts: table?): table`
+  List persisted sessions other than the current one from the derived catalog.
 - `smelt.session.load` :: `fun(id: string): nil`
   Switch the UI to the persisted session with `id`.
 - `smelt.session.model_messages` :: `fun(): table`

@@ -1694,6 +1694,10 @@ fn persistence_actor(
         commit_barrier: None,
     };
     if let Some(recovery) = startup_recovery.as_ref() {
+        smelt_core::session::request_session_catalog_projection(
+            &worker_session_id,
+            recovery.session.current.revision,
+        );
         request_compatibility_export(
             session_dir,
             worker_session_id,
@@ -2556,7 +2560,7 @@ impl PersistenceActor {
         &mut self,
         command: &smelt_store::SessionCommit,
         receipt: smelt_store::SaveReceipt,
-        schedule_compatibility_export: bool,
+        schedule_projections: bool,
     ) -> Result<smelt_store::SaveReceipt, PersistenceCause> {
         let receipt = validate_receipt(command, receipt)?;
         #[cfg(test)]
@@ -2580,7 +2584,12 @@ impl PersistenceActor {
         }
         let session_dir = writer.session_dir().to_path_buf();
         record_save_receipt(&receipt);
-        if schedule_compatibility_export {
+        smelt_core::session::publish_session_catalog_commit(
+            command,
+            &receipt,
+            schedule_projections,
+        );
+        if schedule_projections {
             request_compatibility_export(
                 session_dir,
                 receipt.session_id.clone(),

@@ -389,14 +389,13 @@ impl AppStoryCtx {
 
     /// Working directory the live `TuiApp` captured at construction.
     /// Stories that seed persisted-session fixtures must match this
-    /// into `meta.json::cwd` so the resume dialog's default
-    /// workspace filter keeps the seeded entries visible.
+    /// into catalog metadata so the resume dialog's default workspace filter
+    /// keeps the seeded entries visible.
     pub fn app_cwd(&self) -> &str {
         self.app.cwd_str()
     }
 
-    /// Write a canonical database-backed session fixture with a derived
-    /// `meta.json` cache so `smelt.session.list()` exercises its production path.
+    /// Write a canonical database-backed session fixture and publish its catalog overlay.
     pub fn write_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
         let state_home = std::env::var_os("XDG_STATE_HOME")
             .map(std::path::PathBuf::from)
@@ -405,15 +404,28 @@ impl AppStoryCtx {
         std::fs::create_dir_all(&dir).expect("create session fixture dir");
         let mut db = smelt_store::SessionDb::open(dir.join("session.db"))
             .expect("create session fixture database");
-        let history_len = meta.history_len.unwrap_or_default();
-        let history = (0..history_len)
-            .map(|idx| {
-                protocol::HistoryItem::user(protocol::Content::text(format!(
-                    "storybook session fixture row {idx}"
-                )))
-            })
-            .collect::<Vec<_>>();
-        db.apply_session_commit(&smelt_store::SessionCommit {
+        let history = if let Some(text_bytes) = meta.text_bytes.filter(|bytes| *bytes > 0) {
+            let mut remaining = usize::try_from(text_bytes).expect("fixture text size fits usize");
+            let mut history = Vec::new();
+            while remaining > 0 {
+                let chunk = remaining.min(60_000);
+                history.push(protocol::HistoryItem::user(protocol::Content::text(
+                    "x".repeat(chunk),
+                )));
+                remaining -= chunk;
+            }
+            history
+        } else {
+            (0..meta.history_len.unwrap_or_default())
+                .map(|index| {
+                    protocol::HistoryItem::user(protocol::Content::text(format!(
+                        "storybook session fixture row {index}"
+                    )))
+                })
+                .collect::<Vec<_>>()
+        };
+        let history_len = history.len();
+        let command = smelt_store::SessionCommit {
             session_id: meta.id.clone(),
             expected: smelt_store::StoreHead::default(),
             identity: smelt_store::SessionIdentity {
@@ -450,11 +462,35 @@ impl AppStoryCtx {
             },
             side_tables: smelt_store::SideTableSuffixes::default(),
             descriptors: None,
-        })
-        .expect("write canonical session fixture");
-        let meta_json = serde_json::to_string(meta).expect("serialize session fixture metadata");
-        // COMPAT(session-derived-sidecar-exports): fixture for the alpha list cache reader.
-        std::fs::write(dir.join("meta.json"), meta_json).expect("write session meta fixture");
+        };
+        let receipt = db
+            .apply_session_commit(&command)
+            .expect("write canonical session fixture");
+        smelt_core::session::publish_session_catalog_commit(&command, &receipt, true);
+    }
+
+    /// Reconcile canonical session fixtures before a story opens the resume list.
+    pub fn wait_for_session_catalog(&self) {
+        smelt_core::session::request_session_catalog_reconciliation();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let page = smelt_core::session::list_session_page_result(
+                smelt_core::session::SessionListQuery {
+                    limit: 1_000,
+                    ..smelt_core::session::SessionListQuery::default()
+                },
+            )
+            .expect("read storybook session catalog");
+            if page.catalog.state == smelt_core::session::SessionCatalogState::Ready {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "storybook session catalog did not reconcile: {:?}",
+                page.catalog.last_error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// Commit a fresh Lua generation through the production reload pipeline.

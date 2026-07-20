@@ -260,7 +260,13 @@ struct SessionListItem {
     meta: smelt_core::session::SessionMeta,
     project: Option<String>,
     path_group: Option<String>,
-    request_stats: RequestStats,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionListPage {
+    sessions: Vec<SessionListItem>,
+    next_cursor: Option<smelt_core::session::SessionListCursor>,
+    catalog: smelt_core::session::SessionCatalogStatus,
 }
 
 type RequestStats = smelt_store::RequestAuditStats;
@@ -359,7 +365,7 @@ async fn handle_connection(mut stream: TcpStream) {
 }
 
 async fn route(path: &str) -> (&'static str, &'static str, String) {
-    let path = path.split('?').next().unwrap_or(path);
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
     if let Some(rest) = path.strip_prefix("/api/sessions/") {
         let mut segments = rest.split('/');
         let id = segments.next().unwrap_or("");
@@ -379,7 +385,7 @@ async fn route(path: &str) -> (&'static str, &'static str, String) {
             _ => not_found(),
         }
     } else if path == "/api/sessions" {
-        list_sessions().await
+        list_sessions(query).await
     } else if let Some(asset) = path.strip_prefix("/assets/") {
         asset_response(asset)
     } else {
@@ -415,15 +421,58 @@ fn server_error(message: &str) -> (&'static str, &'static str, String) {
     )
 }
 
-async fn list_sessions() -> (&'static str, &'static str, String) {
-    let sessions = match tokio::task::spawn_blocking(list_session_items).await {
-        Ok(s) => s,
-        Err(e) => return server_error(&e.to_string()),
+async fn list_sessions(query: &str) -> (&'static str, &'static str, String) {
+    let query = match parse_session_list_query(query) {
+        Ok(query) => query,
+        Err(error) => return server_error(&error),
     };
-    match serde_json::to_string(&sessions) {
+    let page = match tokio::task::spawn_blocking(move || list_session_items(query)).await {
+        Ok(Ok(page)) => page,
+        Ok(Err(error)) => return server_error(&error.to_string()),
+        Err(error) => return server_error(&error.to_string()),
+    };
+    match serde_json::to_string(&page) {
         Ok(body) => ("200 OK", "application/json", body),
-        Err(e) => server_error(&e.to_string()),
+        Err(error) => server_error(&error.to_string()),
     }
+}
+
+fn parse_session_list_query(query: &str) -> Result<smelt_core::session::SessionListQuery, String> {
+    let mut limit = 200;
+    let mut cursor_updated_at = None;
+    let mut cursor_id = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "limit" => {
+                limit = value
+                    .parse::<u32>()
+                    .map_err(|error| format!("invalid session page limit: {error}"))?;
+            }
+            "cursor_updated_at_ms" => {
+                cursor_updated_at = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|error| format!("invalid session cursor update time: {error}"))?,
+                );
+            }
+            "cursor_id" => cursor_id = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    let cursor = match (cursor_updated_at, cursor_id) {
+        (None, None) => None,
+        (Some(updated_at_ms), Some(id)) => {
+            Some(smelt_core::session::SessionListCursor { updated_at_ms, id })
+        }
+        _ => return Err("session cursor requires both update time and id".into()),
+    };
+    Ok(smelt_core::session::SessionListQuery {
+        limit,
+        cursor,
+        cwd: None,
+        availability: Some(smelt_core::session::SessionListAvailability::Available),
+    })
 }
 
 async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
@@ -638,20 +687,31 @@ pub fn is_safe_session_ref(id: &str) -> bool {
     smelt_core::session_id::SessionPrefix::parse(id).is_ok()
 }
 
-fn list_session_items() -> Vec<SessionListItem> {
-    smelt_core::session::list_sessions()
+fn list_session_items(
+    query: smelt_core::session::SessionListQuery,
+) -> smelt_core::session::SessionStoreResult<SessionListPage> {
+    let page = smelt_core::session::list_session_page_result(query)?;
+    let sessions = page
+        .entries
         .into_iter()
+        .filter_map(|entry| match entry.status {
+            smelt_core::session::SessionListStatus::Available(meta) => Some(*meta),
+            smelt_core::session::SessionListStatus::Unavailable(_) => None,
+        })
         .map(|meta| {
             let (project, path_group) = project_labels(meta.cwd.as_deref());
-            let request_stats = request_stats_for_session(&meta.id);
             SessionListItem {
                 meta,
                 project,
                 path_group,
-                request_stats,
             }
         })
-        .collect()
+        .collect();
+    Ok(SessionListPage {
+        sessions,
+        next_cursor: page.next_cursor,
+        catalog: page.catalog,
+    })
 }
 
 fn build_session_summary(
@@ -728,12 +788,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_sessions_returns_json_array() {
-        let (head, body) = fetch("/api/sessions").await;
+    async fn api_sessions_returns_catalog_page() {
+        let (head, body) = fetch("/api/sessions?limit=10").await;
         assert!(head.contains("200 OK"), "expected 200, got: {head}");
         assert!(head.contains("application/json"));
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(parsed.is_array());
+        assert!(parsed["sessions"].is_array());
+        assert!(parsed["catalog"]["state"].is_string());
     }
 
     #[tokio::test]

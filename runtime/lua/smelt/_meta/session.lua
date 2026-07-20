@@ -75,8 +75,8 @@ session.id = nil
 ---@type fun(): table
 session.info = nil
 
---- List persisted SQLite sessions other than the current one. Available rows carry `id`, `available = true`, metadata fields, and `size_bytes` when known. Unavailable rows carry `id`, `available = false`, `error_kind`, and `error`.
----@type fun(): table
+--- List persisted sessions other than the current one from the derived catalog. Without `opts`, returns all rows for compatibility. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.
+---@type fun(opts: table?): table
 session.list = nil
 
 --- Switch the UI to the persisted session with `id`. Replays its message log and resets transient state.

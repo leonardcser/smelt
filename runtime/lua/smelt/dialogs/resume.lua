@@ -149,9 +149,23 @@ end)
 
 smelt.cmd.register("resume", function()
   smelt.spawn(function()
-    local entries = smelt.session.list()
+    local entries = {}
+    local cursor = nil
+    local catalog_state = "ready"
+    repeat
+      local page = smelt.session.list({ limit = 500, cursor = cursor })
+      catalog_state = page.catalog.state
+      for _, entry in ipairs(page.entries) do table.insert(entries, entry) end
+      cursor = page.next_cursor
+    until cursor == nil
     if #entries == 0 then
-      smelt.notify.error("no saved sessions")
+      if catalog_state == "reconciling" then
+        smelt.notify.error("session catalog is rebuilding; try again shortly")
+      elseif catalog_state == "degraded" then
+        smelt.notify.error("session catalog is unavailable")
+      else
+        smelt.notify.error("no saved sessions")
+      end
       return
     end
 

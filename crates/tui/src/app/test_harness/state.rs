@@ -288,7 +288,7 @@ impl TestApp {
 
     /// Working directory string the live app uses (captured at
     /// construction). Stories that seed persisted-session fixtures
-    /// match this value into `meta.json` so the resume dialog's
+    /// match this value into catalog metadata so the resume dialog's
     /// workspace filter keeps the seeded entries.
     pub fn cwd_str(&self) -> &str {
         &self.app.cwd

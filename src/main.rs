@@ -307,6 +307,7 @@ fn inspect_url(base_url: &str, session: Option<&str>) -> Result<String, String> 
 }
 
 async fn run_inspect_command(args: InspectArgs) {
+    smelt_core::session::request_session_catalog_reconciliation();
     let mut server = match tui::inspect_server::Server::start_on_port(args.port).await {
         Ok(server) => server,
         Err(err) => {
@@ -595,10 +596,35 @@ fn print_doctor_output(output: &SessionDoctorOutput) {
 
 fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
     let outputs = if args.all {
-        smelt_core::session::list_session_entries_result()
-            .map_err(|err| err.to_string())?
+        let mut cursor = None;
+        let mut session_ids = Vec::new();
+        loop {
+            let page = smelt_core::session::list_session_page_result(
+                smelt_core::session::SessionListQuery {
+                    limit: 500,
+                    cursor,
+                    cwd: None,
+                    availability: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            if page.catalog.state == smelt_core::session::SessionCatalogState::Degraded
+                || (page.catalog.state == smelt_core::session::SessionCatalogState::Reconciling
+                    && page.catalog.completed_scan_id == 0)
+            {
+                return Err(page.catalog.last_error.unwrap_or_else(|| {
+                    "session catalog is reconciling; retry after it is ready".into()
+                }));
+            }
+            session_ids.extend(page.entries.into_iter().map(|entry| entry.id));
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+        session_ids
             .into_iter()
-            .map(|entry| doctor_session(&entry.id))
+            .map(|id| doctor_session(&id))
             .collect::<Vec<_>>()
     } else {
         vec![doctor_session(
@@ -863,6 +889,8 @@ async fn async_main() {
             }
         }
     }
+
+    smelt_core::session::request_session_catalog_reconciliation();
 
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));

@@ -457,7 +457,7 @@ pub struct SessionMeta {
     #[serde(default)]
     pub checkpoint: Option<ContextCheckpoint>,
     /// Approximate text byte size (message bodies, reasoning, tool-call args).
-    /// Populated in `meta.json` so the resume dialog avoids loading session history.
+    /// Projected into the catalog so list consumers avoid opening session databases.
     #[serde(default)]
     pub text_bytes: Option<u64>,
 }
@@ -472,6 +472,61 @@ pub struct SessionListEntry {
 pub enum SessionListStatus {
     Available(Box<SessionMeta>),
     Unavailable(SessionStoreError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionListAvailability {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionListCursor {
+    pub updated_at_ms: u64,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionListQuery {
+    pub limit: u32,
+    pub cursor: Option<SessionListCursor>,
+    pub cwd: Option<String>,
+    pub availability: Option<SessionListAvailability>,
+}
+
+impl Default for SessionListQuery {
+    fn default() -> Self {
+        Self {
+            limit: 200,
+            cursor: None,
+            cwd: None,
+            availability: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCatalogState {
+    Reconciling,
+    Ready,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCatalogStatus {
+    pub state: SessionCatalogState,
+    pub completed_scan_id: u64,
+    pub reconciled_at_ms: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionListPage {
+    pub entries: Vec<SessionListEntry>,
+    pub next_cursor: Option<SessionListCursor>,
+    pub catalog: SessionCatalogStatus,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1145,6 +1200,7 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
     if writer.is_staged() {
         writer.publish()?;
     }
+    crate::session_catalog::publish_commit(&command, &receipt, true);
     writer.release()?;
     Ok(receipt)
 }
@@ -1558,7 +1614,7 @@ pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
 pub fn load_meta_result(id_or_prefix: &str) -> SessionStoreResult<Option<SessionMeta>> {
     let _perf = smelt_perf::perf::begin("session:load_meta");
     let dir = prepare_session_dir_for_read_result(id_or_prefix)?;
-    load_meta_for_dir_result(dir, MetaLoadMode::Full)
+    load_meta_for_dir_result(dir)
 }
 
 pub fn resolve_session_dir_for_read(id_or_prefix: &str) -> Option<ResolvedSessionDir> {
@@ -1711,9 +1767,7 @@ fn session_dir_kind(dir: &Path) -> Option<SessionDirKind> {
 }
 
 pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
-    load_meta_for_dir_result(dir, MetaLoadMode::Full)
-        .ok()
-        .flatten()
+    load_meta_for_dir_result(dir).ok().flatten()
 }
 
 #[cfg(test)]
@@ -2156,8 +2210,19 @@ pub fn delete(id_or_prefix: &str) -> SessionStoreResult<()> {
     }
     crate::session_store::reject_symlink(&session_dir, "delete")?;
     crate::session_store::reject_symlink(&session_dir.join("session.db"), "delete")?;
-    smelt_store::SessionMaintenance::delete_session(&root, id.as_str())
+    crate::session_catalog::begin_delete(id.as_str());
+    match smelt_store::SessionMaintenance::delete_session(&root, id.as_str())
         .map_err(|err| crate::session_store::store_error("delete session", &session_dir, err))
+    {
+        Ok(()) => {
+            crate::session_catalog::complete_delete(id.as_str());
+            Ok(())
+        }
+        Err(error) => {
+            crate::session_catalog::cancel_delete(id.as_str());
+            Err(error)
+        }
+    }
 }
 
 pub fn list_sessions() -> Vec<SessionMeta> {
@@ -2176,90 +2241,177 @@ pub fn list_session_entries() -> Vec<SessionListEntry> {
 
 pub fn list_session_entries_result() -> SessionStoreResult<Vec<SessionListEntry>> {
     let _perf = smelt_perf::perf::begin("session:list");
-    let root = sessions_dir();
-    crate::session_store::reject_symlink(&root, "list")?;
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(SessionStoreError::Io {
-                operation: "list sessions in",
-                path: root.display().to_string(),
-                message: err.to_string(),
-            });
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = list_session_page_result(SessionListQuery {
+            limit: 512,
+            cursor,
+            cwd: None,
+            availability: None,
+        })?;
+        entries.extend(page.entries);
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    Ok(entries)
+}
+
+pub fn list_session_page_result(query: SessionListQuery) -> SessionStoreResult<SessionListPage> {
+    let _perf = smelt_perf::perf::begin("session:list_page");
+    if query.limit == 0 || query.limit > 1_000 {
+        return Err(SessionStoreError::InvalidListQuery {
+            message: "page limit must be between 1 and 1000".into(),
+        });
+    }
+    let cursor = query
+        .cursor
+        .map(|cursor| {
+            Ok(smelt_store::CatalogCursor {
+                updated_at: i64::try_from(cursor.updated_at_ms).map_err(|_| {
+                    SessionStoreError::InvalidListQuery {
+                        message: "cursor update time exceeds SQLite integer range".into(),
+                    }
+                })?,
+                id: cursor.id,
+            })
+        })
+        .transpose()?;
+    let catalog_query = smelt_store::CatalogQuery {
+        limit: query.limit,
+        cursor,
+        cwd: query.cwd,
+        availability: query.availability.map(|availability| match availability {
+            SessionListAvailability::Available => smelt_store::CatalogAvailability::Available,
+            SessionListAvailability::Unavailable => smelt_store::CatalogAvailability::Unavailable,
+        }),
+    };
+    let page = crate::session_catalog::read_page(&catalog_query);
+    let entries = page
+        .sessions
+        .into_iter()
+        .map(session_list_entry_from_catalog)
+        .collect::<SessionStoreResult<Vec<_>>>()?;
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| {
+            Ok(SessionListCursor {
+                updated_at_ms: u64::try_from(cursor.updated_at).map_err(|_| {
+                    SessionStoreError::Corrupt {
+                        context: "catalog session update time is negative".into(),
+                    }
+                })?,
+                id: cursor.id,
+            })
+        })
+        .transpose()?;
+    let state = match page.status.state {
+        crate::session_catalog::ServiceState::Reconciling => SessionCatalogState::Reconciling,
+        crate::session_catalog::ServiceState::Ready => SessionCatalogState::Ready,
+        crate::session_catalog::ServiceState::Degraded => SessionCatalogState::Degraded,
+    };
+    Ok(SessionListPage {
+        entries,
+        next_cursor,
+        catalog: SessionCatalogStatus {
+            state,
+            completed_scan_id: page.status.completed_scan_id,
+            reconciled_at_ms: page
+                .status
+                .reconciled_at
+                .map(|at| {
+                    u64::try_from(at).map_err(|_| SessionStoreError::Corrupt {
+                        context: "catalog reconciliation time is negative".into(),
+                    })
+                })
+                .transpose()?,
+            last_error: page.status.last_error,
+        },
+    })
+}
+
+pub fn request_session_catalog_reconciliation() {
+    crate::session_catalog::request_reconciliation();
+}
+
+pub fn request_session_catalog_projection(id: &str, revision: smelt_store::Revision) {
+    crate::session_catalog::request_projection(id, revision);
+}
+
+pub fn publish_session_catalog_commit(
+    command: &smelt_store::SessionCommit,
+    receipt: &smelt_store::SaveReceipt,
+    schedule_projection: bool,
+) {
+    crate::session_catalog::publish_commit(command, receipt, schedule_projection);
+}
+
+fn session_list_entry_from_catalog(
+    session: smelt_store::CatalogSession,
+) -> SessionStoreResult<SessionListEntry> {
+    let id = session.id.clone();
+    let status = match session.availability {
+        smelt_store::CatalogAvailability::Available => {
+            let created_at_ms =
+                u64::try_from(session.created_at).map_err(|_| SessionStoreError::Corrupt {
+                    context: format!("catalog session {id} has a negative creation time"),
+                })?;
+            let updated_at_ms =
+                u64::try_from(session.updated_at).map_err(|_| SessionStoreError::Corrupt {
+                    context: format!("catalog session {id} has a negative update time"),
+                })?;
+            SessionListStatus::Available(Box::new(SessionMeta {
+                id: id.clone(),
+                title: session.title,
+                slug: session.slug,
+                first_user_message: session.first_user_message,
+                created_at_ms,
+                updated_at_ms,
+                mode: session.mode,
+                reasoning_effort: session
+                    .reasoning_effort
+                    .as_deref()
+                    .and_then(ReasoningEffort::parse),
+                model: session.model,
+                fast_mode: session.fast_mode,
+                cwd: session.cwd,
+                parent_id: session.parent_id,
+                context_tokens: session
+                    .context_tokens
+                    .and_then(|tokens| u32::try_from(tokens).ok()),
+                context_token_identity: None,
+                display_context_token_identity: None,
+                history_len: session
+                    .history_len
+                    .and_then(|length| usize::try_from(length).ok()),
+                checkpoint: None,
+                text_bytes: session.text_bytes,
+            }))
+        }
+        smelt_store::CatalogAvailability::Unavailable => {
+            let kind = session.error_kind.unwrap_or_else(|| "unavailable".into());
+            let summary = session
+                .error_summary
+                .unwrap_or_else(|| format!("session {id} is unavailable"));
+            let error = match kind.as_str() {
+                "missing_database" => SessionStoreError::MissingDatabase { id: id.clone() },
+                "corrupt" => SessionStoreError::Corrupt { context: summary },
+                _ => SessionStoreError::CatalogUnavailable { kind, summary },
+            };
+            SessionListStatus::Unavailable(error)
         }
     };
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|err| SessionStoreError::Io {
-            operation: "read session entry in",
-            path: root.display().to_string(),
-            message: err.to_string(),
-        })?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(id) = crate::session_id::SessionId::parse(&name) else {
-            continue;
-        };
-        let path = session_dir(&id);
-        candidates.push((id.into_string(), path));
-    }
-    let mut out = crate::utils::parallel_filter_map(candidates, |(id, path)| {
-        let status = match load_meta_for_dir_result(path, MetaLoadMode::List) {
-            Ok(Some(meta)) => SessionListStatus::Available(Box::new(meta)),
-            Ok(None) => SessionListStatus::Unavailable(SessionStoreError::MissingDatabase {
-                id: id.clone(),
-            }),
-            Err(err) => SessionListStatus::Unavailable(err),
-        };
-        Some(SessionListEntry { id, status })
-    });
-    out.sort_by_key(|entry| {
-        let updated_at = match &entry.status {
-            SessionListStatus::Available(meta) => session_updated_at(meta),
-            SessionListStatus::Unavailable(_) => 0,
-        };
-        std::cmp::Reverse(updated_at)
-    });
-    Ok(out)
+    Ok(SessionListEntry { id, status })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MetaLoadMode {
-    /// Listing path. Prefer sidecars for speed, but fall back to SQLite when missing.
-    List,
-    /// Exact load path. Fill fields required to resume display-only sessions.
-    Full,
-}
-
-fn load_meta_for_dir_result(
-    path: PathBuf,
-    mode: MetaLoadMode,
-) -> SessionStoreResult<Option<SessionMeta>> {
+fn load_meta_for_dir_result(path: PathBuf) -> SessionStoreResult<Option<SessionMeta>> {
     crate::session_store::reject_symlink(&path, "read")?;
     let db_path = path.join("session.db");
     crate::session_store::reject_symlink(&db_path, "read")?;
     if !db_path.is_file() {
         return Ok(None);
-    }
-    // COMPAT(session-derived-sidecar-exports): catalog cutover removes this sidecar read.
-    if mode == MetaLoadMode::List {
-        let sidecar_path = path.join("meta.json");
-        let sidecar_is_regular = fs::symlink_metadata(&sidecar_path)
-            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
-        if sidecar_is_regular {
-            if let Ok(contents) = fs::read_to_string(sidecar_path) {
-                if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
-                    let directory_id = path.file_name().and_then(|name| name.to_str());
-                    if directory_id == Some(meta.id.as_str())
-                        && crate::session_id::SessionId::parse(&meta.id).is_ok()
-                    {
-                        return Ok(Some(meta));
-                    }
-                }
-            }
-        }
     }
     load_meta_from_db_result(&path)
 }
@@ -2470,6 +2622,7 @@ pub fn load_search_blobs(ids: Vec<String>) -> Vec<(String, String)> {
     crate::utils::parallel_filter_map(ids, |id| load_search_blob(&id).map(|blob| (id, blob)))
 }
 
+#[cfg(test)]
 fn session_updated_at(meta: &SessionMeta) -> u64 {
     if meta.updated_at_ms > 0 {
         meta.updated_at_ms
@@ -2847,8 +3000,7 @@ mod tests {
     }
 
     #[test]
-    // COMPAT(session-derived-sidecar-exports): exercise the alpha list cache and fallback.
-    fn list_sessions_falls_back_to_sqlite_without_regenerating_cache() {
+    fn list_sessions_reads_catalog_without_opening_session_databases() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
         let mut ids = Vec::new();
@@ -2880,29 +3032,24 @@ mod tests {
             ids.push(s.id);
         }
 
+        assert!(crate::session_catalog::wait_until_ready(
+            std::time::Duration::from_secs(2)
+        ));
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         let listed = list_sessions();
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
 
-        for id in ids.iter().take(2) {
+        for id in &ids {
             let meta = listed
                 .iter()
                 .find(|meta| meta.id == *id)
-                .expect("listed meta");
-            assert_eq!(meta.history_len, None);
+                .expect("listed catalog metadata");
+            assert_eq!(meta.history_len, Some(1));
             assert!(meta.checkpoint.is_none());
-            assert_eq!(meta.text_bytes, None);
+            assert!(meta.text_bytes.is_some_and(|bytes| bytes > 0));
         }
-        let missing_sidecar_meta = listed
-            .iter()
-            .find(|meta| meta.id == ids[2])
-            .expect("db-only session is listed from sqlite");
-        assert_eq!(missing_sidecar_meta.history_len, Some(1));
-        assert!(missing_sidecar_meta
-            .text_bytes
-            .is_some_and(|bytes| bytes > 0));
         assert!(
             !dir_for_id(&ids[2]).join("meta.json").exists(),
             "ordinary listing must not regenerate a missing derived cache"
@@ -2913,9 +3060,9 @@ mod tests {
             .find(|row| row.label == "store:db:open_read_only")
             .map(|row| row.count)
             .unwrap_or(0);
-        assert!(
-            read_only_count > 0,
-            "list_sessions should open sqlite when regenerating missing metadata"
+        assert_eq!(
+            read_only_count, 0,
+            "catalog listing must not open canonical session databases"
         );
         let read_write_count = snapshot
             .durations
@@ -3051,6 +3198,10 @@ mod tests {
         fs::write(corrupt_dir.join("session.db"), b"not sqlite").unwrap();
         let missing_db_id = numbered_session_id(22);
         fs::create_dir_all(sessions_dir().join(&missing_db_id)).unwrap();
+        request_session_catalog_reconciliation();
+        assert!(crate::session_catalog::wait_until_ready(
+            std::time::Duration::from_secs(2)
+        ));
 
         let entries = list_session_entries();
 
@@ -3102,16 +3253,49 @@ mod tests {
     }
 
     #[test]
-    fn session_listing_preserves_root_io_errors() {
+    fn session_listing_rejects_invalid_page_queries() {
+        assert!(matches!(
+            list_session_page_result(SessionListQuery {
+                limit: 0,
+                ..SessionListQuery::default()
+            }),
+            Err(SessionStoreError::InvalidListQuery { .. })
+        ));
+        assert!(matches!(
+            list_session_page_result(SessionListQuery {
+                cursor: Some(SessionListCursor {
+                    updated_at_ms: u64::MAX,
+                    id: TEST_SESSION_ID.into(),
+                }),
+                ..SessionListQuery::default()
+            }),
+            Err(SessionStoreError::InvalidListQuery { .. })
+        ));
+    }
+
+    #[test]
+    fn session_listing_reports_root_io_errors_without_synchronous_scanning() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         create_private_dir_all(&engine::state_dir()).unwrap();
         fs::write(sessions_dir(), "not a directory").unwrap();
 
-        assert!(matches!(
-            list_session_entries_result(),
-            Err(SessionStoreError::Io { .. })
-        ));
+        request_session_catalog_reconciliation();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let page = list_session_page_result(SessionListQuery {
+                limit: 10,
+                ..SessionListQuery::default()
+            })
+            .unwrap();
+            if page.catalog.state == SessionCatalogState::Degraded {
+                assert!(page.catalog.last_error.is_some());
+                assert!(page.entries.is_empty());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -3133,6 +3317,10 @@ mod tests {
             load_full_result(&directory_id),
             Err(SessionStoreError::Corrupt { .. })
         ));
+        request_session_catalog_reconciliation();
+        assert!(crate::session_catalog::wait_until_ready(
+            std::time::Duration::from_secs(2)
+        ));
         assert!(list_session_entries().iter().any(|entry| {
             entry.id == directory_id
                 && matches!(
@@ -3141,7 +3329,7 @@ mod tests {
                 )
         }));
 
-        // COMPAT(session-derived-sidecar-exports): corrupt alpha list-cache fixture.
+        // COMPAT(session-derived-sidecar-exports): exact reads ignore malformed exports.
         fs::write(
             dir.join("meta.json"),
             serde_json::json!({ "id": directory_id }).to_string(),

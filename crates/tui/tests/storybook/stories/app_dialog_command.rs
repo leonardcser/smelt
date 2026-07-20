@@ -328,6 +328,7 @@ app_story!(resume_dialog, |ctx| {
         .expect("storybook state home");
     std::fs::create_dir_all(state_home.join("smelt").join("sessions").join(unavailable))
         .expect("create unavailable session fixture");
+    ctx.wait_for_session_catalog();
     ctx.run_command("resume");
     ctx.assert_snapshot();
 });
