@@ -699,7 +699,7 @@ fn render_markdown_spec_with_gutter(
     let style_overlay = gutter.styled.then_some((spec.dim, spec.italic));
     let rows = outcome.line_count.min(u16::MAX as usize) as u16;
     for row in 0..rows {
-        print_row_chrome(out, RowChrome::Gutter(gutter));
+        print_row_gutter(out, gutter);
         apply_temp_decoration(out, &buf, row as usize, true);
         emit_buffer_row_clipped(&buf, row, width, out, style_overlay);
         out.newline();
@@ -944,7 +944,7 @@ fn render_via_temp(
     let mut rows = 0u16;
     for row in row_start..end {
         if let Some(gutter) = gutter {
-            print_row_chrome(out, RowChrome::Gutter(gutter));
+            print_row_gutter(out, gutter);
         }
         apply_temp_decoration(out, &buf, row as usize, true);
         emit_buffer_row_clipped(&buf, row, width, out, styled_gutter);
@@ -954,23 +954,43 @@ fn render_via_temp(
     rows
 }
 
-#[derive(Clone, Copy)]
-enum RowChrome<'a> {
-    Gutter(&'a GutterSpec),
-    Prefix(&'a [protocol::StyledSpan]),
+fn print_row_gutter(out: &mut LineBuilder, gutter: &GutterSpec) {
+    if gutter.styled {
+        out.print_gutter(&gutter.text);
+    } else {
+        out.save_style();
+        out.reset_style();
+        out.print_gutter(&gutter.text);
+        out.pop_style();
+    }
 }
 
-fn print_row_chrome(out: &mut LineBuilder, chrome: RowChrome<'_>) {
-    match chrome {
-        RowChrome::Gutter(gutter) if gutter.styled => out.print_gutter(&gutter.text),
-        RowChrome::Gutter(gutter) => {
-            out.save_style();
-            out.reset_style();
-            out.print_gutter(&gutter.text);
-            out.pop_style();
+fn print_row_prefix(out: &mut LineBuilder, prefix: &[protocol::StyledSpan], max_cols: u16) {
+    let mut remaining = max_cols as usize;
+    for span in prefix {
+        if remaining == 0 {
+            break;
         }
-        RowChrome::Prefix(prefix) => print_styled_spans(out, prefix, None),
+        let piece = clipped_cell_prefix(&span.text, remaining);
+        print_styled_span_range(out, span, None, 0..piece.len());
+        remaining = remaining.saturating_sub(display_width(piece));
+        if piece.len() < span.text.len() {
+            break;
+        }
     }
+}
+
+fn clipped_cell_prefix(text: &str, max_cols: usize) -> &str {
+    if display_width(text) <= max_cols {
+        return text;
+    }
+    let mut end = smelt_buffer::text::cell_to_byte(text, max_cols);
+    let mut prefix = smelt_buffer::text::slice(text, 0..end);
+    if display_width(prefix) > max_cols {
+        end = smelt_buffer::text::prev_char_boundary(text, end);
+        prefix = smelt_buffer::text::slice(text, 0..end);
+    }
+    prefix
 }
 
 fn row_prefix_child_widths(spec: &RowPrefixSpec, width: u16) -> (u16, u16) {
@@ -1061,14 +1081,14 @@ fn render_row_prefix_runs(
         .take(row_count as usize)
     {
         if let Some(gutter) = gutter {
-            print_row_chrome(out, RowChrome::Gutter(gutter));
+            print_row_gutter(out, gutter);
         }
-        let row_prefix = if source_row == 0 {
-            &prefix.first
+        let (row_prefix, child_width) = if source_row == 0 {
+            (&prefix.first, first_width)
         } else {
-            &prefix.rest
+            (&prefix.rest, rest_width)
         };
-        print_row_chrome(out, RowChrome::Prefix(row_prefix));
+        print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
         if row.soft_wrap {
             out.mark_soft_wrap_continuation();
         }
@@ -1119,15 +1139,15 @@ fn render_row_prefix_runs_cap(
                 ..
             } => {
                 if let Some(gutter) = gutter {
-                    print_row_chrome(out, RowChrome::Gutter(gutter));
+                    print_row_gutter(out, gutter);
                 }
-                let row_prefix = if output_row == 0 {
-                    &prefix.first
+                let (row_prefix, child_width) = if output_row == 0 {
+                    (&prefix.first, first_width)
                 } else {
-                    &prefix.rest
+                    (&prefix.rest, rest_width)
                 };
-                print_row_chrome(out, RowChrome::Prefix(row_prefix));
-                render_cap_marker_text(out, skipped, kept, total, direction);
+                print_row_prefix(out, row_prefix, width.saturating_sub(child_width));
+                render_cap_marker_text(out, skipped, kept, total, direction, child_width);
                 written = written.saturating_add(1);
             }
         }
@@ -1141,10 +1161,11 @@ fn render_cap_marker_text(
     kept: u16,
     total: Option<u64>,
     direction: &str,
+    max_cols: u16,
 ) {
     out.push_dim();
     let text = cap_marker_text(skipped, kept, total, direction);
-    out.print(&text);
+    out.print(clipped_cell_prefix(&text, max_cols as usize));
     out.pop_style();
     out.newline();
 }
@@ -1211,7 +1232,7 @@ fn render_ir_row_prefix(
     let mut rows = 0u16;
     for row in 0..total {
         if let Some(gutter) = gutter {
-            print_row_chrome(out, RowChrome::Gutter(gutter));
+            print_row_gutter(out, gutter);
         }
         let source_row = row_start.saturating_add(row);
         let prefix = if source_row == 0 {
@@ -1219,7 +1240,7 @@ fn render_ir_row_prefix(
         } else {
             &spec.rest
         };
-        print_row_chrome(out, RowChrome::Prefix(prefix));
+        print_row_prefix(out, prefix, width.saturating_sub(child_width));
         apply_temp_decoration(out, &buf, row as usize, true);
         emit_buffer_row_clipped(&buf, row, child_width, out, None);
         out.newline();
@@ -2074,6 +2095,31 @@ mod tests {
         assert_eq!(emitted, 10);
         assert_eq!(display_width(line), 10);
         assert_eq!(line, "abcdefghi\u{7f}");
+    }
+
+    #[test]
+    fn row_prefix_clips_long_control_chrome_to_viewport() {
+        let prefix = protocol::StyledSpan {
+            text: format!("* {}", "\u{1c}".repeat(8)),
+            ..Default::default()
+        };
+        let layout = BlockLayout::RowPrefix {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Line(LineSpec {
+                spans: vec![protocol::StyledSpan {
+                    text: "x".into(),
+                    ..Default::default()
+                }],
+                hl_group: None,
+            }))),
+            spec: RowPrefixSpec {
+                first: vec![prefix.clone()],
+                rest: vec![prefix],
+            },
+        };
+
+        let lines = render_lines(&layout, 10);
+        assert_eq!(lines, vec![format!("* {}x", "\u{1c}".repeat(7))]);
+        assert!(lines.iter().all(|line| display_width(line) <= 10));
     }
 
     #[test]
