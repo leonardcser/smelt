@@ -28,8 +28,8 @@ pub use compression::{
 #[cfg(any(test, feature = "test-util"))]
 pub use db::SessionDb;
 pub use db::{
-    session_commit_fingerprint, submit_turn_fingerprint, DoctorReport, FullSession,
-    SessionResumeSnapshot, StorageStats, StoredSession,
+    session_commit_fingerprint, submit_turn_fingerprint, CompatibilityExportSnapshot, DoctorReport,
+    FullSession, SessionResumeSnapshot, StorageStats, StoredSession,
 };
 pub use error::{Result, StoreError};
 pub use history::{

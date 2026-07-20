@@ -194,7 +194,7 @@ enum SessionCommand {
     Doctor(SessionDoctorArgs),
     /// Copy a transactionally consistent session database to a new file
     Backup(SessionBackupArgs),
-    /// Rebuild disposable meta.json and content.txt caches under exclusive ownership
+    /// Rebuild deprecated meta.json and content.txt compatibility exports
     // COMPAT(session-derived-sidecar-exports): explicit alpha export rebuild command.
     RebuildDerived(SessionTargetArgs),
     /// Delete objects unreachable from history and request audits
@@ -723,8 +723,8 @@ fn run_session_command(args: SessionArgs) {
                 maintenance
                     .rebuild_search_index()
                     .map_err(|err| format!("failed to rebuild search index: {err}"))?;
-                smelt_core::session::refresh_derived_files(dir)
-                    .map_err(|err| format!("failed to rebuild derived files: {err}"))?;
+                smelt_core::session::rebuild_compatibility_exports(dir)
+                    .map_err(|err| format!("failed to rebuild compatibility exports: {err}"))?;
                 Ok(())
             })
         }

@@ -2477,9 +2477,6 @@ impl TuiApp {
         if let Some(warning) = status.latest_audit_warning {
             self.notify_warn(warning.message);
         }
-        if let Some(warning) = status.latest_sidecar_warning {
-            self.notify_warn(warning.message);
-        }
     }
 
     pub(crate) fn handle_app_event(&mut self, event: AppEvent) {

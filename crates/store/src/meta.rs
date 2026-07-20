@@ -1,8 +1,3 @@
-#[cfg(any(test, feature = "test-util"))]
-use std::fs;
-#[cfg(any(test, feature = "test-util"))]
-use std::path::Path;
-
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -447,30 +442,6 @@ fn checkpoint_first_live_index(value: &serde_json::Value) -> Option<u64> {
     value
         .get("first_live_index")
         .and_then(serde_json::Value::as_u64)
-}
-
-// COMPAT(session-derived-sidecar-exports): test-only alpha sidecar writer.
-#[cfg(any(test, feature = "test-util"))]
-pub(crate) fn write_meta_sidecar(
-    conn: &Connection,
-    path: impl AsRef<Path>,
-) -> Result<Option<SessionMeta>> {
-    let meta = {
-        let _perf = smelt_perf::perf::begin("store:session:meta_sidecar_query");
-        let Some(meta) = session_meta(conn)? else {
-            return Ok(None);
-        };
-        meta
-    };
-    let bytes = {
-        let _perf = smelt_perf::perf::begin("store:session:meta_sidecar_encode");
-        serde_json::to_vec_pretty(&meta)?
-    };
-    {
-        let _perf = smelt_perf::perf::begin("store:session:meta_sidecar_write");
-        fs::write(path, bytes)?;
-    }
-    Ok(Some(meta))
 }
 
 fn optional_json_string(value: &Option<serde_json::Value>) -> Result<Option<String>> {

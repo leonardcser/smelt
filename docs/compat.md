@@ -14,21 +14,19 @@ with `COMPAT(<id>)`.
   for alpha-era external tooling while canonical state lives only in
   `session.db`
 - Code:
-  - `crates/core/src/session.rs`: list-cache reader, export format, atomic writers,
-    offline-save export, and stale temporary-file cleanup
-  - `crates/tui/src/persist.rs`: synchronous metadata export and coalesced content
-    export worker
-  - `crates/tui/src/app/history.rs`: fork publication exports
+  - `crates/core/src/session_exports.rs`: bounded process exporter, revision-pinned
+    format generation, cross-process locking, and atomic streaming writes
+  - `crates/core/src/session.rs`: offline-save scheduling, explicit maintenance
+    export, and stale temporary-file cleanup
+  - `crates/tui/src/persist.rs`: post-commit compatibility export scheduling
+  - `crates/tui/src/app/history.rs`: post-publication fork export scheduling
   - `src/main.rs`: explicit `session rebuild-derived` export command
-  - `crates/store/src/db.rs` and `crates/store/src/meta.rs`: test-only metadata
-    export primitive
-  - `crates/tui/tests/storybook/app_ctx.rs`: list-cache fixture
+  - `crates/store/src/db.rs` and `crates/store/src/history.rs`: revision-pinned
+    snapshot and cancellable row streaming
 - Tests:
   - compatibility exports are revision-stamped and rebuilt from canonical SQLite
   - stale or failed compatibility exports never affect list, search, resume, or
     model dispatch
-  - CLI rebuild, fork publication, storybook, and benchmark fixtures exercise only
-    explicitly tagged compatibility behavior
 
 ## legacy-attachment-blobs
 

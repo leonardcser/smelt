@@ -519,37 +519,16 @@ enum BurstBenchPosition {
 fn save_bench_fixture(app: &mut TestApp, label: &str) {
     app.app.save_session();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let revision = loop {
+    loop {
         let outcome = app.app.flush_persist();
         match outcome {
             crate::persist::PersistenceFlushOutcome::Durable {
-                receipt: Some(receipt),
-                ..
-            } => break receipt.current.revision.get(),
+                receipt: Some(_), ..
+            } => break,
             crate::persist::PersistenceFlushOutcome::Deadline { .. }
                 if std::time::Instant::now() < deadline => {}
             other => panic!("{label} fixture persistence failed: {other:?}"),
         }
-    };
-    // COMPAT(session-derived-sidecar-exports): wait for the alpha export projection.
-    let content_path = smelt_core::session::dir_for(&app.app.core.session).join("content.txt");
-    let expected_header = format!("# smelt-revision:{revision}");
-    loop {
-        let mut header = String::new();
-        let refreshed = std::fs::File::open(&content_path)
-            .map(std::io::BufReader::new)
-            .and_then(|mut reader| {
-                std::io::BufRead::read_line(&mut reader, &mut header).map(|_| ())
-            })
-            .is_ok_and(|()| header.trim_end() == expected_header);
-        if refreshed {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{label} derived content did not reach revision {revision}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
@@ -1305,9 +1284,45 @@ fn resume_bench_preview_bytes() -> usize {
     env_positive_usize("SMELT_RESUME_BENCH_PREVIEW_BYTES", 5 * 1024 * 1024)
 }
 
+// COMPAT(session-derived-sidecar-exports): wait only for stale/missing export fixtures.
+fn wait_for_resume_compatibility_exports(id: &str) -> std::path::PathBuf {
+    let session_dir = smelt_core::session::dir_for_id(id);
+    let revision = smelt_store::SessionReader::open_existing(&session_dir)
+        .unwrap()
+        .store_head()
+        .unwrap()
+        .revision
+        .get();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let metadata_revision = std::fs::read(session_dir.join("meta.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value["source_revision"].as_u64());
+        let mut header = String::new();
+        let content_revision = std::fs::File::open(session_dir.join("content.txt"))
+            .map(std::io::BufReader::new)
+            .and_then(|mut reader| {
+                std::io::BufRead::read_line(&mut reader, &mut header).map(|_| ())
+            })
+            .ok()
+            .and_then(|()| header.trim_end().strip_prefix("# smelt-revision:"))
+            .and_then(|value| value.parse::<u64>().ok());
+        if metadata_revision == Some(revision) && content_revision == Some(revision) {
+            return session_dir;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resume benchmark exports did not reach revision {revision}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 // COMPAT(session-derived-sidecar-exports): stale exports must not affect catalog listing.
 fn stale_resume_meta(id: &str) {
-    let meta_path = smelt_core::session::dir_for_id(id).join("meta.json");
+    let session_dir = wait_for_resume_compatibility_exports(id);
+    let meta_path = session_dir.join("meta.json");
     let mut meta_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&meta_path).expect("read resume bench meta"))
             .expect("parse resume bench meta");
@@ -1315,17 +1330,19 @@ fn stale_resume_meta(id: &str) {
     object.remove("history_len");
     object.remove("checkpoint");
     object.remove("text_bytes");
+    let temporary = session_dir.join(".resume-bench-meta.tmp");
     std::fs::write(
-        &meta_path,
+        &temporary,
         serde_json::to_vec(&meta_json).expect("encode stale resume bench meta"),
     )
     .expect("write stale resume bench meta");
+    std::fs::rename(temporary, meta_path).expect("replace stale resume bench meta");
 }
 
 // COMPAT(session-derived-sidecar-exports): missing exports must not affect catalog listing.
 fn remove_resume_meta(id: &str) {
-    std::fs::remove_file(smelt_core::session::dir_for_id(id).join("meta.json"))
-        .expect("remove resume bench meta");
+    let session_dir = wait_for_resume_compatibility_exports(id);
+    std::fs::remove_file(session_dir.join("meta.json")).expect("remove resume bench meta");
 }
 
 fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: usize, cwd: &str) {
@@ -1484,7 +1501,7 @@ fn resume_dialog_open_benchmark_suite() {
         0,
         "resume preview must use sparse sqlite transcript records, not full session load"
     );
-    assert_eq!(duration_count(&open_snapshot, "session:list"), 1);
+    assert_eq!(duration_count(&open_snapshot, "session:list_page"), 1);
 
     smelt_perf::perf::clear();
     let preview_ms = run_resume_preview_timer(&mut app);
@@ -1512,7 +1529,7 @@ fn resume_dialog_open_benchmark_suite() {
         preview_ms,
         duration_count(&open_snapshot, "store:db:open_read_only"),
         duration_count(&open_snapshot, "store:db:open_read_write"),
-        duration_total_us(&open_snapshot, "session:list"),
+        duration_total_us(&open_snapshot, "session:list_page"),
         duration_total_us(&open_snapshot, "session:render_preview_into")
             + duration_total_us(&preview_snapshot, "session:render_preview_into"),
     );

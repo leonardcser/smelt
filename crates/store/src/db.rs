@@ -123,6 +123,32 @@ pub struct SessionDb {
     object_compression: ObjectCompression,
 }
 
+// COMPAT(session-derived-sidecar-exports): one revision-pinned read for both exports.
+#[derive(Debug)]
+pub struct CompatibilityExportSnapshot<'a> {
+    transaction: Transaction<'a>,
+    metadata: SessionMeta,
+}
+
+impl CompatibilityExportSnapshot<'_> {
+    pub fn metadata(&self) -> &SessionMeta {
+        &self.metadata
+    }
+
+    pub fn write_search_blob_cancellable(
+        &self,
+        writer: &mut impl Write,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<bool> {
+        history::write_search_blob_cancellable(&self.transaction, writer, should_cancel)
+    }
+
+    pub fn finish(self) -> Result<()> {
+        self.transaction.commit()?;
+        Ok(())
+    }
+}
+
 impl SessionDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(path, OpenOptions::default())
@@ -620,6 +646,19 @@ impl SessionDb {
         meta::session_meta(&self.conn)
     }
 
+    // COMPAT(session-derived-sidecar-exports): pin metadata and content to one revision.
+    pub fn compatibility_export_snapshot(&self) -> Result<Option<CompatibilityExportSnapshot<'_>>> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let Some(metadata) = meta::session_meta(&transaction)? else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        Ok(Some(CompatibilityExportSnapshot {
+            transaction,
+            metadata,
+        }))
+    }
+
     pub fn load_session_resume_snapshot(
         &self,
         descriptor_width: u16,
@@ -659,12 +698,6 @@ impl SessionDb {
             missing_object_references,
             descriptor_tail,
         }))
-    }
-
-    // COMPAT(session-derived-sidecar-exports): test-only alpha sidecar writer.
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn write_meta_sidecar(&self, path: impl AsRef<Path>) -> Result<Option<SessionMeta>> {
-        meta::write_meta_sidecar(&self.conn, path)
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -4588,6 +4621,73 @@ mod tests {
     }
 
     #[test]
+    // COMPAT(session-derived-sidecar-exports): metadata and content share one read revision.
+    fn compatibility_export_snapshot_is_revision_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut writer = SessionDb::open(&path).unwrap();
+        let first = test_submit_user_command(&writer, "export-snapshot", "old prompt", 100);
+        let first = writer.submit_turn(&first).unwrap();
+        let reader = SessionDb::open_read_only(&path).unwrap();
+        let snapshot = reader.compatibility_export_snapshot().unwrap().unwrap();
+        assert_eq!(
+            snapshot.metadata().revision,
+            first.session.current.revision.get()
+        );
+
+        let second = test_submit_user_command(&writer, "export-snapshot", "new prompt", 200);
+        writer.submit_turn(&second).unwrap();
+        let mut content = Vec::new();
+        assert!(snapshot
+            .write_search_blob_cancellable(&mut content, || false)
+            .unwrap());
+        snapshot.finish().unwrap();
+
+        assert_eq!(content, b"old prompt\n");
+    }
+
+    #[test]
+    // COMPAT(session-derived-sidecar-exports): one large row is streamed in bounded chunks.
+    fn compatibility_export_streams_large_rows_in_bounded_chunks() {
+        struct BoundedWriter {
+            bytes: usize,
+            max_write: usize,
+        }
+
+        impl std::io::Write for BoundedWriter {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.bytes = self.bytes.saturating_add(buffer.len());
+                self.max_write = self.max_write.max(buffer.len());
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.db");
+        let mut db = SessionDb::open(&path).unwrap();
+        let text = "x".repeat(256 * 1024);
+        let command = test_submit_user_command(&db, "streamed-export", &text, 100);
+        db.submit_turn(&command).unwrap();
+        let snapshot = db.compatibility_export_snapshot().unwrap().unwrap();
+        let mut writer = BoundedWriter {
+            bytes: 0,
+            max_write: 0,
+        };
+
+        assert!(snapshot
+            .write_search_blob_cancellable(&mut writer, || false)
+            .unwrap());
+        snapshot.finish().unwrap();
+
+        assert_eq!(writer.bytes, text.len() + 1);
+        assert!(writer.max_write <= 64 * 1024);
+    }
+
+    #[test]
     fn submit_turn_fingerprint_changes_for_every_turn_field() {
         let session = SessionCommit {
             session_id: "turn-fingerprint".into(),
@@ -7881,52 +7981,6 @@ mod tests {
         assert!(second_manifest["parent_hash"].is_string());
         assert_eq!(second_manifest["item_hashes"].as_array().unwrap().len(), 1);
     }
-    #[test]
-    // COMPAT(session-derived-sidecar-exports): test the alpha metadata export primitive.
-    fn writes_session_meta_sidecar_from_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
-        let state = TestSessionModel {
-            id: "s1".into(),
-            title: Some("title".into()),
-            slug: Some("slug".into()),
-            first_user_message: Some("hello".into()),
-            cwd: Some("/tmp".into()),
-            mode: Some("ask".into()),
-            reasoning_effort: Some("low".into()),
-            model: Some("model".into()),
-            fast_mode: Some(true),
-            parent_id: Some("parent".into()),
-            accounting_json: Some(serde_json::json!({"cost": 1})),
-            checkpoint_json: None,
-            context_tokens: Some(42),
-            context_tokens_history_len: Some(3),
-            display_context_tokens: Some(40),
-            session_cost_usd: 1.25,
-            revision: 7,
-            history_len: 3,
-            created_at: 10,
-            updated_at: 20,
-        };
-
-        db.apply_test_state(&state).unwrap();
-        let mut expected = state;
-        expected.revision = 1;
-        expected.history_len = 0;
-        assert_eq!(db.test_session_model().unwrap(), Some(expected));
-
-        let meta_path = dir.path().join("meta.json");
-        let meta = db.write_meta_sidecar(&meta_path).unwrap().unwrap();
-        assert_eq!(meta.id, "s1");
-        assert_eq!(meta.revision, 1);
-        assert_eq!(meta.history_len, 0);
-        assert_eq!(meta.fast_mode, Some(true));
-        assert_eq!(meta.schema_version, schema::SCHEMA_VERSION);
-
-        let from_file: SessionMeta = serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
-        assert_eq!(from_file, meta);
-    }
-
     #[test]
     fn session_identity_is_immutable() {
         let dir = tempfile::tempdir().unwrap();

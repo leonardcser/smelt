@@ -1091,8 +1091,6 @@ pub fn session_dir(id: &crate::session_id::SessionId) -> PathBuf {
     sessions_dir().join(id.as_str())
 }
 
-// COMPAT(session-derived-sidecar-exports): format and cleanup for deprecated exports.
-const DERIVED_CACHE_FORMAT_VERSION: u32 = 1;
 const ARTIFACT_CLEANUP_BATCH: usize = 64;
 
 pub fn cleanup_abandoned_session_artifacts() {
@@ -1190,17 +1188,12 @@ pub fn save_result(session: &Session) -> Result<smelt_store::SaveReceipt, smelt_
     let receipt = writer
         .commit_session(&command)
         .map_err(session_commit_failure_to_store_error)?;
-    // COMPAT(session-derived-sidecar-exports): offline saves still publish alpha exports.
-    if let Err(err) = refresh_derived_files(writer.session_dir()) {
-        eprintln!(
-            "smelt: failed to refresh derived files for session {}: {err}",
-            session.id
-        );
-    }
     if writer.is_staged() {
         writer.publish()?;
     }
     crate::session_catalog::publish_commit(&command, &receipt, true);
+    // COMPAT(session-derived-sidecar-exports): schedule best-effort exports after publication.
+    crate::session_exports::request(&session.id, receipt.current.revision);
     writer.release()?;
     Ok(receipt)
 }
@@ -1520,74 +1513,6 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     std::io::Write::write_all(&mut file, contents)
-}
-
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        fs::File::open(path)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
-}
-
-/// Write `contents` to `path` atomically via a private temporary file + rename.
-pub fn atomic_write(path: &Path, contents: &[u8], ts: u64) -> std::io::Result<()> {
-    atomic_write_with(path, ts, |file| std::io::Write::write_all(file, contents))
-}
-
-fn atomic_write_with<E>(
-    path: &Path,
-    ts: u64,
-    write_contents: impl FnOnce(&mut fs::File) -> Result<(), E>,
-) -> Result<(), E>
-where
-    E: From<std::io::Error>,
-{
-    let dir = path
-        .parent()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("storage file has no parent: {}", path.display()),
-            )
-        })
-        .map_err(E::from)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("storage file has no valid name: {}", path.display()),
-            )
-        })
-        .map_err(E::from)?;
-    reject_filesystem_symlink(dir).map_err(E::from)?;
-    reject_filesystem_symlink(path).map_err(E::from)?;
-    let nonce = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".{name}.{ts}.{nonce}.tmp"));
-    let result = (|| {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&tmp).map_err(E::from)?;
-        write_contents(&mut file)?;
-        file.sync_all().map_err(E::from)?;
-        fs::rename(&tmp, path).map_err(E::from)?;
-        sync_directory(dir).map_err(E::from)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 
 /// Load the full semantic session by exact ID or unique prefix (git-style short ID).
@@ -2416,88 +2341,18 @@ fn load_meta_for_dir_result(path: PathBuf) -> SessionStoreResult<Option<SessionM
     load_meta_from_db_result(&path)
 }
 
-fn derived_meta_json(meta: &smelt_store::SessionMeta) -> Result<Vec<u8>, String> {
-    let mut value = serde_json::to_value(meta).map_err(|err| err.to_string())?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "session metadata must serialize as an object".to_string())?;
-    object.insert(
-        "cache_format_version".into(),
-        DERIVED_CACHE_FORMAT_VERSION.into(),
-    );
-    object.insert("source_revision".into(), meta.revision.into());
-    serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())
+// COMPAT(session-derived-sidecar-exports): queue one process-level post-commit export.
+pub fn request_session_compatibility_export(id: &str, revision: smelt_store::Revision) {
+    crate::session_exports::request(id, revision);
 }
 
-// COMPAT(session-derived-sidecar-exports): best-effort alpha metadata export.
-pub fn refresh_derived_meta_file(dir_path: &Path) -> Result<bool, String> {
-    let _perf = smelt_perf::perf::begin("session:refresh_derived_meta_file");
-    let db_path = dir_path.join("session.db");
-    if !db_path.is_file() {
-        return Ok(false);
-    }
-    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
-    let Some(meta) = db.session_meta().map_err(|err| err.to_string())? else {
-        return Ok(false);
-    };
-    let meta_json = derived_meta_json(&meta)?;
-    atomic_write(&dir_path.join("meta.json"), &meta_json, now_ms())
-        .map_err(|err| err.to_string())?;
-    smelt_perf::perf::record_value("session:compat_export:meta:writes", 1);
-    smelt_perf::perf::record_value("session:compat_export:meta:source_revision", meta.revision);
-    smelt_perf::perf::record_value(
-        "session:compat_export:meta:completed_at_us",
-        smelt_perf::perf::timestamp_us(),
-    );
-    Ok(true)
-}
-
-// COMPAT(session-derived-sidecar-exports): best-effort alpha content export.
-pub fn refresh_derived_content_file(dir_path: &Path) -> Result<bool, String> {
-    let _perf = smelt_perf::perf::begin("session:refresh_derived_content_file");
-    let db_path = dir_path.join("session.db");
-    if !db_path.is_file() {
-        return Ok(false);
-    }
-    let db = smelt_store::SessionReader::open_database(&db_path).map_err(|err| err.to_string())?;
-    let Some(meta) = db.session_meta().map_err(|err| err.to_string())? else {
-        return Ok(false);
-    };
-    atomic_write_with(
-        &dir_path.join("content.txt"),
-        now_ms(),
-        |file| -> smelt_store::Result<()> {
-            std::io::Write::write_all(
-                file,
-                format!("# smelt-revision:{}\n", meta.revision).as_bytes(),
-            )?;
-            db.write_search_blob(file)
-        },
-    )
-    .map_err(|err| err.to_string())?;
-    smelt_perf::perf::record_value("session:compat_export:content:writes", 1);
-    smelt_perf::perf::record_value(
-        "session:compat_export:content:source_revision",
-        meta.revision,
-    );
-    smelt_perf::perf::record_value(
-        "session:compat_export:content:completed_at_us",
-        smelt_perf::perf::timestamp_us(),
-    );
-    Ok(true)
-}
-
-// COMPAT(session-derived-sidecar-exports): combined explicit alpha export rebuild.
-pub fn refresh_derived_files(dir_path: &Path) -> Result<bool, String> {
-    let _perf = smelt_perf::perf::begin("session:refresh_derived_files");
-    let meta_refreshed = refresh_derived_meta_file(dir_path)?;
-    let content_refreshed = refresh_derived_content_file(dir_path)?;
-    Ok(meta_refreshed || content_refreshed)
-}
-
-// COMPAT(session-derived-sidecar-exports): legacy public alias for export rebuild.
-pub fn write_db_meta_sidecar(dir_path: &Path) -> Result<bool, String> {
-    refresh_derived_files(dir_path)
+// COMPAT(session-derived-sidecar-exports): explicit synchronous maintenance export.
+pub fn rebuild_compatibility_exports(dir_path: &Path) -> Result<bool, String> {
+    let outcome = crate::session_exports::export_compatibility_files(dir_path, 0, |_| false)?;
+    Ok(!matches!(
+        outcome,
+        crate::session_exports::ExportOutcome::Missing
+    ))
 }
 
 fn load_meta_from_db_result(path: &Path) -> SessionStoreResult<Option<SessionMeta>> {
@@ -2653,6 +2508,35 @@ mod tests {
 
     fn numbered_session_id(value: u64) -> String {
         format!("{value:064x}")
+    }
+
+    // COMPAT(session-derived-sidecar-exports): wait only in tests that inspect exports.
+    fn wait_for_compatibility_exports(dir: &Path, revision: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let meta_revision = fs::read(dir.join("meta.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["source_revision"].as_u64());
+            let content_revision =
+                fs::read_to_string(dir.join("content.txt"))
+                    .ok()
+                    .and_then(|content| {
+                        content
+                            .lines()
+                            .next()
+                            .and_then(|line| line.strip_prefix("# smelt-revision:"))
+                            .and_then(|value| value.parse::<u64>().ok())
+                    });
+            if meta_revision == Some(revision) && content_revision == Some(revision) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "compatibility exports did not reach revision {revision}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -3010,8 +2894,10 @@ mod tests {
             s.title = Some(format!("stale meta {i}"));
             s.updated_at_ms = 1_700_000_000_000 + i;
             s.history.push(user_item(&format!("prompt {i}")));
-            save(&s);
+            let receipt = save_result(&s).unwrap();
+            wait_for_compatibility_exports(&dir_for(&s), receipt.current.revision.get());
 
+            // COMPAT(session-derived-sidecar-exports): stale/missing exports cannot affect listing.
             let meta_path = dir_for(&s).join("meta.json");
             let mut meta_json: Value =
                 serde_json::from_str(&fs::read_to_string(&meta_path).expect("read meta"))
@@ -3052,7 +2938,7 @@ mod tests {
         }
         assert!(
             !dir_for_id(&ids[2]).join("meta.json").exists(),
-            "ordinary listing must not regenerate a missing derived cache"
+            "ordinary listing must not regenerate a missing compatibility export"
         );
         let read_only_count = snapshot
             .durations
@@ -3099,8 +2985,9 @@ mod tests {
         let mut session = fixture_session();
         session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("read only"));
-        save(&session);
+        let receipt = save_result(&session).unwrap();
         let dir = dir_for(&session);
+        wait_for_compatibility_exports(&dir, receipt.current.revision.get());
         let db_path = dir.join("session.db");
         fs::remove_file(dir.join("meta.json")).unwrap();
         fs::remove_file(dir.join("content.txt")).unwrap();
@@ -3121,7 +3008,7 @@ mod tests {
 
     #[test]
     // COMPAT(session-derived-sidecar-exports): exports identify their canonical revision.
-    fn derived_files_identify_the_canonical_revision() {
+    fn compatibility_exports_identify_the_canonical_revision() {
         let state = tempfile::tempdir().expect("state dir");
         let _guard = crate::test_util::isolate_xdg_state(state.path());
         let mut session = fixture_session();
@@ -3130,6 +3017,7 @@ mod tests {
 
         let receipt = save_result(&session).unwrap();
         let dir = dir_for(&session);
+        wait_for_compatibility_exports(&dir, receipt.current.revision.get());
         let meta: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
         let content = fs::read_to_string(dir.join("content.txt")).unwrap();
@@ -3144,7 +3032,7 @@ mod tests {
         );
         assert_eq!(
             meta["cache_format_version"].as_u64(),
-            Some(DERIVED_CACHE_FORMAT_VERSION.into())
+            Some(crate::session_exports::EXPORT_FORMAT_VERSION.into())
         );
         assert!(content.starts_with(&format!(
             "# smelt-revision:{}\n",
@@ -3155,7 +3043,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     // COMPAT(session-derived-sidecar-exports): exported files remain private while supported.
-    fn saved_session_state_and_derived_files_are_private() {
+    fn saved_session_state_and_compatibility_exports_are_private() {
         use std::os::unix::fs::PermissionsExt;
 
         let state = tempfile::tempdir().expect("state dir");
@@ -3163,8 +3051,9 @@ mod tests {
         let mut session = fixture_session();
         session.id = TEST_SESSION_ID.into();
         session.history.push(user_item("private"));
-        save(&session);
+        let receipt = save_result(&session).unwrap();
         let session_dir = dir_for(&session);
+        wait_for_compatibility_exports(&session_dir, receipt.current.revision.get());
         for dir in [engine::state_dir(), sessions_dir(), session_dir.clone()] {
             assert_eq!(
                 fs::metadata(dir).unwrap().permissions().mode() & 0o777,
@@ -4194,32 +4083,5 @@ mod tests {
         cleanup_abandoned_session_artifacts();
 
         assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep");
-    }
-
-    // ── atomic_write ──────────────────────────────────────────────────
-
-    #[test]
-    fn atomic_write_writes_contents_and_renames_into_place() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data.json");
-        atomic_write(&path, b"hello", 42).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-        // No leftover tmp file in the directory.
-        let entries: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|e| e.file_name())
-            .collect();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].to_str(), Some("data.json"));
-    }
-
-    #[test]
-    fn atomic_write_overwrites_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data");
-        std::fs::write(&path, "old").unwrap();
-        atomic_write(&path, b"new", 1).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 }

@@ -449,7 +449,8 @@ All runtime data is stored under the XDG base directories:
 | Directory                           | Contents                                                                          |
 | ----------------------------------- | --------------------------------------------------------------------------------- |
 | `$XDG_CONFIG_HOME/smelt/`           | `early.lua`, `init.lua`, `plugins/`, `commands/`, `skills/`, other user Lua files |
-| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.db`, derived `meta.json` / `content.txt`, blobs)        |
+| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.db`, blobs, and deprecated `meta.json` / `content.txt` compatibility exports) |
+| `$XDG_STATE_HOME/smelt/catalog.db`  | Disposable session-list catalog rebuilt from canonical session databases         |
 | `$XDG_STATE_HOME/smelt/recent.json` | Last-used picks (model, mode, reasoning effort)                                   |
 | `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                                                   |
 | `$XDG_STATE_HOME/smelt/history`     | Prompt history                                                                    |

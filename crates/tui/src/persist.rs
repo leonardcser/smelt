@@ -1,10 +1,9 @@
 //! Fixed-session persistence convergence actor.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -200,7 +199,6 @@ pub(crate) struct SessionPersistenceStatus {
     pub(crate) state: PersistenceState,
     pub(crate) acknowledgement: Option<PersistenceAcknowledgement>,
     pub(crate) latest_audit_warning: Option<PersistenceCause>,
-    pub(crate) latest_sidecar_warning: Option<PersistenceCause>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -510,7 +508,6 @@ impl SessionPersistence {
             },
             acknowledgement: None,
             latest_audit_warning: None,
-            latest_sidecar_warning: None,
         }));
         let pending_audits = Arc::new(AtomicUsize::new(0));
         let pending_full_audit_bytes = Arc::new(AtomicUsize::new(0));
@@ -992,7 +989,6 @@ impl SessionPersistence {
             .unwrap_or_else(|poison| poison.into_inner());
         let snapshot = status.clone();
         status.latest_audit_warning = None;
-        status.latest_sidecar_warning = None;
         snapshot
     }
 
@@ -1415,141 +1411,6 @@ impl StatusPublisher {
         drop(status);
         let _ = self.wake.try_send(());
     }
-
-    fn publish_sidecar_warning(&self, warning: Option<PersistenceCause>) {
-        let mut status = self
-            .status
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if status.latest_sidecar_warning.is_some() {
-            smelt_perf::perf::record_value("persist:sidecar:warning_overwritten", 1);
-        }
-        if warning.is_some() {
-            smelt_perf::perf::record_value("persist:sidecar:warnings", 1);
-        }
-        status.latest_sidecar_warning = warning;
-        drop(status);
-        let _ = self.wake.try_send(());
-    }
-}
-
-const MAX_PENDING_COMPATIBILITY_EXPORTS: usize = 64;
-
-// COMPAT(session-derived-sidecar-exports): process-level bounded alpha exporter.
-struct CompatibilityExportRequest {
-    session_dir: PathBuf,
-    session_id: String,
-    revision: smelt_store::Revision,
-    publisher: StatusPublisher,
-}
-
-struct CompatibilityExporter {
-    pending: Arc<Mutex<BTreeMap<String, CompatibilityExportRequest>>>,
-    wake: SyncSender<()>,
-}
-
-impl CompatibilityExporter {
-    fn spawn() -> Result<Self, String> {
-        let pending = Arc::new(Mutex::new(
-            BTreeMap::<String, CompatibilityExportRequest>::new(),
-        ));
-        let worker_pending = Arc::clone(&pending);
-        let (wake, wakes) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("smelt-compat-export".into())
-            .spawn(move || {
-                while wakes.recv().is_ok() {
-                    loop {
-                        let request = {
-                            let mut pending = worker_pending
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner());
-                            let Some(session_id) = pending.keys().next().cloned() else {
-                                break;
-                            };
-                            pending.remove(&session_id).expect("pending export")
-                        };
-                        let warning = smelt_core::session::refresh_derived_files(
-                            &request.session_dir,
-                        )
-                        .err()
-                        .map(|error| {
-                            PersistenceCause::new(
-                                PersistenceFailureClass::Environment,
-                                format!(
-                                    "session {} is durable at revision {}, but compatibility export failed: {error}",
-                                    request.session_id,
-                                    request.revision.get()
-                                ),
-                            )
-                        });
-                        request.publisher.publish_sidecar_warning(warning);
-                    }
-                }
-            })
-            .map_err(|error| format!("spawn compatibility exporter: {error}"))?;
-        Ok(Self { pending, wake })
-    }
-
-    fn request(&self, request: CompatibilityExportRequest) -> Result<(), PersistenceCause> {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if let Some(current) = pending.get_mut(&request.session_id) {
-            if request.revision >= current.revision {
-                *current = request;
-            }
-            smelt_perf::perf::record_value("persist:projection:compat_export:coalesced", 1);
-        } else {
-            if pending.len() >= MAX_PENDING_COMPATIBILITY_EXPORTS {
-                return Err(PersistenceCause::unavailable(format!(
-                    "compatibility export queue reached its {MAX_PENDING_COMPATIBILITY_EXPORTS}-session limit"
-                )));
-            }
-            pending.insert(request.session_id.clone(), request);
-        }
-        smelt_perf::perf::record_value(
-            "persist:projection:compat_export:queue_depth",
-            pending.len() as u64,
-        );
-        drop(pending);
-        match self.wake.try_send(()) {
-            Ok(()) | Err(TrySendError::Full(())) => Ok(()),
-            Err(TrySendError::Disconnected(())) => Err(PersistenceCause::unavailable(
-                "compatibility export worker disconnected",
-            )),
-        }
-    }
-}
-
-fn request_compatibility_export(
-    session_dir: PathBuf,
-    session_id: String,
-    revision: smelt_store::Revision,
-    publisher: StatusPublisher,
-) {
-    static EXPORTER: OnceLock<Result<CompatibilityExporter, String>> = OnceLock::new();
-    smelt_perf::perf::record_value(
-        "persist:projection:compat_export:requested_revision",
-        revision.get(),
-    );
-    smelt_perf::perf::record_value(
-        "persist:projection:compat_export:requested_at_us",
-        smelt_perf::perf::timestamp_us(),
-    );
-    let result = match EXPORTER.get_or_init(CompatibilityExporter::spawn) {
-        Ok(exporter) => exporter.request(CompatibilityExportRequest {
-            session_dir,
-            session_id,
-            revision,
-            publisher: publisher.clone(),
-        }),
-        Err(error) => Err(PersistenceCause::unavailable(error.clone())),
-    };
-    if let Err(cause) = result {
-        publisher.publish_sidecar_warning(Some(cause));
-    }
 }
 
 struct PersistenceActor {
@@ -1698,11 +1559,10 @@ fn persistence_actor(
             &worker_session_id,
             recovery.session.current.revision,
         );
-        request_compatibility_export(
-            session_dir,
-            worker_session_id,
+        // COMPAT(session-derived-sidecar-exports): recovery schedules the shared exporter.
+        smelt_core::session::request_session_compatibility_export(
+            &worker_session_id,
             recovery.session.current.revision,
-            actor.publisher.clone(),
         );
     }
     let _ = started.send(Ok(SessionPersistenceStartup {
@@ -2582,7 +2442,6 @@ impl PersistenceActor {
                 .map_err(|error| PersistenceCause::from_store("publish session", error))?;
             drop(publication_perf);
         }
-        let session_dir = writer.session_dir().to_path_buf();
         record_save_receipt(&receipt);
         smelt_core::session::publish_session_catalog_commit(
             command,
@@ -2590,11 +2449,10 @@ impl PersistenceActor {
             schedule_projections,
         );
         if schedule_projections {
-            request_compatibility_export(
-                session_dir,
-                receipt.session_id.clone(),
+            // COMPAT(session-derived-sidecar-exports): schedule the shared exporter after commit.
+            smelt_core::session::request_session_compatibility_export(
+                &receipt.session_id,
                 receipt.current.revision,
-                self.publisher.clone(),
             );
         }
         Ok(receipt)

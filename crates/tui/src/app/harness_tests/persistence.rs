@@ -22,6 +22,34 @@ fn session_revision(id: &str) -> u64 {
         .get()
 }
 
+// COMPAT(session-derived-sidecar-exports): wait only in tests that inspect exports.
+fn wait_for_compatibility_exports(session_dir: &std::path::Path, revision: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let metadata_revision = std::fs::read(session_dir.join("meta.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value["source_revision"].as_u64());
+        let content_revision = std::fs::read_to_string(session_dir.join("content.txt"))
+            .ok()
+            .and_then(|content| {
+                content
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("# smelt-revision:"))
+                    .and_then(|value| value.parse::<u64>().ok())
+            });
+        if metadata_revision == Some(revision) && content_revision == Some(revision) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "compatibility exports did not reach revision {revision}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn has_sticky_session_save_failure(app: &TestApp, session_id: &str) -> bool {
     app.app.notification.as_ref().is_some_and(|notification| {
         notification.lifetime.is_sticky()
@@ -489,8 +517,8 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
 }
 
 #[test]
-// COMPAT(session-derived-sidecar-exports): preserve alpha export failure semantics.
-fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
+// COMPAT(session-derived-sidecar-exports): export failure cannot affect canonical durability.
+fn compatibility_export_failure_does_not_undo_canonical_commit() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.app.core.session.id.clone();
@@ -498,12 +526,8 @@ fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
         .session_append_history(HistoryItem::user(Content::text("baseline")));
     app.app.save_session_and_flush();
     let session_dir = smelt_core::session::dir_for_id(&session_id);
+    wait_for_compatibility_exports(&session_dir, session_revision(&session_id));
     let meta_path = session_dir.join("meta.json");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !meta_path.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(meta_path.exists(), "baseline sidecar export did not finish");
     std::fs::remove_file(&meta_path).unwrap();
     std::fs::create_dir(&meta_path).unwrap();
 
@@ -513,22 +537,17 @@ fn sidecar_rebuild_failure_does_not_undo_canonical_commit() {
         )));
     app.app.save_session_and_flush();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !app
-        .app
-        .notification
-        .as_ref()
-        .is_some_and(|notification| notification.summary.contains("compatibility export failed"))
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        app.app.drain_persist_reports();
-    }
     assert!(!app.app.session_document_has_unflushed_work());
+    assert!(!has_sticky_session_save_failure(&app, &session_id));
     assert_eq!(loaded_session(&session_id).history.len(), 2);
-    assert!(app.app.notification.as_ref().is_some_and(|notification| {
-        notification.summary.contains("compatibility export failed")
-    }));
+    assert!(smelt_core::session::list_sessions()
+        .iter()
+        .any(|session| session.id == session_id));
+    assert!(smelt_core::session::load_search_blob(&session_id)
+        .unwrap()
+        .contains("canonical despite sidecar"));
+    assert!(smelt_core::session::rebuild_compatibility_exports(&session_dir).is_err());
+    assert!(meta_path.is_dir());
 }
 
 #[test]
@@ -636,7 +655,7 @@ fn stale_request_audit_after_session_switch_is_rejected() {
 }
 
 #[test]
-// COMPAT(session-derived-sidecar-exports): fork publication currently includes alpha exports.
+// COMPAT(session-derived-sidecar-exports): fork publication schedules alpha exports.
 fn sparse_fork_publishes_a_complete_destination() {
     let guard = test_home_guard();
     let session_id = {
@@ -662,6 +681,7 @@ fn sparse_fork_publishes_a_complete_destination() {
         Some(session_id.as_str())
     );
     assert_eq!(reader.read_history_items_range(0..1).unwrap().len(), 1);
+    wait_for_compatibility_exports(&fork_dir, stored.head.revision.get());
     assert!(fork_dir.join("meta.json").is_file());
     assert!(fork_dir.join("content.txt").is_file());
 }

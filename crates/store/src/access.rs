@@ -11,15 +11,15 @@ use crate::blob_staging::recover_blob_staging;
 use crate::blob_staging::{stage_session_blobs, SessionBlob, BLOB_STAGING_DIR};
 use crate::db::SessionDb;
 use crate::{
-    DescriptorIndex, FullSession, HistoryIndex, HistoryLen, HistorySuffix, ObjectMeta,
-    RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery, RequestAuditStats,
-    RequestAuditSummary, Result, SaveReceipt, SessionCommit, SessionCommitFailure, SessionIdentity,
-    SessionMeta, SessionMetadata, SideTableSuffixes, StartupRecoveryReceipt, StoreError, StoreHead,
-    StoredObject, StoredSession, StoredTurn, SubmitTurn, SubmitTurnReceipt,
-    TranscriptBlockMetadataRecord, TranscriptDescriptorIndex, TranscriptDescriptorRange,
-    TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptDescriptorSuffix,
-    TranscriptSearchCandidate, TranscriptSearchDirection, TurnId, TurnTransition,
-    TurnTransitionReceipt, WriterOwner,
+    CompatibilityExportSnapshot, DescriptorIndex, FullSession, HistoryIndex, HistoryLen,
+    HistorySuffix, ObjectMeta, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
+    RequestAuditStats, RequestAuditSummary, Result, SaveReceipt, SessionCommit,
+    SessionCommitFailure, SessionIdentity, SessionMeta, SessionMetadata, SideTableSuffixes,
+    StartupRecoveryReceipt, StoreError, StoreHead, StoredObject, StoredSession, StoredTurn,
+    SubmitTurn, SubmitTurnReceipt, TranscriptBlockMetadataRecord, TranscriptDescriptorIndex,
+    TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
+    TranscriptDescriptorSuffix, TranscriptSearchCandidate, TranscriptSearchDirection, TurnId,
+    TurnTransition, TurnTransitionReceipt, WriterOwner,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,6 +116,11 @@ impl SessionReader {
 
     pub fn session_meta(&self) -> Result<Option<SessionMeta>> {
         self.db.session_meta()
+    }
+
+    // COMPAT(session-derived-sidecar-exports): pin metadata and content to one revision.
+    pub fn compatibility_export_snapshot(&self) -> Result<Option<CompatibilityExportSnapshot<'_>>> {
+        self.db.compatibility_export_snapshot()
     }
 
     pub fn object(&self, hash: &str) -> Result<Option<StoredObject>> {

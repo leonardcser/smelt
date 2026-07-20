@@ -1213,6 +1213,7 @@ impl TuiApp {
                     return;
                 }
             };
+        let mut fork_revision = imported.current.revision;
         if let Some(intent) = preserved_intent {
             let command = smelt_store::SessionCommit {
                 session_id: forked.id.clone(),
@@ -1223,20 +1224,20 @@ impl TuiApp {
                 side_tables: intent.side_tables,
                 descriptors: intent.descriptors,
             };
-            if let Err(err) = maintenance.commit_session(&command) {
-                self.notify_error_sticky(format!("failed to preserve unsaved fork state: {err}"));
-                return;
+            match maintenance.commit_session(&command) {
+                Ok(receipt) => fork_revision = receipt.current.revision,
+                Err(err) => {
+                    self.notify_error_sticky(format!(
+                        "failed to preserve unsaved fork state: {err}"
+                    ));
+                    return;
+                }
             }
         }
         if let Err(err) =
             copy_legacy_attachment_blobs(&source, &fork_work_dir.join("blobs"), &legacy_attachments)
         {
             self.notify_error_sticky(format!("failed to fork legacy session attachments: {err}"));
-            return;
-        }
-        // COMPAT(session-derived-sidecar-exports): publish alpha exports with a fork.
-        if let Err(err) = session::refresh_derived_files(&fork_work_dir) {
-            self.notify_error_sticky(format!("failed to refresh fork metadata: {err}"));
             return;
         }
         let fork_dir = match maintenance.publish() {
@@ -1250,6 +1251,8 @@ impl TuiApp {
             self.notify_error_sticky(format!("failed to release fork destination: {err}"));
             return;
         }
+        // COMPAT(session-derived-sidecar-exports): fork publication schedules the shared exporter.
+        session::request_session_compatibility_export(&forked.id, fork_revision);
         let Some((header, store_ref)) = session::load_store_header_for_dir(fork_dir.clone()) else {
             self.notify_error_sticky("failed to load forked session header".into());
             return;

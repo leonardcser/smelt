@@ -2,7 +2,7 @@ use protocol::HistoryItem;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Statement};
 use serde_json::{json, Value};
 use smelt_perf::perf;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ops::Range;
 
 use crate::compression::ObjectCompression;
@@ -583,35 +583,76 @@ pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {
 pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
     let _perf = perf::begin("store:transcript:search_blob_full");
     let mut out = Vec::new();
-    write_search_blob_rows(conn, &mut out)?;
+    let completed = write_search_blob_rows(conn, &mut out, &mut || false)?;
+    debug_assert!(completed);
     Ok(String::from_utf8(out).expect("transcript search text is valid UTF-8"))
 }
 
 pub(crate) fn write_search_blob(conn: &Connection, writer: &mut impl Write) -> Result<()> {
     let _perf = perf::begin("store:transcript:search_blob_full");
-    write_search_blob_rows(conn, writer)
+    let completed = write_search_blob_rows(conn, writer, &mut || false)?;
+    debug_assert!(completed);
+    Ok(())
 }
 
-fn write_search_blob_rows(conn: &Connection, writer: &mut impl Write) -> Result<()> {
+// COMPAT(session-derived-sidecar-exports): bound cancellation latency while streaming.
+pub(crate) fn write_search_blob_cancellable(
+    conn: &Connection,
+    writer: &mut impl Write,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<bool> {
+    let _perf = perf::begin("store:transcript:search_blob_full");
+    write_search_blob_rows(conn, writer, &mut should_cancel)
+}
+
+fn write_search_blob_rows(
+    conn: &Connection,
+    writer: &mut impl Write,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<bool> {
+    const WRITE_CHUNK_BYTES: usize = 64 * 1024;
+
     let mut stmt = conn.prepare(
-        "SELECT indexed_text FROM transcript_search WHERE indexed_text != '' ORDER BY block_idx",
+        "SELECT block_idx FROM transcript_search WHERE indexed_text != '' ORDER BY block_idx",
     )?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
     let mut row_count = 0u64;
     let mut byte_count = 0u64;
+    let mut chunk = [0_u8; WRITE_CHUNK_BYTES];
     for row in rows {
-        let text = row?;
+        let block_idx = row?;
+        let mut text = conn.blob_open(
+            rusqlite::MAIN_DB,
+            "transcript_search",
+            "indexed_text",
+            block_idx,
+            true,
+        )?;
         row_count = row_count.saturating_add(1);
-        writer.write_all(text.as_bytes())?;
-        byte_count = byte_count.saturating_add(text.len() as u64);
-        if !text.ends_with('\n') {
+        let mut last_byte = None;
+        loop {
+            if should_cancel() {
+                return Ok(false);
+            }
+            let read = text.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            writer.write_all(&chunk[..read])?;
+            byte_count = byte_count.saturating_add(read as u64);
+            last_byte = Some(chunk[read - 1]);
+        }
+        if last_byte != Some(b'\n') {
+            if should_cancel() {
+                return Ok(false);
+            }
             writer.write_all(b"\n")?;
             byte_count = byte_count.saturating_add(1);
         }
     }
     perf::record_value("store:transcript:search_blob_rows_read", row_count);
     perf::record_value("store:transcript:search_blob_bytes_read", byte_count);
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn transcript_descriptor_suffix_matches(

@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod runtime_state;
 pub mod session;
 pub(crate) mod session_catalog;
+pub(crate) mod session_exports;
 pub mod session_id;
 pub mod session_runtime;
 pub mod session_store;

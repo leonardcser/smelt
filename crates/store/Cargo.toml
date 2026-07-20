@@ -11,7 +11,7 @@ test-util = []
 getrandom = "0.4.3"
 hostname = "0.4.2"
 libc.workspace = true
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "blob", "bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
