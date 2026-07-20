@@ -280,9 +280,11 @@ impl TuiApp {
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
-        let (turn_id, submitted_revision, required_generation) = if self.ephemeral() {
+        let (turn_id, submitted_revision, required_generation, durable_receipt_at) = if self
+            .ephemeral()
+        {
             let turn_id = self.next_turn_id;
-            (turn_id, 0, self.session_document.generation().get())
+            (turn_id, 0, self.session_document.generation().get(), None)
         } else {
             let acknowledgement = match self.submit_canonical_turn(smelt_store::NewTurn {
                 kind: turn.kind,
@@ -309,6 +311,7 @@ impl TuiApp {
                 acknowledgement.receipt.turn_id.get(),
                 acknowledgement.receipt.session.current.revision.get(),
                 acknowledgement.generation.get(),
+                Some(std::time::Instant::now()),
             )
         };
         self.next_turn_id = turn_id.checked_add(1).unwrap_or(turn_id);
@@ -356,6 +359,15 @@ impl TuiApp {
             self.working.finish(TurnOutcome::Errored);
             self.notify_error_sticky("engine stopped before accepting the request".into());
             return None;
+        }
+        if let Some(durable_receipt_at) = durable_receipt_at {
+            smelt_perf::perf::record_value(
+                "persist:submit_turn:dispatch_after_receipt_ms",
+                durable_receipt_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
         }
         smelt_perf::perf::record_value("agent:dispatch:start_turn:turn_id", turn_id);
         smelt_perf::perf::record_value("agent:dispatch:start_turn:revision", submitted_revision);
@@ -1795,15 +1807,23 @@ mod tests {
             "dispatch instrumentation should observe exactly one StartTurn"
         );
         assert_eq!(
-            perf_value_total(&snapshot, "store:transaction:submit_turn:attempts"),
-            1,
-            "Enter should issue exactly one SubmitTurn transaction"
+            perf_value_total(&snapshot, "persist:submit_turn:transactions"),
+            1
         );
-        assert_eq!(
-            perf_value_total(&snapshot, "store:transaction:submit_turn:committed"),
-            1,
-            "Enter should commit exactly one ready turn before dispatch"
-        );
+        for metric in [
+            "persist:submit_turn:queue_wait_ms",
+            "persist:submit_turn:transaction_ms",
+            "persist:submit_turn:history_rows",
+            "persist:submit_turn:descriptor_rows",
+            "persist:submit_turn:index_rows",
+            "persist:submit_turn:dispatch_after_receipt_ms",
+        ] {
+            assert_eq!(
+                perf_value_count(&snapshot, metric),
+                1,
+                "missing bounded SubmitTurn metric {metric}"
+            );
+        }
         assert_eq!(
             perf_value_total(&snapshot, "store:transaction:session_commit:attempts"),
             0,
@@ -1814,9 +1834,8 @@ mod tests {
             Some(payload.turn_id)
         );
 
-        let committed_at =
-            perf_value_last(&snapshot, "store:transaction:submit_turn:committed_at_us")
-                .expect("SubmitTurn commit timestamp");
+        let committed_at = perf_value_last(&snapshot, "persist:submit_turn:committed_at_us")
+            .expect("SubmitTurn commit timestamp");
         let dispatched_at = perf_value_last(&snapshot, "agent:dispatch:start_turn:at_us")
             .expect("dispatch timestamp");
         assert!(

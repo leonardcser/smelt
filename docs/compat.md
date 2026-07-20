@@ -17,7 +17,7 @@ with `COMPAT(<id>)`.
   - `crates/core/src/session_exports.rs`: bounded process exporter, revision-pinned
     format generation, cross-process locking, and atomic streaming writes
   - `crates/core/src/session.rs`: offline-save scheduling, explicit maintenance
-    export, and stale temporary-file cleanup
+    export, read-only revision diagnostics, and stale temporary-file cleanup
   - `crates/tui/src/persist.rs`: post-commit compatibility export scheduling
   - `crates/tui/src/app/history.rs`: post-publication fork export scheduling
   - `src/main.rs`: explicit `session rebuild-derived` export command
@@ -25,8 +25,11 @@ with `COMPAT(<id>)`.
     snapshot and cancellable row streaming
 - Tests:
   - compatibility exports are revision-stamped and rebuilt from canonical SQLite
-  - stale or failed compatibility exports never affect list, search, resume, or
-    model dispatch
+  - crash probes before and after atomic rename leave an old or new complete file,
+    never a partial target
+  - missing, malformed, stale, permission-denied, symlinked, cancelled, and slow
+    exports never affect canonical reads, list, search, resume, model dispatch, or
+    bounded shutdown
 
 ## legacy-attachment-blobs
 

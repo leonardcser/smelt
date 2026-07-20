@@ -595,6 +595,7 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
 }
 
 fn project_session(handle: &ServiceHandle, id: &str, minimum_revision: u64) -> Result<(), String> {
+    let _duration = smelt_perf::perf::begin_value_ms("session:catalog:projection_duration_ms");
     let _perf = smelt_perf::perf::begin("session:catalog:project");
     smelt_perf::perf::record_value(
         "session:catalog:project_requested_revision",
@@ -656,11 +657,13 @@ fn remove_session(handle: &ServiceHandle, id: &str) -> Result<(), String> {
 }
 
 fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
+    let _duration = smelt_perf::perf::begin_value_ms("session:catalog:reconciliation_duration_ms");
     let _lock = CatalogReconcileLock::acquire(&handle.lock_path)
         .map_err(|error| format!("lock session catalog reconciliation: {error}"))?;
     let mut catalog = match Catalog::open(&handle.catalog_path) {
         Ok(catalog) => catalog,
         Err(open_error) => {
+            smelt_perf::perf::record_value("session:catalog:integrity_failures", 1);
             smelt_perf::perf::record_value("session:catalog:rebuilds", 1);
             smelt_store::archive_corrupt_catalog(&handle.catalog_path)
                 .map_err(|error| format!("archive session catalog after {open_error}: {error}"))?;
@@ -725,14 +728,14 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<(), String> {
             }
         }
     }
-    smelt_perf::perf::record_value("session:catalog:reconcile_candidates", candidates);
+    smelt_perf::perf::record_value("session:catalog:reconcile_scanned", candidates);
     smelt_perf::perf::record_value("session:catalog:reconcile_available", available);
     smelt_perf::perf::record_value("session:catalog:reconcile_unavailable", unavailable);
     let reconciled_at = i64::try_from(crate::session::now_ms()).unwrap_or(i64::MAX);
     let deleted = catalog
         .complete_scan(scan_id, reconciled_at)
         .map_err(|error| format!("complete session catalog scan {scan_id}: {error}"))?;
-    smelt_perf::perf::record_value("session:catalog:reconcile_deleted", deleted as u64);
+    smelt_perf::perf::record_value("session:catalog:reconcile_removed", deleted as u64);
 
     {
         let mut overlays = handle

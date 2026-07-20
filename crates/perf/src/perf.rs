@@ -3,8 +3,8 @@
 //! Wrap a scope with [`begin`] (RAII guard); on drop it appends a sample to a per-label ring
 //! (capacity [`RING_CAPACITY`]). When [`crate::alloc::enabled`] is also true, allocs that happened
 //! on the same thread between begin and drop are recorded alongside the duration. Use
-//! [`record_value`] for non-duration metrics. [`snapshot`] returns sortable rows; [`print_summary`]
-//! emits a colored ANSI table.
+//! [`record_value`] for non-duration metrics and [`begin_value_ms`] for elapsed-millisecond value
+//! samples. [`snapshot`] returns sortable rows; [`print_summary`] emits a colored ANSI table.
 
 use crate::alloc;
 use std::collections::HashMap;
@@ -71,6 +71,32 @@ pub fn record_value(label: &'static str, value: u64) {
     }
     if let Ok(mut m) = value_samples().lock() {
         push_capped(m.entry(label).or_default(), value);
+    }
+}
+
+/// Start a scope guard that records elapsed milliseconds as a value sample.
+pub fn begin_value_ms(label: &'static str) -> Option<ValueTimer> {
+    enabled().then(|| ValueTimer {
+        label,
+        start: Instant::now(),
+    })
+}
+
+pub struct ValueTimer {
+    label: &'static str,
+    start: Instant,
+}
+
+impl Drop for ValueTimer {
+    fn drop(&mut self) {
+        record_value(
+            self.label,
+            self.start
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
     }
 }
 
@@ -488,5 +514,25 @@ fn fmt_bytes(n: u64) -> String {
         format!("{:.1}KB", n as f64 / 1024.0)
     } else {
         format!("{:.2}MB", n as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_timer_records_when_its_scope_exits() {
+        set_enabled(true);
+        clear();
+        {
+            let _timer = begin_value_ms("test:value_timer_ms");
+        }
+        let row = snapshot()
+            .values
+            .into_iter()
+            .find(|row| row.label == "test:value_timer_ms")
+            .expect("elapsed value sample");
+        assert_eq!(row.count, 1);
     }
 }

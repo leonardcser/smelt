@@ -1,6 +1,22 @@
 # Storage architecture implementation plan
 
-Status: Proposed, reviewed against the current implementation
+Status: Implemented foundation; canonical session extensions implemented
+
+The per-session ownership, convergence actor, canonical transaction, and bounded
+read-path foundation in this document is implemented. The Enter barrier, persisted
+turn state, root catalog, compatibility exports, transactional search, and active
+transcript memory model are extended and superseded by
+`docs/canonical-session-architecture-plan.md`. Where this document still discusses
+sidecar work in the persistence actor, directory-scanned listing, save-plus-flush
+before provider dispatch, or permanent transcript hydration, the canonical plan
+and current implementation are authoritative.
+
+The resulting runtime has one stable writer lease and canonical mutation owner per
+writable session. Ordinary saves and the dedicated Enter `SubmitTurn` command
+share one private SQLite update body. Catalog projection and compatibility export
+are separate bounded process workers that reopen canonical SQLite after receipt
+publication. Writable startup changes `ready` and `running` turns to
+`interrupted`, and never automatically resends provider work.
 
 ## Purpose
 
@@ -208,8 +224,8 @@ The initial plan had several mismatches that this revision removes.
    commit head.
 4. The document may use only acknowledged head coordinates as conservative
    suffix-planning hints.
-5. The actor serializes canonical commits, publication, sidecar refresh, and
-   request audits.
+5. The actor serializes canonical commits, publication, turn transitions, and
+   request audits. Catalog and compatibility workers do not own canonical state.
 6. Flush targets a `PersistenceGeneration` and a deadline.
 7. The actor never silently opens a different session to service a stale audit.
 
@@ -254,11 +270,12 @@ The initial plan had several mismatches that this revision removes.
    fingerprint, receipt, and revision are handled by one transaction path.
 3. Session ID, creation time, and fork parent are immutable after first insert.
 4. Revision advances once if any canonical section changes, including
-   descriptor-only replacement, and never advances for request audits or
-   sidecars.
+   descriptor-only replacement, and never advances for request audits or derived
+   projections.
 5. Revision increment is checked against SQLite integer limits.
 6. Request audits remain separate best-effort transactions.
-7. Sidecars are regenerated from SQLite only after canonical success.
+7. Catalog and compatibility projection requests are scheduled only after
+   canonical success and carry session identity plus revision, never snapshots.
 8. Object bytes are content-addressed and semantically untyped. Interpretation
    lives on each reference.
 
@@ -538,7 +555,6 @@ struct SessionPersistenceStatus {
     epoch: SessionEpoch,
     state: PersistenceState,
     latest_audit_warning: Option<PersistenceCause>,
-    latest_sidecar_warning: Option<PersistenceCause>,
 }
 
 enum PersistenceState {
@@ -573,9 +589,10 @@ The actor replaces status under a short lock, then `try_send`s a unit wake. A
 full wake is success because the consumer will read the latest status; a
 disconnected wake receiver never changes durability or ownership. Durable status
 retains the newest receipt until another state replaces it, and flush/close also
-return receipts directly. The UI atomically takes audit/sidecar warnings while
-reading status; replacing an unread warning increments an aggregate dropped
-warning metric. Warning fields cannot overwrite canonical state.
+return receipts directly. The UI atomically takes audit warnings while reading
+status; replacing an unread warning increments an aggregate dropped-warning
+metric. Derived worker failures are independently bounded and observable, and
+cannot overwrite canonical state.
 
 There is no `Retrying { next_attempt }` state because there is no timed retry
 scheduler. Each failure carries one structured cause, not a cause plus an
@@ -681,8 +698,8 @@ newest desired intent until no newer intent remains. For each intent it:
 4. Performs the one structural recovery sequence if the outcome is ambiguous.
 5. Updates its head only from a validated receipt.
 6. Publishes `Durable` status and resolves eligible flushes immediately.
-7. Rebuilds derived sidecars from SQLite, updating the independent warning field
-   without changing durable status.
+7. Schedules catalog and compatibility projection by session ID and revision,
+   without waiting or passing transcript-sized state.
 8. Rechecks the latest slot before sleeping.
 
 An in-flight commit is immutable. A newer intent can replace the queued slot but
@@ -746,16 +763,18 @@ nondurable, not dirty-with-an-error. An existing unsupported or initially
 read-only session may be viewed but cannot start a writable actor; edits remain
 unsaved until the user forks or saves to a writable destination.
 
-### 8. Treat sidecars as post-commit caches
+### 8. Schedule derived work after durability
 
 After canonical commit succeeds:
 
-- Publish `Durable` and advance document durability before sidecar work.
-- If sidecar refresh or reading fails, keep durable status and surface an
-  independent warning, never `Blocked`.
-- Attempt repair after a later successful save or explicit maintenance action.
+- Publish `Durable` and advance document durability before projection work.
+- Schedule catalog and compatibility export requests without waiting for them.
+- Keep derived failure and lag outside `Blocked` canonical status.
+- Repair catalog state by bounded reconciliation and compatibility exports by a
+  later coalesced request or explicit maintenance action.
 
-Do not replay canonical state to repair a cache.
+Projectors reopen canonical SQLite. They never replay or mutate canonical state to
+repair derived output.
 
 ## Ordering and control semantics
 
@@ -1104,8 +1123,8 @@ A helper may compare canonical row hashes or exact decoded rows, whichever is
 simplest for that section, but it may not infer change from a manually selected
 metadata field list. Replacing equal history, side-table, or descriptor rows is a
 no-op. Truncation, descriptor-only replacement, and metadata-only mutation each
-count as canonical change. Audit rows, owner metadata, commit receipts, and
-sidecars do not.
+count as canonical change. Audit rows, owner metadata, commit receipts, catalog
+rows, and compatibility exports do not.
 
 `updated_at` changes when the document changes, not merely because the user
 pressed save. Consequently, resubmitting identical desired state can remain a
@@ -1242,23 +1261,25 @@ second path.
 Do not unify these callers with a repository trait. They differ only in how they
 obtain concrete data and ownership; the transaction is already shared.
 
-## Derived files
+## Derived catalog and compatibility exports
 
-Sidecars remain noncanonical caches. Save intents never contain rendered
-sidecars or sidecar input copies. After a successful canonical transaction, the
-actor calls the existing concrete rebuild helper, which opens SQLite as a reader
-and derives files from committed state.
+Derived work never appears in a save intent or canonical transaction. After a
+validated receipt, the actor publishes durability first and schedules two
+independent process services with only session ID and source revision:
 
-For a new session, rebuild only after staged publication has been reconciled and
-the final path is readable. Sidecar replacement is atomic per file. A missing,
-stale, malformed, or unreadable sidecar never affects canonical reads.
+- `catalog.db` is the rebuildable source for paged session listing. Its bounded,
+  coalescing projector reopens `session.db`, applies revision-guarded rows, and
+  falls back to full reconciliation after overflow or corruption.
+- `meta.json` and `content.txt` are deprecated
+  `COMPAT(session-derived-sidecar-exports)` outputs. Their bounded, coalescing
+  exporter takes one revision-pinned read snapshot, writes metadata and streamed
+  content to synced temporary files, and atomically renames complete outputs.
 
-- Canonical `Durable` status and flush success are published before rebuild.
-- Rebuild failure updates an independent latest warning; it does not change
-  revision, generation, durable status, or flush success.
-- It never replays the canonical commit.
-- A later successful save or explicit maintenance action repairs it.
-- Resume, fork, import, doctor, and repair do not depend on sidecar content.
+A missing, stale, malformed, unwritable, or corrupt derived file never changes a
+canonical receipt, provider dispatch, list/search correctness, resume, or
+shutdown durability. Normal runtime readers never use compatibility exports.
+Explicit maintenance may rebuild them, while `session doctor` reports their
+revision state without treating lag as canonical corruption.
 
 ## Read path
 
@@ -1308,8 +1329,9 @@ framework.
 `crates/tui/src/app/history.rs` keeps save triggers, status handling, explicit
 retry UI, and actor close/start at session boundaries. It loses duplicate full
 and live submission flows, pending-save suppression, specialized request-history
-append saves, retry counters, and persistence sleeps. The request boundary keeps
-an ordinary cumulative submit plus generation-targeted flush.
+append saves, retry counters, and persistence sleeps. Pressing Enter folds queued
+not-started save intent into one dedicated `SubmitTurn`, waits for its durable
+receipt, and only then dispatches the provider request.
 
 `crates/tui/src/app/host_dispatch.rs` captures and validates the fixed session
 epoch for request audits. `crates/tui/src/app/transcript.rs` stops maintaining a
@@ -1324,10 +1346,10 @@ separate `descriptors_persisted` boolean.
 suffix representation, `history_range`, truncation, and acknowledged-prefix
 compaction. It does not own transaction coordinates.
 
-`crates/core/src/session.rs` keeps readers, conversion helpers, sidecar rebuild,
-and explicit offline operations. Migrate `save`, `save_result`, staged save, and
-snapshot builders to the canonical updater, then delete helpers that duplicate
-runtime persistence.
+`crates/core/src/session.rs` keeps readers, conversion helpers, catalog service
+entry points, explicit compatibility export maintenance, and offline operations.
+`save`, `save_result`, staged save, runtime persistence, repair, and fixtures use
+the same concrete canonical commit and reader primitives.
 
 ### Store files
 
@@ -1597,7 +1619,7 @@ required terminal state.
 | Ownership loss, dirty local state, then fork/save-as | `ownership_loss_with_dirty_state_can_fork_to_a_writable_session` | The source remains unchanged and read-only; the fork imports the durable prefix, applies the cumulative history/descriptor suffix without full materialization, and becomes durable under a new ID. |
 | Unsupported or initially read-only edits | `blocked_save_requires_explicit_retry`, `resuming_session_with_active_writer_is_read_only`, `repeated_read_only_resumes_do_not_modify_writer_session` | Unsupported saves stay visibly blocked; initially read-only mutation is rejected without changing SQLite. |
 | Stale, saturated, and failed audits | `stale_request_audit_after_session_switch_is_rejected`, `full_control_lane_cannot_lose_the_latest_intent`, `audit_failure_after_canonical_save_preserves_durability` | Stale and excess audits are rejected within fixed bounds; audit failure is a warning and cannot undo canonical durability. |
-| Sidecar failure after canonical commit | `sidecar_rebuild_failure_does_not_undo_canonical_commit` | The canonical receipt is acknowledged and the derived-cache failure remains a visible warning. |
+| Compatibility export failure after canonical commit | `failed_content_rebuild_preserves_existing_exports`, `permissions_failure_leaves_canonical_session_usable`, `exporter_shutdown_is_bounded_while_an_export_lock_is_held` | Canonical SQLite remains usable, the previous complete export remains intact, and bounded exporter failure or shutdown cannot undo durability. |
 | Session switch, delete, fork, actor exit, and shutdown deadline | `stale_request_audit_after_session_switch_is_rejected`, `delete_refuses_session_owned_by_another_process`, `sparse_fork_publishes_a_complete_destination`, `actor_panic_stops_submission_without_advancing_durability`, `control_disconnect_stops_submission_without_advancing_durability`, `close_deadline_reports_exact_progress_without_a_delayed_close`, `shutdown_flushes_latest_generation_after_in_flight_save` | Every boundary either closes the exact epoch, refuses under active ownership, reports unsaved progress, or completes durably. An expired close cannot stop the actor later. |
 | Generation and SQLite revision overflow | `persistence_generation_is_checked`, `revision_overflow_fails_without_partial_mutation` | Overflow is rejected before partial mutation. |
 
@@ -1708,7 +1730,8 @@ Drive the same app paths a user triggers and inspect rendered status/dialogs:
 - Session switch with late durable status and audit host calls.
 - Read-after-generation-targeted flush.
 - Normal close, blocked close, and shutdown deadline.
-- Sidecar warning after canonical durability.
+- Compatibility export failure after canonical durability, catalog corruption,
+  and deterministic ready/running interruption without provider redispatch.
 
 Persistence UI must never report saved while the current generation lacks a
 matching receipt.
@@ -1747,7 +1770,9 @@ Record bounded, non-sensitive metrics for:
 - Structural reopen, fingerprint reconciliation, and explicit retry counts.
 - Blocked and ownership-lost transitions by structured cause.
 - Flush target lag and deadline expiration.
-- Audit rejection/failure, overwritten-warning, and sidecar warning counts.
+- Audit rejection/failure, SubmitTurn queue/transaction/row counts, turn recovery,
+  catalog projection/reconciliation/query status, compatibility export outcomes,
+  and transcript cache budgets, pins, hydration, eviction, and dematerialization.
 
 Generation values and session IDs may be included in local debug diagnostics,
 but never log session content, request bodies, object bytes, secrets,

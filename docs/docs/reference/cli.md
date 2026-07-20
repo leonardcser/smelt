@@ -7,6 +7,11 @@ smelt config default
 smelt export history [--output <PATH>] <SESSION>
 smelt export requests [--output <PATH>] <SESSION>
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
+smelt session doctor [<SESSION>|--all] [--json]
+smelt session backup <SESSION> <OUTPUT>
+smelt session rebuild-derived <SESSION>
+smelt session gc <SESSION>
+smelt session vacuum <SESSION>
 smelt upgrade [--channel stable|unstable]
 smelt upgrade check [--channel stable|unstable]
 ```
@@ -27,6 +32,7 @@ with `smelt.remember.set(...)`.
 | `smelt export history`  | Export semantic history rows for a saved session as JSONL                                           |
 | `smelt export requests` | Export request audit entries for a saved session as JSONL                                           |
 | `smelt inspect`         | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
+| `smelt session`         | Diagnose, back up, repair derived exports, garbage-collect, or compact session storage              |
 | `smelt upgrade`         | Check for and install the newest smelt build                                                        |
 | `smelt upgrade check`   | Check for updates without installing                                                                |
 
@@ -54,6 +60,32 @@ with `smelt.remember.set(...)`.
 | `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main`  |
 
 `smelt upgrade check` accepts the same `--channel` flag and never installs.
+
+### Session recovery and maintenance
+
+`smelt session doctor <SESSION>` checks canonical schema, integrity, references,
+indexes, and storage sizes without modifying the session. It also reports:
+
+- canonical revision and any `ready` or `running` turns;
+- catalog state and source-revision lag;
+- `meta.json` and `content.txt` compatibility-export state and lag.
+
+Use `--json` for machine-readable output or `--all` to inspect every visible
+session. Missing, stale, malformed, or unavailable derived data is reported but
+does not make a canonically healthy session fail the command.
+
+A writable restart deterministically changes every durable `ready` or `running`
+turn to `interrupted`. smelt does not automatically resend such a provider
+request because providers cannot guarantee that an uncertain request was not
+already accepted or billed. Review the transcript and retry explicitly if
+needed; an explicit retry creates a new linked turn.
+
+`smelt session backup <SESSION> <OUTPUT>` creates a transactionally consistent
+SQLite backup and manifest without overwriting an existing destination.
+`rebuild-derived` explicitly regenerates the deprecated compatibility exports
+from canonical SQLite. `gc` removes unreachable objects, and `vacuum` compacts
+free pages. Maintenance commands requiring mutation acquire exclusive session
+ownership and fail rather than racing an active writer.
 
 ## Connection
 

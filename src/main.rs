@@ -236,6 +236,44 @@ struct SessionDoctorOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     report: Option<smelt_store::DoctorReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<SessionRecoveryDoctor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SessionRecoveryDoctor {
+    canonical_revision: u64,
+    nonterminal_turns: Vec<NonterminalTurnDoctor>,
+    catalog: DerivedRevisionDoctor,
+    compatibility_metadata: DerivedRevisionDoctor,
+    compatibility_content: DerivedRevisionDoctor,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct NonterminalTurnDoctor {
+    turn_id: u64,
+    state: smelt_store::TurnState,
+    created_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DerivedRevisionState {
+    Current,
+    Lagging,
+    Ahead,
+    Missing,
+    Malformed,
+    Unavailable,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DerivedRevisionDoctor {
+    state: DerivedRevisionState,
+    source_revision: Option<u64>,
+    revision_lag: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -538,6 +576,80 @@ fn resolve_session_target(reference: &str) -> Result<(String, PathBuf), String> 
     Ok((id.into_string(), dir))
 }
 
+fn derived_revision_doctor(canonical_revision: u64, source_revision: u64) -> DerivedRevisionDoctor {
+    let state = match source_revision.cmp(&canonical_revision) {
+        std::cmp::Ordering::Less => DerivedRevisionState::Lagging,
+        std::cmp::Ordering::Equal => DerivedRevisionState::Current,
+        std::cmp::Ordering::Greater => DerivedRevisionState::Ahead,
+    };
+    DerivedRevisionDoctor {
+        state,
+        source_revision: Some(source_revision),
+        revision_lag: canonical_revision.checked_sub(source_revision),
+        error: None,
+    }
+}
+
+fn unavailable_derived_revision(error: impl Into<String>) -> DerivedRevisionDoctor {
+    DerivedRevisionDoctor {
+        state: DerivedRevisionState::Unavailable,
+        source_revision: None,
+        revision_lag: None,
+        error: Some(error.into()),
+    }
+}
+
+fn missing_derived_revision(state: DerivedRevisionState) -> DerivedRevisionDoctor {
+    DerivedRevisionDoctor {
+        state,
+        source_revision: None,
+        revision_lag: None,
+        error: None,
+    }
+}
+
+fn catalog_doctor(
+    session_id: &str,
+    session_dir: &std::path::Path,
+    canonical_revision: u64,
+) -> DerivedRevisionDoctor {
+    let Some(state_root) = session_dir.parent().and_then(std::path::Path::parent) else {
+        return unavailable_derived_revision("session directory has no state root");
+    };
+    match smelt_store::CatalogReader::open_existing(state_root.join("catalog.db")) {
+        Ok(None) => missing_derived_revision(DerivedRevisionState::Missing),
+        Ok(Some(catalog)) => match catalog.session(session_id) {
+            Ok(None) => missing_derived_revision(DerivedRevisionState::Missing),
+            Ok(Some(row)) if row.availability == smelt_store::CatalogAvailability::Unavailable => {
+                let mut status = derived_revision_doctor(canonical_revision, row.source_revision);
+                status.state = DerivedRevisionState::Unavailable;
+                status.error = row.error_summary.or(row.error_kind);
+                status
+            }
+            Ok(Some(row)) => derived_revision_doctor(canonical_revision, row.source_revision),
+            Err(error) => unavailable_derived_revision(error.to_string()),
+        },
+        Err(error) => unavailable_derived_revision(error.to_string()),
+    }
+}
+
+fn compatibility_revision_doctor(
+    canonical_revision: u64,
+    revision: smelt_core::session::CompatibilityExportRevision,
+) -> DerivedRevisionDoctor {
+    match revision {
+        smelt_core::session::CompatibilityExportRevision::Missing => {
+            missing_derived_revision(DerivedRevisionState::Missing)
+        }
+        smelt_core::session::CompatibilityExportRevision::Malformed => {
+            missing_derived_revision(DerivedRevisionState::Malformed)
+        }
+        smelt_core::session::CompatibilityExportRevision::Valid { source_revision } => {
+            derived_revision_doctor(canonical_revision, source_revision)
+        }
+    }
+}
+
 fn doctor_session(reference: &str) -> SessionDoctorOutput {
     let (session_id, dir) = match resolve_session_target(reference) {
         Ok(resolved) => resolved,
@@ -545,20 +657,64 @@ fn doctor_session(reference: &str) -> SessionDoctorOutput {
             return SessionDoctorOutput {
                 session_id: reference.to_string(),
                 report: None,
+                recovery: None,
                 error: Some(error),
             };
         }
     };
-    match smelt_store::SessionReader::open_existing(&dir).and_then(|reader| reader.doctor_report())
-    {
-        Ok(report) => SessionDoctorOutput {
+    let result = (|| {
+        let reader = smelt_store::SessionReader::open_existing(&dir)?;
+        let report = reader.doctor_report()?;
+        let canonical_revision = reader.store_head()?.revision.get();
+        let nonterminal_turns = reader
+            .turns()?
+            .into_iter()
+            .filter(|turn| {
+                matches!(
+                    turn.state,
+                    smelt_store::TurnState::Ready | smelt_store::TurnState::Running
+                )
+            })
+            .map(|turn| NonterminalTurnDoctor {
+                turn_id: turn.turn_id.get(),
+                state: turn.state,
+                created_at_ms: turn.created_at_ms,
+            })
+            .collect();
+        let catalog = catalog_doctor(&session_id, &dir, canonical_revision);
+        let (compatibility_metadata, compatibility_content) =
+            match smelt_core::session::compatibility_export_status(&dir) {
+                Ok(status) => (
+                    compatibility_revision_doctor(canonical_revision, status.metadata),
+                    compatibility_revision_doctor(canonical_revision, status.content),
+                ),
+                Err(error) => (
+                    unavailable_derived_revision(error.clone()),
+                    unavailable_derived_revision(error),
+                ),
+            };
+        Ok::<_, smelt_store::StoreError>((
+            report,
+            SessionRecoveryDoctor {
+                canonical_revision,
+                nonterminal_turns,
+                catalog,
+                compatibility_metadata,
+                compatibility_content,
+            },
+        ))
+    })();
+    match result {
+        Ok((report, recovery)) => SessionDoctorOutput {
             session_id,
             report: Some(report),
+            recovery: Some(recovery),
             error: None,
         },
         Err(err) => SessionDoctorOutput {
             session_id,
             report: None,
+            recovery: None,
             error: Some(err.to_string()),
         },
     }
@@ -589,6 +745,42 @@ fn print_doctor_output(output: &SessionDoctorOutput) {
     println!("object_raw_bytes: {}", report.stats.object_raw_bytes);
     println!("object_stored_bytes: {}", report.stats.object_stored_bytes);
     println!("request_rows: {}", report.stats.request_rows);
+    let recovery = output.recovery.as_ref().expect("doctor recovery status");
+    println!("canonical_revision: {}", recovery.canonical_revision);
+    for turn in &recovery.nonterminal_turns {
+        println!(
+            "nonterminal_turn: id={} state={} created_at_ms={}",
+            turn.turn_id,
+            turn.state.as_str(),
+            turn.created_at_ms
+        );
+    }
+    for (name, projection) in [
+        ("catalog", &recovery.catalog),
+        ("compatibility_metadata", &recovery.compatibility_metadata),
+        ("compatibility_content", &recovery.compatibility_content),
+    ] {
+        let state = match projection.state {
+            DerivedRevisionState::Current => "current",
+            DerivedRevisionState::Lagging => "lagging",
+            DerivedRevisionState::Ahead => "ahead",
+            DerivedRevisionState::Missing => "missing",
+            DerivedRevisionState::Malformed => "malformed",
+            DerivedRevisionState::Unavailable => "unavailable",
+        };
+        println!(
+            "{name}: state={state} source_revision={} revision_lag={}",
+            projection
+                .source_revision
+                .map_or_else(|| "none".to_string(), |revision| revision.to_string()),
+            projection
+                .revision_lag
+                .map_or_else(|| "none".to_string(), |lag| lag.to_string())
+        );
+        if let Some(error) = &projection.error {
+            println!("{name}_error: {error}");
+        }
+    }
     for issue in &report.issues {
         println!("issue: {issue}");
     }

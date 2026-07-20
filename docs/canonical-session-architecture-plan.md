@@ -99,9 +99,10 @@ Success means the resulting code is simpler, more reliable, more composable,
 easier to test and work with, and contains fewer band-aid mechanisms. Literal
 adherence to this document is not a success criterion.
 
-## Reviewed current state
+## Pre-implementation reviewed state
 
-The current worktree already provides the right foundation:
+At approval, the worktree provided the following foundation and remaining gaps.
+The implementation phases below supersede this historical inventory:
 
 - `crates/tui/src/persist.rs:1220` has one persistence actor per writable
   session, with the authoritative store head and writer lease.
@@ -1269,6 +1270,34 @@ Exit criteria:
   exporter path.
 - Recovery outcomes are deterministic and user-visible.
 - No old path remains dormant.
+
+#### Phase 6 recovery evidence
+
+The hardened implementation uses production SQLite transactions and concrete
+workers rather than a generic failure-injection framework:
+
+- `subprocess_crashes_cover_submit_transaction_and_receipt_boundaries` aborts an
+  actual `SubmitTurn` before begin, after history, descriptor, search, and ready
+  inserts, and after WAL commit. Pre-commit crashes reopen with no canonical
+  change; post-commit exact replay returns turn 1 without duplication.
+- Enter harness tests cover receipt publication before dispatch, engine rejection,
+  dispatch before the `running` transition, final transition failure, writable
+  restart, and real resume. They prove that canonical failure preserves input and
+  prevents dispatch, while ready/running restart becomes visible `interrupted`
+  state without automatic resend.
+- Store rollback, terminal transition, streamed history, SQLite
+  `max_page_count`, ownership, migration, and process-lock tests cover disk full,
+  statement failure, final-history atomicity, owner death/loss, and stale schema
+  boundaries.
+- `subprocess_crashes_leave_catalog_projection_absent_or_complete`, interrupted
+  scan tests, revision-guard tests, queue-overflow reconciliation, 100,000-row
+  pagination, and corrupt-catalog rebuild cover projection boundaries and repair.
+- Compatibility exporter subprocesses abort before and after the shared atomic
+  rename primitive. Permission, symlink, cancellation, stale-worker, queue
+  overflow, revision pinning, streaming, and bounded-shutdown tests prove that an
+  old or new complete export remains and canonical operations are unaffected.
+- `session doctor` integration coverage reports ready turns and catalog/export
+  lag while remaining read-only and preserving canonical health.
 
 ### Phase 7: Final performance, memory, and quality validation
 

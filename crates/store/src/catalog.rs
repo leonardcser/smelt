@@ -426,6 +426,10 @@ impl CatalogReader {
     pub fn page(&self, query: &CatalogQuery) -> Result<CatalogPage> {
         query_page(&self.conn, query)
     }
+
+    pub fn session(&self, id: &str) -> Result<Option<CatalogSession>> {
+        query_session(&self.conn, id)
+    }
 }
 
 pub struct CatalogReconcileLock {
@@ -538,6 +542,17 @@ fn catalog_metadata(conn: &Connection) -> Result<CatalogMetadata> {
         completed_scan_id: nonnegative_u64(completed_scan_id, "completed_scan_id")?,
         reconciled_at,
     })
+}
+
+fn query_session(conn: &Connection, id: &str) -> Result<Option<CatalogSession>> {
+    let mut statement = conn.prepare(
+        "SELECT id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+                fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
+                updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
+         FROM sessions WHERE id = ?1",
+    )?;
+    let mut rows = statement.query([id])?;
+    rows.next()?.map(catalog_session_from_row).transpose()
 }
 
 fn query_page(conn: &Connection, query: &CatalogQuery) -> Result<CatalogPage> {
@@ -676,6 +691,9 @@ fn sqlite_companion_path(path: &Path, suffix: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    const CATALOG_CRASH_ROLE: &str = "SMELT_CATALOG_CRASH_ROLE";
+    const CATALOG_CRASH_PATH: &str = "SMELT_CATALOG_CRASH_PATH";
+
     fn row(id: &str, revision: u64, updated_at: i64) -> CatalogSession {
         CatalogSession {
             id: id.into(),
@@ -725,6 +743,91 @@ mod tests {
                 .to_ascii_lowercase(),
             "wal"
         );
+    }
+
+    #[test]
+    fn reader_returns_one_exact_session_without_scanning_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        let expected = row("exact", 7, 42);
+        catalog.upsert_available(&expected).unwrap();
+        catalog.upsert_available(&row("other", 8, 43)).unwrap();
+        drop(catalog);
+
+        let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+        assert_eq!(reader.session("exact").unwrap(), Some(expected));
+        assert_eq!(reader.session("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn catalog_projection_crash_probe() {
+        let Ok(role) = std::env::var(CATALOG_CRASH_ROLE) else {
+            return;
+        };
+        let path = PathBuf::from(
+            std::env::var_os(CATALOG_CRASH_PATH).expect("catalog crash database path"),
+        );
+        let mut catalog = Catalog::open(path).unwrap();
+        if role == "during-upsert" {
+            catalog
+                .conn
+                .create_scalar_function(
+                    "smelt_test_crash",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    |_| -> rusqlite::Result<i64> { std::process::abort() },
+                )
+                .unwrap();
+            catalog
+                .conn
+                .execute_batch(
+                    "CREATE TEMP TRIGGER crash_catalog AFTER INSERT ON sessions
+                     BEGIN SELECT smelt_test_crash(); END;",
+                )
+                .unwrap();
+        } else if role != "after-upsert" {
+            panic!("unknown catalog crash role {role}");
+        }
+        catalog.upsert_available(&row("crash", 7, 42)).unwrap();
+        std::process::abort();
+    }
+
+    #[test]
+    fn subprocess_crashes_leave_catalog_projection_absent_or_complete() {
+        for role in ["during-upsert", "after-upsert"] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("catalog.db");
+            drop(Catalog::open(&path).unwrap());
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("catalog::tests::catalog_projection_crash_probe")
+                .arg("--nocapture")
+                .env(CATALOG_CRASH_ROLE, role)
+                .env(CATALOG_CRASH_PATH, &path)
+                .status()
+                .unwrap();
+            assert!(
+                !status.success(),
+                "catalog crash probe unexpectedly succeeded"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(libc::SIGABRT));
+            }
+
+            let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+            reader
+                .conn
+                .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .map(|status| assert_eq!(status, "ok"))
+                .unwrap();
+            assert_eq!(
+                reader.session("crash").unwrap(),
+                (role == "after-upsert").then(|| row("crash", 7, 42))
+            );
+        }
     }
 
     #[test]

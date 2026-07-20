@@ -32,6 +32,67 @@ pub(crate) enum ExportOutcome {
     Superseded { source: u64, exported: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExportFailureClass {
+    Io,
+    Permission,
+    InvalidTarget,
+    SourceBehind,
+}
+
+impl ExportFailureClass {
+    fn from_io(error: &std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            Self::Permission
+        } else {
+            Self::Io
+        }
+    }
+
+    const fn metric(self) -> &'static str {
+        match self {
+            Self::Io => "session:compat_export:failures:io",
+            Self::Permission => "session:compat_export:failures:permission",
+            Self::InvalidTarget => "session:compat_export:failures:invalid_target",
+            Self::SourceBehind => "session:compat_export:failures:source_behind",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ExportError {
+    class: ExportFailureClass,
+    message: String,
+}
+
+impl ExportError {
+    fn new(class: ExportFailureClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+
+    fn io(context: impl std::fmt::Display, error: std::io::Error) -> Self {
+        Self::new(
+            ExportFailureClass::from_io(&error),
+            format!("{context}: {error}"),
+        )
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::new(ExportFailureClass::InvalidTarget, message)
+    }
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ExportError {}
+
 #[derive(Clone, Copy, Debug)]
 struct ExportRequest {
     revision: u64,
@@ -240,17 +301,18 @@ fn exporter() -> Result<ExporterHandle, String> {
 }
 
 pub(crate) fn request(id: &str, revision: smelt_store::Revision) {
-    let result = crate::session_id::SessionId::parse(id)
-        .map_err(|error| format!("invalid compatibility export session id: {error}"))
-        .and_then(|_| {
-            smelt_perf::perf::record_value(
-                "session:compat_export:requested_revision",
-                revision.get(),
-            );
-            exporter()?.request(id.to_string(), revision.get())
-        });
-    if let Err(error) = result {
-        global_warning().warn(&error);
+    if let Err(error) = crate::session_id::SessionId::parse(id) {
+        global_warning().warn(
+            ExportFailureClass::InvalidTarget,
+            &format!("invalid compatibility export session id: {error}"),
+        );
+        return;
+    }
+    smelt_perf::perf::record_value("session:compat_export:requested_revision", revision.get());
+    if let Err(error) =
+        exporter().and_then(|exporter| exporter.request(id.to_string(), revision.get()))
+    {
+        global_warning().warn(ExportFailureClass::Io, &error);
     }
 }
 
@@ -309,13 +371,31 @@ fn export_worker(handle: ExporterHandle, wakes: Receiver<()>) {
                                 let _ = handle.signal();
                                 break;
                             }
-                            warnings.warn(&format!(
-                                "session {id} remained at revision {actual} below requested compatibility export revision {}",
-                                request.revision
-                            ));
+                            warnings.warn(
+                                ExportFailureClass::SourceBehind,
+                                &format!(
+                                    "session {id} remained at revision {actual} below requested compatibility export revision {}",
+                                    request.revision
+                                ),
+                            );
                         }
-                        Ok(_) => {}
-                        Err(error) => warnings.warn(&format!("session {id}: {error}")),
+                        Ok(
+                            ExportOutcome::Current { revision }
+                            | ExportOutcome::Written { revision },
+                        ) => {
+                            smelt_perf::perf::record_value(
+                                "session:compat_export:source_revision_lag",
+                                request.revision.saturating_sub(revision),
+                            );
+                        }
+                        Ok(ExportOutcome::Superseded { source, .. }) => {
+                            smelt_perf::perf::record_value(
+                                "session:compat_export:source_revision_lag",
+                                request.revision.saturating_sub(source),
+                            );
+                        }
+                        Ok(ExportOutcome::Missing) => {}
+                        Err(error) => warnings.warn(error.class, &format!("session {id}: {error}")),
                     }
                 }
             }
@@ -366,10 +446,13 @@ fn reconcile_all(handle: &ExporterHandle, warnings: &mut WarningLimiter) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(error) => {
-            warnings.warn(&format!(
-                "enumerate compatibility export sessions in {}: {error}",
-                handle.sessions_root.display()
-            ));
+            warnings.warn(
+                ExportFailureClass::from_io(&error),
+                &format!(
+                    "enumerate compatibility export sessions in {}: {error}",
+                    handle.sessions_root.display()
+                ),
+            );
             return;
         }
     };
@@ -381,7 +464,10 @@ fn reconcile_all(handle: &ExporterHandle, warnings: &mut WarningLimiter) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                warnings.warn(&format!("enumerate compatibility export session: {error}"));
+                warnings.warn(
+                    ExportFailureClass::from_io(&error),
+                    &format!("enumerate compatibility export session: {error}"),
+                );
                 return;
             }
         };
@@ -400,7 +486,9 @@ fn reconcile_all(handle: &ExporterHandle, warnings: &mut WarningLimiter) {
                 return;
             }
             Ok(_) => {}
-            Err(error) => warnings.warn(&format!("session {id}: {error}")),
+            Err(error) => {
+                warnings.warn(error.class, &format!("session {id}: {error}"));
+            }
         }
     }
     smelt_perf::perf::record_value("session:compat_export:reconcile_scanned", scanned);
@@ -411,13 +499,13 @@ pub(crate) fn export_compatibility_files(
     session_dir: &Path,
     minimum_revision: u64,
     mut should_cancel: impl FnMut(u64) -> bool,
-) -> Result<ExportOutcome, String> {
-    let started = Instant::now();
+) -> Result<ExportOutcome, ExportError> {
+    let _duration = smelt_perf::perf::begin_value_ms("session:compat_export:duration_ms");
     crate::session_store::reject_symlink(session_dir, "export compatibility files")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ExportError::invalid(error.to_string()))?;
     let db_path = session_dir.join("session.db");
     crate::session_store::reject_symlink(&db_path, "export compatibility files")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ExportError::invalid(error.to_string()))?;
     if !db_path.is_file() {
         return Ok(ExportOutcome::Missing);
     }
@@ -427,11 +515,18 @@ pub(crate) fn export_compatibility_files(
     else {
         return Ok(ExportOutcome::Cancelled);
     };
-    let reader = smelt_store::SessionReader::open_database(&db_path)
-        .map_err(|error| format!("open canonical database for compatibility export: {error}"))?;
-    let Some(snapshot) = reader
-        .compatibility_export_snapshot()
-        .map_err(|error| format!("open compatibility export snapshot: {error}"))?
+    let reader = smelt_store::SessionReader::open_database(&db_path).map_err(|error| {
+        ExportError::new(
+            ExportFailureClass::Io,
+            format!("open canonical database for compatibility export: {error}"),
+        )
+    })?;
+    let Some(snapshot) = reader.compatibility_export_snapshot().map_err(|error| {
+        ExportError::new(
+            ExportFailureClass::Io,
+            format!("open compatibility export snapshot: {error}"),
+        )
+    })?
     else {
         return Ok(ExportOutcome::Missing);
     };
@@ -469,6 +564,8 @@ pub(crate) fn export_compatibility_files(
         });
     }
 
+    let metadata_duration =
+        smelt_perf::perf::begin_value_ms("session:compat_export:metadata_duration_ms");
     let meta_json = derived_meta_json(&metadata)?;
     let Some(meta_file) = prepare_atomic_write(&meta_path, |file| {
         if should_cancel(source_revision) {
@@ -480,7 +577,10 @@ pub(crate) fn export_compatibility_files(
     else {
         return Ok(ExportOutcome::Cancelled);
     };
+    drop(metadata_duration);
 
+    let content_duration =
+        smelt_perf::perf::begin_value_ms("session:compat_export:content_duration_ms");
     let mut content_bytes = 0_u64;
     let Some(content_file) = prepare_atomic_write(&content_path, |file| {
         let header = format!("# smelt-revision:{source_revision}\n");
@@ -495,39 +595,40 @@ pub(crate) fn export_compatibility_files(
     else {
         return Ok(ExportOutcome::Cancelled);
     };
+    drop(content_duration);
     if should_cancel(source_revision) {
         return Ok(ExportOutcome::Cancelled);
     }
-    snapshot
-        .finish()
-        .map_err(|error| format!("finish compatibility export snapshot: {error}"))?;
+    snapshot.finish().map_err(|error| {
+        ExportError::new(
+            ExportFailureClass::Io,
+            format!("finish compatibility export snapshot: {error}"),
+        )
+    })?;
 
     let export_dir = meta_file.parent().to_path_buf();
     let meta_bytes = meta_file.install()?;
     content_file.install()?;
     sync_directory(&export_dir)
-        .map_err(|error| format!("sync compatibility export directory: {error}"))?;
+        .map_err(|error| ExportError::io("sync compatibility export directory", error))?;
 
     smelt_perf::perf::record_value("session:compat_export:metadata_bytes", meta_bytes);
     smelt_perf::perf::record_value("session:compat_export:content_bytes", content_bytes);
     smelt_perf::perf::record_value("session:compat_export:source_revision", source_revision);
-    smelt_perf::perf::record_value(
-        "session:compat_export:duration_ms",
-        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-    );
     Ok(ExportOutcome::Written {
         revision: source_revision,
     })
 }
 
-fn derived_meta_json(metadata: &smelt_store::SessionMeta) -> Result<Vec<u8>, String> {
-    let mut value = serde_json::to_value(metadata).map_err(|error| error.to_string())?;
+fn derived_meta_json(metadata: &smelt_store::SessionMeta) -> Result<Vec<u8>, ExportError> {
+    let mut value =
+        serde_json::to_value(metadata).map_err(|error| ExportError::invalid(error.to_string()))?;
     let object = value
         .as_object_mut()
-        .ok_or_else(|| "session metadata must serialize as an object".to_string())?;
+        .ok_or_else(|| ExportError::invalid("session metadata must serialize as an object"))?;
     object.insert("cache_format_version".into(), EXPORT_FORMAT_VERSION.into());
     object.insert("source_revision".into(), metadata.revision.into());
-    serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
+    serde_json::to_vec_pretty(&value).map_err(|error| ExportError::invalid(error.to_string()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,6 +638,30 @@ enum ExistingRevision {
     Valid(u64),
 }
 
+pub(crate) fn compatibility_export_status(
+    session_dir: &Path,
+) -> Result<crate::session::CompatibilityExportStatus, String> {
+    let revision = |path: &Path,
+                    kind|
+     -> Result<crate::session::CompatibilityExportRevision, String> {
+        Ok(
+            match exported_revision(path, kind).map_err(|error| error.to_string())? {
+                ExistingRevision::Missing => crate::session::CompatibilityExportRevision::Missing,
+                ExistingRevision::Malformed => {
+                    crate::session::CompatibilityExportRevision::Malformed
+                }
+                ExistingRevision::Valid(source_revision) => {
+                    crate::session::CompatibilityExportRevision::Valid { source_revision }
+                }
+            },
+        )
+    };
+    Ok(crate::session::CompatibilityExportStatus {
+        metadata: revision(&session_dir.join("meta.json"), ExportKind::Metadata)?,
+        content: revision(&session_dir.join("content.txt"), ExportKind::Content)?,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum ExportKind {
     Metadata,
@@ -544,22 +669,22 @@ enum ExportKind {
 }
 
 // COMPAT(session-derived-sidecar-exports): target reads only prevent stale replacement.
-fn exported_revision(path: &Path, kind: ExportKind) -> Result<ExistingRevision, String> {
+fn exported_revision(path: &Path, kind: ExportKind) -> Result<ExistingRevision, ExportError> {
     crate::session_store::reject_symlink(path, "inspect compatibility export")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ExportError::invalid(error.to_string()))?;
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ExistingRevision::Missing);
         }
-        Err(error) => return Err(format!("read {}: {error}", path.display())),
+        Err(error) => return Err(ExportError::io(format!("read {}", path.display()), error)),
     };
     let revision = match kind {
         ExportKind::Metadata => {
             let mut bytes = Vec::new();
             file.take(MAX_META_REVISION_BYTES)
                 .read_to_end(&mut bytes)
-                .map_err(|error| format!("read {}: {error}", path.display()))?;
+                .map_err(|error| ExportError::io(format!("read {}", path.display()), error))?;
             serde_json::from_slice::<serde_json::Value>(&bytes)
                 .ok()
                 .and_then(|value| {
@@ -576,7 +701,7 @@ fn exported_revision(path: &Path, kind: ExportKind) -> Result<ExistingRevision, 
             let mut header = String::new();
             BufReader::new(file.take(MAX_CONTENT_HEADER_BYTES))
                 .read_line(&mut header)
-                .map_err(|error| format!("read {}: {error}", path.display()))?;
+                .map_err(|error| ExportError::io(format!("read {}", path.display()), error))?;
             header
                 .strip_prefix("# smelt-revision:")
                 .and_then(|value| value.trim_end().parse::<u64>().ok())
@@ -593,10 +718,10 @@ impl CompatibilityExportLock {
     fn acquire(
         session_dir: &Path,
         mut should_cancel: impl FnMut() -> bool,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, ExportError> {
         let path = session_dir.join(".compat-export.lock");
         crate::session_store::reject_symlink(&path, "lock compatibility export")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ExportError::invalid(error.to_string()))?;
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true).truncate(false);
         #[cfg(unix)]
@@ -605,13 +730,16 @@ impl CompatibilityExportLock {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let file = options.open(&path).map_err(|error| {
-            format!("open compatibility export lock {}: {error}", path.display())
+            ExportError::io(
+                format!("open compatibility export lock {}", path.display()),
+                error,
+            )
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("secure compatibility export lock: {error}"))?;
+                .map_err(|error| ExportError::io("secure compatibility export lock", error))?;
         }
         loop {
             match file.try_lock() {
@@ -619,7 +747,7 @@ impl CompatibilityExportLock {
                 Err(fs::TryLockError::WouldBlock) if should_cancel() => return Ok(None),
                 Err(fs::TryLockError::WouldBlock) => thread::sleep(LOCK_RETRY),
                 Err(fs::TryLockError::Error(error)) => {
-                    return Err(format!("lock compatibility export: {error}"));
+                    return Err(ExportError::io("lock compatibility export", error));
                 }
             }
         }
@@ -646,14 +774,17 @@ impl PreparedAtomicWrite {
             .expect("prepared compatibility export has a parent")
     }
 
-    fn install(mut self) -> Result<u64, String> {
+    fn install(mut self) -> Result<u64, ExportError> {
         crate::session_store::reject_symlink(&self.target, "install compatibility export")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ExportError::invalid(error.to_string()))?;
         fs::rename(&self.temporary, &self.target).map_err(|error| {
-            format!(
-                "replace compatibility export {} from {}: {error}",
-                self.target.display(),
-                self.temporary.display()
+            ExportError::io(
+                format!(
+                    "replace compatibility export {} from {}",
+                    self.target.display(),
+                    self.temporary.display()
+                ),
+                error,
             )
         })?;
         self.installed = true;
@@ -672,30 +803,38 @@ impl Drop for PreparedAtomicWrite {
 fn prepare_atomic_write(
     path: &Path,
     write_contents: impl FnOnce(&mut File) -> std::io::Result<bool>,
-) -> Result<Option<PreparedAtomicWrite>, String> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("compatibility export has no parent: {}", path.display()))?;
+) -> Result<Option<PreparedAtomicWrite>, ExportError> {
+    let dir = path.parent().ok_or_else(|| {
+        ExportError::invalid(format!(
+            "compatibility export has no parent: {}",
+            path.display()
+        ))
+    })?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("compatibility export has no valid name: {}", path.display()))?;
+        .ok_or_else(|| {
+            ExportError::invalid(format!(
+                "compatibility export has no valid name: {}",
+                path.display()
+            ))
+        })?;
     crate::session_store::reject_symlink(dir, "write compatibility export")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ExportError::invalid(error.to_string()))?;
     crate::session_store::reject_symlink(path, "write compatibility export")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ExportError::invalid(error.to_string()))?;
     let (temporary, mut file) = create_atomic_temp(dir, name)?;
     let result = (|| {
         let complete = write_contents(&mut file)
-            .map_err(|error| format!("write {}: {error}", temporary.display()))?;
+            .map_err(|error| ExportError::io(format!("write {}", temporary.display()), error))?;
         if !complete {
             return Ok(None);
         }
         file.sync_all()
-            .map_err(|error| format!("sync {}: {error}", temporary.display()))?;
+            .map_err(|error| ExportError::io(format!("sync {}", temporary.display()), error))?;
         let bytes = file
             .metadata()
-            .map_err(|error| format!("inspect {}: {error}", temporary.display()))?
+            .map_err(|error| ExportError::io(format!("inspect {}", temporary.display()), error))?
             .len();
         Ok(Some(PreparedAtomicWrite {
             temporary: temporary.clone(),
@@ -710,7 +849,7 @@ fn prepare_atomic_write(
     result
 }
 
-fn create_atomic_temp(dir: &Path, name: &str) -> Result<(PathBuf, File), String> {
+fn create_atomic_temp(dir: &Path, name: &str) -> Result<(PathBuf, File), ExportError> {
     for _ in 0..MAX_TEMP_CREATE_ATTEMPTS {
         let nonce = TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
         let path = dir.join(format!(".{name}.{}-{nonce}.tmp", std::process::id()));
@@ -724,12 +863,17 @@ fn create_atomic_temp(dir: &Path, name: &str) -> Result<(PathBuf, File), String>
         match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("create {}: {error}", path.display())),
+            Err(error) => {
+                return Err(ExportError::io(format!("create {}", path.display()), error));
+            }
         }
     }
-    Err(format!(
-        "create compatibility export temporary file in {} after {MAX_TEMP_CREATE_ATTEMPTS} attempts",
-        dir.display()
+    Err(ExportError::new(
+        ExportFailureClass::Io,
+        format!(
+            "create compatibility export temporary file in {} after {MAX_TEMP_CREATE_ATTEMPTS} attempts",
+            dir.display()
+        ),
     ))
 }
 
@@ -774,7 +918,7 @@ struct WarningLimiter {
 }
 
 impl WarningLimiter {
-    fn warn(&mut self, message: &str) {
+    fn warn(&mut self, class: ExportFailureClass, message: &str) {
         let now = Instant::now();
         let should_warn = self
             .last_warning
@@ -784,6 +928,7 @@ impl WarningLimiter {
             self.last_warning = Some(now);
         }
         smelt_perf::perf::record_value("session:compat_export:failures", 1);
+        smelt_perf::perf::record_value(class.metric(), 1);
     }
 }
 
@@ -792,6 +937,8 @@ mod tests {
     use super::*;
 
     const SESSION_ID: &str = "1000000000000000000000000000000000000000000000000000000000000001";
+    const ATOMIC_CRASH_ROLE: &str = "SMELT_COMPAT_ATOMIC_CRASH_ROLE";
+    const ATOMIC_CRASH_TARGET: &str = "SMELT_COMPAT_ATOMIC_CRASH_TARGET";
 
     fn canonical_fixture(state_root: &Path, text: &str) -> (PathBuf, smelt_store::SaveReceipt) {
         let session_dir = state_root.join("sessions").join(SESSION_ID);
@@ -840,6 +987,93 @@ mod tests {
             crate::session::store_commit_from_session(&session, first.current, 1).unwrap();
         let mut db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         db.apply_session_commit(&command).unwrap()
+    }
+
+    #[test]
+    fn compatibility_atomic_write_crash_probe() {
+        let Ok(role) = std::env::var(ATOMIC_CRASH_ROLE) else {
+            return;
+        };
+        let target = PathBuf::from(
+            std::env::var_os(ATOMIC_CRASH_TARGET).expect("compatibility crash target"),
+        );
+        let prepared = prepare_atomic_write(&target, |file| {
+            file.write_all(b"new-complete-revision")?;
+            Ok(true)
+        })
+        .unwrap()
+        .unwrap();
+        match role.as_str() {
+            "before-rename" => {}
+            "after-rename" => {
+                prepared.install().unwrap();
+            }
+            other => panic!("unknown compatibility atomic crash role {other}"),
+        }
+        std::process::abort();
+    }
+
+    #[test]
+    fn atomic_write_crashes_leave_the_old_or_new_complete_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("content.txt");
+        for (role, expected) in [
+            ("before-rename", "old-complete-revision"),
+            ("after-rename", "new-complete-revision"),
+        ] {
+            fs::write(&target, b"old-complete-revision").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("session_exports::tests::compatibility_atomic_write_crash_probe")
+                .arg("--nocapture")
+                .env(ATOMIC_CRASH_ROLE, role)
+                .env(ATOMIC_CRASH_TARGET, &target)
+                .status()
+                .unwrap();
+            assert!(!status.success(), "crash probe unexpectedly succeeded");
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(libc::SIGABRT));
+            }
+            assert_eq!(fs::read_to_string(&target).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn compatibility_status_classifies_missing_malformed_and_valid_exports() {
+        let state = tempfile::tempdir().unwrap();
+        let (session_dir, receipt) = canonical_fixture(state.path(), "status");
+        assert_eq!(
+            compatibility_export_status(&session_dir).unwrap(),
+            crate::session::CompatibilityExportStatus {
+                metadata: crate::session::CompatibilityExportRevision::Missing,
+                content: crate::session::CompatibilityExportRevision::Missing,
+            }
+        );
+
+        fs::write(session_dir.join("meta.json"), b"malformed").unwrap();
+        fs::write(session_dir.join("content.txt"), b"malformed").unwrap();
+        assert_eq!(
+            compatibility_export_status(&session_dir).unwrap(),
+            crate::session::CompatibilityExportStatus {
+                metadata: crate::session::CompatibilityExportRevision::Malformed,
+                content: crate::session::CompatibilityExportRevision::Malformed,
+            }
+        );
+
+        export_compatibility_files(&session_dir, receipt.current.revision.get(), |_| false)
+            .unwrap();
+        let valid = crate::session::CompatibilityExportRevision::Valid {
+            source_revision: receipt.current.revision.get(),
+        };
+        assert_eq!(
+            compatibility_export_status(&session_dir).unwrap(),
+            crate::session::CompatibilityExportStatus {
+                metadata: valid,
+                content: valid,
+            }
+        );
     }
 
     #[test]
@@ -981,7 +1215,8 @@ mod tests {
             .unwrap();
         drop(db);
 
-        assert!(export_compatibility_files(&session_dir, 0, |_| false).is_err());
+        let error = export_compatibility_files(&session_dir, 0, |_| false).unwrap_err();
+        assert_eq!(error.class, ExportFailureClass::Io);
         let expected = ExistingRevision::Valid(first_revision);
         assert_eq!(revisions(&session_dir), (expected, expected));
         assert!(fs::read_to_string(session_dir.join("content.txt"))
@@ -1000,8 +1235,38 @@ mod tests {
         fs::write(&destination, "keep").unwrap();
         symlink(&destination, session_dir.join("meta.json")).unwrap();
 
-        assert!(export_compatibility_files(&session_dir, 0, |_| false).is_err());
+        let error = export_compatibility_files(&session_dir, 0, |_| false).unwrap_err();
+        assert_eq!(error.class, ExportFailureClass::InvalidTarget);
         assert_eq!(fs::read_to_string(destination).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissions_failure_leaves_canonical_session_usable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = tempfile::tempdir().unwrap();
+        let (session_dir, receipt) = canonical_fixture(state.path(), "canonical");
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let result =
+            export_compatibility_files(&session_dir, receipt.current.revision.get(), |_| false);
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = result.expect_err("read-only session directory must reject export writes");
+        assert_eq!(error.class, ExportFailureClass::Permission);
+        assert!(
+            error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("permission denied"),
+            "unexpected export error: {error}"
+        );
+        let reader = smelt_store::SessionReader::open_existing(&session_dir).unwrap();
+        assert_eq!(
+            reader.store_head().unwrap().revision,
+            receipt.current.revision
+        );
+        reader.quick_check().unwrap();
     }
 
     #[test]

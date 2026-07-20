@@ -1026,7 +1026,9 @@ impl SessionDb {
         let fingerprint = canonical_submit_turn_fingerprint(command, &prepared.side_tables)
             .map_err(session_commit_failure_from_store_error)?;
         let compression = self.object_compression;
-        smelt_perf::perf::record_value("store:transaction:submit_turn:attempts", 1);
+        let _transaction_duration =
+            smelt_perf::perf::begin_value_ms("persist:submit_turn:transaction_ms");
+        smelt_perf::perf::record_value("persist:submit_turn:transactions", 1);
         let result = self.run_immediate_transaction(
             "submit turn",
             |conn| {
@@ -1066,12 +1068,23 @@ impl SessionDb {
             },
             session_commit_failure_from_store_error,
         );
+        drop(_transaction_duration);
         if result.is_ok() {
-            smelt_perf::perf::record_value("store:transaction:submit_turn:committed", 1);
             smelt_perf::perf::record_value(
-                "store:transaction:submit_turn:committed_at_us",
+                "persist:submit_turn:committed_at_us",
                 smelt_perf::perf::timestamp_us(),
             );
+            smelt_perf::perf::record_value(
+                "persist:submit_turn:history_rows",
+                command.session.history.items.len() as u64,
+            );
+            let descriptor_rows = command
+                .session
+                .descriptors
+                .as_ref()
+                .map_or(0, |suffix| suffix.records.len()) as u64;
+            smelt_perf::perf::record_value("persist:submit_turn:descriptor_rows", descriptor_rows);
+            smelt_perf::perf::record_value("persist:submit_turn:index_rows", descriptor_rows);
         }
         result
     }
@@ -1129,66 +1142,84 @@ impl SessionDb {
         command: &TurnTransition,
         owner_token: Option<&str>,
     ) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
-        let prepared = prepare_canonical_update(&command.session)?;
-        validate_turn_transition_command(command)?;
-        let fingerprint = canonical_turn_transition_fingerprint(command, &prepared.side_tables)
-            .map_err(session_commit_failure_from_store_error)?;
-        let compression = self.object_compression;
-        smelt_perf::perf::record_value("store:transaction:turn_transition:attempts", 1);
-        let result = self.run_immediate_transaction(
-            "transition turn",
-            |conn| {
-                verify_canonical_owner(conn, owner_token)?;
-                if let Some(persisted) = idempotent_persisted_commit(conn, &fingerprint)? {
-                    verify_idempotent_receipt(conn, command.session.expected, &persisted.receipt)?;
-                    let Some(PersistedTurnReceipt::Transitioned { turn_id, state }) =
-                        persisted.turn
-                    else {
-                        return Err(SessionCommitFailure::Integrity {
-                            message: "turn transition has no transition receipt".into(),
-                        });
-                    };
-                    if turn_id != command.turn_id || state != command.state {
-                        return Err(SessionCommitFailure::Integrity {
-                            message: "persisted turn transition receipt does not match command"
-                                .into(),
+        let result = (|| {
+            let prepared = prepare_canonical_update(&command.session)?;
+            validate_turn_transition_command(command)?;
+            let fingerprint = canonical_turn_transition_fingerprint(command, &prepared.side_tables)
+                .map_err(session_commit_failure_from_store_error)?;
+            let compression = self.object_compression;
+            smelt_perf::perf::record_value("store:transaction:turn_transition:attempts", 1);
+            self.run_immediate_transaction(
+                "transition turn",
+                |conn| {
+                    verify_canonical_owner(conn, owner_token)?;
+                    if let Some(persisted) = idempotent_persisted_commit(conn, &fingerprint)? {
+                        verify_idempotent_receipt(
+                            conn,
+                            command.session.expected,
+                            &persisted.receipt,
+                        )?;
+                        let Some(PersistedTurnReceipt::Transitioned { turn_id, state }) =
+                            persisted.turn
+                        else {
+                            return Err(SessionCommitFailure::Integrity {
+                                message: "turn transition has no transition receipt".into(),
+                            });
+                        };
+                        if turn_id != command.turn_id || state != command.state {
+                            return Err(SessionCommitFailure::Integrity {
+                                message: "persisted turn transition receipt does not match command"
+                                    .into(),
+                            });
+                        }
+                        return Ok(TurnTransitionReceipt {
+                            session: persisted.receipt,
+                            turn_id,
+                            state,
                         });
                     }
-                    return Ok(TurnTransitionReceipt {
-                        session: persisted.receipt,
-                        turn_id,
-                        state,
-                    });
-                }
-                validate_turn_transition_in_transaction(conn, command)?;
-                let receipt = apply_canonical_update_in_transaction(
-                    conn,
-                    &command.session,
-                    &prepared,
-                    compression,
-                    true,
-                )?;
-                apply_turn_transition(conn, command)?;
-                persist_canonical_receipt(
-                    conn,
-                    &fingerprint,
-                    &receipt,
-                    Some(PersistedTurnReceipt::Transitioned {
+                    validate_turn_transition_in_transaction(conn, command)?;
+                    let receipt = apply_canonical_update_in_transaction(
+                        conn,
+                        &command.session,
+                        &prepared,
+                        compression,
+                        true,
+                    )?;
+                    apply_turn_transition(conn, command)?;
+                    persist_canonical_receipt(
+                        conn,
+                        &fingerprint,
+                        &receipt,
+                        Some(PersistedTurnReceipt::Transitioned {
+                            turn_id: command.turn_id,
+                            state: command.state,
+                        }),
+                    )
+                    .map_err(session_commit_failure_from_store_error)?;
+                    Ok(TurnTransitionReceipt {
+                        session: receipt,
                         turn_id: command.turn_id,
                         state: command.state,
-                    }),
-                )
-                .map_err(session_commit_failure_from_store_error)?;
-                Ok(TurnTransitionReceipt {
-                    session: receipt,
-                    turn_id: command.turn_id,
-                    state: command.state,
-                })
-            },
-            session_commit_failure_from_store_error,
-        );
+                    })
+                },
+                session_commit_failure_from_store_error,
+            )
+        })();
         if result.is_ok() {
             smelt_perf::perf::record_value("store:transaction:turn_transition:committed", 1);
+            if command.state == TurnState::Running {
+                if let Ok(Some(turn)) = self.turn(command.turn_id) {
+                    smelt_perf::perf::record_value(
+                        "persist:turn:ready_to_running_ms",
+                        turn.started_at_ms
+                            .unwrap_or(command.at_ms)
+                            .saturating_sub(turn.created_at_ms),
+                    );
+                }
+            }
+        } else {
+            smelt_perf::perf::record_value("persist:turn:transition_failures", 1);
         }
         result
     }
@@ -1199,9 +1230,16 @@ impl SessionDb {
         at_ms: u64,
     ) -> Result<Option<StartupRecoveryReceipt>> {
         checked_sql_coordinate(at_ms, "startup recovery timestamp")?;
-        self.immediate_transaction("interrupt nonterminal turns", |conn| {
+        let recovery = self.immediate_transaction("interrupt nonterminal turns", |conn| {
             interrupt_nonterminal_turns_in_transaction(conn, token, at_ms)
-        })
+        })?;
+        if let Some(receipt) = &recovery {
+            smelt_perf::perf::record_value(
+                "persist:turn:interrupted_on_startup",
+                receipt.interrupted_turns.len() as u64,
+            );
+        }
+        Ok(recovery)
     }
 
     pub fn turn(&self, turn_id: TurnId) -> Result<Option<StoredTurn>> {
@@ -2910,10 +2948,6 @@ fn interrupt_nonterminal_turns_in_transaction(
             interrupted_turns: interrupted_turns.clone(),
         }),
     )?;
-    smelt_perf::perf::record_value(
-        "store:turn:interrupted_on_startup",
-        interrupted_turns.len() as u64,
-    );
     Ok(Some(StartupRecoveryReceipt {
         session: receipt,
         interrupted_turns,
@@ -3539,6 +3573,10 @@ mod tests {
         RequestAuditPayloadMode, Revision, SideTableSuffixes, TranscriptDescriptorSuffix,
         DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
     };
+
+    const SUBMIT_CRASH_ROLE: &str = "SMELT_SUBMIT_CRASH_ROLE";
+    const SUBMIT_CRASH_DB: &str = "SMELT_SUBMIT_CRASH_DB";
+    const SUBMIT_CRASH_COMMAND: &str = "SMELT_SUBMIT_CRASH_COMMAND";
 
     #[derive(Clone, Debug, PartialEq)]
     struct TestSessionModel {
@@ -4509,6 +4547,114 @@ mod tests {
     }
 
     #[test]
+    fn submit_turn_crash_probe() {
+        let Ok(role) = std::env::var(SUBMIT_CRASH_ROLE) else {
+            return;
+        };
+        let db_path = std::path::PathBuf::from(
+            std::env::var_os(SUBMIT_CRASH_DB).expect("submit crash database"),
+        );
+        let command_path = std::path::PathBuf::from(
+            std::env::var_os(SUBMIT_CRASH_COMMAND).expect("submit crash command"),
+        );
+        let command: SubmitTurn = serde_json::from_slice(&fs::read(command_path).unwrap()).unwrap();
+        if role == "before-transaction" {
+            std::process::abort();
+        }
+
+        let mut db = SessionDb::open(db_path).unwrap();
+        if role != "after-commit" {
+            db.connection()
+                .create_scalar_function(
+                    "smelt_test_crash",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    |_| -> rusqlite::Result<i64> { std::process::abort() },
+                )
+                .unwrap();
+            let table = match role.as_str() {
+                "after-history" => "history_items",
+                "after-descriptor" => "transcript_blocks",
+                "after-search" => "transcript_search",
+                "after-ready-turn" => "turns",
+                other => panic!("unknown submit crash role {other}"),
+            };
+            db.connection()
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER crash_submit AFTER INSERT ON {table}
+                     BEGIN SELECT smelt_test_crash(); END;"
+                ))
+                .unwrap();
+        }
+        db.submit_turn(&command).unwrap();
+        std::process::abort();
+    }
+
+    #[test]
+    fn subprocess_crashes_cover_submit_transaction_and_receipt_boundaries() {
+        for role in [
+            "before-transaction",
+            "after-history",
+            "after-descriptor",
+            "after-search",
+            "after-ready-turn",
+            "after-commit",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("session.db");
+            let db = SessionDb::open(&db_path).unwrap();
+            let command = test_submit_user_command(&db, "submit-crash", "crash needle", 100);
+            drop(db);
+            let command_path = dir.path().join("submit.json");
+            fs::write(&command_path, serde_json::to_vec(&command).unwrap()).unwrap();
+
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("db::tests::submit_turn_crash_probe")
+                .arg("--nocapture")
+                .env(SUBMIT_CRASH_ROLE, role)
+                .env(SUBMIT_CRASH_DB, &db_path)
+                .env(SUBMIT_CRASH_COMMAND, &command_path)
+                .status()
+                .unwrap();
+            assert!(
+                !status.success(),
+                "crash probe {role} unexpectedly succeeded"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(libc::SIGABRT), "crash probe {role}");
+            }
+
+            let mut reopened = SessionDb::open(&db_path).unwrap();
+            reopened.quick_check().unwrap();
+            if role == "after-commit" {
+                assert_eq!(reopened.store_head().unwrap(), test_store_head(1, 1, 1));
+                let receipt = reopened.submit_turn(&command).unwrap();
+                assert_eq!(receipt.turn_id, TurnId::new(1));
+                assert_eq!(reopened.turns().unwrap().len(), 1);
+                assert_eq!(
+                    reopened
+                        .search_transcript_candidates("needle")
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            } else {
+                assert_eq!(reopened.store_head().unwrap(), StoreHead::default());
+                assert_eq!(reopened.history_item_count().unwrap(), 0);
+                assert_eq!(reopened.transcript_descriptor_count().unwrap(), 0);
+                assert!(reopened.turns().unwrap().is_empty());
+                assert!(reopened
+                    .search_transcript_candidates("needle")
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn submit_turn_commits_history_descriptor_search_and_ready_state_together() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
@@ -4786,6 +4932,48 @@ mod tests {
         let receipt = db.submit_turn(&command).unwrap();
         assert_eq!(receipt.turn_id, TurnId::new(1));
         assert_eq!(db.next_turn_id().unwrap(), Some(TurnId::new(2)));
+    }
+
+    #[test]
+    fn sqlite_full_rolls_back_submitted_history_search_and_turn_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.connection()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        let page_count = db
+            .connection()
+            .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "max_page_count", page_count)
+            .unwrap();
+
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        let mut text = String::with_capacity(2 * 1024 * 1024);
+        for _ in 0..text.capacity() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            text.push(char::from(b'!' + (state % 90) as u8));
+        }
+        let command = test_submit_user_command(&db, "submit-full", &text, 100);
+
+        let error = db.submit_turn(&command).unwrap_err();
+
+        assert!(
+            matches!(error, SessionCommitFailure::Sqlite { ref message } if message.to_ascii_lowercase().contains("full")),
+            "unexpected full-disk error: {error:?}"
+        );
+        assert_eq!(db.store_head().unwrap(), StoreHead::default());
+        assert_eq!(db.history_item_count().unwrap(), 0);
+        assert_eq!(db.transcript_descriptor_count().unwrap(), 0);
+        assert!(db.turns().unwrap().is_empty());
+        assert!(db
+            .search_transcript_candidates("unlikely")
+            .unwrap()
+            .is_empty());
+        db.quick_check().unwrap();
     }
 
     #[test]

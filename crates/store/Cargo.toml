@@ -20,4 +20,5 @@ smelt-protocol = { workspace = true }
 zstd = "0.13"
 
 [dev-dependencies]
+rusqlite = { version = "0.40.1", default-features = false, features = ["functions"] }
 tempfile = { workspace = true }

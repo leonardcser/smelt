@@ -300,6 +300,7 @@ enum PersistenceControl {
     RetryBlocked,
     SubmitTurn {
         intent: Box<SubmitTurnIntent>,
+        queued_at: Instant,
         deadline: Instant,
         reply: mpsc::Sender<Result<SubmitTurnAcknowledgement, PersistenceCause>>,
     },
@@ -739,6 +740,7 @@ impl SessionPersistence {
             control,
             PersistenceControl::SubmitTurn {
                 intent: Box::new(intent),
+                queued_at: Instant::now(),
                 deadline,
                 reply,
             },
@@ -1618,9 +1620,14 @@ impl PersistenceActor {
                 }
                 PersistenceControl::SubmitTurn {
                     intent,
+                    queued_at,
                     deadline,
                     reply,
                 } => {
+                    smelt_perf::perf::record_value(
+                        "persist:submit_turn:queue_wait_ms",
+                        queued_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    );
                     let generation = intent.session.generation;
                     let result = if Instant::now() >= deadline {
                         Err(PersistenceCause::unavailable(

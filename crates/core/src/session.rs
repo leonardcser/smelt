@@ -522,6 +522,20 @@ pub struct SessionCatalogStatus {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityExportRevision {
+    Missing,
+    Malformed,
+    Valid { source_revision: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibilityExportStatus {
+    pub metadata: CompatibilityExportRevision,
+    pub content: CompatibilityExportRevision,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionListPage {
     pub entries: Vec<SessionListEntry>,
@@ -2346,9 +2360,15 @@ pub fn request_session_compatibility_export(id: &str, revision: smelt_store::Rev
     crate::session_exports::request(id, revision);
 }
 
+// COMPAT(session-derived-sidecar-exports): inspect derived export revisions for diagnostics.
+pub fn compatibility_export_status(dir_path: &Path) -> Result<CompatibilityExportStatus, String> {
+    crate::session_exports::compatibility_export_status(dir_path)
+}
+
 // COMPAT(session-derived-sidecar-exports): explicit synchronous maintenance export.
 pub fn rebuild_compatibility_exports(dir_path: &Path) -> Result<bool, String> {
-    let outcome = crate::session_exports::export_compatibility_files(dir_path, 0, |_| false)?;
+    let outcome = crate::session_exports::export_compatibility_files(dir_path, 0, |_| false)
+        .map_err(|error| error.to_string())?;
     Ok(!matches!(
         outcome,
         crate::session_exports::ExportOutcome::Missing
