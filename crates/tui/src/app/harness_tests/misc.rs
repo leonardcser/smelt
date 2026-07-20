@@ -7,6 +7,147 @@ use crate::app::transcript_scroll_trace::{
 use crate::smelt_edit::RowIndex;
 
 #[test]
+fn main_transcript_paints_a_selected_delta_before_a_coalesced_turn_completion() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.start_turn(42);
+    app.render_to_frame();
+
+    app.inject_engine(EngineEvent::TextDelta {
+        delta: "coalesced live transcript marker".into(),
+    })
+    .expect("queue transcript delta");
+    app.inject_engine(EngineEvent::TurnComplete {
+        turn_id: 42,
+        history: None,
+        meta: None,
+    })
+    .expect("queue turn completion");
+
+    let selected_delta = app
+        .app
+        .core
+        .engine
+        .try_recv_output()
+        .expect("select loop should receive the first delta");
+    app.app
+        .dispatch_engine_output_in_render_loop_to(selected_delta, &mut std::io::sink(), |_| {});
+    let mut streamed_frame = None;
+    app.app
+        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |app| {
+            streamed_frame = Some(app.ui.snapshot().text())
+        });
+
+    let streamed_frame = streamed_frame.expect("turn completion should paint the pending delta");
+    assert!(
+        streamed_frame.contains("coalesced live transcript marker"),
+        "no frame painted the selected delta: {streamed_frame}"
+    );
+
+    app.render_to_frame();
+    assert!(!app.agent_running(), "turn completion was not dispatched");
+}
+
+#[test]
+fn main_transcript_streams_before_a_busy_engine_queue_completes_the_turn() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.start_turn(42);
+    app.render_to_frame();
+
+    let queued_deltas = crate::app::READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME * 2;
+    for index in 0..queued_deltas {
+        app.inject_engine(EngineEvent::TextDelta {
+            delta: format!("live transcript marker {index}\n"),
+        })
+        .expect("queue transcript delta");
+    }
+    app.inject_engine(EngineEvent::TurnComplete {
+        turn_id: 42,
+        history: None,
+        meta: None,
+    })
+    .expect("queue turn completion");
+
+    app.app
+        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("live transcript marker"), "frame: {frame}");
+    assert!(
+        app.agent_running(),
+        "turn completed before a streaming frame"
+    );
+    assert!(
+        app.streaming_state().text,
+        "streaming text was flushed early"
+    );
+
+    for _ in 0..=queued_deltas {
+        if !app.agent_running() {
+            break;
+        }
+        app.app
+            .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+    }
+    assert!(!app.agent_running(), "turn completion was not drained");
+    assert!(
+        !app.streaming_state().text,
+        "streaming text was not finalized"
+    );
+}
+
+#[test]
+fn tool_output_paints_before_a_coalesced_tool_completion() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.start_turn(42);
+    app.render_to_frame();
+
+    let call_id = "streaming-tool".to_string();
+    app.inject_engine(EngineEvent::ToolStarted {
+        call_id: call_id.clone(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::from([("command".into(), serde_json::json!("sleep 1"))]),
+    })
+    .expect("queue tool start");
+    app.inject_engine(EngineEvent::ToolOutput {
+        call_id: call_id.clone(),
+        chunk: "coalesced live tool marker\n".into(),
+    })
+    .expect("queue tool output");
+    app.inject_engine(EngineEvent::ToolFinished {
+        call_id,
+        result: protocol::ToolOutcome {
+            content: "done".into(),
+            is_error: false,
+            metadata: None,
+        },
+        elapsed_ms: Some(10),
+    })
+    .expect("queue tool completion");
+
+    let selected_start = app
+        .app
+        .core
+        .engine
+        .try_recv_output()
+        .expect("select loop should receive the tool start");
+    app.app
+        .dispatch_engine_output_in_render_loop_to(selected_start, &mut std::io::sink(), |_| {});
+    let mut streamed_frame = None;
+    app.app
+        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |app| {
+            streamed_frame = Some(app.ui.snapshot().text())
+        });
+
+    let streamed_frame = streamed_frame.expect("tool completion should paint pending output");
+    assert!(
+        streamed_frame.contains("coalesced live tool marker"),
+        "no frame painted the tool output: {streamed_frame}"
+    );
+}
+
+#[test]
 fn signal_api_reads_sets_and_subscribes_to_values() {
     let mut app = TestApp::builder().build();
 

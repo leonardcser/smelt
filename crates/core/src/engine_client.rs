@@ -1,6 +1,6 @@
-//! Thin wrapper around `EngineHandle` that gates `recv`/`try_recv` on the confirms-clear flag.
+//! Thin wrapper around `EngineHandle` that pauses output while a confirm dialog is open.
 
-use engine::{EngineHandle, HostCall};
+use engine::{EngineHandle, EngineOutput};
 use protocol::{EngineEvent, UiCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +32,16 @@ impl EngineClient {
         }
     }
 
+    /// Returns `pending()` when a confirm dialog is open, preserving the
+    /// ordering of protocol events and host callbacks.
+    pub async fn recv_output(&mut self) -> Option<EngineOutput> {
+        if !self.confirms_clear.load(Ordering::Relaxed) {
+            std::future::pending().await
+        } else {
+            self.handle.recv_output().await
+        }
+    }
+
     /// Returns `Err(Empty)` when a confirm dialog is open.
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
         if !self.confirms_clear.load(Ordering::Relaxed) {
@@ -41,12 +51,13 @@ impl EngineClient {
         }
     }
 
-    /// Move out the host-callback receiver. Caller stores it as a
-    /// sibling field so the engine event loop and the host-callback
-    /// loop can be polled in the same `tokio::select!` without
-    /// borrowing `EngineClient` twice.
-    pub fn take_host_rx(&mut self) -> mpsc::UnboundedReceiver<HostCall> {
-        self.handle.take_host_rx()
+    /// Returns `Err(Empty)` when a confirm dialog is open.
+    pub fn try_recv_output(&mut self) -> Result<EngineOutput, mpsc::error::TryRecvError> {
+        if !self.confirms_clear.load(Ordering::Relaxed) {
+            Err(mpsc::error::TryRecvError::Empty)
+        } else {
+            self.handle.try_recv_output()
+        }
     }
 
     pub(crate) fn injector(&self) -> engine::EventInjector {

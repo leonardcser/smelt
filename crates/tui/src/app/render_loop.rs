@@ -5,6 +5,33 @@
 use crate::app::TuiApp;
 use crate::content::{layout, prompt_buf};
 
+fn is_engine_stream_delta(event: &protocol::EngineEvent) -> bool {
+    matches!(
+        event,
+        protocol::EngineEvent::ReasoningPartDelta { .. }
+            | protocol::EngineEvent::TextDelta { .. }
+            | protocol::EngineEvent::ToolCallDraftDelta { .. }
+            | protocol::EngineEvent::ToolOutput { .. }
+            | protocol::EngineEvent::EngineAskDelta { .. }
+    )
+}
+
+fn starts_or_updates_live_engine_output(event: &protocol::EngineEvent) -> bool {
+    is_engine_stream_delta(event)
+        || matches!(
+            event,
+            protocol::EngineEvent::ReasoningPartStarted { .. }
+                | protocol::EngineEvent::ToolCallDraftStarted { .. }
+                | protocol::EngineEvent::ToolStarted { .. }
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EngineOutputDrainOutcome {
+    Drained,
+    FrameBoundary,
+}
+
 fn prepare_transcript_window(
     transcript: &mut crate::app::transcript::TranscriptDocument,
     lua: &crate::lua::LuaGeneration,
@@ -245,6 +272,63 @@ impl TuiApp {
         self.save_session_if_pending();
     }
 
+    pub(crate) fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W) {
+        self.publish_diff_signals();
+        self.render_normal_to(out);
+        self.save_session_if_pending();
+    }
+
+    /// Drain one bounded batch from a continuously-ready engine output queue.
+    /// `FrameBoundary` tells the caller to paint before processing more output.
+    pub(crate) fn drain_ready_engine_outputs_for_frame_to<
+        W: std::io::Write,
+        F: FnMut(&mut Self),
+    >(
+        &mut self,
+        out: &mut W,
+        mut on_transient_frame: F,
+    ) -> EngineOutputDrainOutcome {
+        let drain_started_at = std::time::Instant::now();
+        let mut drained_outputs = 0;
+        while drained_outputs < crate::app::READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME
+            && (drained_outputs == 0
+                || drain_started_at.elapsed() < crate::app::READY_QUEUE_DRAIN_MAX_DURATION)
+        {
+            let output = match self.core.engine.try_recv_output() {
+                Ok(output) => output,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    return EngineOutputDrainOutcome::Drained;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    engine::log::entry(
+                        engine::log::Level::Warn,
+                        "engine_stop",
+                        &serde_json::json!({
+                            "reason": "channel_disconnected",
+                            "source": "try_recv_drain",
+                        }),
+                    );
+                    self.discard_turn(crate::app::TurnEnd::Errored {
+                        kind: None,
+                        retry_at_ms: None,
+                    });
+                    return EngineOutputDrainOutcome::Drained;
+                }
+            };
+            drained_outputs += 1;
+            if !self.dispatch_engine_output_in_render_loop_to(output, out, |app| {
+                on_transient_frame(app)
+            }) {
+                return EngineOutputDrainOutcome::FrameBoundary;
+            }
+        }
+        EngineOutputDrainOutcome::FrameBoundary
+    }
+
+    pub(crate) fn drain_ready_engine_outputs_for_frame(&mut self) -> EngineOutputDrainOutcome {
+        self.drain_ready_engine_outputs_for_frame_to(&mut std::io::stdout(), |_| {})
+    }
+
     pub(crate) fn render_requested_transient_frame_to<W: std::io::Write>(
         &mut self,
         out: &mut W,
@@ -252,18 +336,39 @@ impl TuiApp {
         if !self.transient_render_requested {
             return false;
         }
-        self.publish_diff_signals();
-        self.render_normal_to(out);
-        self.save_session_if_pending();
+        self.render_frame_to(out);
         true
     }
 
-    pub(crate) fn dispatch_engine_event_in_render_loop(
+    pub(crate) fn dispatch_engine_output_in_render_loop(
         &mut self,
-        ev: protocol::EngineEvent,
+        output: engine::EngineOutput,
     ) -> bool {
         let mut stdout = std::io::stdout();
-        self.dispatch_engine_event_in_render_loop_to(ev, &mut stdout, |_| {})
+        self.dispatch_engine_output_in_render_loop_to(output, &mut stdout, |_| {})
+    }
+
+    pub(crate) fn dispatch_engine_output_in_render_loop_to<
+        W: std::io::Write,
+        F: FnOnce(&mut Self),
+    >(
+        &mut self,
+        output: engine::EngineOutput,
+        out: &mut W,
+        on_transient_frame: F,
+    ) -> bool {
+        match output {
+            engine::EngineOutput::Event(event) => {
+                self.dispatch_engine_event_in_render_loop_to(event, out, on_transient_frame)
+            }
+            engine::EngineOutput::HostCall(call) => {
+                if self.render_requested_transient_frame_to(out) {
+                    on_transient_frame(self);
+                }
+                self.dispatch_host_call(call);
+                true
+            }
+        }
     }
 
     pub(crate) fn dispatch_engine_event_in_render_loop_to<
@@ -278,7 +383,12 @@ impl TuiApp {
         if self.render_transient_frame_before_engine_event_to(&ev, out) {
             on_transient_frame(self);
         }
-        self.dispatch_engine_event(ev)
+        let updates_live_output = starts_or_updates_live_engine_output(&ev);
+        let keep_streaming = self.dispatch_engine_event(ev);
+        if updates_live_output {
+            self.request_transient_render();
+        }
+        keep_streaming
     }
 
     pub(crate) fn render_transient_frame_before_engine_event_to<W: std::io::Write>(
@@ -286,7 +396,7 @@ impl TuiApp {
         ev: &protocol::EngineEvent,
         out: &mut W,
     ) -> bool {
-        if !matches!(ev, protocol::EngineEvent::EngineAskResponse { .. }) {
+        if is_engine_stream_delta(ev) {
             return false;
         }
         self.render_requested_transient_frame_to(out)

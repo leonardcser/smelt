@@ -38,6 +38,15 @@ pub enum SystemPromptBehavior {
     Autonomous,
 }
 
+/// Whether the frontend services callbacks emitted by the engine.
+/// Disabled callbacks fail immediately so the engine can use their fallback
+/// without waiting for a frontend that only consumes protocol events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostCallbacks {
+    Enabled,
+    Disabled,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SystemPromptCapabilities {
     pub tool_calling: bool,
@@ -200,6 +209,7 @@ pub struct EngineConfig {
     /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
     pub system_prompt_behavior: SystemPromptBehavior,
+    pub host_callbacks: HostCallbacks,
     pub cwd: PathBuf,
     /// Pre-rendered "# Skills" block injected into the system prompt.
     /// Built once on startup from the [`SkillLoader`] and refreshed through
@@ -218,6 +228,7 @@ impl EngineConfig {
             instructions: None,
             system_prompt_override: None,
             system_prompt_behavior: SystemPromptBehavior::Interactive,
+            host_callbacks: HostCallbacks::Enabled,
             cwd,
             skill_section: None,
             clock,
@@ -233,14 +244,73 @@ impl EngineConfig {
     }
 }
 
+/// Ordered output from the engine task. Host callbacks share the protocol-event
+/// channel so frontends always apply preceding history updates before a callback.
+pub enum EngineOutput {
+    Event(EngineEvent),
+    HostCall(HostCall),
+}
+
+#[derive(Clone)]
+pub(crate) struct EngineEventSender {
+    output_tx: mpsc::UnboundedSender<EngineOutput>,
+}
+
+impl EngineEventSender {
+    pub(crate) fn send(&self, event: EngineEvent) -> Result<(), Box<EngineEvent>> {
+        self.output_tx
+            .send(EngineOutput::Event(event))
+            .map_err(|error| match error.0 {
+                EngineOutput::Event(event) => Box::new(event),
+                EngineOutput::HostCall(_) => unreachable!("sent an engine event"),
+            })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HostCallSender {
+    output_tx: mpsc::UnboundedSender<EngineOutput>,
+    enabled: bool,
+}
+
+impl HostCallSender {
+    pub(crate) fn send(&self, call: HostCall) -> Result<(), Box<HostCall>> {
+        if !self.enabled {
+            return Err(Box::new(call));
+        }
+        self.output_tx
+            .send(EngineOutput::HostCall(call))
+            .map_err(|error| match error.0 {
+                EngineOutput::HostCall(call) => Box::new(call),
+                EngineOutput::Event(_) => unreachable!("sent a host call"),
+            })
+    }
+}
+
+pub(crate) fn output_channel(
+    host_callbacks: HostCallbacks,
+) -> (
+    EngineEventSender,
+    HostCallSender,
+    mpsc::UnboundedReceiver<EngineOutput>,
+) {
+    let (output_tx, output_rx) = mpsc::unbounded_channel();
+    (
+        EngineEventSender {
+            output_tx: output_tx.clone(),
+        },
+        HostCallSender {
+            output_tx,
+            enabled: host_callbacks == HostCallbacks::Enabled,
+        },
+        output_rx,
+    )
+}
+
 pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
-    event_tx: mpsc::UnboundedSender<EngineEvent>,
-    event_rx: mpsc::UnboundedReceiver<EngineEvent>,
-    /// Inbound host-callback requests. Held by the consumer (TUI /
-    /// headless app), drained on the main thread, and replied to via
-    /// the per-call `oneshot::Sender` embedded in each variant.
-    host_rx: mpsc::UnboundedReceiver<HostCall>,
+    event_tx: EngineEventSender,
+    output_rx: mpsc::UnboundedReceiver<EngineOutput>,
 }
 
 impl EngineHandle {
@@ -248,20 +318,32 @@ impl EngineHandle {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    pub async fn recv_output(&mut self) -> Option<EngineOutput> {
+        self.output_rx.recv().await
+    }
+
+    pub fn try_recv_output(&mut self) -> Result<EngineOutput, mpsc::error::TryRecvError> {
+        self.output_rx.try_recv()
+    }
+
+    /// Receive only protocol events, dropping unsupported host callbacks.
+    /// Frontends that implement host callbacks should use `recv_output`.
     pub async fn recv(&mut self) -> Option<EngineEvent> {
-        self.event_rx.recv().await
+        while let Some(output) = self.recv_output().await {
+            if let EngineOutput::Event(event) = output {
+                return Some(event);
+            }
+        }
+        None
     }
 
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
-        self.event_rx.try_recv()
-    }
-
-    /// Take ownership of the host-callback receiver. The consumer
-    /// holds onto this receiver directly so it can be polled in the
-    /// same `tokio::select!` block as `EngineHandle::recv` without
-    /// hitting borrow-checker conflicts on `&mut self`.
-    pub fn take_host_rx(&mut self) -> mpsc::UnboundedReceiver<HostCall> {
-        std::mem::replace(&mut self.host_rx, mpsc::unbounded_channel().1)
+        loop {
+            match self.try_recv_output()? {
+                EngineOutput::Event(event) => return Ok(event),
+                EngineOutput::HostCall(_) => {}
+            }
+        }
     }
 
     pub fn injector(&self) -> EventInjector {
@@ -275,24 +357,38 @@ impl EngineHandle {
     pub fn for_test() -> (
         Self,
         mpsc::UnboundedReceiver<UiCommand>,
-        mpsc::UnboundedSender<EngineEvent>,
+        EngineOutputInjector,
     ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (_host_tx, host_rx) = mpsc::unbounded_channel();
+        let (event_tx, host_tx, output_rx) = output_channel(HostCallbacks::Enabled);
         let handle = EngineHandle {
             cmd_tx,
             event_tx: event_tx.clone(),
-            event_rx,
-            host_rx,
+            output_rx,
         };
-        (handle, cmd_rx, event_tx)
+        (handle, cmd_rx, EngineOutputInjector { event_tx, host_tx })
+    }
+}
+
+#[derive(Clone)]
+pub struct EngineOutputInjector {
+    event_tx: EngineEventSender,
+    host_tx: HostCallSender,
+}
+
+impl EngineOutputInjector {
+    pub fn send(&self, event: EngineEvent) -> Result<(), Box<EngineEvent>> {
+        self.event_tx.send(event)
+    }
+
+    pub fn send_host_call(&self, call: HostCall) -> Result<(), Box<HostCall>> {
+        self.host_tx.send(call)
     }
 }
 
 #[derive(Clone)]
 pub struct EventInjector {
-    event_tx: mpsc::UnboundedSender<EngineEvent>,
+    event_tx: EngineEventSender,
 }
 
 impl EventInjector {
@@ -306,20 +402,18 @@ impl EventInjector {
 /// Start the engine. Must be called from within a tokio runtime.
 pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (host_tx, host_rx) = mpsc::unbounded_channel();
+    let (event_tx, host_tx, output_rx) = output_channel(config.host_callbacks);
+    let handle = EngineHandle {
+        cmd_tx,
+        event_tx: event_tx.clone(),
+        output_rx,
+    };
 
-    let event_tx_clone = event_tx.clone();
     tokio::spawn(agent::engine_task(
         config, dispatcher, cmd_rx, event_tx, host_tx,
     ));
 
-    EngineHandle {
-        cmd_tx,
-        event_tx: event_tx_clone,
-        event_rx,
-        host_rx,
-    }
+    handle
 }
 
 #[cfg(test)]
@@ -492,6 +586,47 @@ mod tests {
             }
             _ => panic!("unexpected event"),
         }
+    }
+
+    #[tokio::test]
+    async fn engine_outputs_preserve_event_and_host_call_order() {
+        let (mut handle, _cmd_rx, output_injector) = EngineHandle::for_test();
+        let _ = output_injector.send(EngineEvent::Ready);
+        let (reply, _reply_rx) = tokio::sync::oneshot::channel();
+        assert!(output_injector
+            .send_host_call(HostCall::PrepareRequest {
+                messages: Vec::new(),
+                estimated_tokens: 0,
+                reply,
+            })
+            .is_ok());
+
+        assert!(matches!(
+            handle.recv_output().await,
+            Some(EngineOutput::Event(EngineEvent::Ready))
+        ));
+        assert!(matches!(
+            handle.recv_output().await,
+            Some(EngineOutput::HostCall(HostCall::PrepareRequest { .. }))
+        ));
+    }
+
+    #[test]
+    fn disabled_host_calls_are_rejected_before_queueing() {
+        let (_event_tx, host_tx, mut output_rx) = output_channel(HostCallbacks::Disabled);
+        let (reply, _reply_rx) = tokio::sync::oneshot::channel();
+
+        assert!(host_tx
+            .send(HostCall::PrepareRequest {
+                messages: Vec::new(),
+                estimated_tokens: 0,
+                reply,
+            })
+            .is_err());
+        assert!(matches!(
+            output_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Drain `engine::HostCall` requests and run the matching Lua hooks
+//! Dispatch `engine::HostCall` requests through the matching Lua hooks
 //! on the TUI main thread. Each `HostCall` carries its own
 //! `oneshot::Sender` for the reply; we send back at most once.
 
@@ -110,18 +110,6 @@ fn prepare_request_to_lua(
 }
 
 impl TuiApp {
-    /// Pull every pending `HostCall` and dispatch it. Non-blocking;
-    /// returns once the channel reports `Empty`.
-    pub(crate) fn drain_host_calls(&mut self) {
-        loop {
-            let call = match self.host_rx.try_recv() {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-            self.dispatch_host_call(call);
-        }
-    }
-
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
             HostCall::ProviderResponse { message, reply } => {
@@ -208,9 +196,6 @@ impl TuiApp {
         estimated_tokens: u32,
         reply: MessageReply,
     ) {
-        while let Ok(ev) = self.core.engine.try_recv() {
-            self.dispatch_engine_event(ev);
-        }
         let lua = self.lua.lua();
         let funcs = self
             .lua

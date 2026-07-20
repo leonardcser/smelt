@@ -104,6 +104,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     // ── Engine ─────────────────────────────────────────────────────────
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
         ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
     let target = ModelTarget {
@@ -118,7 +119,6 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     };
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
-    drop(handle.take_host_rx());
 
     // Wait for Ready.
     loop {

@@ -21,17 +21,12 @@ pub struct HeadlessApp {
 
 impl HeadlessApp {
     pub fn new(
-        mut core: Core,
+        core: Core,
         sink: HeadlessSink,
         system_prompt: String,
         capabilities: engine::SystemPromptCapabilities,
         lua: Option<crate::lua::LuaRuntime>,
     ) -> Self {
-        // Drop the host-callback receiver so the engine sees a closed channel
-        // and `host_call` returns `None` instead of deadlocking on the
-        // unanswered `oneshot::Receiver`. Provider middleware is a TUI-only
-        // feature today; headless runs proceed with unmutated payloads.
-        let _ = core.engine.take_host_rx();
         let (lua, lua_wakeup_rx) = if let Some(lua) = lua {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             lua.set_wakeup_sender(tx);

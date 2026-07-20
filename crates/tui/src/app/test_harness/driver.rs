@@ -210,7 +210,11 @@ impl TestApp {
     }
 
     pub fn inject_engine(&self, ev: EngineEvent) -> Result<(), Box<EngineEvent>> {
-        self.event_tx.send(ev).map_err(|e| Box::new(e.0))
+        self.output_injector.send(ev)
+    }
+
+    pub fn inject_host_call(&self, call: engine::HostCall) -> Result<(), Box<engine::HostCall>> {
+        self.output_injector.send_host_call(call)
     }
 
     /// Drain `UiCommand`s buffered on the engine channel into the action log.

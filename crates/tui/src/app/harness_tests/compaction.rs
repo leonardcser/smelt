@@ -119,6 +119,85 @@ fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
 }
 
 #[test]
+fn ordered_prepare_request_paints_transient_streaming_state() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    assert!(app.run_lua(
+        r#"
+        smelt.engine.ask_inherited({
+            messages = { { role = "user", content = "summarize" } },
+            on_delta = function(delta)
+                smelt.transcript._set_compaction_preview(delta)
+            end,
+            on_response = function()
+                smelt.transcript._set_compaction_preview(nil)
+            end,
+        })
+        "#
+    ));
+    let ask_id = app.pending_ask_id().expect("pending ask id");
+    app.render_to_frame();
+
+    let marker = "ordered prepare streaming marker";
+    app.inject_engine(protocol::EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: format!("# Goal\n{marker}"),
+    })
+    .expect("queue compaction preview delta");
+    app.inject_engine(protocol::EngineEvent::EngineAskResponse {
+        id: ask_id,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text("# Goal\nfinal summary")),
+            None,
+            None,
+        )),
+        error: None,
+    })
+    .expect("queue compaction preview response");
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    assert!(
+        app.inject_host_call(engine::HostCall::PrepareRequest {
+            messages: Vec::new(),
+            estimated_tokens: 0,
+            reply: tx,
+        })
+        .is_ok(),
+        "queue prepare request"
+    );
+
+    let mut streamed_frames = Vec::new();
+    loop {
+        let outcome = app
+            .app
+            .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |app| {
+                streamed_frames.push(app.ui.snapshot().text())
+            });
+        if outcome == crate::app::render_loop::EngineOutputDrainOutcome::Drained {
+            break;
+        }
+        app.app.render_frame_to(&mut std::io::sink());
+        streamed_frames.push(app.app.ui.snapshot().text());
+    }
+
+    assert!(
+        streamed_frames.iter().any(|frame| frame.contains(marker)),
+        "ordered prepare request skipped the transient frame: {streamed_frames:#?}"
+    );
+    assert!(
+        app.app
+            .session_document
+            .transcript
+            .compaction_preview_id()
+            .is_none(),
+        "final response should clear the transient preview"
+    );
+    assert!(matches!(
+        rx.try_recv().expect("prepare request reply"),
+        engine::HostRequestDecision::Continue
+    ));
+}
+
+#[test]
 fn auto_compaction_does_not_recompact_checkpoint_summary_without_new_old_groups() {
     let mut app = TestApp::builder().build();
     let mut settings = app.app.core.config.settings.clone();

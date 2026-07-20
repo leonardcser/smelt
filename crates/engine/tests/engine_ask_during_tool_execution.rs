@@ -136,6 +136,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
 
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
         ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
     let target = ModelTarget {
@@ -150,7 +151,6 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
     };
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
-    drop(handle.take_host_rx());
 
     loop {
         match handle.recv().await {
@@ -350,6 +350,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
 
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
         ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
     let original_target = ModelTarget {
@@ -373,7 +374,6 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         ..original_target.clone()
     };
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
-    drop(handle.take_host_rx());
     while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
@@ -436,6 +436,7 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
     let server = tokio::spawn(run_server(listener, counter, request_tx));
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
         ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
     let original_target = ModelTarget {
@@ -454,7 +455,6 @@ async fn model_switch_during_sequential_tool_wait_applies_to_follow_up_request()
         ..original_target.clone()
     };
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
-    drop(handle.take_host_rx());
     while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
         turn_id: 1,

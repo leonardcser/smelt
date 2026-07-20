@@ -1,15 +1,13 @@
-//! Host-callback channel - typed RPCs from the engine task to whoever
-//! runs Lua (TUI / headless). Each variant carries its own
-//! `oneshot::Sender<Reply>` so correlation is "the channel handle"
-//! instead of an integer id + lookup table.
+//! Typed callbacks from the engine task to the frontend host. Request/reply
+//! variants carry their own `oneshot::Sender<Reply>` so correlation is the
+//! channel handle instead of an integer id and lookup table. Host callbacks
+//! share the ordered [`crate::EngineOutput`] queue with protocol events.
 //!
 //! Why not put these on [`protocol::EngineEvent`] / [`protocol::UiCommand`]?
 //! Those types are `Serialize` for JSON output and persistence; an embedded
 //! `oneshot::Sender` is neither serializable nor meaningful across process
-//! boundaries. Splitting host RPC into its own channel keeps the protocol
-//! surface clean and lets us add new RPCs by adding a single enum variant
-//! plus a handler arm on the consumer side - no protocol churn, no pending
-//! HashMap on the engine, no `*Response` variants on `UiCommand`.
+//! boundaries. Keeping host RPCs outside the protocol surface also avoids a
+//! pending map and paired `*Response` variants on `UiCommand`.
 
 use protocol::Message;
 use std::path::PathBuf;
@@ -44,11 +42,8 @@ impl HostRequestDecision {
     }
 }
 
-/// One synchronous request from the engine to the host (TUI / headless).
-/// The host must `reply.send(...)` exactly once or the engine's awaiting
-/// future will resolve with the channel's `Closed` error and fall back
-/// to a default; both paths are intentional - dropping a `reply` is a
-/// "no-op" signal.
+/// One callback from the engine to the frontend host. Request/reply variants
+/// fall back to their default when the host drops `reply` without sending.
 pub enum HostCall {
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant message. `Some(msg)` replaces it before

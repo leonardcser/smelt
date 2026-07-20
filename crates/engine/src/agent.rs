@@ -30,7 +30,7 @@ fn next_request_id() -> u64 {
 }
 
 fn dispatch_request_audit(
-    host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
+    host_tx: &crate::HostCallSender,
     session_dir: &Path,
     persistence: protocol::PersistenceScope,
     ctx: crate::request_log::RequestContext,
@@ -90,8 +90,8 @@ pub(crate) async fn engine_task(
     mut config: EngineConfig,
     dispatcher: Box<dyn crate::tools::ToolDispatcher>,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
-    event_tx: mpsc::UnboundedSender<EngineEvent>,
-    host_tx: mpsc::UnboundedSender<crate::host::HostCall>,
+    event_tx: crate::EngineEventSender,
+    host_tx: crate::HostCallSender,
 ) {
     // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
     // Per-request header() calls (Copilot, Codex) still override this.
@@ -318,8 +318,8 @@ pub(crate) struct BackgroundCtx<'a> {
     pub config: &'a EngineConfig,
     pub http_client: &'a reqwest::Client,
     pub dispatcher: &'a dyn ToolDispatcher,
-    pub event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
-    pub host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
+    pub event_tx: &'a crate::EngineEventSender,
+    pub host_tx: &'a crate::HostCallSender,
     pub bg_cancel: CancellationToken,
 }
 
@@ -384,8 +384,8 @@ fn spawn_engine_ask(
     client: &reqwest::Client,
     dispatcher: &dyn ToolDispatcher,
     task: AskTask,
-    event_tx: &mpsc::UnboundedSender<EngineEvent>,
-    host_tx: &mpsc::UnboundedSender<crate::host::HostCall>,
+    event_tx: &crate::EngineEventSender,
+    host_tx: &crate::HostCallSender,
     cancel: CancellationToken,
 ) {
     let AskTask {
@@ -790,9 +790,9 @@ struct Turn<'a> {
     provider: EngineProvider,
     dispatcher: &'a dyn ToolDispatcher,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
-    event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
-    /// Host-callback channel for provider middleware and request preparation.
-    host_tx: &'a mpsc::UnboundedSender<crate::host::HostCall>,
+    event_tx: &'a crate::EngineEventSender,
+    /// Host-callback sender for provider middleware and request preparation.
+    host_tx: &'a crate::HostCallSender,
     config: &'a mut EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: CancellationToken,
@@ -1755,7 +1755,7 @@ impl<'a> Turn<'a> {
     }
 
     fn send_tool_started_for_call(
-        event_tx: &mpsc::UnboundedSender<EngineEvent>,
+        event_tx: &crate::EngineEventSender,
         tc: &protocol::ToolCall,
         args: &HashMap<String, Value>,
     ) {
@@ -1771,7 +1771,7 @@ impl<'a> Turn<'a> {
     }
 
     fn send_tool_dispatch_for_call(
-        event_tx: &mpsc::UnboundedSender<EngineEvent>,
+        event_tx: &crate::EngineEventSender,
         request_id: u64,
         tc: &protocol::ToolCall,
         args: &HashMap<String, Value>,
@@ -1786,7 +1786,7 @@ impl<'a> Turn<'a> {
     }
 
     fn send_tool_rejected_for_call(
-        event_tx: &mpsc::UnboundedSender<EngineEvent>,
+        event_tx: &crate::EngineEventSender,
         tc: &protocol::ToolCall,
         args: &HashMap<String, Value>,
         summary: protocol::StyledLines,
@@ -2658,7 +2658,7 @@ struct ProviderStreamState {
 }
 
 impl ProviderStreamState {
-    fn apply(&self, event: ProviderStreamEvent<'_>, event_tx: &mpsc::UnboundedSender<EngineEvent>) {
+    fn apply(&self, event: ProviderStreamEvent<'_>, event_tx: &crate::EngineEventSender) {
         match event {
             ProviderStreamEvent::TextDelta(text) => {
                 self.text.lock().unwrap().push_str(text);
@@ -2714,7 +2714,7 @@ impl ProviderStreamState {
         }
     }
 
-    fn finish(self, event_tx: &mpsc::UnboundedSender<EngineEvent>) -> (String, String) {
+    fn finish(self, event_tx: &crate::EngineEventSender) -> (String, String) {
         self.reasoning_parts
             .into_inner()
             .unwrap_or_default()
@@ -2741,7 +2741,7 @@ impl ReasoningStreamState {
     fn apply(
         &mut self,
         event: ReasoningStreamEvent<'_>,
-        tx: &mpsc::UnboundedSender<EngineEvent>,
+        tx: &crate::EngineEventSender,
         partial_reasoning: &std::sync::Mutex<String>,
     ) {
         match event {
@@ -2813,7 +2813,7 @@ impl ReasoningStreamState {
         }
     }
 
-    fn finish_item(&mut self, item_id: &str, tx: &mpsc::UnboundedSender<EngineEvent>) {
+    fn finish_item(&mut self, item_id: &str, tx: &crate::EngineEventSender) {
         let mut ids: Vec<_> = self
             .parts
             .iter()
@@ -2827,7 +2827,7 @@ impl ReasoningStreamState {
         }
     }
 
-    fn finish_all(self, tx: &mpsc::UnboundedSender<EngineEvent>) {
+    fn finish_all(self, tx: &crate::EngineEventSender) {
         let mut parts: Vec<_> = self.parts.into_iter().collect();
         parts.sort_by(|a, b| a.0.cmp(&b.0));
         for (id, part) in parts {
@@ -2837,7 +2837,7 @@ impl ReasoningStreamState {
 }
 
 fn start_reasoning_part(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
+    tx: &crate::EngineEventSender,
     id: String,
     item_id: &str,
     kind: ReasoningKind,
@@ -2895,7 +2895,7 @@ fn normalize_reasoning_part(kind: ReasoningKind, source: &str) -> (Option<String
 }
 
 fn send_reasoning_part_finished(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
+    tx: &crate::EngineEventSender,
     id: String,
     part: ActiveReasoningPart,
 ) {
@@ -2911,7 +2911,7 @@ fn send_reasoning_part_finished(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn send_usage(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
+    tx: &crate::EngineEventSender,
     target: &ModelTarget,
     usage: protocol::TokenUsage,
     tokens_per_sec: Option<f64>,
@@ -2935,6 +2935,24 @@ fn send_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestEventReceiver(tokio::sync::mpsc::UnboundedReceiver<crate::EngineOutput>);
+
+    impl TestEventReceiver {
+        fn try_recv(&mut self) -> Result<EngineEvent, tokio::sync::mpsc::error::TryRecvError> {
+            loop {
+                match self.0.try_recv()? {
+                    crate::EngineOutput::Event(event) => return Ok(event),
+                    crate::EngineOutput::HostCall(_) => {}
+                }
+            }
+        }
+    }
+
+    fn test_event_channel() -> (crate::EngineEventSender, TestEventReceiver) {
+        let (event_tx, _host_tx, output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
+        (event_tx, TestEventReceiver(output_rx))
+    }
 
     fn test_store_commit(id: &str, history: Vec<HistoryItem>) -> smelt_store::SessionCommit {
         smelt_store::SessionCommit {
@@ -2974,7 +2992,7 @@ mod tests {
 
     #[test]
     fn completed_only_reasoning_part_emits_its_content_as_a_delta() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = test_event_channel();
         let partial_reasoning = std::sync::Mutex::new(String::new());
         let mut state = ReasoningStreamState::default();
 
@@ -3041,7 +3059,7 @@ mod tests {
                 "response": {"usage": {}},
             }),
         ];
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = test_event_channel();
         let provider_stream = ProviderStreamState::default();
 
         smelt_provider::parse_openai_stream_events(&stream_events, &mut |event| {
@@ -3075,7 +3093,7 @@ mod tests {
 
     #[test]
     fn reasoning_item_finished_closes_its_open_parts() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = test_event_channel();
         let partial_reasoning = std::sync::Mutex::new(String::new());
         let mut state = ReasoningStreamState::default();
 
@@ -3113,7 +3131,7 @@ mod tests {
 
     #[test]
     fn reasoning_item_finished_does_not_repeat_a_finished_part() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = test_event_channel();
         let partial_reasoning = std::sync::Mutex::new(String::new());
         let mut state = ReasoningStreamState::default();
 
@@ -3325,8 +3343,7 @@ mod tests {
         let client = reqwest::Client::new();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+        let (event_tx, host_tx, _output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
         let clock: std::sync::Arc<dyn crate::clock::Clock> =
             std::sync::Arc::new(crate::clock::RealClock);
         let mut config = test_engine_config(clock.clone());
@@ -3452,8 +3469,7 @@ mod tests {
         let client = reqwest::Client::new();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+        let (event_tx, host_tx, _output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
         let clock: std::sync::Arc<dyn crate::clock::Clock> =
             std::sync::Arc::new(crate::clock::RealClock);
         let mut config = test_engine_config(clock.clone());
@@ -3572,9 +3588,9 @@ mod tests {
         let note = protocol::HistoryNote::process_status_event(
             protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
         );
-        let config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
+        let mut config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
+        config.host_callbacks = crate::HostCallbacks::Disabled;
         let mut handle = crate::start(config, Box::new(crate::tools::EmptyDispatcher::new()));
-        drop(handle.take_host_rx());
 
         loop {
             match tokio::time::timeout(std::time::Duration::from_secs(1), handle.recv())
@@ -3674,7 +3690,7 @@ mod tests {
 
     #[test]
     fn send_usage_emits_token_usage_event_with_cost_when_pricing_resolves() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        let (tx, mut rx) = test_event_channel();
         let target = ModelTarget {
             model: "model-x".into(),
             config: ModelConfig {
@@ -3710,7 +3726,7 @@ mod tests {
 
     #[test]
     fn send_usage_emits_no_cost_when_pricing_zero() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        let (tx, mut rx) = test_event_channel();
         let target = ModelTarget {
             provider_type: "openai-compatible".into(),
             config: ModelConfig::default(),
@@ -3726,7 +3742,7 @@ mod tests {
 
     #[test]
     fn send_usage_can_mark_background_requests() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<EngineEvent>();
+        let (tx, mut rx) = test_event_channel();
         send_usage(
             &tx,
             &model_target(),

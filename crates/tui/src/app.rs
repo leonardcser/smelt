@@ -48,8 +48,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME: usize = 64;
-const TERMINAL_EVENT_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
+pub(crate) const READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME: usize = 64;
+const READY_QUEUE_DRAIN_MAX_DURATION: Duration = Duration::from_millis(8);
 pub(crate) const DOCKED_DIALOG_TRANSCRIPT_ROWS: u16 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -265,10 +265,6 @@ pub struct TuiApp {
     lua_wakeup_tx: tokio::sync::mpsc::UnboundedSender<()>,
     /// Wakeup from cross-thread tasks that pushed to the Lua inbox. Drains the inbox so parked coroutines resume.
     lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-    /// Host-callback receiver from the engine task. Lives next to the
-    /// engine's event receiver but is moved out at construction time so
-    /// the two can be polled in the same `tokio::select!`.
-    pub(crate) host_rx: tokio::sync::mpsc::UnboundedReceiver<engine::HostCall>,
     pub(crate) queued_inputs: InputQueues,
     /// Current working directory, updated when the process cwd changes.
     pub(crate) cwd: String,
@@ -1449,7 +1445,7 @@ impl TuiApp {
     pub fn new(
         config: smelt_core::RuntimeState,
         startup_overrides: smelt_core::StartupOverrides,
-        mut engine: EngineHandle,
+        engine: EngineHandle,
         permissions: smelt_core::permissions::PermissionsHandle,
         shared_session: Arc<Mutex<Option<SharedSessionState>>>,
         lua: crate::lua::LuaRuntime,
@@ -1458,7 +1454,6 @@ impl TuiApp {
         env: Arc<engine::env::RuntimeEnv>,
         options: TuiAppOptions,
     ) -> Self {
-        let host_rx = engine.take_host_rx();
         let TuiAppOptions {
             startup_auth_error,
             app_events,
@@ -1663,7 +1658,6 @@ impl TuiApp {
             shell_panel: None,
             lua_wakeup_tx,
             lua_wakeup_rx,
-            host_rx,
             queued_inputs: InputQueues::default(),
             cwd,
             cwd_project,
@@ -3030,38 +3024,12 @@ impl TuiApp {
                 self.apply_context_window_update(update);
             }
 
-            self.drain_host_calls();
-
             if self.drain_idle_work() {
                 self.render_normal_after_startup_work(&mut workspace_warmup_pending);
                 continue 'main;
             }
 
-            loop {
-                let ev = match self.core.engine.try_recv() {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        engine::log::entry(
-                            engine::log::Level::Warn,
-                            "engine_stop",
-                            &serde_json::json!({
-                                "reason": "channel_disconnected",
-                                "source": "try_recv_drain",
-                            }),
-                        );
-                        self.discard_turn(TurnEnd::Errored {
-                            kind: None,
-                            retry_at_ms: None,
-                        });
-                        break;
-                    }
-                };
-                let action = self.dispatch_engine_event_in_render_loop(ev);
-                if !action {
-                    break;
-                }
-            }
+            self.drain_ready_engine_outputs_for_frame();
 
             while let Ok(completion) = self.process_completion_rx.try_recv() {
                 self.handle_process_completed(completion.id, completion.exit_code);
@@ -3206,8 +3174,8 @@ impl TuiApp {
                         }
                     }
 
-                    while drained_events < TERMINAL_EVENT_DRAIN_MAX_EVENTS_PER_FRAME
-                        && drain_started_at.elapsed() < TERMINAL_EVENT_DRAIN_MAX_DURATION
+                    while drained_events < READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME
+                        && drain_started_at.elapsed() < READY_QUEUE_DRAIN_MAX_DURATION
                     {
                         let Ok(ev) = term_events.try_recv() else {
                             break;
@@ -3253,15 +3221,8 @@ impl TuiApp {
                     self.render_normal();
                 }
 
-                Some(ev) = self.core.engine.recv() => {
-                    self.dispatch_engine_event_in_render_loop(ev);
-                }
-
-                Some(call) = self.host_rx.recv() => {
-                    self.dispatch_host_call(call);
-                    // Drain any pending follow-ups in the same wake so
-                    // multiple host calls don't serialise on one tick.
-                    self.drain_host_calls();
+                Some(output) = self.core.engine.recv_output() => {
+                    self.dispatch_engine_output_in_render_loop(output);
                 }
 
                 Some(_) = self.lua_wakeup_rx.recv() => {
@@ -3374,7 +3335,6 @@ impl TuiApp {
                 .signals
                 .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
             app.drain_signals_pending();
-            app.drain_host_calls();
             app.stop_background_processes();
             app.save_session_and_flush();
             let unflushed = app.session_document_has_unflushed_work().then(|| {

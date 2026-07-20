@@ -1095,6 +1095,11 @@ async fn async_main() {
             } else {
                 engine::SystemPromptBehavior::Interactive
             },
+            host_callbacks: if args.headless {
+                engine::HostCallbacks::Disabled
+            } else {
+                engine::HostCallbacks::Enabled
+            },
             skill_section: prompt_inputs.skill_section.clone(),
             ..engine::EngineConfig::new(cwd.clone(), Arc::clone(&clock))
         },

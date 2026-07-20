@@ -126,7 +126,7 @@ pub struct TestApp {
     pub app: TuiApp,
     pub clock: Arc<VirtualClock>,
     cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
-    event_tx: mpsc::UnboundedSender<EngineEvent>,
+    output_injector: engine::EngineOutputInjector,
     actions: Vec<Action>,
     quit: bool,
     /// Allocation delta for the most recent `feed_one`. `None` when no event
@@ -237,7 +237,7 @@ impl TestAppBuilder {
     }
 
     fn build_after_test_home_setup(self) -> TestApp {
-        let (engine, cmd_rx, event_tx) = EngineHandle::for_test();
+        let (engine, cmd_rx, output_injector) = EngineHandle::for_test();
 
         let permissions = smelt_core::permissions::PermissionsHandle::new(
             smelt_core::permissions::Permissions::load(),
@@ -383,7 +383,7 @@ impl TestAppBuilder {
             app,
             clock,
             cmd_rx,
-            event_tx,
+            output_injector,
             actions: Vec::new(),
             quit: false,
             last_alloc: None,

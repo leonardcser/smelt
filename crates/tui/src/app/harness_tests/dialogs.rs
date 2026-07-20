@@ -1508,6 +1508,127 @@ fn btw_command_preserves_model_history_prefix_and_appends_question() {
 }
 
 #[test]
+fn btw_dialog_paints_a_selected_delta_before_a_coalesced_final_response() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.push_user_block("how do I render a buffer?");
+    app.push_assistant_text("Call `buf:source(text)`.");
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app.apply_lua_command("btw show me a tiny example");
+        app.app.drive_lua_tasks();
+    }
+    let ask_id = app.pending_ask_id().expect("/btw registered ask callback");
+    app.render_to_frame();
+
+    app.inject_engine(protocol::EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: "coalesced live dialog marker".into(),
+    })
+    .expect("queue /btw delta");
+    app.inject_engine(protocol::EngineEvent::EngineAskResponse {
+        id: ask_id,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text("coalesced final answer")),
+            None,
+            None,
+        )),
+        error: None,
+    })
+    .expect("queue /btw response");
+
+    let selected_delta = app
+        .app
+        .core
+        .engine
+        .try_recv_output()
+        .expect("select loop should receive the first delta");
+    app.app
+        .dispatch_engine_output_in_render_loop_to(selected_delta, &mut std::io::sink(), |_| {});
+    let mut streamed_frame = None;
+    app.app
+        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |app| {
+            streamed_frame = Some(app.ui.snapshot().text())
+        });
+
+    let streamed_frame = streamed_frame.expect("final response should paint the pending delta");
+    assert!(
+        streamed_frame.contains("coalesced live dialog marker"),
+        "no frame painted the selected delta: {streamed_frame}"
+    );
+    assert!(
+        !streamed_frame.contains("coalesced final answer"),
+        "the final callback ran before the streamed frame: {streamed_frame}"
+    );
+
+    let final_frame = app.render_to_frame().text();
+    assert!(
+        final_frame.contains("coalesced final answer"),
+        "frame: {final_frame}"
+    );
+    app.app.core.timers.clear();
+}
+
+#[test]
+fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.push_user_block("how do I render a buffer?");
+    app.push_assistant_text("Call `buf:source(text)`.");
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app.apply_lua_command("btw show me a tiny example");
+        app.app.drive_lua_tasks();
+    }
+    let ask_id = app.pending_ask_id().expect("/btw registered ask callback");
+    app.render_to_frame();
+
+    let queued_deltas = crate::app::READY_QUEUE_DRAIN_MAX_ITEMS_PER_FRAME * 2;
+    for index in 0..queued_deltas {
+        let delta = if index == 0 {
+            "live dialog marker ".to_string()
+        } else {
+            format!("chunk-{index} ")
+        };
+        app.inject_engine(protocol::EngineEvent::EngineAskDelta { id: ask_id, delta })
+            .expect("queue /btw delta");
+    }
+    app.inject_engine(protocol::EngineEvent::EngineAskResponse {
+        id: ask_id,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text("final answer")),
+            None,
+            None,
+        )),
+        error: None,
+    })
+    .expect("queue /btw response");
+
+    app.app
+        .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("live dialog marker"), "frame: {frame}");
+    assert!(!frame.contains("final answer"), "frame: {frame}");
+
+    for _ in 0..=queued_deltas {
+        if app.pending_ask_id().is_none() {
+            break;
+        }
+        app.app
+            .drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
+    }
+    assert!(
+        app.pending_ask_id().is_none(),
+        "final response was not drained"
+    );
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("final answer"), "frame: {frame}");
+    app.app.core.timers.clear();
+}
+
+#[test]
 fn btw_command_denies_tool_calls_then_retries_same_request_shape() {
     let mut app = TestApp::builder().build();
     stub_btw_ui(&mut app);

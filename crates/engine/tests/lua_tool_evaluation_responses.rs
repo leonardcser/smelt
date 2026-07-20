@@ -208,12 +208,12 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
 
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
         ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
     let target = model_target(addr);
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
-    drop(handle.take_host_rx());
     while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
 
     let tool = ToolDef {
@@ -295,12 +295,12 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
 
     let config = EngineConfig {
         system_prompt_override: Some("test system".into()),
+        host_callbacks: engine::HostCallbacks::Disabled,
         ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
     };
     let target = model_target(addr);
 
     let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
-    drop(handle.take_host_rx());
 
     let (report_tx, report_rx) = mpsc::channel();
     let host = std::thread::spawn(move || {
