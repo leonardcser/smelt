@@ -513,6 +513,15 @@ fn custom_command_turn_includes_registered_lua_tools() {
         "registered Lua tool missing from custom command payload: {:?}",
         payload.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
     );
+
+    let payload = app
+        .start_custom_command_with_lua_tool(1)
+        .expect("repeated custom command should replace the synthetic turn");
+    assert!(
+        payload.tools.iter().any(|t| t.name == "fuzz_custom_tool_1"),
+        "replacement Lua tool missing from custom command payload: {:?}",
+        payload.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
 }
 
 #[test]

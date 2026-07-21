@@ -31,6 +31,10 @@ impl TestApp {
         &mut self,
         variant: u8,
     ) -> Option<protocol::StartTurnPayload> {
+        if self.agent_running() {
+            self.cancel();
+        }
+
         let tool_name = format!("fuzz_custom_tool_{}", variant % 4);
         let snippet = format!(
             r#"

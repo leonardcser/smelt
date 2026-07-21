@@ -5181,10 +5181,12 @@ impl TranscriptDocument {
     ) -> TranscriptDescriptorSaveSuffix {
         let history = self.history();
         let descriptor_order_dirty = if descriptors_persisted {
-            history.descriptor_dirty_from().or_else(|| {
-                dirty_history_from
-                    .and_then(|idx| history.first_block_index_for_history_origin_at_or_after(idx))
-            })
+            let history_order_dirty = dirty_history_from
+                .and_then(|idx| history.first_block_index_for_history_origin_at_or_after(idx));
+            match (history.descriptor_dirty_from(), history_order_dirty) {
+                (Some(descriptor), Some(history)) => Some(descriptor.min(history)),
+                (dirty, None) | (None, dirty) => dirty,
+            }
         } else {
             Some(0)
         };
@@ -9536,6 +9538,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn descriptor_save_suffix_uses_earliest_dirty_source() {
+        let mut document = super::TranscriptDocument::new();
+        document.push_with_origin(
+            smelt_core::Block::Text {
+                content: "persisted".into(),
+            },
+            smelt_core::BlockOrigin::History(0),
+        );
+        document.history_mut().clear_descriptor_dirty();
+        document.push_with_origin(
+            smelt_core::Block::Text {
+                content: "dirty tail".into(),
+            },
+            smelt_core::BlockOrigin::History(1),
+        );
+        assert_eq!(document.history().descriptor_dirty_from(), Some(1));
+
+        let suffix = document.descriptor_save_suffix(true, Some(0));
+        let super::TranscriptDescriptorSaveSuffix::Suffix {
+            descriptor_start_idx,
+            descriptor_records,
+        } = suffix
+        else {
+            panic!("dirty descriptor sources should produce a save suffix");
+        };
+        assert_eq!(descriptor_start_idx, 0);
+        assert_eq!(descriptor_records.len(), 2);
     }
 
     #[test]

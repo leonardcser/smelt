@@ -1,0 +1,78 @@
+{
+  "_about": "Regression for a smelt_loop crash where repeated custom-command probes left active synthetic turns, then a canonical history replacement saved a descriptor suffix from a later transcript-only dirty boundary.",
+  "_fix": "Cancel the active synthetic turn before each probe and save descriptors from the earliest canonical-history or transcript dirty boundary.",
+  "vim": true,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 45
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 64
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    },
+    {
+      "kind": "key_special",
+      "data": 187
+    },
+    {
+      "kind": "engine_messages",
+      "data": {
+        "msg_count": 1
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 55
+      }
+    }
+  ]
+}
