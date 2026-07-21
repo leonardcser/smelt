@@ -1072,6 +1072,7 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
         // them. Catches reload-path leaks (handles created during reload
         // but never dropped) that the per-field walk above can't see.
         app.assert_no_handle_leak_across_reload();
+        app.assert_lua_runtime_released();
     });
 }
 

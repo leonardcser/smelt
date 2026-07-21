@@ -2560,5 +2560,6 @@ pub fn run_scenario(scenario: Scenario) {
             ns_end,
             INTERN_SLACK
         );
+        app.assert_lua_runtime_released();
     });
 }

@@ -346,9 +346,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                 }
 
-                let lua_clone = lua.clone();
+                let lua = lua.weak();
                 Ok(LuaReg::new(move || {
-                    let Ok(meta) = lua_clone.named_registry_value::<mlua::Table>(&key) else {
+                    let Some(lua) = lua.try_upgrade() else {
+                        return false;
+                    };
+                    let Ok(meta) = lua.named_registry_value::<mlua::Table>(&key) else {
                         return false;
                     };
                     match old_description {

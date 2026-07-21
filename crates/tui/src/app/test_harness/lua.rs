@@ -251,4 +251,15 @@ impl TestApp {
 
         std::fs::write(init_path, original).expect("restore Lua init after failed candidate");
     }
+
+    /// Consume the app and verify that Lua-owned registration userdata did not
+    /// retain a strong reference to the VM during teardown.
+    pub fn assert_lua_runtime_released(self) {
+        let lua = self.app.lua.lua.weak();
+        drop(self);
+        assert!(
+            lua.try_upgrade().is_none(),
+            "Lua registration retained a strong reference to its own runtime"
+        );
+    }
 }

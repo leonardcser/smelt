@@ -1,0 +1,93 @@
+{
+  "_about": "Lua registration teardown regression: prompt picker and prediction flows create Reg userdata whose removal callbacks must not retain a strong reference to their own Lua VM.",
+  "_fix": "fix(lua): avoid self-retaining registration handles",
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "paste",
+      "data": "/"
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 129
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 2164260864
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 0
+      }
+    },
+    {
+      "kind": "set_agent_mode",
+      "data": {
+        "mode": "normal"
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 1984823296
+    },
+    {
+      "kind": "set_agent_mode",
+      "data": {
+        "mode": "normal"
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 7740289
+    },
+    {
+      "kind": "key_special",
+      "data": 27
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 164
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 3539322497
+    },
+    {
+      "kind": "resize",
+      "data": {
+        "w": 0,
+        "h": 0
+      }
+    }
+  ]
+}

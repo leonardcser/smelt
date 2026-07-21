@@ -29,10 +29,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )?
             };
             let s2 = s.clone();
-            let lua_for_cancel = lua.clone();
+            let lua = lua.weak();
             Ok(LuaReg::new(move || {
+                let Some(lua) = lua.try_upgrade() else {
+                    return false;
+                };
                 if let Ok(mut rt) = s2.tasks.lock() {
-                    return rt.cancel_task(&lua_for_cancel, id);
+                    return rt.cancel_task(&lua, id);
                 }
                 false
             }))

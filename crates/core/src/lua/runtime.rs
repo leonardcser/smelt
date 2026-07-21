@@ -4498,6 +4498,23 @@ mod tests {
     }
 
     #[test]
+    fn dropping_runtime_releases_lua_reg_cycles() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load("LEAK_REG = smelt.reg.new(function() end)")
+            .exec()
+            .expect("create registration");
+        let lua = rt.lua.weak();
+
+        drop(rt);
+
+        assert!(
+            lua.try_upgrade().is_none(),
+            "LuaReg retained a strong reference to its own Lua state"
+        );
+    }
+
+    #[test]
     fn lifecycle_on_ready_fires_in_registration_order_and_drains() {
         let mut rt = LuaRuntime::new();
         rt.lua

@@ -22,12 +22,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["undo"],
         |lua, undo: LuaCallback<(), ()>| -> LuaResult<LuaReg> {
             let key = lua.create_registry_value(undo.into_inner())?;
-            let lua_clone = lua.clone();
+            let lua = lua.weak();
             Ok(LuaReg::new(move || {
-                if let Ok(func) = lua_clone.registry_value::<mlua::Function>(&key) {
+                let Some(lua) = lua.try_upgrade() else {
+                    return false;
+                };
+                if let Ok(func) = lua.registry_value::<mlua::Function>(&key) {
                     let _ = func.call::<()>(());
                 }
-                let _ = lua_clone.remove_registry_value(key);
+                let _ = lua.remove_registry_value(key);
                 true
             }))
         },

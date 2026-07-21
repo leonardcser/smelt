@@ -32,9 +32,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let id = fragments.raw_len() + 1;
             fragments.raw_set(id, text)?;
 
-            let lua_clone = lua.clone();
+            let lua = lua.weak();
             Ok(LuaReg::new(move || {
-                let Ok(fragments) = lua_clone.named_registry_value::<mlua::Table>(SYSTEM_PROMPT_FRAGMENTS_REGISTRY) else {
+                let Some(lua) = lua.try_upgrade() else {
+                    return false;
+                };
+                let Ok(fragments) =
+                    lua.named_registry_value::<mlua::Table>(SYSTEM_PROMPT_FRAGMENTS_REGISTRY)
+                else {
                     return false;
                 };
                 let _ = fragments.raw_set(id, mlua::Value::Nil);
