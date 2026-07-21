@@ -39,7 +39,9 @@ pub(super) fn run_prebuilt() {
             .current_dir(&root),
     );
 
-    let replay = root.join("fuzz/target/debug/replay_scenario");
+    let replay = cargo_target_dir(&root)
+        .join("debug")
+        .join(format!("replay_scenario{}", std::env::consts::EXE_SUFFIX));
     let mut fail = false;
 
     for target in targets_of(TargetKind::Json) {
@@ -127,8 +129,8 @@ pub(super) fn run_prebuilt() {
     println!("all regression seeds passed");
 }
 
-fn fuzz_binary(root: &Path, host: &str, target: &str) -> PathBuf {
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+fn cargo_target_dir(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|path| {
             if path.is_absolute() {
@@ -137,8 +139,11 @@ fn fuzz_binary(root: &Path, host: &str, target: &str) -> PathBuf {
                 root.join(path)
             }
         })
-        .unwrap_or_else(|| root.join("fuzz/target"));
-    target_dir
+        .unwrap_or_else(|| root.join("fuzz/target"))
+}
+
+fn fuzz_binary(root: &Path, host: &str, target: &str) -> PathBuf {
+    cargo_target_dir(root)
         .join(host)
         .join("release")
         .join(format!("{target}{}", std::env::consts::EXE_SUFFIX))
