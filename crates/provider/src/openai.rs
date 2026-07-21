@@ -52,21 +52,10 @@ fn effort_label(effort: ReasoningEffort) -> String {
     }
 }
 
-// COMPAT(openai-reasoning-summary-shape): old sessions may contain OpenAI
-// Responses reasoning summaries as an object or string; current wire uses an array.
-fn normalize_openai_reasoning_item(data: &serde_json::Value) -> serde_json::Value {
+fn reasoning_item_without_id(data: &serde_json::Value) -> serde_json::Value {
     let mut out = data.clone();
-    let Some(obj) = out.as_object_mut() else {
-        return out;
-    };
-    obj.remove("id");
-    let Some(summary) = obj.get_mut("summary") else {
-        return out;
-    };
-    if summary.is_object() {
-        *summary = serde_json::json!([summary.clone()]);
-    } else if let Some(text) = summary.as_str() {
-        *summary = serde_json::json!([{ "type": "summary_text", "text": text }]);
+    if let Some(obj) = out.as_object_mut() {
+        obj.remove("id");
     }
     out
 }
@@ -187,7 +176,7 @@ fn build_body_with_user_shape(
                 if let Some(blocks) = &m.reasoning_details {
                     for block in blocks {
                         if block.provider == ReasoningBlock::OPENAI_RESPONSES {
-                            input.push(normalize_openai_reasoning_item(&block.data));
+                            input.push(reasoning_item_without_id(&block.data));
                         }
                     }
                 }
@@ -306,7 +295,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
                 tool_calls.push(ToolCall::new(call_id, FunctionCall { name, arguments }));
             }
             Some("reasoning") => {
-                let data = normalize_openai_reasoning_item(item);
+                let data = reasoning_item_without_id(item);
                 let summaries: Vec<&str> = data["summary"]
                     .as_array()
                     .into_iter()
@@ -417,7 +406,7 @@ impl StreamState {
             .into_iter()
             .map(|data| ReasoningBlock {
                 provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
-                data: normalize_openai_reasoning_item(&data),
+                data: reasoning_item_without_id(&data),
             })
             .collect();
         Ok(ParsedResponse {
@@ -1018,35 +1007,6 @@ mod tests {
     }
 
     #[test]
-    fn build_body_wraps_legacy_reasoning_summary_object() {
-        let m = Message {
-            role: Role::Assistant,
-            content: None,
-            reasoning_content: None,
-            reasoning_details: Some(vec![ReasoningBlock {
-                provider: ReasoningBlock::OPENAI_RESPONSES.to_string(),
-                data: json!({
-                    "type": "reasoning",
-                    "id": "rs_1",
-                    "summary": {"type": "summary_text", "text": "legacy"},
-                    "encrypted_content": "ciphertext",
-                }),
-            }]),
-            tool_calls: None,
-            tool_call_id: None,
-            is_error: false,
-            tool_metadata: None,
-        };
-
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
-
-        assert_eq!(body["input"][0]["type"], "reasoning");
-        assert!(body["input"][0].get("id").is_none());
-        assert!(body["input"][0]["summary"].is_array());
-        assert_eq!(body["input"][0]["summary"][0]["text"], "legacy");
-    }
-
-    #[test]
     fn build_body_strips_replayed_reasoning_item_ids() {
         let m = Message {
             role: Role::Assistant,
@@ -1291,22 +1251,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn parse_response_normalizes_legacy_reasoning_summary_object() {
-        let v = json!({
-            "output": [
-                {"type": "reasoning",
-                 "summary": {"type": "summary_text", "text": "legacy"}}
-            ],
-            "usage": {}
-        });
-        let r = parse_response(&v).unwrap();
-        assert_eq!(r.reasoning.as_deref(), Some("legacy"));
-        let details = r.reasoning_blocks.unwrap();
-        assert!(details[0].data["summary"].is_array());
-        assert_eq!(details[0].data["summary"][0]["text"], "legacy");
     }
 
     #[test]

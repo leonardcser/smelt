@@ -981,7 +981,6 @@ Visible transcript cursor position relative to the committed viewport.
 | `title` | `string` |  | Optional display title. |
 | `view_state` | `string` |  | Current group view state. |
 | `children` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Child block snapshots. |
-| `blocks` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Legacy alias for `children`. |
 
 ### `smelt.transcript.GroupSelector`
 

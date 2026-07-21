@@ -1143,6 +1143,8 @@ impl SessionMaintenance {
         apply_maintenance_commit(&mut self.writer, &command)
     }
 
+    // COMPAT(transcript-descriptor-history-link-mismatch): repair descriptors written by
+    // early sparse transcript builds while those sessions remain supported.
     pub fn repair_transcript_history_links(&mut self) -> Result<usize> {
         let mut session = self
             .writer

@@ -688,7 +688,6 @@
 ---@field title? string Optional display title.
 ---@field view_state? string Current group view state.
 ---@field children? smelt.transcript.Block[] Child block snapshots.
----@field blocks? smelt.transcript.Block[] Legacy alias for `children`.
 
 --- Group selector declared through `smelt.transcript.groups.register`.
 ---@class smelt.transcript.GroupSelector

@@ -703,14 +703,11 @@ end
 ---@field title? string Optional display title.
 ---@field view_state? string Current group view state.
 ---@field children? smelt.transcript.Block[] Child block snapshots.
----@field blocks? smelt.transcript.Block[] Legacy alias for `children`.
 
 --- Return child snapshots for a transcript group snapshot.
 ---@type fun(group: smelt.transcript.Group): smelt.transcript.Block[]
 function smelt.transcript.defaults.group_children(group)
-  -- COMPAT(transcript-group-blocks-alias): `blocks` was the original field
-  -- name for group children; custom renderers may still pass it during alpha.
-  return group.children or group.blocks or {}
+  return group.children or {}
 end
 
 --- True when a grouped child represents a failed or denied tool result.

@@ -516,6 +516,7 @@ fn migrate_to_v5(conn: &Connection, increment_attempt: bool) -> Result<()> {
             INSERT INTO transcript_search SELECT * FROM transcript_search_legacy;
             "#,
         )?;
+        // COMPAT(request-audit-zero-based-attempts): v2/v3 producers wrote zero-based attempts.
         let attempt_adjustment = if increment_attempt { "+ 1" } else { "" };
         conn.execute_batch(&format!(
             r#"
