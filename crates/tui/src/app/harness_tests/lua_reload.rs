@@ -979,9 +979,16 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
             699 => "lua sparse tail exact marker",
             _ => "ordinary lua sparse content",
         };
-        app.app.push_block(smelt_core::Block::Text {
-            content: format!("block {index}: {marker}"),
-        });
+        let content = format!("block {index}: {marker}");
+        if index == 10 {
+            app.app.push_block(smelt_core::Block::User {
+                text: content,
+                image_labels: Vec::new(),
+                command: false,
+            });
+        } else {
+            app.app.push_block(smelt_core::Block::Text { content });
+        }
     }
     app.app.save_session_and_flush();
     let loaded = crate::app::history::load_transcript_tail_from_sqlite_dir(
@@ -1022,7 +1029,10 @@ fn lua_transcript_detail_apis_rehydrate_sparse_windows_and_release_pins() {
 
     assert!(app.run_lua(
         r#"
-            assert(smelt.transcript.reveal_block(10, { cursor = true }))
+            local view = assert(smelt.transcript.view())
+            local target = assert(view:previous_block({ role = "user" }))
+            assert(target.first_line:find("lua sparse early exact marker", 1, true))
+            assert(smelt.transcript.reveal(target, { move_cursor = true }))
         "#,
     ));
     app.render_silent();
