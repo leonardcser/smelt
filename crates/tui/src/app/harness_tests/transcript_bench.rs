@@ -516,19 +516,57 @@ enum BurstBenchPosition {
     Bottom,
 }
 
-fn save_bench_fixture(app: &mut TestApp, label: &str) {
+fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::SaveReceipt {
     app.app.save_session();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let outcome = app.app.flush_persist();
         match outcome {
             crate::persist::PersistenceFlushOutcome::Durable {
-                receipt: Some(_), ..
-            } => break,
+                receipt: Some(receipt),
+                ..
+            } => break receipt,
             crate::persist::PersistenceFlushOutcome::Deadline { .. }
                 if std::time::Instant::now() < deadline => {}
             other => panic!("{label} fixture persistence failed: {other:?}"),
         }
+    }
+}
+
+fn wait_for_bench_derivations(app: &TestApp, label: &str, receipt: &smelt_store::SaveReceipt) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let session_id = &app.app.core.session.id;
+    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let catalog_path = session_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("session directory is below the state root")
+        .join("catalog.db");
+    let expected_revision = receipt.current.revision.get();
+    let expected_export = smelt_core::session::CompatibilityExportRevision::Valid {
+        source_revision: expected_revision,
+    };
+    let mut catalog_current = false;
+    loop {
+        if !catalog_current {
+            catalog_current = smelt_store::CatalogReader::open_existing(&catalog_path)
+                .ok()
+                .flatten()
+                .and_then(|catalog| catalog.session(session_id).ok().flatten())
+                .is_some_and(|session| session.source_revision == expected_revision);
+        }
+        let export_status = smelt_core::session::compatibility_export_status(&session_dir).ok();
+        let export_current = export_status.is_some_and(|status| {
+            status.metadata == expected_export && status.content == expected_export
+        });
+        if catalog_current && export_current {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{label} derived projections did not reach canonical revision {expected_revision}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -835,7 +873,8 @@ fn run_resumed_wheel_scroll_bench_sample(
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    save_bench_fixture(&mut app, "resumed wheel");
+    let receipt = save_bench_fixture(&mut app, "resumed wheel");
+    wait_for_bench_derivations(&app, "resumed wheel", &receipt);
 
     install_sparse_resume_bench_transcript(&mut app);
     app.type_char('G');
@@ -914,7 +953,8 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    save_bench_fixture(&mut app, "search");
+    let receipt = save_bench_fixture(&mut app, "search");
+    wait_for_bench_derivations(&app, "search", &receipt);
     smelt_perf::perf::clear();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -1398,7 +1438,8 @@ fn seed_resume_bench_preview_session(
     app.app.handle_resize(120, 32);
     let bytes = push_search_bench_transcript(&mut app, preview_bytes);
     app.render_silent();
-    save_bench_fixture(&mut app, "resume preview");
+    let receipt = save_bench_fixture(&mut app, "resume preview");
+    wait_for_bench_derivations(&app, "resume preview", &receipt);
     let id = app.app.core.session.id.clone();
     assert!(
         crate::app::history::load_transcript_tail_from_sqlite_id(&id, 80, 12).is_some(),
@@ -1881,7 +1922,8 @@ fn saved_hot_path_app(
 
     app.app.load_session(session);
     app.app.restore_screen();
-    save_bench_fixture(&mut app, "hot path");
+    let receipt = save_bench_fixture(&mut app, "hot path");
+    wait_for_bench_derivations(&app, "hot path", &receipt);
     app
 }
 
@@ -2373,6 +2415,23 @@ fn run_submit_hot_paths(history_len: usize) -> Vec<(HotPathSample, smelt_perf::p
         "store:transcript:dirty_descriptor_suffix_rows",
         1,
     );
+    assert_eq!(
+        perf_value_max(&submit_snapshot, "persist:submit_turn:transactions"),
+        1,
+        "submit_enter did not use exactly one canonical SubmitTurn transaction"
+    );
+    assert_hot_path_at_most(
+        &submit_snapshot,
+        submit.operation,
+        "store:session:invariant_history_rows",
+        0,
+    );
+    assert_hot_path_at_most(
+        &submit_snapshot,
+        submit.operation,
+        "transcript:descriptor_record_index:entries_scanned",
+        2,
+    );
     assert_cached_persist_db(&submit_snapshot, submit.operation);
 
     let (render, render_snapshot) =
@@ -2598,7 +2657,7 @@ fn transcript_active_memory_benchmark_suite() {
     let mut batch_count = 0usize;
     let mut marker_written = false;
 
-    while generated_bytes < target_bytes {
+    loop {
         let batch_end = block_count.saturating_add(SAVE_BATCH_BLOCKS);
         while generated_bytes < target_bytes && block_count < batch_end {
             let marker = if !marker_written && generated_bytes >= target_bytes / 2 {
@@ -2613,9 +2672,13 @@ fn transcript_active_memory_benchmark_suite() {
                 .push_block(smelt_core::transcript_model::Block::Text { content });
             block_count += 1;
         }
-        save_bench_fixture(&mut app, "active memory");
+        let receipt = save_bench_fixture(&mut app, "active memory");
         while app.app.session_document.transcript.drain_compaction_slice() {}
         batch_count += 1;
+        if generated_bytes >= target_bytes {
+            wait_for_bench_derivations(&app, "active memory", &receipt);
+            break;
+        }
     }
     assert!(marker_written);
     let seeded_ms = elapsed_ms(started_at.elapsed());

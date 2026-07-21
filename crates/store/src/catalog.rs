@@ -1095,6 +1095,109 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual catalog query benchmark"]
+    fn catalog_query_benchmark_suite() {
+        if std::env::var("SMELT_CATALOG_BENCH").ok().as_deref() != Some("1") {
+            eprintln!("CATALOG_BENCH_SKIPPED");
+            return;
+        }
+        let row_count = std::env::var("SMELT_CATALOG_BENCH_ROWS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|count| *count >= 1_000)
+            .unwrap_or(100_000);
+        let runs = std::env::var("SMELT_CATALOG_BENCH_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(101);
+
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(temp.path().join("catalog.db")).unwrap();
+        catalog
+            .conn
+            .execute_batch(&format!(
+                "BEGIN;
+                 WITH RECURSIVE sequence(value) AS (
+                     VALUES(1)
+                     UNION ALL
+                     SELECT value + 1 FROM sequence WHERE value < {row_count}
+                 )
+                 INSERT INTO sessions (
+                     id, cwd, created_at, updated_at, source_revision, status, last_seen_scan
+                 )
+                 SELECT printf('%064x', value),
+                        CASE value % 2 WHEN 0 THEN '/even' ELSE '/odd' END,
+                        value,
+                        value / 2,
+                        1,
+                        CASE value % 10 WHEN 0 THEN 'unavailable' ELSE 'available' END,
+                        0
+                 FROM sequence;
+                 COMMIT;"
+            ))
+            .unwrap();
+        catalog
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+
+        let query = CatalogQuery {
+            limit: 100,
+            ..CatalogQuery::default()
+        };
+        let first = catalog.page(&query).unwrap();
+        let second_query = CatalogQuery {
+            limit: 100,
+            cursor: first.next_cursor,
+            ..CatalogQuery::default()
+        };
+        let filtered_query = CatalogQuery {
+            limit: 100,
+            cwd: Some("/even".into()),
+            availability: Some(CatalogAvailability::Available),
+            ..CatalogQuery::default()
+        };
+        catalog.page(&second_query).unwrap();
+        catalog.page(&filtered_query).unwrap();
+
+        let mut first_page_us = Vec::with_capacity(runs);
+        let mut second_page_us = Vec::with_capacity(runs);
+        let mut filtered_page_us = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            for (query, samples) in [
+                (&query, &mut first_page_us),
+                (&second_query, &mut second_page_us),
+                (&filtered_query, &mut filtered_page_us),
+            ] {
+                let started = std::time::Instant::now();
+                assert_eq!(catalog.page(query).unwrap().sessions.len(), 100);
+                samples.push(started.elapsed().as_micros() as u64);
+            }
+        }
+        for samples in [
+            &mut first_page_us,
+            &mut second_page_us,
+            &mut filtered_page_us,
+        ] {
+            samples.sort_unstable();
+        }
+        let median = |samples: &[u64]| samples[samples.len() / 2];
+        println!(
+            "CATALOG_BENCH_JSON {}",
+            serde_json::json!({
+                "rows": row_count,
+                "runs": runs,
+                "page_size": 100,
+                "first_page_median_us": median(&first_page_us),
+                "second_page_median_us": median(&second_page_us),
+                "filtered_page_median_us": median(&filtered_page_us),
+                "database_bytes": fs::metadata(temp.path().join("catalog.db")).unwrap().len(),
+            })
+        );
+    }
+
+    #[test]
     fn corrupt_catalog_can_be_deleted_and_rebuilt() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("catalog.db");

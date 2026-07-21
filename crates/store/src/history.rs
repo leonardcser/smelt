@@ -1020,7 +1020,8 @@ pub(crate) fn read_transcript_descriptor_slice_with_total(
                 estimated_text_bytes, preview_text, '' AS indexed_text,
                 descriptor_json, origin_json, tool_state_json
          FROM transcript_blocks
-         WHERE descriptor_idx >= ?2
+         WHERE descriptor_json IS NOT NULL
+           AND descriptor_idx >= ?2
            AND descriptor_idx < ?2 + ?1
          ORDER BY descriptor_idx",
     )?;

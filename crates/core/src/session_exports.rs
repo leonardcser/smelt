@@ -1269,6 +1269,91 @@ mod tests {
         reader.quick_check().unwrap();
     }
 
+    fn linux_resident_bytes() -> Option<u64> {
+        let status = fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+        line.split_whitespace()
+            .nth(1)?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    }
+
+    #[test]
+    #[ignore = "manual compatibility export benchmark"]
+    fn compatibility_export_benchmark_suite() {
+        if std::env::var("SMELT_COMPAT_EXPORT_BENCH").ok().as_deref() != Some("1") {
+            eprintln!("COMPAT_EXPORT_BENCH_SKIPPED");
+            return;
+        }
+        const ROW_BYTES: usize = 1024 * 1024;
+        let target_bytes = std::env::var("SMELT_COMPAT_EXPORT_BENCH_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(50 * 1024 * 1024);
+        let state = tempfile::tempdir().unwrap();
+        let (session_dir, receipt) = canonical_fixture(state.path(), "export benchmark seed");
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let conn = db.connection();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let payload = "x".repeat(ROW_BYTES);
+        let mut remaining = target_bytes;
+        let mut row_count = 0_u64;
+        {
+            let mut insert_block = conn
+                .prepare(
+                    "INSERT INTO transcript_blocks (block_idx, kind, estimated_text_bytes)
+                     VALUES (?1, 'text', ?2)",
+                )
+                .unwrap();
+            let mut insert_search = conn
+                .prepare(
+                    "INSERT INTO transcript_search (block_idx, history_idx, indexed_text)
+                     VALUES (?1, NULL, ?2)",
+                )
+                .unwrap();
+            while remaining > 0 {
+                let bytes = remaining.min(ROW_BYTES);
+                let block_idx = 10_000_i64 + i64::try_from(row_count).unwrap();
+                insert_block
+                    .execute([block_idx, i64::try_from(bytes).unwrap()])
+                    .unwrap();
+                insert_search
+                    .execute((block_idx, &payload[..bytes]))
+                    .unwrap();
+                remaining -= bytes;
+                row_count += 1;
+            }
+        }
+        conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        drop(db);
+
+        let rss_before = linux_resident_bytes();
+        let started = Instant::now();
+        let outcome =
+            export_compatibility_files(&session_dir, receipt.current.revision.get(), |_| false)
+                .unwrap();
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rss_after = linux_resident_bytes();
+        let output_bytes = fs::metadata(session_dir.join("content.txt")).unwrap().len();
+        assert!(matches!(outcome, ExportOutcome::Written { .. }));
+        assert!(output_bytes >= target_bytes as u64);
+        println!(
+            "COMPAT_EXPORT_BENCH_JSON {}",
+            serde_json::json!({
+                "target_bytes": target_bytes,
+                "rows": row_count,
+                "row_bytes": ROW_BYTES,
+                "output_bytes": output_bytes,
+                "elapsed_ms": elapsed_ms,
+                "rss_before_bytes": rss_before,
+                "rss_after_bytes": rss_after,
+            })
+        );
+    }
+
     #[test]
     fn overlapping_exporters_are_serialized_and_higher_revision_wins() {
         let state = tempfile::tempdir().unwrap();

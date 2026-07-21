@@ -133,6 +133,7 @@ pub struct TestApp {
     /// has been fed yet.
     last_alloc: Option<AllocDelta>,
     transcript_scroll_probe: transcript_scroll::TranscriptScrollProbeState,
+    _environment_guard: Option<TestEnvironmentGuard>,
 }
 
 pub struct TestAppBuilder {
@@ -213,8 +214,13 @@ impl TestAppBuilder {
     }
 
     pub fn build(self) -> TestApp {
+        // The app keeps using the process-wide harness home and cwd after
+        // construction. Retain their guard so another app cannot reset them
+        // while this app or one of its SQLite workers is still active.
         let guard = test_environment_guard();
-        self.build_with_test_environment_guard(&guard)
+        let mut app = self.build_with_test_environment_guard(&guard);
+        app._environment_guard = Some(guard);
+        app
     }
 
     pub(crate) fn build_with_test_home_guard(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
@@ -388,6 +394,7 @@ impl TestAppBuilder {
             quit: false,
             last_alloc: None,
             transcript_scroll_probe: transcript_scroll::TranscriptScrollProbeState::default(),
+            _environment_guard: None,
         }
     }
 }

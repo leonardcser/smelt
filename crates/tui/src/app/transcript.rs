@@ -102,6 +102,7 @@ pub(crate) struct TranscriptMemorySnapshot {
 #[derive(Default)]
 struct TranscriptHydrationState {
     lru: VecDeque<BlockId>,
+    lru_ids: HashSet<BlockId>,
     viewport_pins: HashSet<BlockId>,
     operation_pins: HashMap<BlockId, usize>,
     hydration_reads: u64,
@@ -119,9 +120,18 @@ impl TranscriptHydrationState {
         self.viewport_pins.contains(&id) || self.operation_pins.contains_key(&id)
     }
 
-    fn touch(&mut self, id: BlockId) {
-        self.lru.retain(|candidate| *candidate != id);
-        self.lru.push_back(id);
+    fn touch_many(&mut self, ids: &[BlockId]) {
+        let mut moved = ids.iter().copied().collect::<HashSet<_>>();
+        if moved.is_empty() {
+            return;
+        }
+        self.lru.retain(|candidate| !moved.contains(candidate));
+        for id in ids {
+            if moved.remove(id) {
+                self.lru_ids.insert(*id);
+                self.lru.push_back(*id);
+            }
+        }
     }
 
     fn pin_operation(&mut self, ids: &[BlockId]) {
@@ -277,15 +287,21 @@ impl SqliteTranscriptStore {
     fn read_descriptor_slice(
         &self,
         range: smelt_store::TranscriptDescriptorRange,
+        total_count: usize,
     ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
-        self.db.read_transcript_descriptor_slice(range)
+        self.db
+            .read_transcript_descriptor_slice_with_total(range, total_count)
     }
 
     fn read_hydration_records(
         &self,
         range: smelt_store::TranscriptDescriptorRange,
+        total_count: usize,
     ) -> Option<Vec<TranscriptBlockRecordWithId>> {
-        let slice = self.db.read_transcript_descriptor_slice(range).ok()?;
+        let slice = self
+            .db
+            .read_transcript_descriptor_slice_with_total(range, total_count)
+            .ok()?;
         slice
             .into_records()
             .into_iter()
@@ -330,9 +346,10 @@ impl TranscriptStoreCache {
         &mut self,
         session_dir: Option<&PathBuf>,
         range: smelt_store::TranscriptDescriptorRange,
+        total_count: usize,
     ) -> Option<smelt_store::TranscriptDescriptorSlice> {
         self.store_for_session(session_dir)?
-            .read_descriptor_slice(range)
+            .read_descriptor_slice(range, total_count)
             .ok()
     }
 
@@ -340,9 +357,10 @@ impl TranscriptStoreCache {
         &mut self,
         session_dir: Option<&PathBuf>,
         range: smelt_store::TranscriptDescriptorRange,
+        total_count: usize,
     ) -> Option<Vec<TranscriptBlockRecordWithId>> {
         self.store_for_session(session_dir)?
-            .read_hydration_records(range)
+            .read_hydration_records(range, total_count)
     }
 }
 
@@ -1698,11 +1716,12 @@ impl TranscriptDocument {
     }
 
     fn touch_hydrated(&mut self, ids: &[BlockId]) {
-        for id in ids {
-            if self.content.transcript.history.is_hydrated(*id) {
-                self.hydration.touch(*id);
-            }
-        }
+        let hydrated = ids
+            .iter()
+            .copied()
+            .filter(|id| self.content.transcript.history.is_hydrated(*id))
+            .collect::<Vec<_>>();
+        self.hydration.touch_many(&hydrated);
     }
 
     pub(crate) fn ensure_hydrated_ids(&mut self, ids: &[BlockId]) -> bool {
@@ -1743,6 +1762,13 @@ impl TranscriptDocument {
             .into_iter()
             .map(|(_, id, stored)| (id, stored))
             .collect::<HashMap<_, _>>();
+        let total_count = self.descriptors.total_count().unwrap_or_else(|| {
+            self.compacted_descriptor_len
+                .max(self.content.transcript.history.persisted_descriptor_count())
+        });
+        if total_count == 0 {
+            return false;
+        }
         let session_dir = self.descriptors.session_dir.clone();
         let hydration_started_at = Instant::now();
         let mut hydrated = 0_u64;
@@ -1751,6 +1777,7 @@ impl TranscriptDocument {
             let Some(records) = self.store_cache.read_hydration_records(
                 session_dir.as_ref(),
                 smelt_store::TranscriptDescriptorRange::from(range),
+                total_count,
             ) else {
                 smelt_perf::perf::record_value("transcript:block_cache:hydration_failures", 1);
                 continue;
@@ -1812,6 +1839,9 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn pin_operation_blocks(&mut self, ids: &[BlockId]) -> bool {
+        if ids.is_empty() {
+            return true;
+        }
         self.hydration.pin_operation(ids);
         if self.ensure_hydrated_ids(ids) {
             true
@@ -1823,6 +1853,9 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn unpin_operation_blocks(&mut self, ids: &[BlockId]) {
+        if ids.is_empty() {
+            return;
+        }
         self.hydration.unpin_operation(ids);
         self.enforce_hydrated_budget();
     }
@@ -1851,7 +1884,7 @@ impl TranscriptDocument {
     fn enforce_hydrated_budget(&mut self) {
         let history = &self.content.transcript.history;
         for (id, _) in history.hydrated_blocks() {
-            if !self.hydration.lru.contains(&id) {
+            if self.hydration.lru_ids.insert(id) {
                 self.hydration.lru.push_back(id);
             }
         }
@@ -1863,7 +1896,9 @@ impl TranscriptDocument {
             let Some(id) = self.hydration.lru.pop_front() else {
                 break;
             };
+            self.hydration.lru_ids.remove(&id);
             if self.hydration.is_pinned(id) {
+                self.hydration.lru_ids.insert(id);
                 self.hydration.lru.push_back(id);
                 continue;
             }
@@ -1879,6 +1914,9 @@ impl TranscriptDocument {
         }
         self.hydration
             .lru
+            .retain(|id| self.content.transcript.history.is_hydrated(*id));
+        self.hydration
+            .lru_ids
             .retain(|id| self.content.transcript.history.is_hydrated(*id));
 
         let pinned_bytes = self
@@ -2232,9 +2270,12 @@ impl TranscriptDocument {
         &mut self,
         range: smelt_store::TranscriptDescriptorRange,
     ) -> Option<LoadedDescriptorWindow> {
-        let slice = self
-            .store_cache
-            .read_descriptor_slice(self.descriptors.session_dir(), range)?;
+        let total_count = self.descriptors.total_count()?;
+        let slice = self.store_cache.read_descriptor_slice(
+            self.descriptors.session_dir(),
+            range,
+            total_count,
+        )?;
         LoadedDescriptorWindow::from_slice(slice)
     }
 
@@ -5502,6 +5543,34 @@ mod document_tests {
         let second = document.memory_snapshot();
         assert_eq!(second.hydration_reads, first.hydration_reads);
         assert_eq!(second.hydration_ranges, first.hydration_ranges);
+    }
+
+    #[test]
+    fn active_full_document_hydrates_stored_block_without_sparse_extent() {
+        let mut source = fixed_transcript(3);
+        let records = source.history.descriptor_records();
+        let dir = tempfile::tempdir().unwrap();
+        crate::persist::write_transcript_descriptor_suffix(dir.path(), 0, &records).unwrap();
+        source.history.clear_descriptor_dirty();
+        let first_id = source.history.order[0];
+        let stored = source
+            .history
+            .stored_ref_for_materialized(first_id, 0)
+            .unwrap();
+        let mut document = TranscriptDocument::from_transcript(source);
+        document.set_session_dir(dir.path().to_path_buf());
+
+        assert_eq!(document.descriptors.total_count(), None);
+        assert_eq!(document.compacted_descriptor_len, 0);
+        assert!(document.history_mut().dematerialize_live(first_id, stored) > 0);
+        assert_eq!(
+            document.history().persisted_descriptor_count(),
+            records.len()
+        );
+        assert!(document.ensure_hydrated_ids(&[first_id]));
+        assert!(
+            matches!(document.history().block(first_id), Some(Block::Text { content }) if content == "block 0")
+        );
     }
 
     #[test]

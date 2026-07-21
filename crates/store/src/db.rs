@@ -7286,6 +7286,30 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_slices_exclude_indexed_rows_without_descriptor_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = vec![
+            transcript_record(0, "zero", "zero text"),
+            transcript_record(10, "one", "one text"),
+        ];
+        db.apply_test_descriptors(&records).unwrap();
+        db.connection()
+            .execute(
+                "UPDATE transcript_blocks SET descriptor_json = NULL WHERE block_idx = 10",
+                [],
+            )
+            .unwrap();
+
+        let slice = db.read_transcript_descriptor_slice((0..2).into()).unwrap();
+        assert_eq!(slice.total_count, 2);
+        assert_eq!(
+            slice.records,
+            vec![without_indexed_text(records[0].clone())]
+        );
+    }
+
+    #[test]
     fn transcript_block_metadata_reads_include_descriptorless_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = SessionDb::open(dir.path().join("session.db")).unwrap();

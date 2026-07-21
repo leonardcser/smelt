@@ -1781,6 +1781,12 @@ pub struct BlockHistory {
     order_generation: u64,
     /// Bumped when semantic navigation coordinates, roles, or labels may change.
     navigation_generation: u64,
+    /// Number of ordered entries represented by canonical transcript descriptors.
+    persisted_descriptor_count: usize,
+    /// Hydrated entries and their retained memory, maintained across entry transitions.
+    hydrated_ids: HashSet<BlockId>,
+    hydrated_block_bytes: usize,
+    hydrated_tool_state_bytes: usize,
     /// Earliest transcript order index whose persisted descriptor may be stale.
     descriptor_dirty_from: Option<usize>,
     /// Bumped when a persisted descriptor may have changed. Unlike `generation`,
@@ -1806,6 +1812,10 @@ impl BlockHistory {
             generation: 0,
             order_generation: 0,
             navigation_generation: 0,
+            persisted_descriptor_count: 0,
+            hydrated_ids: HashSet::new(),
+            hydrated_block_bytes: 0,
+            hydrated_tool_state_bytes: 0,
             descriptor_dirty_from: None,
             descriptor_dirty_generation: 0,
             descriptor_changes: VecDeque::new(),
@@ -1838,10 +1848,99 @@ impl BlockHistory {
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
     }
 
+    fn recount_persisted_descriptors(&mut self) {
+        self.persisted_descriptor_count = self
+            .order
+            .iter()
+            .filter(|id| {
+                self.entries
+                    .get(id)
+                    .is_some_and(BlockEntry::has_persisted_descriptor)
+            })
+            .count();
+    }
+
+    fn recount_hydrated_entries(&mut self) {
+        self.hydrated_ids.clear();
+        self.hydrated_block_bytes = 0;
+        self.hydrated_tool_state_bytes = 0;
+        for id in &self.order {
+            let Some(entry @ BlockEntry::Hydrated { .. }) = self.entries.get(id) else {
+                continue;
+            };
+            self.hydrated_ids.insert(*id);
+            self.hydrated_block_bytes = self
+                .hydrated_block_bytes
+                .saturating_add(entry.hydrated_block_weight());
+            self.hydrated_tool_state_bytes = self
+                .hydrated_tool_state_bytes
+                .saturating_add(entry.hydrated_tool_state_weight());
+        }
+    }
+
+    fn insert_entry(&mut self, id: BlockId, entry: BlockEntry) -> Option<BlockEntry> {
+        let block_bytes = entry.hydrated_block_weight();
+        let tool_state_bytes = entry.hydrated_tool_state_weight();
+        let hydrated = matches!(&entry, BlockEntry::Hydrated { .. });
+        let persisted = entry.has_persisted_descriptor();
+        let previous = self.entries.insert(id, entry);
+        let was_persisted = previous
+            .as_ref()
+            .is_some_and(BlockEntry::has_persisted_descriptor);
+        match (was_persisted, persisted) {
+            (false, true) => {
+                self.persisted_descriptor_count = self.persisted_descriptor_count.saturating_add(1);
+            }
+            (true, false) => {
+                self.persisted_descriptor_count = self.persisted_descriptor_count.saturating_sub(1);
+            }
+            _ => {}
+        }
+        if let Some(previous) = previous.as_ref() {
+            self.hydrated_block_bytes = self
+                .hydrated_block_bytes
+                .saturating_sub(previous.hydrated_block_weight());
+            self.hydrated_tool_state_bytes = self
+                .hydrated_tool_state_bytes
+                .saturating_sub(previous.hydrated_tool_state_weight());
+        }
+        if hydrated {
+            self.hydrated_ids.insert(id);
+            self.hydrated_block_bytes = self.hydrated_block_bytes.saturating_add(block_bytes);
+            self.hydrated_tool_state_bytes = self
+                .hydrated_tool_state_bytes
+                .saturating_add(tool_state_bytes);
+        } else {
+            self.hydrated_ids.remove(&id);
+        }
+        previous
+    }
+
+    fn remove_entry(&mut self, id: BlockId) -> Option<BlockEntry> {
+        let entry = self.entries.remove(&id)?;
+        if entry.has_persisted_descriptor() {
+            self.persisted_descriptor_count = self.persisted_descriptor_count.saturating_sub(1);
+        }
+        self.hydrated_ids.remove(&id);
+        self.hydrated_block_bytes = self
+            .hydrated_block_bytes
+            .saturating_sub(entry.hydrated_block_weight());
+        self.hydrated_tool_state_bytes = self
+            .hydrated_tool_state_bytes
+            .saturating_sub(entry.hydrated_tool_state_weight());
+        Some(entry)
+    }
+
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
+        self.recount_persisted_descriptors();
+        self.recount_hydrated_entries();
         self.bump_order_generation();
         self.mark_descriptor_dirty_from(0);
+    }
+
+    pub fn persisted_descriptor_count(&self) -> usize {
+        self.persisted_descriptor_count
     }
 
     pub fn descriptor_dirty_from(&self) -> Option<usize> {
@@ -2034,15 +2133,37 @@ impl BlockHistory {
     }
 
     pub fn descriptor_record_index_for_order_index(&self, start: usize) -> usize {
-        self.order
-            .iter()
-            .take(start.min(self.order.len()))
-            .filter(|id| {
-                self.entries
-                    .get(id)
-                    .is_some_and(BlockEntry::has_persisted_descriptor)
-            })
-            .count()
+        let start = start.min(self.order.len());
+        let suffix_len = self.order.len().saturating_sub(start);
+        let descriptor_index = if start <= suffix_len {
+            self.order
+                .iter()
+                .take(start)
+                .filter(|id| {
+                    self.entries
+                        .get(id)
+                        .is_some_and(BlockEntry::has_persisted_descriptor)
+                })
+                .count()
+        } else {
+            let suffix_descriptors = self
+                .order
+                .iter()
+                .skip(start)
+                .filter(|id| {
+                    self.entries
+                        .get(id)
+                        .is_some_and(BlockEntry::has_persisted_descriptor)
+                })
+                .count();
+            self.persisted_descriptor_count
+                .saturating_sub(suffix_descriptors)
+        };
+        smelt_perf::perf::record_value(
+            "transcript:descriptor_record_index:entries_scanned",
+            start.min(suffix_len) as u64,
+        );
+        descriptor_index
     }
 
     pub fn descriptor_records_from(&self, start: usize) -> Vec<TranscriptBlockRecord> {
@@ -2217,6 +2338,8 @@ impl BlockHistory {
             self.bump_order_generation();
             self.bump_navigation_generation();
         }
+        self.recount_persisted_descriptors();
+        self.recount_hydrated_entries();
         self.gc_tool_states();
     }
 
@@ -2246,6 +2369,8 @@ impl BlockHistory {
             .map_or(0, |(_, state)| tool_state_retained_bytes(state));
         let block_weight = block_retained_bytes(&block);
         let weight = block_weight.saturating_add(tool_state_weight);
+        let had_entry = self.entries.contains_key(&id);
+        debug_assert_eq!(had_entry, self.order.contains(&id));
         if let Some((call_id, state)) = record.tool_state {
             if !matches!(
                 self.tool_states.get(&call_id),
@@ -2255,7 +2380,7 @@ impl BlockHistory {
                     .insert(call_id, ToolStateEntry::Hydrated(state));
             }
         }
-        if !self.order.contains(&id) {
+        if !had_entry {
             self.order.push(id);
             self.bump_order_generation();
             if stored.kind == StoredBlockKind::User {
@@ -2265,7 +2390,7 @@ impl BlockHistory {
         self.next_id = self.next_id.max(id.0.saturating_add(1));
         self.content_hashes.insert(id, block_hash);
         self.origins.remove(&id);
-        self.entries.insert(
+        self.insert_entry(
             id,
             BlockEntry::Hydrated {
                 stored,
@@ -2282,7 +2407,7 @@ impl BlockHistory {
         if !matches!(self.entries.get(&id), Some(BlockEntry::Hydrated { .. })) {
             return self.is_live(id);
         }
-        let Some(BlockEntry::Hydrated { block, stored, .. }) = self.entries.remove(&id) else {
+        let Some(BlockEntry::Hydrated { block, stored, .. }) = self.remove_entry(id) else {
             unreachable!("entry was checked as hydrated");
         };
         if let Some(origin) = stored.origin {
@@ -2294,7 +2419,7 @@ impl BlockHistory {
                     .insert(call_id.clone(), ToolStateEntry::Live(state));
             }
         }
-        self.entries.insert(id, BlockEntry::Live(*block));
+        self.insert_entry(id, BlockEntry::Live(*block));
         true
     }
 
@@ -2307,7 +2432,7 @@ impl BlockHistory {
             block_weight,
             tool_state_weight,
             ..
-        }) = self.entries.remove(&id)
+        }) = self.remove_entry(id)
         else {
             unreachable!("entry was checked as hydrated");
         };
@@ -2331,7 +2456,7 @@ impl BlockHistory {
             }
         }
         self.origins.remove(&id);
-        self.entries.insert(id, BlockEntry::Stored(stored));
+        self.insert_entry(id, BlockEntry::Stored(stored));
         smelt_perf::perf::record_value("transcript:block_cache:evicted_bytes", weight as u64);
         weight
     }
@@ -2340,7 +2465,7 @@ impl BlockHistory {
         if !matches!(self.entries.get(&id), Some(BlockEntry::Live(_))) {
             return 0;
         }
-        let Some(BlockEntry::Live(block)) = self.entries.remove(&id) else {
+        let Some(BlockEntry::Live(block)) = self.remove_entry(id) else {
             unreachable!("entry was checked as live");
         };
         let mut weight = block_retained_bytes(&block);
@@ -2360,14 +2485,15 @@ impl BlockHistory {
         }
         self.origins.remove(&id);
         self.statuses.remove(&id);
-        self.entries.insert(id, BlockEntry::Stored(stored));
+        self.insert_entry(id, BlockEntry::Stored(stored));
         weight
     }
 
     pub fn hydrated_blocks(&self) -> impl Iterator<Item = (BlockId, usize)> + '_ {
-        self.order.iter().filter_map(|id| {
-            let weight = self.entries.get(id)?.hydrated_weight();
-            (weight > 0).then_some((*id, weight))
+        self.hydrated_ids.iter().filter_map(|id| {
+            self.entries
+                .get(id)
+                .map(|entry| (*id, entry.hydrated_weight()))
         })
     }
 
@@ -2408,17 +2534,11 @@ impl BlockHistory {
     }
 
     pub fn hydrated_block_retained_bytes(&self) -> usize {
-        self.entries
-            .values()
-            .map(BlockEntry::hydrated_block_weight)
-            .sum()
+        self.hydrated_block_bytes
     }
 
     pub fn hydrated_tool_state_retained_bytes(&self) -> usize {
-        self.entries
-            .values()
-            .map(BlockEntry::hydrated_tool_state_weight)
-            .sum()
+        self.hydrated_tool_state_bytes
     }
 
     pub fn tool_state_metadata_retained_bytes(&self) -> usize {
@@ -2450,7 +2570,8 @@ impl BlockHistory {
     }
 
     pub fn hydrated_retained_bytes(&self) -> usize {
-        self.hydrated_blocks().map(|(_, weight)| weight).sum()
+        self.hydrated_block_bytes
+            .saturating_add(self.hydrated_tool_state_bytes)
     }
 
     pub fn live_block_count(&self) -> usize {
@@ -2468,10 +2589,7 @@ impl BlockHistory {
     }
 
     pub fn hydrated_block_count(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|entry| matches!(entry, BlockEntry::Hydrated { .. }))
-            .count()
+        self.hydrated_ids.len()
     }
 
     pub fn block_at(&self, i: usize) -> &Block {
@@ -2544,8 +2662,9 @@ impl BlockHistory {
         let id = BlockId(self.next_id);
         self.next_id += 1;
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
+        let entry = BlockEntry::Live(block);
         self.order.insert(order_index, id);
-        self.entries.insert(id, BlockEntry::Live(block));
+        self.insert_entry(id, entry);
         self.content_hashes.insert(id, hash);
         if let Some(origin) = origin {
             self.origins.insert(id, origin);
@@ -2611,16 +2730,14 @@ impl BlockHistory {
             .tool_state
             .as_ref()
             .map_or(0, |(_, state)| tool_state_retained_bytes(state));
+        let entry = BlockEntry::Hydrated {
+            stored,
+            block: Box::new(block),
+            block_weight,
+            tool_state_weight,
+        };
         self.order.insert(order_index, id);
-        self.entries.insert(
-            id,
-            BlockEntry::Hydrated {
-                stored,
-                block: Box::new(block),
-                block_weight,
-                tool_state_weight,
-            },
-        );
+        self.insert_entry(id, entry);
         self.content_hashes.insert(id, hash);
         if let Some(origin) = origin {
             self.origins.insert(id, origin);
@@ -2696,8 +2813,7 @@ impl BlockHistory {
             self.tool_states.remove(&call_id);
         }
         let block = self
-            .entries
-            .remove(&id)
+            .remove_entry(id)
             .and_then(BlockEntry::into_materialized);
         self.bump_order_generation();
         self.mark_descriptor_dirty_from(idx);
@@ -2721,7 +2837,7 @@ impl BlockHistory {
             .unwrap_or(self.order.len());
         self.order.retain(|id| !removed.contains(id));
         for id in removed {
-            self.entries.remove(&id);
+            self.remove_entry(id);
             self.content_hashes.remove(&id);
             self.statuses.remove(&id);
             self.origins.remove(&id);
@@ -2810,11 +2926,12 @@ impl BlockHistory {
                 .unwrap_or_default(),
         );
         let hash = block.content_hash();
+        let entry = BlockEntry::Live(block);
         if self.content_hashes.get(&id) == Some(&hash) {
-            self.entries.insert(id, BlockEntry::Live(block));
+            self.insert_entry(id, entry);
             return;
         }
-        self.entries.insert(id, BlockEntry::Live(block));
+        self.insert_entry(id, entry);
         self.content_hashes.insert(id, hash);
         self.bump_generation();
         if navigation != previous_navigation {
@@ -2843,7 +2960,7 @@ impl BlockHistory {
         }
         let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
         self.order.retain(|candidate| *candidate != id);
-        self.entries.remove(&id);
+        self.remove_entry(id);
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
         self.origins.remove(&id);
@@ -2858,6 +2975,10 @@ impl BlockHistory {
         if self.order.is_empty() {
             self.entries.clear();
             self.content_hashes.clear();
+            self.persisted_descriptor_count = 0;
+            self.hydrated_ids.clear();
+            self.hydrated_block_bytes = 0;
+            self.hydrated_tool_state_bytes = 0;
             self.next_id = 0;
             self.tool_states.clear();
             self.statuses.clear();
@@ -2867,6 +2988,10 @@ impl BlockHistory {
         self.order.clear();
         self.entries.clear();
         self.content_hashes.clear();
+        self.persisted_descriptor_count = 0;
+        self.hydrated_ids.clear();
+        self.hydrated_block_bytes = 0;
+        self.hydrated_tool_state_bytes = 0;
         self.next_id = 0;
         self.tool_states.clear();
         self.statuses.clear();
@@ -2918,7 +3043,7 @@ impl BlockHistory {
         }
         let removed: Vec<BlockId> = self.order.drain(idx..).collect();
         for id in removed {
-            self.entries.remove(&id);
+            self.remove_entry(id);
             self.content_hashes.remove(&id);
             self.statuses.remove(&id);
             self.origins.remove(&id);
@@ -3386,7 +3511,15 @@ mod tests {
 
         assert!(history.install_hydrated_record(id, stored, record));
         assert!(history.is_hydrated(id));
+        assert_eq!(history.hydrated_block_count(), 1);
+        assert_eq!(history.hydrated_blocks().count(), 1);
         assert_eq!(history.hydrated_retained_bytes(), expected_weight);
+        assert_eq!(
+            history.hydrated_retained_bytes(),
+            history
+                .hydrated_block_retained_bytes()
+                .saturating_add(history.hydrated_tool_state_retained_bytes())
+        );
         assert!(matches!(history.block(id), Some(Block::ToolCall { name, .. }) if name == "bash"));
         let output = history
             .tool_state("call-1")
@@ -3397,6 +3530,8 @@ mod tests {
 
         assert_eq!(history.evict_hydrated(id), expected_weight);
         assert!(!history.is_materialized(id));
+        assert_eq!(history.hydrated_block_count(), 0);
+        assert_eq!(history.hydrated_blocks().count(), 0);
         assert_eq!(history.hydrated_retained_bytes(), 0);
         assert_eq!(history.tool_status("call-1"), Some(ToolStatus::Ok));
         assert!(history.tool_state("call-1").is_none());
@@ -3467,6 +3602,8 @@ mod tests {
         );
 
         assert!(history.is_live(id));
+        assert_eq!(history.hydrated_block_count(), 0);
+        assert_eq!(history.hydrated_retained_bytes(), 0);
         assert_eq!(history.descriptor_dirty_from(), Some(0));
         assert!(matches!(history.block(id), Some(Block::Text { content }) if content == "after"));
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(0)));
@@ -3506,6 +3643,8 @@ mod tests {
         }));
 
         assert!(history.is_live(id));
+        assert_eq!(history.hydrated_block_count(), 0);
+        assert_eq!(history.hydrated_retained_bytes(), 0);
         assert_eq!(history.descriptor_dirty_from(), Some(0));
         assert_eq!(history.block_origin(id), Some(BlockOrigin::History(0)));
         assert_eq!(
@@ -3579,7 +3718,7 @@ mod tests {
         history.push(Block::Text {
             content: "before".into(),
         });
-        history.push_descriptor_with_origin(
+        let draft = history.push_descriptor_with_origin(
             TranscriptBlockDescriptor::ToolDraft {
                 stream_id: "stream-1".into(),
                 call_id: Some("call-1".into()),
@@ -3606,11 +3745,24 @@ mod tests {
         assert_eq!(history.descriptor_record_index_for_order_index(2), 1);
         assert_eq!(history.descriptor_record_index_for_order_index(3), 1);
         assert_eq!(history.descriptor_record_index_for_order_index(4), 2);
+        assert_eq!(history.descriptor_record_index_for_order_index(5), 3);
 
         let records = history.descriptor_records_from(3);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("after"));
         assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("tail"));
+
+        history.rewrite(
+            draft,
+            Block::Text {
+                content: "finished tool".into(),
+            },
+        );
+        assert_eq!(history.descriptor_record_index_for_order_index(5), 4);
+        history.remove_block(draft);
+        assert_eq!(history.descriptor_record_index_for_order_index(4), 3);
+        history.truncate(3);
+        assert_eq!(history.descriptor_record_index_for_order_index(3), 2);
     }
 
     #[test]
