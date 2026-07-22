@@ -1,5 +1,5 @@
 -- Example .smelt/init.lua for a repository.
--- Project-local config is loaded automatically after you run /trust once.
+-- Project-local config loads after /trust records its current content hash.
 
 smelt.settings.show_tips = false
 

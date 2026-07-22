@@ -96,7 +96,7 @@ Delete the persisted session with `id`. Refuses to delete the currently active s
 fun(): string
 ```
 
-Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when Smelt exits.
+Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.
 
 ## `smelt.session.enter_worktree`
 

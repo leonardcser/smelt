@@ -62,8 +62,14 @@ jobs:
       - name: Check Lua API docs are in sync
         run: |
           cargo xtask gen-lua-docs
-          git diff --exit-code -- docs/docs/reference/api runtime/lua/smelt/_meta docs/zensical.toml \
-            || (echo "::error::Generated Lua API docs are out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
+          git diff --exit-code -- \
+            docs/docs/reference/api \
+            docs/docs/reference/configuration.md \
+            docs/docs/guide/plugins.md \
+            runtime/lua/smelt/_meta \
+            runtime/skills/customize/SKILL.md \
+            docs/zensical.toml \
+            || (echo "::error::Generated Lua documentation is out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
 
   fuzz-regression:
     name: Fuzz regression replay

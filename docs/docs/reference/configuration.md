@@ -16,12 +16,13 @@ autocmds) behaves like a plugin and is also loaded at startup.
 
 ### Per-project config
 
-After the user `init.lua` runs, smelt looks for `.smelt/init.lua` and
-`.smelt/plugins/*.lua` under the current working directory and sources them.
-Project-local config is especially useful on teams: clone the repo and the agent
-already knows the project's conventions and tooling. It is gated by a content
-trust system: run `/trust` once to record the SHA-256 hash of `.smelt/`. Any
-edit invalidates the hash and requires re-running `/trust`.
+After bundled autoload modules, the user `init.lua`, and global user plugins run,
+smelt looks for `.smelt/init.lua` and `.smelt/plugins/*.lua` under the current
+working directory and sources them.
+Project-local config is especially useful on teams: after reviewing and trusting
+it, a fresh clone carries the project's conventions and tooling. Run `/trust` to
+record the current SHA-256 hash of `.smelt/`; any edit invalidates that hash and
+requires review and trust again.
 
 | Lua API              | Description                                          |
 | -------------------- | ---------------------------------------------------- |
@@ -127,6 +128,8 @@ Per-model overrides:
 | `thinking_budgets`   | Per-level budgets for budget-based thinking: `{ low = 2048, medium = 8192, high = 16384, max = 16384 }`   |
 | `context_window`     | Total context window in tokens. Overrides provider/catalog metadata when set.                             |
 | `supports_reasoning` | Whether this model supports reasoning/thinking parameters. Overrides provider/catalog metadata when set.  |
+| `supports_fast_mode` | Whether this model supports accelerated inference. Enables `fast_mode` and `/fast` when true.              |
+| `input_modalities`   | Array of accepted inputs such as `{ "text", "image", "pdf" }`; overrides discovered metadata.         |
 
 #### Pricing
 
@@ -231,8 +234,8 @@ smelt.remember.set({
 `smelt.settings.*`, `smelt.theme.use(...)`, and `smelt.theme.apply(...)` apply
 to the running session and never write to disk themselves. Put settings in
 `init.lua`, and defer theme calls with `smelt.lifecycle.on_ready(...)`, to apply
-them on every launch. Run `/reload` after editing config to apply changes
-without restarting.
+them on every launch. Saved Lua config reloads automatically by default; run
+`/reload` to apply changes manually without restarting.
 
 ## Per-plugin Model Preferences
 
@@ -267,32 +270,42 @@ smelt.settings.show_tps = true
 Set settings from `init.lua`, the `--set` CLI flag, or any Lua context. Unknown
 keys raise at the access site; type mismatches raise on assignment.
 
-| Key                              | Type      | Default                  | Description                                                                                                                                                                                                                                   |
-| -------------------------------- | --------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vim`                            | `boolean` | `false`                  | Vi keybindings in the prompt                                                                                                                                                                                                                  |
-| `system_clipboard`               | `boolean` | `true`                   | Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works                    |
-| `auto_compact`                   | `boolean` | `true`                   | Auto-summarize when active request context usage crosses `compact_threshold` (forced on in headless)                                                                                                                                          |
-| `auto_continue`                  | `string`  | `"goal"`                 | Idle auto-continue policy: `"off"` disables it, `"goal"` continues active auto goals, and `"always"` continues any idle session                                                                                                             |
-| `compact_threshold`              | `number`  | `0.80`                   | Fraction of the active context window at which auto-compact fires before oversized requests (0 < x ≤ 1)                                                                                                                                       |
-| `compact_keep_recent_groups`     | `number`  | `1`                      | Minimum number of trailing message groups kept verbatim after compaction; a group is a user message, a plain assistant message, or an assistant tool-use step with its tool outputs                                                           |
-| `show_tps`                       | `boolean` | `true`                   | Tokens/sec in status bar                                                                                                                                                                                                                      |
-| `show_tokens`                    | `boolean` | `true`                   | Context token count in status bar                                                                                                                                                                                                             |
-| `show_cost`                      | `boolean` | `true`                   | Session cost in status bar                                                                                                                                                                                                                    |
-| `show_prediction`                | `boolean` | `true`                   | Ghost-text input predictions                                                                                                                                                                                                                  |
-| `show_tips`                      | `boolean` | `true`                   | Curated discovery tips in the start banner and prompt chrome                                                                                                                                                                                  |
-| `file_icons`                     | `boolean` | `false`                  | Show Nerd Font file-type icons before inline-code paths that point at existing files                                                                                                                                                          |
-| `file_icon_colors`               | `boolean` | `true`                   | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled                                                                                                                                                       |
-| `show_slug`                      | `boolean` | `true`                   | Task-slug label in status bar                                                                                                                                                                                                                 |
-| `restrict_to_workspace`          | `boolean` | `true`                   | Downgrade Allow to Ask for paths outside the workspace                                                                                                                                                                                        |
-| `redact_secrets`                 | `boolean` | `false`                  | Scrub detected secrets from user input and tool results before they reach the LLM                                                                                                                                                             |
-| `auto_reload`                    | `boolean` | `true`                   | Watch Lua config inputs and fire `/reload` on change. Prompt inputs such as `AGENTS.md`, `SKILL.md`, and `--system-prompt` stay manual via `/reload`                                                                                          |
-| `cache_ttl_long`                 | `boolean` | `false`                  | Opt the Anthropic prompt cache into the 1-hour TTL (default is the 5-minute ephemeral TTL). No effect on non-Anthropic providers                                                                                                              |
-| `web_search_provider`            | `string`  | `"duckduckgo"`           | Built-in `web_search` provider: `"duckduckgo"` or `"brave"`                                                                                                                                                                                   |
-| `brave_search_api_key_env`       | `string`  | `"BRAVE_SEARCH_API_KEY"` | Env var read for the Brave Search API key                                                                                                                                                                                                     |
-| `worktree_root`                  | `string`  | `".worktrees"`           | Root directory for managed git worktrees. Relative paths are resolved inside the git root; absolute paths use a per-repository bucket. Supports `~`, `$VAR`, and `${VAR}` expansion                                                           |
-| `autoupgrade`                    | `string`  | `"notify"`               | `"off"` no checks; `"notify"` show pill + banner subtitle when a new build is available; `"auto"` install in background as soon as an update is detected. Automatic background checks stay quiet on transient fetch failures and retry later. |
-| `autoupgrade_channel`            | `string`  | `"stable"`               | `"stable"` downloads tagged prebuilt tarballs (any tag, including `alpha`/`beta` prereleases); `"unstable"` follows `main` HEAD via `cargo install`                                                                                           |
-| `autoupgrade_interval`           | `number`  | `3600`                   | Seconds between background autoupgrade checks. Clamped to a 60 s minimum to avoid hammering GitHub                                                                                                                                            |
+<!-- SETTINGS_REFERENCE_BEGIN -->
+<!-- This region is auto-generated by `cargo xtask gen-lua-docs`. Do not edit by hand. -->
+
+Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloads automatically by default; run `/reload` to apply changes manually. Override from the CLI with `--set KEY=VALUE`. Assigning an unknown key or wrong type raises at the call site.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `vim` | `boolean` | `false` | Vi keybindings in the prompt. |
+| `system_clipboard` | `boolean` | `true` | Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works. |
+| `auto_compact` | `boolean` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
+| `auto_continue` | `"off"` \| `"goal"` \| `"always"` | `"goal"` | Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. |
+| `show_tps` | `boolean` | `true` | Tokens/sec in status bar. |
+| `show_tokens` | `boolean` | `true` | Context token count in status bar. |
+| `show_cost` | `boolean` | `true` | Session cost in status bar. |
+| `show_prediction` | `boolean` | `true` | Ghost-text input predictions in the prompt. |
+| `show_tips` | `boolean` | `true` | Curated discovery tips in the start banner and prompt chrome. |
+| `file_icons` | `boolean` | `false` | Show Nerd Font file-type icons before inline-code paths that point at existing files. |
+| `file_icon_colors` | `boolean` | `true` | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled. |
+| `show_slug` | `boolean` | `true` | Task-slug label in status bar. |
+| `terminal_title` | `boolean` | `true` | Keep the terminal window/tab title in sync with the current session title. |
+| `restrict_to_workspace` | `boolean` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
+| `redact_secrets` | `boolean` | `false` | Scrub detected secrets from user input and tool results before they reach the LLM. |
+| `auto_reload` | `boolean` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/, completers/, tools/, dialogs/, runtime overrides) and dispatch `/reload` when any of them changes. Prompt inputs such as AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
+| `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the bundled compact plugin auto-triggers before oversized requests. |
+| `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after compaction. A group is a user message, a plain assistant message, or an assistant tool-use step together with its tool outputs. |
+| `request_audit` | `"off"` \| `"summary"` \| `"full"` | `"summary"` | Request audit storage mode. `summary` keeps timing, token, cost, and size metadata only; `full` stores reconstructable provider payloads; `off` disables request audit writes. |
+| `fast_mode` | `boolean` | `false` | Request the provider's accelerated inference mode when supported. |
+| `cache_ttl_long` | `boolean` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on non-Anthropic providers. |
+| `web_search_provider` | `"duckduckgo"` \| `"brave"` | `"duckduckgo"` | Search provider used by the built-in `web_search` tool. |
+| `brave_search_api_key_env` | string | `"BRAVE_SEARCH_API_KEY"` | Environment variable containing the Brave Search API key. |
+| `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
+| `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection. |
+| `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (tagged releases, including prereleases) or `"unstable"` (`main` HEAD). |
+| `autoupgrade_interval` | `number` | `3600` | Seconds between background autoupgrade checks. The upgrade plugin clamps to a 60-second minimum to avoid hammering GitHub. |
+
+<!-- SETTINGS_REFERENCE_END -->
 
 Use Brave Search instead of the default DuckDuckGo HTML search by selecting the
 provider and exporting the configured API key environment variable:
@@ -305,6 +318,45 @@ smelt.settings.brave_search_api_key_env = "BRAVE_SEARCH_API_KEY"
 ```bash
 export BRAVE_SEARCH_API_KEY=...
 ```
+
+### Request audit
+
+`smelt.settings.request_audit` controls the provider-request records stored in
+each session database:
+
+| Mode | Stored data |
+| ---- | ----------- |
+| `summary` | Timing, token, cost, transport, and payload-size metadata (default) |
+| `full` | Summary metadata plus reconstructable request and response payloads |
+| `off` | No new request-audit rows |
+
+Full payloads can contain prompts, source excerpts, tool results, and model
+responses. Treat a session database or `smelt export requests` output created in
+this mode as sensitive. Set `SMELT_REQUEST_AUDIT=off|summary|full` to pin the mode
+for a process; this environment override takes precedence over Lua config and
+continues to win after `/reload`.
+
+### Fast mode
+
+`smelt.settings.fast_mode = true` requests accelerated inference at startup.
+The active model must resolve `supports_fast_mode = true` from explicit model
+config or provider metadata. `/fast on|off|toggle` changes the current session;
+unsupported models reject the command. Provider-specific billing or quota rules
+still apply.
+
+### Notifications
+
+Terminal notification preferences are a nested table, not scalar `--set` keys:
+
+```lua
+smelt.settings.notifications = {
+  turn_end = true,
+}
+```
+
+`turn_end` defaults to `false`. The `/notify` command can enable the next
+notification or override the setting for the current session without editing
+config.
 
 `smelt.settings.transcript` is an additional Lua table for transcript display
 preferences. It is not a scalar `--set` key. Use `view` to set default fold
@@ -448,35 +500,54 @@ All runtime data is stored under the XDG base directories:
 
 | Directory                           | Contents                                                                          |
 | ----------------------------------- | --------------------------------------------------------------------------------- |
-| `$XDG_CONFIG_HOME/smelt/`           | `early.lua`, `init.lua`, `plugins/`, `commands/`, `skills/`, other user Lua files |
-| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.db`, blobs, and deprecated `meta.json` / `content.txt` compatibility exports) |
+| `$XDG_CONFIG_HOME/smelt/`           | `early.lua`, `init.lua`, autoloaded `plugins/`, reusable `lua/` modules, `commands/`, and `skills/` |
+| `$XDG_STATE_HOME/smelt/sessions/`   | Canonical `session.db` data, blobs, and deprecated `meta.json` / `content.txt` compatibility exports |
 | `$XDG_STATE_HOME/smelt/catalog.db`  | Disposable session-list catalog rebuilt from canonical session databases         |
+| `$XDG_STATE_HOME/smelt/*_auth.json` | Private OAuth fallback files for Codex, Copilot, and Kimi Code                    |
 | `$XDG_STATE_HOME/smelt/recent.json` | Last-used picks (model, mode, reasoning effort)                                   |
 | `$XDG_STATE_HOME/smelt/workspaces/` | Per-workspace saved permissions                                                   |
 | `$XDG_STATE_HOME/smelt/history`     | Prompt history                                                                    |
 | `$XDG_STATE_HOME/smelt/trust.json`  | Trusted project `.smelt/` hashes                                                  |
 | `$XDG_STATE_HOME/smelt/logs/`       | Log files (rotated)                                                               |
+| `$XDG_DATA_HOME/smelt/builtins/`    | Read-only mirror of the embedded Lua runtime and generated LuaCATS stubs          |
 | `$XDG_DATA_HOME/smelt/runtime/`     | Extra Lua runtime roots (optional)                                                |
 | `$XDG_CACHE_HOME/smelt/web/`        | HTTP/pricing cache                                                                |
 | `$XDG_CACHE_HOME/smelt/`            | `copilot_models.json` and other discovered model caches                           |
 
-OAuth-backed providers store their login state under Smelt's runtime data and
-can be managed with `smelt auth`.
+OAuth-backed providers load credentials in this order: a provider-specific
+environment override, the operating system's native keyring, then a private JSON
+fallback under `$XDG_STATE_HOME/smelt/`. `smelt auth` writes both keyring and
+fallback storage so login remains available when a desktop keyring is locked or
+unavailable. The fallback files are `codex_auth.json`, `copilot_auth.json`, and
+`kimi_code_auth.json`, with mode `0600` on Unix. Logout removes both copies.
 
 ## Environment Variables
 
-| Variable          | Purpose                                                 |
-| ----------------- | ------------------------------------------------------- |
-| `XDG_CONFIG_HOME` | Config directory (default: `~/.config`)                 |
-| `XDG_STATE_HOME`  | State directory (default: `~/.local/state`)             |
-| `XDG_CACHE_HOME`  | Cache directory (default: `~/.cache`)                   |
-| `XDG_DATA_HOME`   | Data directory (default: `~/.local/share`)              |
-| `HOME`            | Used as a fallback when XDG variables are unset         |
-| `COLORFGBG`       | Terminal color hint (fallback for dark/light detection) |
-| `TERM`            | Terminal type (`dumb` skips color detection)            |
-| `NO_COLOR`        | Disable ANSI colors                                     |
-| `FORCE_COLOR`     | Force ANSI colors regardless of TTY detection           |
-| `EDITOR`          | Editor for `Ctrl+X Ctrl+E` and vim `v`                  |
+| Variable                   | Purpose |
+| -------------------------- | ------- |
+| `XDG_CONFIG_HOME`          | Config directory (default: `~/.config`) |
+| `XDG_STATE_HOME`           | State directory (default: `~/.local/state`) |
+| `XDG_CACHE_HOME`           | Cache directory (default: `~/.cache`) |
+| `XDG_DATA_HOME`            | Data directory (default: `~/.local/share`) |
+| `XDG_RUNTIME_DIR`          | Public process-status root; falls back to the platform temp directory |
+| `HOME`                     | Used as a fallback when XDG variables are unset |
+| `SMELT_RUNTIME_DIR`        | Highest-priority bundled Lua runtime override, mainly for development |
+| `SMELT_REQUEST_AUDIT`      | Pin request audit to `off`, `summary`, or `full` |
+| `SMELT_CODEX_TOKENS`       | JSON OAuth credential override for Codex |
+| `SMELT_COPILOT_TOKENS`     | JSON OAuth credential override for Copilot |
+| `SMELT_KIMI_CODE_TOKENS`   | JSON OAuth credential override for Kimi Code |
+| `BRAVE_SEARCH_API_KEY`     | Brave Search key using the default `brave_search_api_key_env` setting |
+| `COLORFGBG`                | Terminal color hint (fallback for dark/light detection) |
+| `TERM`                     | Terminal type (`dumb` skips color detection) |
+| `NO_COLOR`                 | Disable ANSI colors |
+| `FORCE_COLOR`              | Force ANSI colors regardless of TTY detection |
+| `VISUAL`                   | Preferred editor for `Ctrl+X Ctrl+E` |
+| `EDITOR`                   | Fallback editor when `VISUAL` is unset |
+
+The OAuth override variables contain each provider's complete JSON credential
+record, not a single API key. They have highest load priority and are intended
+for controlled automation; avoid shell history and process environments that
+other users can inspect.
 
 ## CLI Flags
 

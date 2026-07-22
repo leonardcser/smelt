@@ -50,7 +50,7 @@ session.cwd = nil
 ---@type fun(id: string): nil
 session.delete = nil
 
---- Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when Smelt exits.
+--- Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.
 ---@type fun(): string
 session.dir = nil
 

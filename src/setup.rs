@@ -407,7 +407,8 @@ fn default_config_lua() -> String {
 
     lua.push_str("-- Optional bundled plugins. Uncomment to enable.\n");
     lua.push_str("-- require(\"smelt.plugins.which_key\")\n");
-    lua.push_str("-- require(\"smelt.plugins.inspect\")\n\n");
+    lua.push_str("-- require(\"smelt.plugins.inspect\")\n");
+    lua.push_str("-- require(\"smelt.plugins.lsp\")\n\n");
 
     lua.push_str("-- Providers\n");
     lua.push_str("-- No provider is registered by default. Use `smelt auth` to add one,\n");
@@ -875,5 +876,13 @@ mod tests {
         assert!(lua.contains("model = true,"));
         assert!(lua.contains("-- smelt.provider.register(\"openai\""));
         assert!(lua.contains("-- smelt.mcp.register(\"filesystem\""));
+    }
+
+    #[test]
+    fn public_config_example_matches_generated_default() {
+        assert_eq!(
+            include_str!("../docs/lua-examples/config.lua"),
+            default_config_lua()
+        );
     }
 }

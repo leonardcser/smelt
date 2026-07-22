@@ -18,10 +18,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "theme",
-        "Apply, read, and override the active colorscheme. Highlight \
+        "List bundled colorschemes, or apply, read, and override the active one. Highlight \
 groups follow nvim's PascalCase convention (`Comment`, `SmeltAccent`, …). \
 A `ThemeSpec` has optional `name`, `syntax`, and `light` metadata plus a \
-required `groups` map. UiHost-only.",
+required `groups` map. Listing metadata is Host-tier; active-theme operations \
+require UiHost.",
         Tier::UiHost,
     )?;
 

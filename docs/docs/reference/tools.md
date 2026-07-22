@@ -13,16 +13,18 @@ default; writes and edits prompt for confirmation.
 
 ### `read_file`
 
-Reads a file from the local filesystem. Supports text files and image files
-(png, jpg, gif, webp, bmp, tiff, svg). Jupyter notebooks (`.ipynb`) are rendered
-as numbered cells with their type, source, and outputs. Use `offset` and `limit`
-to read a window of a large file.
+Reads a file from the local filesystem. Supports text, images (png, jpg, gif,
+webp, bmp, tiff, svg), and PDFs when the active model/provider accepts that
+media. Jupyter notebooks (`.ipynb`) are rendered as numbered cells with their
+type, source, and outputs. Use `offset` and `limit` to read a window of a large
+text file.
 
-| Parameter   | Description                               |
-| ----------- | ----------------------------------------- |
-| `file_path` | Absolute path to the file (required)      |
-| `offset`    | 1-based line number to start reading from |
-| `limit`     | Number of lines to read (default: 2000)   |
+| Parameter    | Description                               |
+| ------------ | ----------------------------------------- |
+| `file_path`  | Absolute path to the file (required)      |
+| `offset`     | 1-based line number to start reading from |
+| `limit`      | Number of lines to read (default: 2000)   |
+| `timeout_ms` | Read timeout in milliseconds (default: 15000) |
 
 ### `write_file`
 
@@ -76,10 +78,11 @@ asked for.
 Fast file pattern matching. Supports `**` recursive globs. Results are sorted by
 modification time, newest first.
 
-| Parameter | Description                                                 |
-| --------- | ----------------------------------------------------------- |
-| `pattern` | Glob pattern, e.g. `**/*.rs` (required)                     |
-| `path`    | Directory to search (defaults to current working directory) |
+| Parameter    | Description                                                 |
+| ------------ | ----------------------------------------------------------- |
+| `pattern`    | Glob pattern, e.g. `**/*.rs` (required)                     |
+| `path`       | Directory to search (defaults to current working directory) |
+| `timeout_ms` | Timeout in milliseconds (default: 30000)                    |
 
 ### `grep`
 
@@ -93,7 +96,8 @@ modes.
 | `path`           | File or directory to search (defaults to current working directory) |
 | `glob`           | Glob filter for files (e.g. `*.ts`, `*.{ts,tsx}`)                   |
 | `type`           | File-type filter (e.g. `js`, `py`, `rust`, `go`)                    |
-| `output_mode`    | `content` (default), `files_with_matches`, or `count`               |
+| `output_mode`    | `files_with_matches` (default), `content`, or `count`               |
+| `include_ignored`| Search files and directories ignored by source-control rules        |
 | `-i`             | Case-insensitive search                                             |
 | `-n`             | Show line numbers (default: true; `content` mode only)              |
 | `-A`             | Lines of context after each match (`content` mode only)             |
@@ -158,6 +162,46 @@ Stops a running background bash process and returns its buffered output.
 | --------- | ---------------------------------------------------------------------- |
 | `id`      | Background process id (usually the child pid), e.g. `12345` (required) |
 
+## Workspace and runtime
+
+These tools change smelt itself, not only a subprocess. The directory-switching
+tools are interactive-only and omitted in headless mode; `smelt_reload` remains
+available because it schedules config work at a safe turn boundary.
+
+### `switch_cwd`
+
+Switches smelt's real process working directory. Future relative tool calls,
+project instructions, skills, session metadata, and workspace permission checks
+use the new checkout. This differs from `cd` inside `bash`, which affects only
+that one shell process.
+
+| Parameter | Description |
+| --------- | ----------- |
+| `path` | Directory to enter (required) |
+
+### `enter_worktree`
+
+Creates or opens a smelt-managed git worktree and then performs the equivalent
+of `switch_cwd`. Names are normalized, capped at 64 characters, and deduplicated.
+The default base is `main`, then `master`, then `HEAD`; the configured
+`smelt.settings.worktree_root` controls where worktrees are stored.
+
+| Parameter | Description |
+| --------- | ----------- |
+| `name` | Semantic worktree name (required) |
+| `base` | Optional git base ref |
+
+Managed worktree agents do not push, open pull requests, merge, or remove the
+worktree unless you explicitly ask. See
+[Managed worktrees](../guide/usage.md#managed-worktrees).
+
+### `smelt_reload`
+
+Schedules a reload of smelt's Lua config at the end of the current agent turn.
+It takes no parameters. Use it after editing files under `~/.config/smelt/` or
+`.smelt/` so the in-flight tool call is not disrupted. Multiple calls in one
+turn coalesce into one reload.
+
 ## Web
 
 Fetch live documentation, API specs, or reference material from the internet.
@@ -185,8 +229,11 @@ URL and format.
 
 ### `web_search`
 
-Searches the web via DuckDuckGo. Returns a numbered list of results with title,
-URL, and description. Results are cached for 15 minutes per query.
+Searches the web using the configured DuckDuckGo or Brave backend. Returns a
+numbered list of results with title, URL, and description. Results are cached for
+15 minutes per query. Select the backend with
+[`smelt.settings.web_search_provider`](configuration.md#settings); Brave also
+uses the environment variable named by `brave_search_api_key_env`.
 
 | Parameter | Description             |
 | --------- | ----------------------- |
@@ -208,6 +255,9 @@ interactive mode only; the agent's turn is blocked until you reply.
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `questions` | List of 1-4 question objects (required). Each has `question`, `header` (short label, max 12 chars), `options` (2-4 `{label, description}` items), and `multiSelect` |
 
+`multiSelect` is accepted by the schema, but the current dialog records one
+option or the free-text Other value per question.
+
 ## Knowledge
 
 Load domain-specific instructions on demand. Skills keep the system prompt lean
@@ -222,6 +272,45 @@ for how to create and organize skills.
 | Parameter | Description                          |
 | --------- | ------------------------------------ |
 | `name`    | Name of the skill to load (required) |
+
+## Goal coordination
+
+The autoloaded goal plugin adds tools for persistent, user-requested objectives.
+Goals survive across turns in the current session and can drive idle
+auto-continue. The agent must not create one merely because a task is long.
+
+### `get_goal`
+
+Returns the current goal's objective, lifecycle state, progress, auto-continue
+setting, id, and timestamps. It takes no parameters.
+
+### `create_goal`
+
+Creates a goal when you explicitly ask to start or set one. It fails while an
+unfinished goal exists.
+
+| Parameter | Description |
+| --------- | ----------- |
+| `objective` | Objective to pursue (required) |
+| `summary` | Optional short label for the goal bar |
+| `auto_continue` | Continue automatically while idle (default: true) |
+
+### `update_goal_progress`
+
+Records durable phase or milestone progress for an active goal. Its required
+`progress` object accepts a short `label` and optional numeric `current`, `total`,
+or `percent` values. Numeric progress should only be used when grounded in an
+explicit plan or measurable work.
+
+### `update_goal`
+
+Marks the current goal `done` with completion evidence, or `blocked` with the
+exact external blocker. It cannot pause, resume, clear, or rewrite a goal.
+
+| Parameter | Description |
+| --------- | ----------- |
+| `state` | `done` or `blocked` (required) |
+| `reason` | Completion evidence or blocker |
 
 ## Mode-Specific
 

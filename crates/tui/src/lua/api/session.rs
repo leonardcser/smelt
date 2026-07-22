@@ -655,7 +655,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "dir",
-        "Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when Smelt exits.",
+        "Absolute path of the current session directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| app.current_session_dir().display().to_string())

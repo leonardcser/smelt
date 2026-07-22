@@ -233,6 +233,7 @@ impl LuaLoadPaths {
         if let Some(cwd) = &self.project_cwd {
             roots.push(cwd.join(".smelt").join("runtime"));
         }
+        roots.push(self.config_dir.join("lua"));
         roots.push(self.data_runtime.clone());
         roots
     }
@@ -3837,7 +3838,8 @@ fn module_to_relpath(module: &str) -> PathBuf {
 /// 2. Workspace `runtime/lua/` (debug builds only, when the path exists) -
 ///    so `cargo run` + `/reload` picks up unbuilt edits to bundled plugins.
 /// 3. `.smelt/runtime/` in cwd - project overrides.
-/// 4. `<XDG_DATA_HOME>/smelt/runtime/` - user overrides.
+/// 4. `<XDG_CONFIG_HOME>/smelt/lua/` - user modules.
+/// 5. `<XDG_DATA_HOME>/smelt/runtime/` - user overrides.
 fn module_overlay_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(dir) = std::env::var_os("SMELT_RUNTIME_DIR") {
@@ -3857,6 +3859,7 @@ fn module_overlay_roots() -> Vec<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.join(".smelt").join("runtime"));
     }
+    roots.push(crate::config::config_dir().join("lua"));
     roots.push(engine::data_dir().join("runtime"));
     roots
 }
@@ -4632,6 +4635,32 @@ mod tests {
 
     // End-to-end `reload()` lives in `tui::lua::tests::reload_clears_tui_surfaces`
     // - the bundled autoload modules need the TUI Lua API to run.
+
+    #[test]
+    fn config_lua_directory_is_a_module_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join("smelt");
+        let lua_dir = config_dir.join("lua");
+        std::fs::create_dir_all(&lua_dir).unwrap();
+        std::fs::write(
+            lua_dir.join("example_plugin.lua"),
+            "return { tag = 'user-module' }\n",
+        )
+        .unwrap();
+
+        let paths = LuaLoadPaths {
+            config_dir,
+            runtime_override: None,
+            development_runtime: None,
+            project_cwd: None,
+            data_runtime: tmp.path().join("data-runtime"),
+        };
+        let lua = Lua::new();
+        register_module_searcher_with_roots(&lua, paths.module_overlay_roots(), None).unwrap();
+
+        let module: mlua::Table = lua.load("return require('example_plugin')").eval().unwrap();
+        assert_eq!(module.get::<String>("tag").unwrap(), "user-module");
+    }
 
     #[test]
     fn overlay_file_overrides_embedded_module() {

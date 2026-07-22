@@ -5,24 +5,27 @@
 smelt loads Lua from a fixed sequence of files. Each one is optional; if it
 doesn't exist, smelt moves on.
 
-| Order | File                            | What it's for                                                                                                                                                  |
-| ----- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | `~/.config/smelt/early.lua`     | Runs before argv is parsed. Restricted API: `smelt.cli`, `smelt.builtins`, `smelt.provider`, and `smelt.phase`. See [Early-phase config](#early-phase-config). |
-| 2     | `.smelt/early.lua`              | Project-scoped early phase. Same restrictions; requires trust.                                                                                                 |
-| 3     | `~/.config/smelt/init.lua`      | Your main config: providers, settings, permissions, MCP, keymaps, commands, custom tools.                                                                      |
-| 4     | `~/.config/smelt/plugins/*.lua` | Loaded after `init.lua`. One file per plugin.                                                                                                                  |
-| 5     | `.smelt/init.lua`               | Project-local override. Requires trust.                                                                                                                        |
-| 6     | `.smelt/plugins/*.lua`          | Project-local plugins. Requires trust.                                                                                                                         |
+| Order | File or phase                    | What it is for |
+| ----- | -------------------------------- | -------------- |
+| 1     | `~/.config/smelt/early.lua`      | Runs before argv is parsed. Restricted API: `smelt.cli`, `smelt.builtins`, `smelt.provider`, and `smelt.phase`. See [Early-phase config](#early-phase-config). |
+| 2     | `.smelt/early.lua`               | Project-scoped early phase. Same restrictions; requires trust. |
+| 3     | Bundled autoload modules         | Built-in modes, commands, tools, and plugins that were not disabled in `early.lua`. |
+| 4     | `~/.config/smelt/init.lua`       | Main config: providers, settings, permissions, MCP/LSP, keymaps, commands, and tools. |
+| 5     | `~/.config/smelt/plugins/*.lua`  | Global user plugins, loaded in filename order after `init.lua`. |
+| 6     | `.smelt/init.lua`                | Project-local override. Requires trust. |
+| 7     | `.smelt/plugins/*.lua`           | Project-local plugins. Requires trust. |
 
 `~/.config/smelt` honors `$XDG_CONFIG_HOME`. Override the `init.lua` path with
 `--config <path>`. If no config exists on first launch, the setup wizard creates
 one for you.
 
-Project-local files (`.smelt/*`) are gated by the trust prompt; accept the
-directory the first time you open it. Use them for repo-specific keymaps, slash
-commands, permission rules, or MCP servers without polluting your global config.
-Project-local config is especially useful on teams: clone the repo and the agent
-already knows the project's conventions and tooling.
+Project-local files (`.smelt/*`) are content-hash gated. Review them, then run
+`/trust` from the project to record the current SHA-256 hash. Any edit invalidates
+trust until you review and run `/trust` again. Use them for repo-specific
+keymaps, slash commands, permission rules, or MCP servers without polluting your
+global config.
+Project-local config is especially useful on teams: after reviewing and trusting
+it, a new clone carries the project's conventions and tooling.
 
 The [Getting Started](getting-started.md) guide covers basic provider setup. See
 the [Configuration Reference](../reference/configuration.md) for every
@@ -111,17 +114,20 @@ smelt.lifecycle.on_ready(function()
 end)
 ```
 
-Or create a colorscheme at `~/.config/smelt/lua/smelt/colorschemes/mytheme.lua`
-and load it:
+Or create a colorscheme module at
+`~/.config/smelt/lua/smelt/colorschemes/mytheme.lua` and load it:
 
 ```lua
 -- ~/.config/smelt/lua/smelt/colorschemes/mytheme.lua
 return {
-  SmeltAccent  = { fg = { ansi = 208 } },
-  SmeltProcess = { fg = { ansi = 117 } },
-  SmeltMuted   = { fg = { ansi = 244 } },
-  SmeltUserBg  = { bg = { dark = { ansi = 236 }, light = { ansi = 254 } } },
-  Comment      = "SmeltMuted",
+  name = "mytheme",
+  groups = {
+    SmeltAccent  = { fg = { ansi = 208 } },
+    SmeltProcess = { fg = { ansi = 117 } },
+    SmeltMuted   = { fg = { ansi = 244 } },
+    SmeltUserBg  = { bg = { dark = { ansi = 236 }, light = { ansi = 254 } } },
+    Comment      = "SmeltMuted",
+  },
 }
 ```
 

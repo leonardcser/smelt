@@ -6,6 +6,7 @@
 -- Optional bundled plugins. Uncomment to enable.
 -- require("smelt.plugins.which_key")
 -- require("smelt.plugins.inspect")
+-- require("smelt.plugins.lsp")
 
 -- Providers
 -- No provider is registered by default. Use `smelt auth` to add one,
@@ -49,8 +50,15 @@ smelt.remember.set({
 -- Vi keybindings in the prompt.
 smelt.settings.vim = false
 
+-- Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works.
+smelt.settings.system_clipboard = true
+
 -- Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless).
 smelt.settings.auto_compact = true
+
+-- Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session.
+-- possible values: off, goal, always
+smelt.settings.auto_continue = "goal"
 
 -- Tokens/sec in status bar.
 smelt.settings.show_tps = true
@@ -76,6 +84,9 @@ smelt.settings.file_icon_colors = true
 -- Task-slug label in status bar.
 smelt.settings.show_slug = true
 
+-- Keep the terminal window/tab title in sync with the current session title.
+smelt.settings.terminal_title = true
+
 -- Downgrade `Allow` to `Ask` for paths outside the workspace.
 smelt.settings.restrict_to_workspace = true
 
@@ -91,8 +102,22 @@ smelt.settings.compact_threshold = 0.8
 -- Minimum number of trailing message groups kept verbatim after compaction. A group is a user message, a plain assistant message, or an assistant tool-use step together with its tool outputs.
 smelt.settings.compact_keep_recent_groups = 1
 
+-- Request audit storage mode. `summary` keeps timing, token, cost, and size metadata only; `full` stores reconstructable provider payloads; `off` disables request audit writes.
+-- possible values: off, summary, full
+smelt.settings.request_audit = "summary"
+
+-- Request the provider's accelerated inference mode when supported.
+smelt.settings.fast_mode = false
+
 -- Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral TTL; `true` opts into the 1-hour TTL. Has no effect on non-Anthropic providers.
 smelt.settings.cache_ttl_long = false
+
+-- Search provider used by the built-in `web_search` tool.
+-- possible values: duckduckgo, brave
+smelt.settings.web_search_provider = "duckduckgo"
+
+-- Environment variable containing the Brave Search API key.
+smelt.settings.brave_search_api_key_env = "BRAVE_SEARCH_API_KEY"
 
 -- Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo.
 smelt.settings.worktree_root = ".worktrees"
@@ -107,6 +132,11 @@ smelt.settings.autoupgrade_channel = "stable"
 
 -- Seconds between background autoupgrade checks. The upgrade plugin clamps to a 60-second minimum to avoid hammering GitHub.
 smelt.settings.autoupgrade_interval = 3600
+
+-- Terminal notification preferences. Use /notify for temporary turn-end alerts.
+smelt.settings.notifications = {
+  turn_end = false,
+}
 
 -- Transcript display settings
 -- Fold-state values: "collapsed", "peek", "expanded".

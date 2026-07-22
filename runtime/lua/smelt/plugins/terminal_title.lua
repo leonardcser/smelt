@@ -1,5 +1,5 @@
--- Static terminal window/tab title. The displayed title is the session title,
--- then the task slug, then `smelt`. Disable with
+-- Keeps the terminal window/tab title in sync with smelt. The displayed title
+-- is the session title, then the task slug, then `smelt`. Disable with
 -- `smelt.settings.terminal_title = false` or via
 -- `smelt.builtins.disable({ plugins = { "terminal_title" } })` in `early.lua`.
 

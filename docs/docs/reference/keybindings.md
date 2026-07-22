@@ -13,6 +13,7 @@
 | `Ctrl+S`                        | Stash / unstash input                                     |
 | `Ctrl+C`                        | Clear input (undoable) / cancel agent / quit              |
 | `Ctrl+L`                        | Redraw screen                                             |
+| `Ctrl+G`                        | Move a foreground bash tool call to the background        |
 | `Ctrl+T`                        | Cycle reasoning effort                                    |
 | `Shift+Tab`                     | Cycle mode (normal → plan → apply → yolo)                 |
 | `Esc`                           | Dismiss dialog / unqueue messages                         |
@@ -20,6 +21,9 @@
 | `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Previous / next line (history at edges)                   |
 | `Tab`                           | Accept ghost text completion                              |
 | `F1`                            | Open help                                                 |
+| `F3`                            | Toggle the model/context debug panel                      |
+| `F5`                            | Reload Lua config                                         |
+| `F12`                           | Toggle the performance panel                              |
 | `Cmd+V`                         | Paste text or image from clipboard                        |
 
 While the agent is responding, `Enter` queues your prompt to run next.
@@ -43,7 +47,7 @@ keybind = cmd+shift+z=csi:122;10u
 ```
 
 The `cmd+z` bindings send CSI-u sequences that preserve the Command/Super and
-Shift modifiers. Without them, terminals may send `Esc z`, which Smelt cannot
+Shift modifiers. Without them, terminals may send `Esc z`, which smelt cannot
 distinguish from `Alt+Z`.
 
 tmux:
@@ -86,11 +90,13 @@ set -s extended-keys-format csi-u
 | `Alt+C`                                       | Capitalize word            |
 | `Ctrl+_` / `Cmd+Z`                            | Undo                       |
 | `Alt+_` / `Cmd+Shift+Z`                       | Redo                       |
-| `Ctrl+X Ctrl+E`                               | Edit in `$EDITOR`          |
+| `Ctrl+X Ctrl+E`                               | Edit in `$VISUAL` or `$EDITOR` |
 
-`Ctrl+Y` and the vim `p` / `P` commands share the system clipboard with the
-internal kill ring: yanking pushes to both, and pasting prefers external
-clipboard text if it changed since the last yank.
+When `smelt.settings.system_clipboard` is enabled (the default), `Ctrl+Y` and
+the vim `p` / `P` commands share the system clipboard with the internal kill
+ring: yanking pushes to both, and pasting prefers external clipboard text if it
+changed since the last yank. Disable the setting when OSC 52 clipboard writes
+are unreliable; bracketed terminal paste still works.
 
 ### Selection (non-vim)
 
@@ -119,7 +125,7 @@ block when the click lands inside a table.
 
 ## Modes
 
-Smelt has four agent modes: `normal`, `plan`, `apply`, and `yolo`. Each has its
+smelt has four agent modes: `normal`, `plan`, `apply`, and `yolo`. Each has its
 own permission defaults. The active mode is shown in the status bar. Cycle with
 `Shift+Tab`. Bindings can be scoped to a specific mode through the Lua API
 (`smelt.keymap.set`); see the
@@ -127,7 +133,7 @@ own permission defaults. The active mode is shown in the status bar. Cycle with
 
 ## Vim Mode
 
-Set `settings.vim = true` in config to enable vim mode. If you already live in
+Set `smelt.settings.vim = true` in config to enable vim mode. If you already live in
 Vim, this keeps your muscle memory intact: navigate the transcript, edit the
 prompt, and select text with the same chords you use in your editor. Supports
 insert, normal, and visual modes. In normal mode, several emacs-style keys take
@@ -144,7 +150,7 @@ on their vim meanings:
 | `Ctrl+J` | History next         | Insert newline        |
 | `Ctrl+K` | History prev         | Kill to end of line   |
 | `Ctrl+R` | Redo                 | History search        |
-| `v`      | Edit in `$EDITOR`    | n/a                   |
+| `v` / `V` | Visual / visual-line selection | n/a            |
 | `Ctrl+A` | No-op                | Start of line         |
 | `Ctrl+W` | No-op                | Delete word backward  |
 
@@ -214,6 +220,7 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 | `Ctrl+U` / `Ctrl+D`             | Half-page scroll |
 | `Home`                          | Top              |
 | `End`                           | Bottom           |
+| `Ctrl+O`                        | Toggle expanded detail where supported |
 | `Enter`                         | Confirm          |
 | `Esc` / `Ctrl+C`                | Dismiss          |
 

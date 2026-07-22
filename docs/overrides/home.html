@@ -187,8 +187,14 @@
     display: block;
   }
 
-  .hero-actions a:hover .btn-shadow {
+  .hero-actions a:hover .btn-shadow,
+  .hero-actions a:focus-visible .btn-shadow {
     opacity: 1;
+  }
+
+  .hero-actions a:focus-visible {
+    outline: 2px solid #ff8c42;
+    outline-offset: 0.35rem;
   }
 
   .hero-actions a:active {
@@ -223,30 +229,30 @@
 <section class="hero">
   <div id="hero-lava"></div>
   <div class="hero-overlay">
-    <div class="hero-logo" aria-label="smelt">
-      <img src="logo-dark.svg" alt="smelt logo" />
+    <div class="hero-logo">
+      <img src="logo-dark.svg" alt="smelt" />
     </div>
     <p class="hero-subtitle">
       A coding agent you hack like Neovim. Rust core, Lua plugins, hot reload.
     </p>
     <div class="hero-actions">
-      <a href="guide/getting-started/"
-        ><span class="btn-shadow"
+      <a href="guide/getting-started/" aria-label="Get started with smelt"
+        ><span class="btn-shadow" aria-hidden="true"
           ><span class="btn-row">░░░░░░░░░░░░░░░░</span
           ><span class="btn-row">░░░░░░░░░░░░░░░░</span
           ><span class="btn-row">░░░░░░░░░░░░░░░░</span></span
-        ><span class="btn-bg"
+        ><span class="btn-bg" aria-hidden="true"
           ><span class="btn-row">████████████████</span
           ><span class="btn-row">████████████████</span
           ><span class="btn-row">████████████████</span></span
         ><span class="btn-label">Get Started</span></a
       >
-      <a href="https://github.com/leonardcser/smelt"
-        ><span class="btn-shadow"
+      <a href="https://github.com/leonardcser/smelt" aria-label="smelt on GitHub"
+        ><span class="btn-shadow" aria-hidden="true"
           ><span class="btn-row">████████████████</span
           ><span class="btn-row">████████████████</span
           ><span class="btn-row">████████████████</span></span
-        ><span class="btn-bg"
+        ><span class="btn-bg" aria-hidden="true"
           ><span class="btn-row">░░░░░░░░░░░░░░░░</span
           ><span class="btn-row">░░░░░░░░░░░░░░░░</span
           ><span class="btn-row">░░░░░░░░░░░░░░░░</span></span

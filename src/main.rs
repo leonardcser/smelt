@@ -111,7 +111,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "KEY=VALUE",
-        help = "Override a config setting (e.g. --set vim_mode=true)"
+        help = "Override a config setting (e.g. --set vim=true)"
     )]
     set: Vec<String>,
 }
@@ -131,7 +131,7 @@ enum ColorMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Manage provider authentication (add providers, Codex or Copilot login/logout)
+    /// Manage provider authentication (add providers, Codex, Copilot, or Kimi Code login/logout)
     Auth,
     /// Print configuration templates
     Config(ConfigArgs),

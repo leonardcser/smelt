@@ -1,8 +1,8 @@
 # Lua plugin examples
 
 Drop most of these files into `~/.config/smelt/init.lua` (or `dofile` them from
-your own `init.lua`) to try them out. `plugin.lua` is a standalone module to
-place under `~/.config/smelt/lua/` and require from `init.lua`;
+your own `init.lua`) to try them out. Copy `plugin.lua` to
+`~/.config/smelt/plugins/example_plugin.lua`, where smelt autoloads it;
 `per_project.lua` is intended as example content for `<repo>/.smelt/init.lua`.
 
 - **config.lua**: the default `init.lua` template printed by

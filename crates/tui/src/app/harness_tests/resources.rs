@@ -731,6 +731,7 @@ fn managed_model_refresh_event_updates_the_running_catalog() {
         local status = smelt.model.status()
         assert(status.providers.codex.authenticated == true)
         assert(status.providers.codex.status == "fresh")
+        assert(smelt.config.model_config().supports_fast_mode == true)
         "#,
     ));
 

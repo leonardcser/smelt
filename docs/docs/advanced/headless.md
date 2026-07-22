@@ -22,8 +22,9 @@ smelt --headless "summarize @src/main.rs"
 ```
 
 Slash commands (`/resume`, `/clear`, etc.) are interactive-only and exit 1 with
-`"…" requires interactive mode`. The shell escape (`!cmd`) does work; it runs
-the command via `sh -c` and exits without calling the model.
+`"..." requires interactive mode`. The shell escape (`!cmd`) does work; it runs
+the command via `sh -c`, forwards its output, and exits without calling the
+model. smelt does not currently propagate the child command's exit status.
 
 ## Provider and Model
 
@@ -31,7 +32,7 @@ Use the same flags as interactive mode:
 
 ```bash
 smelt --headless \
-  --model openai/gpt-5 \
+  --model openai/gpt-5.5 \
   "fix the failing tests"
 ```
 
@@ -42,7 +43,7 @@ smelt --headless \
   --api-base https://api.openai.com/v1 \
   --api-key-env OPENAI_API_KEY \
   --type openai \
-  --model gpt-5 \
+  --model gpt-5.5 \
   "fix the failing tests"
 ```
 
@@ -85,14 +86,15 @@ message reprint. The stream ends after `TurnComplete` or `TurnError`.
 
 ## Permissions
 
-Headless mode never prompts:
+Headless mode never prompts. Decisions that resolve to Ask are denied, explicit
+Allow rules still run, and explicit Deny rules remain blocked. Yolo mode
+(`--mode yolo`) defaults to Allow, while the other modes keep their more cautious
+per-tool and per-effect defaults.
 
-- **Yolo mode** (`--mode yolo`): all permission requests are auto-approved
-- **Other modes**: permission requests are auto-denied; the tool call fails and
-  the model has to recover
-
-Default rules still apply, so read-only tools (`read_file`, `glob`, `grep`,
-allowed `bash` patterns) run silently in every mode. See
+Interactive-only tools such as `ask_user_question`, `enter_worktree`, and
+`switch_cwd` are omitted from the headless tool list rather than failing after a
+call. Read-only tools (`read_file`, `glob`, `grep`, allowed `bash` patterns) run
+silently in every default mode. See
 [Permissions](../reference/permissions.md) for the defaults and how to widen
 them via `init.lua`.
 
@@ -116,17 +118,19 @@ smelt --headless --color=always "fix the bug" 2>&1 | less -R
 
 | Code | Meaning                                                             |
 | ---- | ------------------------------------------------------------------- |
-| 0    | Turn completed (including `TurnError` in JSON mode; see the stream) |
-| 1    | Missing message, auth failure, slash command, or shell escape error |
-| 130  | Interrupted by `SIGINT` / `SIGTERM` (Ctrl-C)                        |
+| 0    | Dispatch finished, including `TurnError`; shell escapes also return 0 after launch |
+| 1    | Missing message, startup/auth failure, or an interactive-only slash command |
+| 2    | Invalid CLI syntax or option value |
+| 130  | Interrupted by `SIGINT` / `SIGTERM` (Ctrl-C) |
 
-On interrupt, smelt sends a cancel to the engine and exits 130 once the current
-request unwinds.
+For model failures after dispatch, inspect stderr in text mode or the terminal
+`TurnComplete` / `TurnError` event in JSON mode. On interrupt, smelt sends a
+cancel to the engine and exits 130.
 
 ## Sessions
 
-Headless turns are one-shot. `--resume` is ignored, and the session is not
-persisted, and there is no resume hint printed on exit. To chain turns, drive
+Headless turns are one-shot. `--resume` is ignored, the session is not
+persisted, and no resume hint is printed on exit. To chain turns, drive
 smelt from your script and feed prior context through the prompt.
 
 ## Examples

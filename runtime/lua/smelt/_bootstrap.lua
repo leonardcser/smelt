@@ -1014,6 +1014,11 @@ function __smelt_auto_name(kind)
   return string.format("%s:%s:%d", scope, kind, idx)
 end
 
+--- Handle returned by `smelt.plugin` for a named plugin scope.
+---@class smelt.Plugin
+---@field name string Stable scope name.
+---@field state table Ephemeral JSON-shaped state that survives `/reload` but not restart.
+
 -- Promote the current loader frame to plugin scope `name` and return a
 -- small handle exposing the plugin's per-cycle state slot:
 --
@@ -1034,6 +1039,7 @@ end
 --
 -- Must be called from a module body (or init.lua). Outside a loader
 -- frame (e.g. from an event callback) it raises immediately.
+---@type fun(name: string): smelt.Plugin
 function smelt.plugin(name)
   if type(name) ~= "string" or name == "" then
     error("smelt.plugin: name must be a non-empty string", 2)

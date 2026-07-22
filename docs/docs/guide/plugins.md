@@ -12,40 +12,127 @@ it.
 
 ## Anatomy of a plugin
 
-A plugin is just a Lua module. There is no manifest, no register-yourself call,
-and no init hook. Top-level statements run when the file is `require`d, so
-that's where you wire your behaviour up.
+A plugin is a Lua module with no manifest. Top-level statements run when the
+file is loaded, so that is where you declare a stable plugin scope and register
+behavior.
 
 ```lua
 -- ~/.config/smelt/plugins/hello.lua
+local M = smelt.plugin("hello")
+
+M.state.greetings = M.state.greetings or 0
 smelt.cmd.register("hello", function(arg)
-  smelt.notify.info("hello, " .. ((arg and arg ~= "") and arg or "world"))
+  M.state.greetings = M.state.greetings + 1
+  local name = (arg and arg ~= "") and arg or "world"
+  smelt.notify.info("hello, " .. name)
 end, { desc = "greet someone" })
 
-return {}
+return M
 ```
 
-Load it automatically by leaving it under `~/.config/smelt/plugins/`, or load a
-module explicitly from `init.lua`:
+`smelt.plugin(name)` must run in a module body or `init.lua`. It gives the module
+a stable scope, exposes ephemeral hot-reload state as `M.state`, and assigns
+stable declaration-order names to unnamed buffers, windows, overlays, and paint
+registrations. It does not prefix command, signal, event, keymap, or lifecycle
+names, so choose globally distinctive names for those registrations.
+
+Files under `~/.config/smelt/plugins/` load automatically. Reusable modules under
+`~/.config/smelt/lua/` can be loaded explicitly from `init.lua`:
 
 ```lua
 require("smelt.plugins.which_key") -- bundled opt-in plugin
-require("hello")                  -- yours, if it is on package.path
+require("hello")                   -- ~/.config/smelt/lua/hello.lua
 ```
 
 For a real walkthrough, the bundled plugins under
 [`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
 are the canonical examples. Every pattern below comes straight from them.
 
+## Editor setup
+
+On every launch, smelt mirrors its embedded Lua runtime to:
+
+```
+$XDG_DATA_HOME/smelt/builtins/lua/smelt/
+```
+
+The default is `~/.local/share/smelt/builtins/lua/smelt/`. It includes the
+bundled implementation and generated LuaCATS stubs under `_meta/`. Treat the
+mirror as read-only because an upgrade refreshes it.
+
+Point Lua Language Server at the parent `builtins/lua` directory. For example,
+place a `.luarc.json` in the project where you edit smelt config, replacing the
+path with the expanded absolute path on your machine:
+
+```json
+{
+  "runtime.version": "Lua 5.4",
+  "workspace.library": [
+    "/home/you/.local/share/smelt/builtins/lua"
+  ],
+  "diagnostics.globals": ["smelt"]
+}
+```
+
+This provides completions and diagnostics for Rust-backed APIs, bundled Lua
+functions, option tables, and string-literal aliases. In a source checkout, use
+`runtime/lua` as the library path instead. The generated
+[Lua API reference](../reference/api/index.md) renders the same annotations.
+
+## Agent semantic code tools (LSP)
+
+The opt-in `smelt.plugins.lsp` plugin gives the agent semantic navigation,
+diagnostics, and rename tools backed by standard stdio language servers. The
+server executables must already be installed and available on `PATH`.
+
+```lua
+local lsp = require("smelt.plugins.lsp")
+
+lsp.setup({
+  servers = {
+    rust = {
+      cmd = { "rust-analyzer" },
+      extensions = { "rs" },
+      language_id = "rust",
+      root_markers = { "Cargo.toml", ".git" },
+    },
+  },
+})
+```
+
+Each key under `servers` is a local label:
+
+| Field | Description |
+| ----- | ----------- |
+| `cmd` | Executable followed by arguments (required) |
+| `extensions` | Filename extensions handled by the server, without dots |
+| `language_id` | LSP language id sent for opened documents |
+| `root_markers` | Files or directories searched upward to choose a project root |
+| `init_timeout_ms` | Initialize/workspace-ready timeout, default `120000` |
+| `request_timeout_ms` | Per-request timeout, default `30000` |
+| `startup_wait_ms` | Short wait for a starting server or fresh diagnostics, default `5000` |
+| `initialization_options` | JSON-shaped value sent in the initialize request |
+| `settings` | JSON-shaped workspace configuration sent after initialization |
+
+The plugin adds `language_server_status`, `outline`, `find_symbol`,
+`inspect_symbol`, `inspect_symbol_at`, `find_definition`, `find_references`,
+`diagnostics`, `preview_rename`, and `rename_symbol`. Servers start lazily for the
+matching file and project root. Navigation, diagnostics, and rename previews are
+read effects and allowed by default. Applying `rename_symbol` is allowed in
+Normal, denied in Plan, asks in Apply, and is allowed in Yolo.
+
 ## Hot reload
 
-Edit any Lua file, then press `F5` or run `/reload`. Your config re-runs from
-scratch; the current transcript and agent state stay put. Errors land in
-`/messages`. Changes to [`early.lua`](customization.md#early-phase-config) need
-a real restart.
+Saved Lua files reload automatically by default; press `F5` or run `/reload` to
+reload manually. The current transcript and agent state stay put. Reload is
+transactional: smelt evaluates early config,
+autoloaded modules, user config, and trusted project config in a fresh candidate,
+then commits the complete generation only if every file succeeds. On failure,
+the running commands, tools, keymaps, hooks, providers, settings, permissions,
+and UI resources stay active, and diagnostics land in `/messages`.
 
-Reload also refreshes the on-disk inputs that feed the agent's system prompt and
-tool surface, not just Lua:
+Manual reload also refreshes the on-disk inputs that feed the agent's system
+prompt and tool surface, not just Lua:
 
 - `AGENTS.md` (global `~/.config/smelt/AGENTS.md` plus the nearest project copy)
   is re-read.
@@ -71,36 +158,37 @@ rename the command file.
 
 ### Surviving reload smoothly
 
-Module bodies run with the host pointer live on every Lua-context bring-up, both
-cold start and `/reload`. Three pieces compose into "my UI keeps the same
-position / focus / content when the user reloads my plugin":
+Module bodies run on cold start and every successful `/reload`. Start each module
+with `smelt.plugin(name)` so state and resources reconnect automatically:
 
-1. **`smelt.state.get(name)`** - JSON-shaped table that survives `/reload` (not
-   restart). Persist your `is_open` / cursor / variant index here.
-2. **`opts.name = "..."`** on `smelt.overlay.new`, `smelt.win.new`,
-   `smelt.buf.new`, and `smelt.paint.register` - opts the resource into
-   hot-reload survival. The Rust-side structure stays in place; re-passing the
-   same name on re-open swaps the layout / closure / contents atomically.
-   Anonymous (no-name) resources get reaped each reload.
-3. **Module-body re-open** - at the bottom of your file, check the state flag
-   and re-call your `open()`. On cold start `is_open` is false, so it's a no-op;
-   after `/reload` it's true, so `open()` re-runs and finds the named overlay /
-   paint slot already there, just updating closures.
+1. `M.state` is a JSON-shaped table that survives `/reload`, but not process
+   restart. Store `is_open`, cursor position, and other rebuildable UI state here.
+2. Unnamed `smelt.buf.new`, `smelt.win.new`, `smelt.overlay.new`, and
+   `smelt.paint.register` calls receive stable scope and declaration-order names.
+   The matching Rust resources survive reload while their Lua callbacks, layout,
+   and mutable options are replaced by the new generation.
+3. Re-run `open()` from the module body when `M.state.is_open` is true. The calls
+   reconnect to the existing named resources instead of duplicating them.
 
 ```lua
+local M = smelt.plugin("my_plugin")
+
 local function open()
-  if STATE then return end
-  STATE = {}
-  STATE.buf     = smelt.buf.new   ({ name = "myplugin.buf" })
-  STATE.win     = smelt.win.new   (STATE.buf, { name = "myplugin.win" })
-  STATE.paint   = smelt.paint.register(paint_fn, { name = "myplugin.paint" })
-  STATE.overlay = smelt.overlay.new({ name = "myplugin", layout = ... })
-  persist().is_open = true
+  local buf = smelt.buf.new()
+  local win = smelt.win.new(buf, { focusable = true })
+  smelt.paint.register(paint_fn)
+  smelt.overlay.new({ layout = smelt.ui.layout.leaf(win) })
+  M.state.is_open = true
 end
 
--- module body - runs on every Lua-context bring-up.
-if persist().is_open then open() end
+if M.state.is_open then open() end
+return M
 ```
+
+Use explicit `opts.name` values when resource identity must stay stable across
+source reordering or when several constructors are created dynamically. Calling
+the constructors without a plugin scope leaves them anonymous, so they are
+reaped on reload.
 
 Paint leaves can also receive pointer events directly (`press`, `release`,
 `drag`), which is useful for canvas-like overlays that should not be forced
@@ -121,29 +209,44 @@ handlers can early-return on `ctx.kind ~= "launch"`.
 
 ## Bundled plugins
 
-| Plugin         | Autoloaded | What it does                                                                                                                                                                                        |
-| -------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `compact`      | yes        | Owns `/compact` and post-turn auto-compaction (uses inherited-session compaction retries and drives the prompt top-bar working indicator via `smelt.work.busy`)                                     |
-| `esc_chord`    | yes        | `<Esc><Esc>` to cancel active work or rewind a turn                                                                                                                                                 |
-| `debug_panel`  | yes        | F3 overlay with resolved model config, context tokens, and pricing                                                                                                                                  |
-| `inspect`      | **opt-in** | Owns `/inspect`, starting the local session/request inspector web UI and opening it in a browser when available                                                                                     |
-| `perf_panel`   | yes        | F12 overlay with live duration percentiles                                                                                                                                                          |
-| `predict`      | yes        | After each turn, predicts your next message and shows it as ghost text                                                                                                                              |
-| `scroll_pills` | yes        | While the transcript is scrolled away from the tail, shows two click-only overlays: a "↓ jump to bottom" pill above the prompt and a one-row "jump to next message" pill at the top of the terminal |
-| `title`        | yes        | After each turn, generates a session title + slug if one isn't set                                                                                                                                  |
-| `plan_mode`    | yes        | Registers the built-in `plan` mode after Normal, adds `present_plan`, and injects the plan-mode system prompt                                                                                       |
-| `which_key`    | **opt-in** | Which-key style popup for pending global Lua keymaps                                                                                                                                                |
+<!-- BUNDLED_PLUGINS_BEGIN -->
+<!-- This region is auto-generated by `cargo xtask gen-lua-docs`. Do not edit by hand. -->
 
-To enable an opt-in plugin, `require` it from `~/.config/smelt/init.lua`:
+Bundled with smelt. Drop a file under `~/.config/smelt/plugins/` to add your own.
 
-```lua
-require("smelt.plugins.which_key")
-require("smelt.plugins.inspect")
-```
+### Autoloaded
 
-Autoloaded plugins can be disabled from `early.lua` with
-`smelt.builtins.disable({ plugins = { "plan_mode" } })` when you explicitly want
-to remove their built-in behavior.
+Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = { "<name>" } })` in `early.lua`.
+
+| Plugin | Summary |
+| --- | --- |
+| `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
+| `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
+| `smelt.plugins.debug_panel` | F3 debug panel. |
+| `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
+| `smelt.plugins.goal` | Goal lifecycle plugin. |
+| `smelt.plugins.perf_panel` | F12 perf panel. |
+| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
+| `smelt.plugins.predict` | Input prediction plugin. |
+| `smelt.plugins.process_control` | Ctrl-G: move a foreground bash command to the background registry. |
+| `smelt.plugins.scroll_pills` | Clickable scroll-pill overlays navigate the transcript. |
+| `smelt.plugins.terminal_title` | Keeps the terminal window/tab title in sync with smelt. |
+| `smelt.plugins.title` | Session title plugin. |
+| `smelt.plugins.turn_notifications` | Optional terminal desktop notification when an agent turn ends. |
+| `smelt.plugins.upgrade` | Autoupgrade plugin. |
+| `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |
+
+### Opt-in
+
+Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/smelt/init.lua` to enable.
+
+| Plugin | Summary |
+| --- | --- |
+| `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
+| `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |
+| `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
+
+<!-- BUNDLED_PLUGINS_END -->
 
 ## Host vs UiHost
 
@@ -156,7 +259,7 @@ per-namespace page calls it out in the header.
   `smelt.events`, `smelt.tools`.
 - **UiHost**: requires a live terminal UI. Calling a UiHost function from
   headless mode raises. Examples: `smelt.win`, `smelt.buf`, `smelt.theme`,
-  `smelt.notify`, `smelt.statusline`, `smelt.keymap`.
+  `smelt.notify`, `smelt.dialog`, `smelt.keymap`.
 
 The split matters because the same plugin can run in a TUI session and in a CI
 script (`smelt --headless`). Keeping UI logic behind a tier check lets you write
@@ -195,16 +298,16 @@ The full lists are the `smelt.events.Name` and `smelt.signal.Name` aliases in
 [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 
-| Name              | Payload                                   | When                         |
-| ----------------- | ----------------------------------------- | ---------------------------- |
-| `session_started` | none                                      | A session has been loaded    |
-| `turn_start`      | none                                      | The agent dispatched a turn  |
-| `turn_end`        | `{ cancelled }`                           | Turn complete or interrupted |
-| `tool_start`      | `{ tool, args }`                          | A tool call began            |
-| `tool_end`        | `{ tool, is_error, elapsed_ms }`          | A tool call finished         |
-| `agent_mode`      | `"normal"`, `"plan"`, `"apply"`, `"yolo"` | Agent mode changed           |
-| `input_submit`    | submitted text                            | User submitted a message     |
-| `shutdown`        | none                                      | App is about to quit         |
+| API | Name | Payload | When |
+| --- | ---- | ------- | ---- |
+| event | `session_started` | none | A session has been loaded |
+| event | `turn_start` | none | The agent dispatched a turn |
+| event | `turn_end` | `{ cancelled }` | Turn complete or interrupted |
+| event | `tool_start` | `{ tool, args }` | A tool call began |
+| event | `tool_end` | `{ tool, is_error, elapsed_ms }` | A tool call finished |
+| signal | `agent_mode` | `"normal"`, `"plan"`, `"apply"`, `"yolo"` | Agent mode changed |
+| event | `input_submit` | submitted text | User submitted a message |
+| event | `shutdown` | none | App is about to quit |
 
 ```lua
 smelt.events.on("turn_end", function(payload)
@@ -405,11 +508,11 @@ end)
 if err == "timeout" then ... end
 
 -- First to finish wins; losers are cancelled.
-local winner = smelt.task.race(
+local index, result = smelt.task.race(
   function() return smelt.fs.read_async("/etc/hostname") end,
   function() smelt.sleep(500); return "fallback" end
 )
-print(winner.index, winner.result)
+print(index, result)
 
 -- Wait for everything; results stay in input order.
 local results = smelt.task.all(
@@ -433,12 +536,14 @@ s.counter = (s.counter or 0) + 1
 `smelt.state.persistent(name)` returns a JSON-backed wrapper that writes through
 to `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Use it for user preferences or
 data that must survive restarts. Top-level assignments are debounced and
-auto-saved; nested mutations need an explicit `:save()`.
+auto-saved; nested mutations need an explicit `.save()` call.
 
 ```lua
 local s = smelt.state.persistent("recent_files")
 s.last_opened = "/path/to/file"   -- debounced auto-save
-table.insert(s.history or {}, "another"); s.save()   -- nested → manual save
+s.history = s.history or {}
+table.insert(s.history, "another")
+s.save()                           -- nested mutation: save explicitly
 ```
 
 ## Filesystem watching
@@ -457,7 +562,7 @@ filesystem change under `path`. `event = { kind, detail?, paths }`:
 Set `opts.recursive = false` to watch only direct children. Returns a `Reg`:
 
 ```lua
-local reg = smelt.fs.watch(vim.fn.getcwd(), function(ev)
+local reg = smelt.fs.watch(smelt.session.info().cwd, function(ev)
   for _, p in ipairs(ev.paths) do
     smelt.log.info(ev.kind .. " " .. p)
   end

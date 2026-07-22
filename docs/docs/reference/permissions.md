@@ -43,15 +43,26 @@ to tool, effect, and mode defaults.
 | `web_search`          | Ask    | Ask                | Ask   | Allow |
 | `read_process_output` | Allow  | Allow              | Allow | Allow |
 | `enter_worktree`      | Ask    | Ask                | Ask   | Allow |
+| `switch_cwd`          | Ask    | Deny               | Ask   | Allow |
 | `stop_process`        | Ask    | Deny               | Ask   | Allow |
-| `load_skill`          | Ask    | Ask                | Ask   | Allow |
+| `load_skill`          | Ask    | Allow              | Ask   | Allow |
+| `get_goal`            | Ask    | Ask                | Ask   | Allow |
+| `create_goal`         | Ask    | Ask                | Ask   | Allow |
+| `update_goal_progress` | Ask   | Ask                | Ask   | Allow |
+| `update_goal`         | Ask    | Ask                | Ask   | Allow |
 | `present_plan`        | N/A    | Allow              | N/A   | N/A   |
 | `smelt_reload`        | Ask    | Deny               | Ask   | Allow |
+
+The optional LSP plugin registers read-effect semantic tools with Allow in
+Normal, Plan, and Apply. `rename_symbol` has write effect, so its defaults are
+Allow in Normal, Deny in Plan, Ask in Apply, and Allow in Yolo.
 
 Plan mode is built in. It ships with a read-only default policy and adds the
 `present_plan` tool. Read-only tools stay allowed, `enter_worktree` and unknown
 or networked tools require confirmation, and write/process/config effects are
-denied without prompting unless your config extends the policy differently.
+denied without prompting. `switch_cwd` is therefore denied even though the
+more constrained `enter_worktree` has an explicit Ask rule. Your config can
+extend these defaults.
 
 ## Default Bash Patterns
 
@@ -185,7 +196,7 @@ The "always allow" options above approve future calls at one of two scopes:
 | Scope         | Lifetime                        | Storage                                                   |
 | ------------- | ------------------------------- | --------------------------------------------------------- |
 | **Session**   | Until `/clear`, `/new`, or exit | Memory                                                    |
-| **Workspace** | All future sessions in this CWD | `$XDG_STATE_HOME/smelt/workspaces/<cwd>/permissions.json` |
+| **Workspace** | All future sessions in this CWD | `$XDG_STATE_HOME/smelt/workspaces/<encoded-cwd>/permissions.json` |
 
 Workspace approvals stay narrow: approving a command pattern only approves calls
 matching that pattern, and approving an outside directory only approves access

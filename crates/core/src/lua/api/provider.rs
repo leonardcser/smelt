@@ -32,13 +32,13 @@ pub struct LuaProviderModel {
     pub repeat_penalty: Option<f64>,
     /// Whether the model supports tool calls.
     pub tool_calling: Option<bool>,
-    /// Cost per input token in USD.
+    /// Cost per 1M input tokens in USD.
     pub input_cost: Option<f64>,
-    /// Cost per output token in USD.
+    /// Cost per 1M output tokens in USD.
     pub output_cost: Option<f64>,
-    /// Cost per cache-read token in USD.
+    /// Cost per 1M cache-read tokens in USD.
     pub cache_read_cost: Option<f64>,
-    /// Cost per cache-write token in USD.
+    /// Cost per 1M cache-write tokens in USD.
     pub cache_write_cost: Option<f64>,
     /// Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown.
     pub max_tokens: Option<u32>,

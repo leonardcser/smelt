@@ -14,6 +14,7 @@ nav = [
     { "Usage" = "guide/usage.md" },
     { "Customization" = "guide/customization.md" },
     { "Plugin Authoring" = "guide/plugins.md" },
+    { "Troubleshooting" = "guide/troubleshooting.md" },
   ]},
   { "Reference" = [
     { "CLI" = "reference/cli.md" },
@@ -29,6 +30,7 @@ nav = [
     { "`smelt.agent`" = "reference/api/agent.md" },
     { "`smelt.auth`" = "reference/api/auth.md" },
     { "`smelt.buf`" = "reference/api/buf.md" },
+    { "`smelt.build`" = "reference/api/build.md" },
     { "`smelt.builtins`" = "reference/api/builtins.md" },
     { "`smelt.cli`" = "reference/api/cli.md" },
     { "`smelt.clipboard`" = "reference/api/clipboard.md" },

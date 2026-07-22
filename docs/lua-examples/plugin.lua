@@ -1,10 +1,10 @@
 -- A small hot-reload-friendly plugin.
--- Copy to ~/.config/smelt/lua/example_plugin.lua, then add
--- `require("example_plugin")` to ~/.config/smelt/init.lua.
+-- Copy to ~/.config/smelt/plugins/example_plugin.lua; smelt autoloads plugin
+-- files in filename order after ~/.config/smelt/init.lua.
 
-local M = {}
+local M = smelt.plugin("example_plugin")
 
-local state = smelt.state.get("example_plugin")
+local state = M.state
 state.pings = state.pings or 0
 
 local function ping(arg)

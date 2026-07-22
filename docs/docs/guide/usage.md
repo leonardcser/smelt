@@ -6,11 +6,12 @@ The agent streams its response and may call tools along the way.
 
 - `Ctrl+J` or `Shift+Enter` inserts a newline (for multi-line messages)
 - `Ctrl+R` fuzzy-searches your input history
-- `Ctrl+X Ctrl+E` opens your `$EDITOR` for longer messages
+- `Ctrl+X Ctrl+E` opens your external editor (`$VISUAL`, then `$EDITOR`)
 - `Ctrl+C` clears the input, cancels the agent, or quits (context-dependent)
+- `Ctrl+G` moves a foreground agent-started bash command to the background
 - `Enter` submits; with an empty prompt, it continues the turn when history
   exists
-- `F1` opens the help dialog
+- `F1` opens the help dialog; `F3` and `F12` toggle debug and performance panels
 
 ## Context Counter
 
@@ -44,6 +45,26 @@ The current mode is shown in the status bar. Set the starting mode with
 See [Permissions Reference](../reference/permissions.md) for the full default
 matrix.
 
+## Goals and Auto-Continue
+
+A goal is a persistent session objective with a lifecycle, progress label, and
+optional idle auto-continue. Create one only when you want smelt to keep pursuing
+a defined objective across turns:
+
+```
+/goal implement the approved migration and validate every package
+```
+
+The goal bar shows its short summary and durable progress. Use `/goal status`,
+`/goal pause`, `/goal resume`, `/goal block [reason]`, `/goal done`, and
+`/goal clear` to control it. `/goal auto on|off` changes whether it continues
+while idle. Queued user messages always run before auto-continue.
+
+The default `smelt.settings.auto_continue = "goal"` continues active auto goals
+only. Set it to `"off"` to disable automatic continuation, or `"always"` to
+continue any idle session. See [Commands](../reference/commands.md#goals-and-auto-continue)
+for the full lifecycle.
+
 ## Reasoning Effort
 
 Press `Ctrl+T` to cycle through reasoning levels (`off`, `low`, `medium`,
@@ -53,6 +74,13 @@ complex refactors, or debugging tangled bugs. Set the starting level with
 `--reasoning-effort`, and configure which levels appear in the cycle with
 `--reasoning-cycle`.
 
+## Fast Mode
+
+`/fast` toggles accelerated inference for the current session when the active
+model advertises support. Use `/fast on`, `/fast off`, or `/fast toggle` for an
+explicit action. Set `smelt.settings.fast_mode = true` to request it at startup;
+unsupported models remain in their normal inference mode.
+
 ## Tools
 
 The agent can read files, edit code, run shell commands, fetch URLs, and more.
@@ -61,6 +89,11 @@ tool wants to do. You can approve once, for the session, or for the workspace.
 Session and workspace approvals save you from repeatedly confirming the same
 safe operation, for example, allowing every `git status` call in a repo you
 trust. Press `Tab` to attach an optional message to your approval.
+
+Long-running `bash` calls can continue in smelt's background process registry.
+Press `Ctrl+G` while one is foregrounded to detach it, then use `/ps` to inspect
+output or stop it. This is different from putting `&` in a shell command, which
+the built-in tool rejects so it can keep ownership of the process.
 
 See [Tools Reference](../reference/tools.md) for the full list and
 [Permissions](../reference/permissions.md) for details on approval scopes.
@@ -105,6 +138,20 @@ the selection.
 - `Esc`: bring queued messages back into the prompt so you can edit them
 - `Esc Esc`: cancel active work, or rewind when idle
 
+## Copying Conversation Messages
+
+`/copy` copies the latest conversation message to the system clipboard. Pass a
+count, role filter, or headers when you need more context:
+
+```
+/copy --role assistant 2
+/copy --headers 1
+```
+
+`/yank` is an alias with the same arguments. This operates on conversation
+messages, while prompt selection copy and the kill ring are covered in the
+[Keybindings Reference](../reference/keybindings.md).
+
 ## Sessions
 
 Every conversation is automatically saved after each turn. Sessions let you
@@ -121,11 +168,13 @@ smelt --resume <SESSION_ID> # resume a specific session
 
 Or use `/resume` from within the TUI. Use `/fork` to branch the current
 conversation into a new session, or `/rewind` (also `Esc Esc` when idle) to roll
-back to an earlier turn.
+back to an earlier turn. `/session` shows the current id, paths, worktree, model,
+context usage, costs, compactions, and history counts; press `c` there to copy the
+id or `y` to copy all metadata.
 
 Use `smelt --ephemeral` for a temporary interactive session. Ephemeral sessions
 can use tools and attachments normally, but they are stored in a temporary
-directory, are removed when Smelt exits, and do not appear in resume lists.
+directory, are removed when smelt exits, and do not appear in resume lists.
 
 For debugging or auditing saved sessions and provider requests, run the local
 inspector web UI:
@@ -134,6 +183,54 @@ inspector web UI:
 smelt inspect
 smelt inspect --session <SESSION_ID>
 ```
+
+For database health checks, transactionally consistent backups, or storage
+maintenance, use `smelt session doctor|backup|rebuild-derived|gc|vacuum`. See the
+[CLI session-maintenance reference](../reference/cli.md#session-maintenance)
+before running mutating maintenance against a session.
+
+## Managed Worktrees
+
+Managed worktrees isolate parallel implementations without moving the original
+checkout. Start directly in one:
+
+```bash
+smelt --worktree docs-audit
+```
+
+Or create, pick, and enter them from a running session:
+
+```
+/worktree                         # picker and status
+/worktree docs-audit --base main # create or enter
+/wt docs-audit -b main           # short form
+```
+
+Names are normalized and deduplicated. The default location is
+`<repo>/.worktrees/`; configure `smelt.settings.worktree_root` to use another
+relative or absolute root. Entering one switches smelt's real process working
+directory, then reloads project instructions, skills, trusted `.smelt/` config,
+workspace permissions, and watcher roots for the new checkout.
+
+An agent in a managed worktree does not push, open a pull request, merge into the
+base checkout, or remove the worktree unless you explicitly ask. If you ask it to
+land changes without choosing a strategy, the default is commit, rebase onto the
+base branch, validate, and fast-forward the base checkout without a merge commit.
+
+## Turn Notifications
+
+`/notify` schedules a desktop terminal notification for the next completed turn.
+Use `/notify on` or `/notify off` for a session override, `/notify clear` to return
+to the configured default, and `/notify status` to inspect it. Persist the default
+with:
+
+```lua
+smelt.settings.notifications = {
+  turn_end = true,
+}
+```
+
+Notification delivery depends on terminal and operating-system support.
 
 ## Compaction
 

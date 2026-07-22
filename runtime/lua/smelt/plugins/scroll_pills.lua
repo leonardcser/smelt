@@ -1,4 +1,5 @@
--- Scroll-pill overlays for transcript navigation:
+-- Clickable scroll-pill overlays navigate the transcript.
+--
 --   * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail.
 --   * Top pill    - first line of the nearest actionable user message;
 --     click aligns it to the viewport top, then the next target walks back.

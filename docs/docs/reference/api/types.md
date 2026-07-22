@@ -6,6 +6,15 @@ Records and string-literal unions referenced from the namespace pages. Generated
 
 ## Classes
 
+### `smelt.Plugin`
+
+Handle returned by `smelt.plugin` for a named plugin scope.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | Stable scope name. |
+| `state` | `table` | yes | Ephemeral JSON-shaped state that survives `/reload` but not restart. |
+
 ### `smelt.Reg`
 
 Registration handle returned by every reactive-subscription API. `:remove()` undoes the binding (frees the underlying callback / cancels the timer / drops the subscription). Idempotent: subsequent calls return `false`.
@@ -777,10 +786,10 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `min_p` | `number` |  | Default minimum-probability cutoff. |
 | `repeat_penalty` | `number` |  | Default repeat penalty. |
 | `tool_calling` | `boolean` |  | Whether the model supports tool calls. |
-| `input_cost` | `number` |  | Cost per input token in USD. |
-| `output_cost` | `number` |  | Cost per output token in USD. |
-| `cache_read_cost` | `number` |  | Cost per cache-read token in USD. |
-| `cache_write_cost` | `number` |  | Cost per cache-write token in USD. |
+| `input_cost` | `number` |  | Cost per 1M input tokens in USD. |
+| `output_cost` | `number` |  | Cost per 1M output tokens in USD. |
+| `cache_read_cost` | `number` |  | Cost per 1M cache-read tokens in USD. |
+| `cache_write_cost` | `number` |  | Cost per 1M cache-write tokens in USD. |
 | `max_tokens` | `integer` |  | Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown. |
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 | `context_window` | `integer` |  | Total context window, in tokens. |

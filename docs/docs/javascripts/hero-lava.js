@@ -41,6 +41,14 @@
   var coarsePointerQuery = window.matchMedia
     ? window.matchMedia("(pointer: coarse)")
     : null;
+  var reducedMotionQuery = window.matchMedia
+    ? window.matchMedia("(prefers-reduced-motion: reduce)")
+    : null;
+  var visible = false;
+
+  function prefersReducedMotion() {
+    return reducedMotionQuery && reducedMotionQuery.matches;
+  }
 
   function currentScheme() {
     return document.body.getAttribute("data-md-color-scheme") || "default";
@@ -645,11 +653,21 @@
     spawnBlast(cx, cy, power);
   }
 
+  function startAnimation() {
+    cancelAnimationFrame(animFrame);
+    lastTime = 0;
+    if (prefersReducedMotion()) {
+      render(0);
+      return;
+    }
+    animFrame = requestAnimationFrame(frame);
+  }
+
   var observer = new IntersectionObserver(
     function (entries) {
-      if (entries[0].isIntersecting) {
-        lastTime = 0;
-        animFrame = requestAnimationFrame(frame);
+      visible = entries[0].isIntersecting;
+      if (visible) {
+        startAnimation();
       } else {
         cancelAnimationFrame(animFrame);
       }
@@ -658,11 +676,11 @@
   );
 
   container.addEventListener("pointermove", function (event) {
-    setMouse(event.clientX, event.clientY);
+    if (!prefersReducedMotion()) setMouse(event.clientX, event.clientY);
   });
 
   container.addEventListener("click", function (event) {
-    triggerExplosion(event.clientX, event.clientY);
+    if (!prefersReducedMotion()) triggerExplosion(event.clientX, event.clientY);
   });
 
   container.addEventListener("pointerleave", function () {
@@ -672,8 +690,22 @@
 
   window.addEventListener("resize", function () {
     resize();
+    if (prefersReducedMotion()) render(0);
   });
 
+  function handleMotionPreference() {
+    if (visible) startAnimation();
+  }
+
+  if (reducedMotionQuery) {
+    if (reducedMotionQuery.addEventListener) {
+      reducedMotionQuery.addEventListener("change", handleMotionPreference);
+    } else if (reducedMotionQuery.addListener) {
+      reducedMotionQuery.addListener(handleMotionPreference);
+    }
+  }
+
   resize();
+  render(0);
   observer.observe(container);
 })();

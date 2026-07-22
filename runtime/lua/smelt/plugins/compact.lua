@@ -1,7 +1,8 @@
--- Compaction plugin. Owns the /compact command and the post-turn
--- auto-compact subscription. When the context window is filling up, it
--- runs inherited-session summarisation over the older history with a
--- fixed structured prompt while preserving a live suffix verbatim.
+-- Compacts older history while preserving a live recent suffix. Owns the
+-- /compact command and the post-turn auto-compact subscription. When the
+-- context window is filling up, it runs inherited-session summarisation over
+-- the older history with a fixed structured prompt while preserving a live
+-- suffix verbatim.
 --
 -- Compaction is visible to the user via `smelt.work.busy("compacting")`
 -- and emits structured `compaction` log events with before/after token

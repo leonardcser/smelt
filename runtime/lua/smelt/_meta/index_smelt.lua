@@ -37,7 +37,7 @@ smelt.ns = nil
 --- Must be called from a module body (or init.lua). Outside a loader
 --- frame (e.g. from an event callback) it raises immediately.
 ---@see smelt.state.get
----@type fun(name: any): any
+---@type fun(name: string): smelt.Plugin
 smelt.plugin = nil
 
 --- Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.

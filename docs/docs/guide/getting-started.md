@@ -4,7 +4,7 @@
 
 === "Prebuilt Binaries"
 
-    Grab the latest binary from
+    Grab the latest binary for Linux or macOS (`x86_64` or `aarch64`) from
     [GitHub Releases](https://github.com/leonardcser/smelt/releases) and put
     it on your `$PATH`:
 
@@ -29,7 +29,8 @@ You can also skip the wizard and configure everything from the command line:
 
 ```bash
 smelt --model gpt-5.5 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
-smelt --headless --model openai/gpt-5 "summarize @README.md"
+smelt --headless --model gpt-5.5 --api-base https://api.openai.com/v1 \
+  --api-key-env OPENAI_API_KEY "summarize @README.md"
 smelt --resume              # open the saved-session picker
 ```
 
@@ -54,8 +55,8 @@ once, pick the provider, then start smelt with no extra flags:
     smelt
     ```
 
-    After login, Smelt registers the `kimi-code` provider automatically. Start
-    Smelt with no flags to use it.
+    After login, smelt registers the `kimi-code` provider automatically. Start
+    smelt with no flags to use it.
 
 === ":simple-github: GitHub Copilot"
 
@@ -125,8 +126,8 @@ smelt.provider.register("openai", {
 smelt.settings.vim = true
 ```
 
-Switch models at runtime with `/model`. Edit the file and press `F5` to
-hot-reload without losing the session.
+Switch models at runtime with `/model`. Saved Lua config reloads automatically
+by default without losing the session; press `F5` to reload manually.
 
 `init.lua` is real Lua, not a schema: keymaps, slash commands, MCP servers,
 permission rules, statusline segments, and custom tools all live here.
@@ -136,6 +137,7 @@ permission rules, statusline segments, and custom tools all live here.
 - [Usage](usage.md): modes, tools, sessions, daily workflow
 - [Customization](customization.md): themes, keymaps, slash commands, MCP
 - [Plugin Authoring](plugins.md): the Lua API in depth
+- [Troubleshooting](troubleshooting.md): startup, terminal, config, LSP, and session recovery
 - [Configuration Reference](../reference/configuration.md): every setting and
   provider field
 - [CLI Reference](../reference/cli.md): every flag
