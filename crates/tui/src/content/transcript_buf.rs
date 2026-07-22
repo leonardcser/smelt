@@ -1719,6 +1719,12 @@ impl TranscriptProjection {
         history: &BlockHistory,
         indices: Vec<usize>,
     ) -> bool {
+        if indices.is_empty() {
+            return false;
+        }
+        let renderer_generation = env.renderer_generation;
+        let renderer_cache_key = env.renderer_cache_key;
+        self.ensure_node_indices(env, history, indices.iter().copied());
         let missing: Vec<usize> = indices
             .into_iter()
             .filter(|&i| {
@@ -1733,12 +1739,6 @@ impl TranscriptProjection {
             "transcript:row_index:exactify_missing",
             missing.len() as u64,
         );
-        if missing.is_empty() {
-            return false;
-        }
-        let renderer_generation = env.renderer_generation;
-        let renderer_cache_key = env.renderer_cache_key;
-        self.ensure_node_indices(env, history, missing.iter().copied());
         let mut changed = false;
         for i in missing {
             changed |= self.measure_cached_layout_height(
@@ -2861,7 +2861,7 @@ impl TranscriptProjection {
         };
 
         let block_indices = start..end;
-        self.ensure_node_indices(env, history, block_indices.clone());
+        let _ = self.exactify_node_indices(env, history, block_indices.clone().collect());
         for block_index in block_indices {
             let id = self.measurements.active.nodes[block_index].id;
             let key = self.measurements.active.nodes[block_index].key;
